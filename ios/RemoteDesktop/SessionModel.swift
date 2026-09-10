@@ -46,7 +46,7 @@ struct RemoteKeyboardCaptureIdentity: Hashable {
 /// Top-level state holder for the client. Owns the `Transport`, tracks
 /// lifecycle, and fans input events out as `ControlMessage`s.
 @MainActor
-final class SessionModel: ObservableObject {
+final class SessionModel: ObservableObject, VideoRendererTarget {
     typealias LocalAccountBindingValidator = @Sendable (
         _ expected: CloudKitAccountBinding
     ) async throws -> Void
@@ -83,14 +83,14 @@ final class SessionModel: ObservableObject {
         case ended(String)
     }
 
-    @Published private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hostName: String?
-    @Published private(set) var display: DisplayInfo?
+    @Published private(set) var display: DisplayInfo? { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
     @Published private(set) var remoteInputGeneration = UUID()
     @Published private(set) var remoteKeyboardFocusGeneration = UUID()
-    @Published private(set) var inputActivity: RemoteInputActivity
+    @Published private(set) var inputActivity: RemoteInputActivity { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published var error: String?
     @Published private(set) var experience: Experience = .remoteControl {
         didSet { updateVideoRendererTarget(); updateRemoteScreenObscuration() }
@@ -107,14 +107,14 @@ final class SessionModel: ObservableObject {
             updateRemoteScreenObscuration()
         }
     }
-    @Published private(set) var isRemoteScreenObscured = false
+    @Published private(set) var isRemoteScreenObscured = false { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var computerUseConnectionMode:
         ComputerUseConnectionMode = .liveScreen {
-        didSet { updateVideoRendererTarget() }
+        didSet { updateVideoRendererTarget(); notifyRemoteScreenVisibilityChanged() }
     }
     @Published private(set) var computerUseVisualSidecarState:
-        ComputerUseVisualSidecarState = .unavailable
-    @Published private(set) var isCloudAccountRevalidationPending = false
+        ComputerUseVisualSidecarState = .unavailable { didSet { notifyRemoteScreenVisibilityChanged() } }
+    @Published private(set) var isCloudAccountRevalidationPending = false { didSet { notifyRemoteScreenVisibilityChanged() } }
 
     var hasInteractiveRemoteScreen: Bool {
         isRemoteScreenSessionReady && !isRemoteScreenObscured
@@ -151,7 +151,6 @@ final class SessionModel: ObservableObject {
     }
 
     /// Current transport/submission readiness, independently of task privacy.
-    /// The view uses this to retain the explicit reveal control while covered.
     /// This is not proof of a fresh capture or a drawable presentation.
     var isRemoteScreenSessionReady: Bool {
         guard inputActivity.allowsInput, !isCloudAccountRevalidationPending else { return false }
@@ -163,7 +162,8 @@ final class SessionModel: ObservableObject {
     }
 
     /// Prepare the sink before asking it for a submitted-frame readiness edge.
-    /// Keep it mounted through transient frame loss, with pixels/input shielded.
+    /// Keep the container mounted through transient frame loss. Candidate
+    /// visibility and input readiness have separate policies below.
     var shouldPrepareRemoteScreenRenderer: Bool {
         guard state == .connecting || state == .connected else { return false }
         if experience == .computerUse, computerUseConnectionMode == .localPromptOnly {
@@ -173,6 +173,59 @@ final class SessionModel: ObservableObject {
             }
         }
         return true
+    }
+
+    /// Permission to expose candidate pixels precedes renderer readiness.
+    /// It grants no input authority and says nothing about capture freshness.
+    /// Read requested privacy/activity too, before their cleanup commits.
+    var mayRevealRemoteScreenPixels: Bool {
+        guard shouldPrepareRemoteScreenRenderer, state == .connected,
+              inputActivity.allowsInput, desiredInputActivity.allowsInput,
+              !isCloudAccountRevalidationPending, !isRemoteScreenObscured,
+              computerUseSession?.isRemoteScreenObscured != true, display != nil else { return false }
+        if experience == .computerUse {
+            guard computerUseSession?.isConnected == true else { return false }
+            if computerUseConnectionMode == .localPromptOnly { return computerUseVisualSidecar?.hasCurrentDisplay == true }
+        }
+        return inputHelloReceived
+    }
+
+    private struct ScreenVisibilityObserver {
+        weak var owner: AnyObject?
+        let notify: @MainActor () -> Void
+    }
+    private var screenVisibilityObservers: [UUID: ScreenVisibilityObserver] = [:]
+    private var isNotifyingScreenVisibility = false
+    private var screenVisibilityNotificationPending = false
+
+    /// Native surfaces hide and detach synchronously at policy changes rather
+    /// than waiting for SwiftUI to rebuild an opaque overlay. Callbacks read the
+    /// current policy; an earlier notification never carries a stale permit.
+    func observeRemoteScreenVisibility(owner: AnyObject, _ observer: @escaping @MainActor () -> Void) -> UUID {
+        screenVisibilityObservers = screenVisibilityObservers.filter { $0.value.owner != nil }
+        let id = UUID()
+        screenVisibilityObservers[id] = .init(owner: owner, notify: observer)
+        observer()
+        return id
+    }
+
+    func removeRemoteScreenVisibilityObserver(_ id: UUID) {
+        screenVisibilityObservers.removeValue(forKey: id)
+    }
+
+    private func notifyRemoteScreenVisibilityChanged() {
+        screenVisibilityNotificationPending = true
+        guard !isNotifyingScreenVisibility else { return }
+        isNotifyingScreenVisibility = true
+        defer { isNotifyingScreenVisibility = false }
+        while screenVisibilityNotificationPending {
+            screenVisibilityNotificationPending = false
+            screenVisibilityObservers = screenVisibilityObservers.filter { $0.value.owner != nil }
+            for (id, observer) in Array(screenVisibilityObservers) {
+                guard observer.owner != nil, screenVisibilityObservers[id] != nil else { continue }
+                observer.notify()
+            }
+        }
     }
 
     var isComputerUsePromptTransportReady: Bool {
@@ -217,7 +270,7 @@ final class SessionModel: ObservableObject {
     private var sessionAccountBinding: CloudKitAccountBinding?
     private var accountRevalidationGeneration: UInt64 = 0
     private var seq: UInt32 = 0
-    private var inputHelloReceived = false
+    private var inputHelloReceived = false { didSet { notifyRemoteScreenVisibilityChanged() } }
     private struct InputSource {
         let lease: RemoteInputSourceLease
         var keys: Set<Int> = []
@@ -474,7 +527,8 @@ final class SessionModel: ObservableObject {
     }
 
     private var acceptsNewRemoteInput: Bool {
-        !isRetiringInputSources && !isUpdatingRemoteScreenObscuration
+        !isRetiringInputSources && !isUpdatingRemoteScreenObscuration && !isUpdatingInputActivity
+            && desiredInputActivity.allowsInput
             && computerUseSession?.isRemoteScreenObscured != true
             && hasInteractiveRemoteScreen
     }
@@ -600,7 +654,13 @@ final class SessionModel: ObservableObject {
         guard !isUpdatingRemoteScreenObscuration, !isRetiringInputSources,
               inputSourceCleanupDepth == 0 else { return }
         isUpdatingRemoteScreenObscuration = true
-        defer { isUpdatingRemoteScreenObscuration = false }
+        defer {
+            isUpdatingRemoteScreenObscuration = false
+            // Prompt connection/experience can change pixel eligibility even
+            // when neither obscuration nor keyboard policy changed. Notify
+            // only after owned input cleanup has joined.
+            notifyRemoteScreenVisibilityChanged()
+        }
         while isRemoteScreenObscured != (computerUseSession?.isRemoteScreenObscured ?? false)
                 || keyboardTaskInputPermitted != taskPermitsKeyboardInput {
             if computerUseSession?.isRemoteScreenObscured == true {
@@ -888,9 +948,18 @@ final class SessionModel: ObservableObject {
                       self.computerUseConnectionMode == .localPromptOnly else {
                     return
                 }
+                let revision = created.stateRevision
                 self.computerUseVisualSidecarState = newState
+                guard self.computerUseVisualSidecar === created,
+                      self.experience == .computerUse, self.computerUseConnectionMode == .localPromptOnly,
+                      created.stateRevision == revision, created.state == newState else { return }
                 if newState == .live { self.hasReceivedVideoFrame = true }
-                else { self.invalidateRemoteInput() }
+                else if newState == .waitingForFreshFrame && created.hasCurrentDisplay {
+                    // A local surface loss keeps its authenticated display.
+                    // Clearing it here would prevent the replacement from
+                    // showing candidate pixels until after it was ready.
+                    self.retireRenderedInput { self.computerUseVisualSidecar === created }
+                } else { self.invalidateRemoteInput() }
             }
             created.onDisplay = { [weak self, weak created] display in
                 guard let self, let created, self.computerUseVisualSidecar === created,
@@ -1029,6 +1098,7 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
     var onDisplay: ((DisplayInfo) -> Void)?
 
     private(set) var state: ComputerUseVisualSidecarState = .unavailable
+    private(set) var stateRevision = UUID()
 
     private struct Configuration {
         let pairingCode: String
@@ -1048,6 +1118,7 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
     private var isRetiringRendererFrame = false
     private var didReceiveCompatibleHostHello = false
     private var currentDisplay: DisplayInfo?
+    var hasCurrentDisplay: Bool { didReceiveCompatibleHostHello && currentDisplay != nil }
     private var didReceiveRendererFrame = false
     private var seq: UInt32 = 0
 
@@ -1202,7 +1273,7 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
             self.sendQualityPolicy(on: candidate)
             guard self.generation == generation, self.presentationID == presentationID,
                   self.didReceiveCompatibleHostHello else { return }
-            self.transition(to: .waitingForFreshFrame)
+            self.transition(to: .waitingForFreshFrame, repeatNotification: true)
         }
         candidate.onDisplay = { [weak self, weak candidate] display in
             guard let self, let candidate, self.transport === candidate,
@@ -1234,8 +1305,8 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
               didReceiveCompatibleHostHello,
               let display = currentDisplay,
               didReceiveRendererFrame else { return }
-        // The screen model discards its layout when input is withdrawn. Replay
-        // the retained current display before restoring renderer readiness.
+        // Replay the retained current display before restoring renderer
+        // readiness, including recovery from a withdrawn input scope.
         let presentationID = self.presentationID
         onDisplay?(display)
         guard self.generation == generation, self.presentationID == presentationID, didReceiveCompatibleHostHello,
@@ -1276,8 +1347,9 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
             ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
     }
 
-    private func transition(to newState: ComputerUseVisualSidecarState) {
-        guard state != newState else { return }
+    private func transition(to newState: ComputerUseVisualSidecarState, repeatNotification: Bool = false) {
+        guard state != newState || repeatNotification else { return }
+        stateRevision = UUID()
         state = newState
         onStateChange?(newState)
     }

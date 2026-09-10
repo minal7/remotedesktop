@@ -10,6 +10,187 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_candidatePixelsPrecedeFrameReadinessWithoutGrantingInput() async throws {
+        let connected = expectation(description: "candidate pixels transport")
+        let transport = RecordingTargetTransport(connected: connected)
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456")
+        await fulfillment(of: [connected], timeout: 1)
+        XCTAssertFalse(session.mayRevealRemoteScreenPixels)
+        transport.onHostHello?(compatibleComputerUseHello())
+        XCTAssertFalse(session.mayRevealRemoteScreenPixels)
+        transport.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1))
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertNil(session.beginRemoteInputSource(.pointer, expectedInputGeneration: session.remoteInputGeneration))
+        let count = transport.sentMessages.count
+        session.send(.pointer(x: 10, y: 20, buttons: 1))
+        XCTAssertEqual(transport.sentMessages.count, count)
+        transport.onFirstVideoFrame?()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        transport.onVideoFrameUnavailable?()
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels, "Local frame loss cannot close the path needed to display its replacement")
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        transport.onInputUnavailable?()
+        XCTAssertFalse(session.mayRevealRemoteScreenPixels)
+    }
+
+    func test_candidateVisibilityJoinsActivityCleanupAndRetainsConcurrentReturn() async throws {
+        let (session, visual, _) = try await makePrivacyFixture()
+        let owner = NSObject(), generation = session.remoteInputGeneration
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.pointer(x: 10, y: 20, buttons: 1), from: pointer)
+        var states: [Bool] = [], returned = false
+        let observation = session.observeRemoteScreenVisibility(owner: owner) {
+            states.append(session.mayRevealRemoteScreenPixels)
+            if !session.mayRevealRemoteScreenPixels && !returned {
+                returned = true
+                XCTAssertTrue(visual.sentMessages.contains { if case .pointer(x: 10, y: 20, buttons: 0) = $0.message { return true }; return false },
+                    "Held input must release before a surface loss closes its wire readiness")
+                session.setApplicationInputActive(true)
+            }
+        }
+        defer { session.removeRemoteScreenVisibilityObserver(observation); withExtendedLifetime(owner) {}; session.reset() }
+        session.setApplicationInputActive(false)
+        XCTAssertTrue(returned)
+        XCTAssertTrue(states.contains(false)); XCTAssertEqual(states.last, true)
+        XCTAssertTrue(session.inputActivity.allowsInput)
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(pointer))
+    }
+
+    func test_sidecarCandidateDisplaySurvivesFrameLossButNotARepeatedHello() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        defer { session.reset() }
+        let display = session.display
+        visual.onVideoFrameUnavailable?()
+        XCTAssertEqual(session.computerUseVisualSidecarState, .waitingForFreshFrame)
+        XCTAssertEqual(session.display, display)
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertTrue(session.computerUseSession === prompt); XCTAssertTrue(session.isComputerUsePromptTransportReady)
+        // A new hello while already waiting must still withdraw the old
+        // display. Duplicate UI state text cannot hide that lifetime change.
+        visual.onHostHello?(compatibleComputerUseHello())
+        XCTAssertNil(session.display)
+        XCTAssertFalse(session.mayRevealRemoteScreenPixels)
+        visual.onDisplay?(DisplayInfo(w: 1024, h: 768, scale: 1))
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        visual.onFirstVideoFrame?()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+    }
+
+    func test_nativeScreenDetachesForPrivacyAndPreparesAgainBeforeReadiness() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        let window = try RemoteKeyboardTestWindow()
+        let screen = RemoteScreenUIView()
+        screen.frame = window.window.bounds
+        screen.bindSession(session)
+        visual.onDetachRenderer = { visual.onVideoFrameUnavailable?() }
+        defer { visual.onDetachRenderer = nil; screen.stopCapture(); screen.removeFromSuperview(); window.close(); session.reset() }
+        window.window.rootViewController?.view.addSubview(screen)
+        XCTAssertEqual(visual.attachedRenderers.count, 1)
+        XCTAssertTrue(prompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertFalse(session.mayRevealRemoteScreenPixels)
+        XCTAssertEqual(visual.detachedRenderers.count, 1)
+        XCTAssertFalse(session.isRemoteScreenSessionReady)
+        XCTAssertTrue(session.shouldPrepareRemoteScreenRenderer, "Keep the native container and explicit Show Mac path available")
+        XCTAssertTrue(visual.disconnectReasons.isEmpty)
+        prompt.revealLiveScreen()
+        XCTAssertTrue(session.mayRevealRemoteScreenPixels)
+        XCTAssertEqual(visual.attachedRenderers.count, 2)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen, "Preparing a renderer is not frame readiness")
+        visual.onFirstVideoFrame?()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        XCTAssertTrue(session.computerUseSession === prompt)
+    }
+
+    func test_visibilityObserversRetireWithTheirNativeOwnerOrExplicitRemoval() async throws {
+        let (session, _, _) = try await makePrivacyFixture()
+        defer { session.reset() }
+        var retiredCalls = 0, removedCalls = 0
+        autoreleasepool {
+            let owner = NSObject()
+            _ = session.observeRemoteScreenVisibility(owner: owner) { retiredCalls += 1 }
+        }
+        let owner = NSObject()
+        let observation = session.observeRemoteScreenVisibility(owner: owner) { removedCalls += 1 }
+        session.removeRemoteScreenVisibilityObserver(observation)
+        session.setApplicationInputActive(false); session.setApplicationInputActive(true)
+        XCTAssertEqual(retiredCalls, 1); XCTAssertEqual(removedCalls, 1)
+    }
+
+    func test_promptConnectionWithdrawalNotifiesPixelVisibilityWithoutPrivacyChange() async throws {
+        let (session, _, prompt) = try await makePrivacyFixture()
+        let owner = NSObject()
+        var states: [Bool] = []
+        let observation = session.observeRemoteScreenVisibility(owner: owner) { states.append(session.mayRevealRemoteScreenPixels) }
+        defer { session.removeRemoteScreenVisibilityObserver(observation); withExtendedLifetime(owner) {}; session.reset() }
+        XCTAssertEqual(states.last, true)
+        XCTAssertFalse(session.isRemoteScreenObscured)
+        prompt.stop()
+        XCTAssertEqual(states.last, false, "An unchanged privacy bit cannot retain pixels for a stopped prompt connection")
+        XCTAssertFalse(session.isRemoteScreenObscured)
+        prompt.start()
+        XCTAssertEqual(states.last, true)
+    }
+
+    func test_nativeVisibilityRegistrationPreservesReplacementDuringOldRendererDetach() async throws {
+        let (old, oldVisual, _) = try await makePrivacyFixture()
+        let (interrupted, interruptedVisual, interruptedPrompt) = try await makePrivacyFixture()
+        let (current, currentVisual, currentPrompt) = try await makePrivacyFixture()
+        let window = try RemoteKeyboardTestWindow()
+        let screen = RemoteScreenUIView()
+        screen.frame = window.window.bounds
+        screen.bindSession(old)
+        window.window.rootViewController?.view.addSubview(screen)
+        defer {
+            oldVisual.onDetachRenderer = nil
+            screen.stopCapture(); screen.removeFromSuperview(); window.close()
+            old.reset(); interrupted.reset(); current.reset()
+        }
+        var replaced = false
+        oldVisual.onDetachRenderer = {
+            guard !replaced else { return }
+            replaced = true
+            screen.bindSession(current)
+        }
+        screen.bindSession(interrupted)
+        XCTAssertTrue(replaced)
+        XCTAssertTrue(screen.session === current)
+        XCTAssertEqual(oldVisual.detachedRenderers.count, 1)
+        XCTAssertTrue(interruptedVisual.attachedRenderers.isEmpty)
+        XCTAssertEqual(currentVisual.attachedRenderers.count, 1)
+        XCTAssertTrue(interruptedPrompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertTrue(currentVisual.detachedRenderers.isEmpty)
+        XCTAssertTrue(currentPrompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertEqual(currentVisual.detachedRenderers.count, 1, "The surviving registration must still observe its own privacy changes")
+        currentPrompt.revealLiveScreen()
+        XCTAssertEqual(currentVisual.attachedRenderers.count, 2)
+    }
+
+    func test_sidecarWaitingVisibilityCannotRetireAReentrantCurrentFrame() async throws {
+        let (session, visual, _) = try await makePrivacyFixture()
+        let owner = NSObject()
+        var restored = false
+        let observation = session.observeRemoteScreenVisibility(owner: owner) {
+            if !restored && session.computerUseVisualSidecarState == .waitingForFreshFrame {
+                restored = true
+                visual.onFirstVideoFrame?()
+            }
+        }
+        defer { session.removeRemoteScreenVisibilityObserver(observation); withExtendedLifetime(owner) {}; session.reset() }
+        visual.onVideoFrameUnavailable?()
+        XCTAssertTrue(restored)
+        XCTAssertEqual(session.computerUseVisualSidecarState, .live)
+        XCTAssertTrue(session.hasReceivedVideoFrame, "The previous waiting callback must not clear its replacement's frame")
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        XCTAssertTrue(session.isComputerUsePromptTransportReady)
+    }
+
     func test_privacyShieldReleasesAllSourcesAndBlocksInputUntilExplicitReveal() async throws {
         let (session, visual, prompt) = try await makePrivacyFixture()
         defer { session.reset() }
@@ -417,7 +598,8 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertEqual(usage, SoftModifier.shift.hidUsage); XCTAssertFalse(down)
         XCTAssertEqual(model.computerUseVisualSidecarState, .waitingForFreshFrame)
         XCTAssertFalse(model.hasInteractiveRemoteScreen); XCTAssertTrue(model.shouldPrepareRemoteScreenRenderer)
-        XCTAssertNil(model.display); XCTAssertFalse(model.hasReceivedVideoFrame)
+        XCTAssertEqual(model.display, display); XCTAssertFalse(model.hasReceivedVideoFrame)
+        XCTAssertTrue(model.mayRevealRemoteScreenPixels, "The authenticated display remains usable for the next renderer frame")
         XCTAssertEqual(model.softModifierMask, 0)
         XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertTrue(promptSession.isConnected)
         XCTAssertTrue(model.isComputerUsePromptTransportReady)
@@ -1439,7 +1621,8 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
     private(set) var attachedRenderers: [any RemoteVideoSurface] = []
     private(set) var detachedRenderers: [any RemoteVideoSurface] = []
     func attachVideoRenderer(_ renderer: any RemoteVideoSurface) { attachedRenderers.append(renderer) }
-    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) { detachedRenderers.append(renderer) }
+    var onDetachRenderer: (() -> Void)?
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) { detachedRenderers.append(renderer); onDetachRenderer?() }
 
     private let connected: XCTestExpectation
     private let disconnected: XCTestExpectation?

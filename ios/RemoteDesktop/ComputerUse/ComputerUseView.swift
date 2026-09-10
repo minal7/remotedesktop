@@ -249,7 +249,7 @@ struct ComputerUseView: View {
                         session.hasInteractiveRemoteScreen && model.isConnected)
                     .accessibilityHidden(!session.hasInteractiveRemoteScreen)
             }
-            if !session.isRemoteScreenSessionReady {
+            if !session.mayRevealRemoteScreenPixels {
                 Color(uiColor: .secondarySystemGroupedBackground)
                     .overlay {
                         VStack(spacing: 10) {
@@ -272,7 +272,15 @@ struct ComputerUseView: View {
                     .accessibilityIdentifier("computer-use-local-connection")
             }
 
-            if session.isRemoteScreenSessionReady,
+            if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady {
+                localVisualSidecarStatus
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .padding(12)
+                    .allowsHitTesting(false)
+            }
+
+            if session.shouldPrepareRemoteScreenRenderer,
                model.isLiveScreenPrivacyShielded {
                 postMailPrivacyShield
             } else if session.hasInteractiveRemoteScreen {
@@ -321,11 +329,10 @@ struct ComputerUseView: View {
     }
 
     private var screenAccessibilityLabel: String {
+        if model.isLiveScreenPrivacyShielded { return "Mac screen hidden for this Mail task" }
+        if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady { return "Mac screen loading; input unavailable" }
         if !session.isRemoteScreenSessionReady {
             return "Secure local AI connection to \(session.hostName ?? model.hostName)"
-        }
-        if model.isLiveScreenPrivacyShielded {
-            return "Mac screen hidden for this Mail task"
         }
         if session.hasReceivedVideoFrame {
             return "Live interactive screen for \(session.hostName ?? model.hostName)"
@@ -334,11 +341,10 @@ struct ComputerUseView: View {
     }
 
     private var screenAccessibilityHint: String {
+        if model.isLiveScreenPrivacyShielded { return "Choose Show Mac to reveal the desktop before control becomes available." }
+        if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady { return "Wait for the screen before controlling your Mac." }
         if !session.isRemoteScreenSessionReady {
             return "Prompts and results use the secure local connection. Use the Mac directly if AI asks for help."
-        }
-        if model.isLiveScreenPrivacyShielded {
-            return "Choose Show Mac when you are ready to reveal the live desktop."
         }
         return "Turn on Zoom and move to pinch or drag the view without controlling the Mac. Turn it off to control the Mac."
     }

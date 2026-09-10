@@ -78,7 +78,15 @@
     "RemoteDesktopTests/ComputerUseSetupTests/test_restoredTypedPauseReplaysExactRevisionAndPreservesGuidance",
     "RemoteDesktopTests/ComputerUseSetupTests/test_sessionTakeControlPausesLocallyAndSendsPauseControl",
     "RemoteDesktopTests/ComputerUseSetupTests/test_versionedControlAcknowledgementsRejectOlderAndGenericStatuses",
-    "RemoteDesktopTests/ComputerUseSetupTests/test_takeControlCancelsTheOlderTaskResponseTimeout"
+    "RemoteDesktopTests/ComputerUseSetupTests/test_takeControlCancelsTheOlderTaskResponseTimeout",
+    "RemoteDesktopTests/WebRTCTransportTests/test_candidatePixelsPrecedeFrameReadinessWithoutGrantingInput",
+    "RemoteDesktopTests/WebRTCTransportTests/test_candidateVisibilityJoinsActivityCleanupAndRetainsConcurrentReturn",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarCandidateDisplaySurvivesFrameLossButNotARepeatedHello",
+    "RemoteDesktopTests/WebRTCTransportTests/test_nativeScreenDetachesForPrivacyAndPreparesAgainBeforeReadiness",
+    "RemoteDesktopTests/WebRTCTransportTests/test_visibilityObserversRetireWithTheirNativeOwnerOrExplicitRemoval",
+    "RemoteDesktopTests/WebRTCTransportTests/test_promptConnectionWithdrawalNotifiesPixelVisibilityWithoutPrivacyChange",
+    "RemoteDesktopTests/WebRTCTransportTests/test_nativeVisibilityRegistrationPreservesReplacementDuringOldRendererDetach",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarWaitingVisibilityCannotRetireAReentrantCurrentFrame"
   ],
   "expectedTests": [
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
@@ -180,19 +188,27 @@
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementDuringCreationRemovesTheUninstalledObject",
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementDuringInstallationCannotRemoveItsSuccessor",
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementIsolatesDeferredOldFramesAndSizesFromReplacement",
+    "RemoteDesktopTests/WebRTCTransportTests/test_candidatePixelsPrecedeFrameReadinessWithoutGrantingInput",
+    "RemoteDesktopTests/WebRTCTransportTests/test_candidateVisibilityJoinsActivityCleanupAndRetainsConcurrentReturn",
     "RemoteDesktopTests/WebRTCTransportTests/test_disconnectDuringPrivacyCleanupCannotSubmitTheInterruptedPrompt",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope",
     "RemoteDesktopTests/WebRTCTransportTests/test_keyboardCleanupCannotOverwriteAReentrantTakeControlWithResume",
+    "RemoteDesktopTests/WebRTCTransportTests/test_nativeScreenDetachesForPrivacyAndPreparesAgainBeforeReadiness",
+    "RemoteDesktopTests/WebRTCTransportTests/test_nativeVisibilityRegistrationPreservesReplacementDuringOldRendererDetach",
     "RemoteDesktopTests/WebRTCTransportTests/test_privacyCleanupRejectsReentrantInputAndHonorsAConcurrentReveal",
     "RemoteDesktopTests/WebRTCTransportTests/test_privacyEdgeDuringSourceCleanupPreservesEveryOwnedRelease",
     "RemoteDesktopTests/WebRTCTransportTests/test_privacyShieldReleasesAllSourcesAndBlocksInputUntilExplicitReveal",
+    "RemoteDesktopTests/WebRTCTransportTests/test_promptConnectionWithdrawalNotifiesPixelVisibilityWithoutPrivacyChange",
     "RemoteDesktopTests/WebRTCTransportTests/test_remoteKeyboardFocusRequestIsScopedOneUseAndPreservesPointerOwnership",
     "RemoteDesktopTests/WebRTCTransportTests/test_rendererLossReleasesRemoteControlsAndRestoresWithoutAnotherHello",
     "RemoteDesktopTests/WebRTCTransportTests/test_resumeRetiresKeyboardImmediatelyAcrossAnotherPauseAndKeepsTLSAndPointer",
     "RemoteDesktopTests/WebRTCTransportTests/test_retiredPromptPrivacyCallbackCannotCoverAReplacementRemoteSession",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarCandidateDisplaySurvivesFrameLossButNotARepeatedHello",
     "RemoteDesktopTests/WebRTCTransportTests/test_sidecarPreparesRendererAndTransfersItAcrossTransportReplacement",
     "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererCleanupCannotWithdrawAReplacementPresentation",
-    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererLossPreservesTLSAndRepublishesLayoutBeforeReadiness"
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererLossPreservesTLSAndRepublishesLayoutBeforeReadiness",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarWaitingVisibilityCannotRetireAReentrantCurrentFrame",
+    "RemoteDesktopTests/WebRTCTransportTests/test_visibilityObserversRetireWithTheirNativeOwnerOrExplicitRemoval"
   ]
 }

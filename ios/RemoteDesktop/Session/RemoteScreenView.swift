@@ -143,7 +143,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private let videoView = RemoteVideoSurfaceView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
     private var remoteDisplay: DisplayInfo?
-    private weak var boundSession: SessionModel?
+    private let rendererBinding = RemoteVideoRendererBinding()
+    private var visibilityObserver: UUID?
+    private var sessionBindingRequest = UUID()
+    private var visibilityOwner: UUID?
+    private var isReconcilingVisibility = false
+    private var visibilityReconciliationPending = false
     private weak var zoomController: RemoteScreenZoomController?
     private let touchScroll = UIPanGestureRecognizer()
     private let indirectScroll = UIPanGestureRecognizer()
@@ -175,6 +180,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        rendererBinding.attach(videoView)
+        videoView.isHidden = true
         backgroundColor = .black
         clipsToBounds = true
 
@@ -262,8 +269,27 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     func bindSession(_ session: SessionModel?) {
         guard !stopped else { return }
-        if self.session !== session { retireInputSource() }
-        self.session = session
+        let request = UUID()
+        sessionBindingRequest = request
+        if self.session !== session {
+            if let visibilityObserver { self.session?.removeRemoteScreenVisibilityObserver(visibilityObserver) }
+            visibilityObserver = nil
+            visibilityOwner = nil
+            retireInputSource()
+            guard !stopped, sessionBindingRequest == request else { return }
+            self.session = session
+        }
+        if visibilityOwner == nil, let session = self.session {
+            let owner = UUID()
+            visibilityOwner = owner
+            let observer = session.observeRemoteScreenVisibility(owner: self) { [weak self, weak session] in
+                guard let self, let session, self.session === session,
+                      self.visibilityOwner == owner, !self.stopped else { return }
+                self.rebindRendererIfNeeded()
+            }
+            if self.session === session && visibilityOwner == owner && !stopped { visibilityObserver = observer }
+            else { session.removeRemoteScreenVisibilityObserver(observer) }
+        }
         synchronizeInputAvailability(allowSourceBinding: true)
         rebindRendererIfNeeded()
     }
@@ -312,6 +338,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     func stopCapture() {
         stopped = true
+        sessionBindingRequest = UUID()
+        visibilityOwner = nil
+        if let visibilityObserver { session?.removeRemoteScreenVisibilityObserver(visibilityObserver) }
+        visibilityObserver = nil
         retireInputSource()
         session = nil
         synchronizeInputAvailability()
@@ -347,15 +377,27 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private func rebindRendererIfNeeded() {
-        if let previous = boundSession, previous !== session || window == nil || stopped {
-            previous.detachVideoRenderer(videoView)
-            boundSession = nil
+        visibilityReconciliationPending = true
+        guard !isReconcilingVisibility else {
+            let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
+            videoView.isHidden = !visible
+            if !visible { cursorLayer.hide() }
+            // Publish the newest desired target to the binding while its old
+            // detach is still joined; don't briefly attach an obsolete owner.
+            rendererBinding.bind(visible ? session : nil)
+            return
         }
-
-        guard !stopped, window != nil, let session else { return }
-        if boundSession !== session {
-            session.attachVideoRenderer(videoView)
-            boundSession = session
+        isReconcilingVisibility = true
+        defer { isReconcilingVisibility = false }
+        while visibilityReconciliationPending {
+            visibilityReconciliationPending = false
+            let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
+            videoView.isHidden = !visible
+            if !visible { cursorLayer.hide() }
+            // The binding joins the old exact detach before installing the
+            // latest target. Reveal receives a new native sink/subscription;
+            // a hidden RTC view's cached frame is never reused for readiness.
+            rendererBinding.bind(visible ? session : nil)
         }
     }
 

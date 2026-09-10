@@ -62,17 +62,19 @@ struct SessionView: View {
 
             if !session.hasInteractiveRemoteScreen {
                 ZStack {
-                    Color.black.ignoresSafeArea()
+                    if !session.mayRevealRemoteScreenPixels { Color.black.ignoresSafeArea() }
                     VStack(spacing: 12) {
                         if session.inputActivity.allowsInput {
-                            ProgressView().tint(.white)
+                            ProgressView()
                             Text(session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…")
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.primary)
                         } else {
                             Text("Return to this window to control your Mac.")
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.primary)
                         }
                     }
+                    .padding(16)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
                 .allowsHitTesting(false)
                 .accessibilityElement(children: .combine)
