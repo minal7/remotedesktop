@@ -70,7 +70,7 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                     let retainedScalar = nativeScalarSources.contains(requirement.id)
                     if status == .dateRequirementSuperseded || status == .quantityRequirementSuperseded {
                         guard retainedScalar, case .superseded(let record) = scalars.entries[offset].resolution,
-                              (record.topic == .replaceQuantity) == (status == .quantityRequirementSuperseded) else { return false }
+                              record.topic.isQuantityReplacement == (status == .quantityRequirementSuperseded) else { return false }
                         return true // The replacement rows still require their own current evidence below.
                     }
                     // A host-bound literal scalar parameter keeps its typed

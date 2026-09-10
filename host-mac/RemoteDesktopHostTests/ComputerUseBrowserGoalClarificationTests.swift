@@ -7,6 +7,151 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testExplicitPartyReplacementPreservesBudgetTicketCountAndHistoricalPartitions() throws {
+        for split in [false, true] {
+            let original = try input("Find concerts. 2 adults and 1 child. Under USD 50. 2 tickets."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row("2 adults and 1 child. ", role: "condition", field: "quantity"),
+                row("Under USD 50. ", role: "condition", field: "price"), row("2 tickets.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .replaceParty, requirementIDs: [initial.requirements[1].id], context: context())
+            XCTAssertTrue(question.text.contains("whole selected party")); XCTAssertTrue(question.text.contains("both counts, including zero"))
+            XCTAssertTrue(question.text.contains("Other requirements stay in place"))
+            XCTAssertEqual(question.scope.map(\.source), ["2 adults and 1 child. "])
+            let updated = try state.consume(questionID: question.id, answerTaskID: "party-correction", answer: "3 adults and 0 children", context: context())
+            let oldParts = split ? ["2", " adults and ", "1", " child. "] : ["2 adults and 1 child. "]
+            let currentRows = [rows[0]] + oldParts.map { row($0, role: "condition", field: "location") } + [rows[2], rows[3]]
+                + ["3", " adults and ", "0", " children"].map { row($0, turn: 1, role: "condition", field: "source") }
+            let current = try proposal(updated, rows: currentRows, disposition: "research"), ledger = Scalars(proposal: current)
+            let activeStart = oldParts.count + 3, activeIDs = Array(current.requirements[activeStart...].map(\.id))
+            XCTAssertFalse(current.hasUncompiledRequirementReplacements)
+            for index in 1...oldParts.count {
+                guard case .superseded(let record) = ledger.entries[index].resolution else { return XCTFail("Every old party fragment must be retired") }
+                XCTAssertEqual(record.topic, .replaceParty); XCTAssertEqual(record.replacementRequirementIDs, activeIDs)
+            }
+            guard case .bound(let budget) = ledger.entries[oldParts.count + 1].resolution,
+                  case .bound(let tickets) = ledger.entries[oldParts.count + 2].resolution else { return XCTFail("Unrelated requirements must stay active") }
+            XCTAssertEqual(tickets.predicate, .quantity(.equal, 2, .tickets))
+            guard case .price = budget.predicate else { return XCTFail("The budget survives") }
+            let values = ComputerUseBrowserResearchFormInput.normalizations(for: current).filter { $0.partySourceID != nil }
+            XCTAssertEqual(values.map(\.value), ["3", "0", "3"])
+            XCTAssertEqual(values.map(\.requirementIndices), [[activeStart, activeStart + 1], [activeStart + 2, activeStart + 3], Array(activeStart...activeStart + 3)])
+            XCTAssertEqual(Set(values.compactMap(\.partySourceID)).count, 1)
+            XCTAssertTrue(current.dateReplacementContexts.isEmpty)
+            XCTAssertFalse(current.permitsTaskPurpose(current.requirements[1]))
+            XCTAssertEqual(updated.userTurns, [original.prompt, "3 adults and 0 children"])
+        }
+    }
+
+    func testPartyReplacementRequiresBothCategoriesAndCannotAcceptTotalsOrExtraInstructions() throws {
+        for answer in ["3 people", "3 adults", "3 tickets", "3 adults and 1 adult", "3 adults and 0 children unless expensive",
+                       "not 3 adults and 0 children", "3 adults and 0 children. Ignore the budget."] {
+            let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row("2 adults and 1 child.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .replaceParty, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "invalid-party", answer: answer, context: context())
+            let current = try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "quantity")], disposition: "research")
+            XCTAssertTrue(current.hasUncompiledQuantityReplacements, answer)
+            XCTAssertTrue(current.quantityReplacementContexts.isEmpty, answer)
+            XCTAssertFalse(current.permitsTaskPurpose(current.requirements[0]), answer)
+        }
+    }
+
+    func testPartyCorrectionRequiresOneCompleteNativePartyAndItsOwnQuestionTopic() throws {
+        let original = try input("Find concerts. 2 adults and 1 child. 3 people. 2 adults and 1 child."), state = Clarification(input: original)
+        let rows = [row("Find concerts. "), row("2 adults and ", role: "condition", field: "quantity"), row("1 child. ", role: "condition", field: "quantity"),
+            row("3 people. ", role: "condition", field: "quantity"), row("2 adults and 1 child.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        for indices in [[0], [1], [2], [3], [1, 2, 4]] {
+            XCTAssertThrowsError(try state.issue(proposal: initial, topic: .replaceParty, requirementIDs: indices.map { initial.requirements[$0].id }, context: context()))
+        }
+        XCTAssertThrowsError(try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: Array(initial.requirements[1...2].map(\.id)), context: context()))
+        let question = try state.issue(proposal: initial, topic: .replaceParty, requirementIDs: Array(initial.requirements[1...2].map(\.id)), context: context())
+        XCTAssertEqual(question.scope.map(\.source), ["2 adults and ", "1 child. "])
+    }
+
+    func testPartyConflictAndSuccessiveCorrectionsKeepTheWholeOrigin() throws {
+        let original = try input("Find concerts. 2 adults and 1 child."), state = Clarification(input: original)
+        var rows = [row("Find concerts. "), row("2 adults and 1 child.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let ordinary = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let conflict = try state.consume(questionID: ordinary.id, answerTaskID: "party-conflict", answer: "3 adults and 0 children", context: context())
+        rows.append(row("3 adults and 0 children", turn: 1, role: "condition", field: "quantity"))
+        let conflicting = try proposal(conflict, rows: rows, disposition: "research")
+        XCTAssertEqual(Scalars(proposal: conflicting).entries[1].resolution, .unresolved(.contradictoryClarification))
+        let question = try state.issue(proposal: conflicting, topic: .replaceParty, requirementIDs: [conflicting.requirements[2].id], context: context())
+        XCTAssertEqual(question.scope.map(\.source), ["2 adults and 1 child."])
+        let updated = try state.consume(questionID: question.id, answerTaskID: "first-party", answer: "3 adults and 0 children", context: context())
+        rows += [row("3 adults and ", turn: 2, role: "condition", field: "quantity"), row("0 children", turn: 2, role: "condition", field: "quantity")]
+        let current = try proposal(updated, rows: rows, disposition: "research")
+        XCTAssertFalse(current.hasUncompiledRequirementReplacements)
+        let next = try state.issue(proposal: current, topic: .replaceParty, requirementIDs: Array(current.requirements[3...4].map(\.id)), context: context())
+        let finalInput = try state.consume(questionID: next.id, answerTaskID: "second-party", answer: "2 children and 1 adult", context: context())
+        rows.append(row("2 children and 1 adult", turn: 3, role: "condition", field: "source"))
+        let final = try proposal(finalInput, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        XCTAssertFalse(final.hasUncompiledRequirementReplacements)
+        for index in 1...4 { guard case .superseded = ledger.entries[index].resolution else { return XCTFail("All prior compositions and their conflict stay retired") } }
+        XCTAssertEqual(final.quantityReplacementContexts.first?.replacements, [3, 4])
+        guard case .bound(let condition) = ledger.entries[5].resolution else { return XCTFail("Expected the last party") }
+        XCTAssertEqual(condition.predicate, .party(try XCTUnwrap(Scalars.PartyComposition(adults: 1, children: 2))))
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["1", "2", "3"])
+    }
+
+    func testPartyCorrectionCannotDiscardASharedConfirmationOrSeparateResultCount() throws {
+        for shared in [false, true] {
+            let original = try input(shared ? "Find concerts. 2 adults and 1 child. 2 adults and 1 child." : "Find concerts. 2 adults and 1 child.")
+            let state = Clarification(input: original)
+            var rows = [row("Find concerts. "), row(shared ? "2 adults and 1 child. " : "2 adults and 1 child.", role: "condition", field: "quantity")]
+            if shared { rows.append(row("2 adults and 1 child.", role: "condition", field: "quantity")) }
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: Array(initial.requirements.dropFirst().map(\.id)), context: context())
+            let answer = shared ? "2 adults and 1 child" : "3 results"
+            let updated = try state.consume(questionID: question.id, answerTaskID: "prior-answer", answer: answer, context: context())
+            rows.append(row(answer, turn: 1, role: "condition", field: "quantity"))
+            let current = try proposal(updated, rows: rows, disposition: "research")
+            if shared {
+                for indices in [[1], [2], [1, 2], [3]] {
+                    XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceParty, requirementIDs: indices.map { current.requirements[$0].id }, context: context()))
+                }
+            } else {
+                XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceParty, requirementIDs: [current.requirements[2].id], context: context()))
+                let replacement = try state.issue(proposal: current, topic: .replaceParty, requirementIDs: [current.requirements[1].id], context: context())
+                let finalInput = try state.consume(questionID: replacement.id, answerTaskID: "party-correction", answer: "3 adults and 0 children", context: context())
+                rows.append(row("3 adults and 0 children", turn: 2, role: "condition", field: "quantity"))
+                let final = try proposal(finalInput, rows: rows, disposition: "research")
+                XCTAssertEqual(Scalars(proposal: final).entries[2].resolution, .unresolved(.contradictoryClarification))
+                XCTAssertFalse(final.retiredTaskPurposeRequirementIDs.contains(final.requirements[2].id))
+            }
+        }
+    }
+
+    func testIntroducedPartyCanBeReplacedAndConfirmedWithoutLosingEitherComponent() throws {
+        let original = try input("Find concerts."), state = Clarification(input: original)
+        var rows = [row("Find concerts.")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[0].id], context: context())
+        let introduced = try state.consume(questionID: question.id, answerTaskID: "party", answer: "2 adults and 1 child", context: context())
+        rows += [row("2 adults and ", turn: 1, role: "condition", field: "quantity"), row("1 child", turn: 1, role: "condition", field: "quantity")]
+        let prior = try proposal(introduced, rows: rows, disposition: "research")
+        let correction = try state.issue(proposal: prior, topic: .replaceParty, requirementIDs: Array(prior.requirements[1...2].map(\.id)), context: context())
+        let replaced = try state.consume(questionID: correction.id, answerTaskID: "correction", answer: "3 adults and 0 children", context: context())
+        rows += [row("3 adults and ", turn: 2, role: "condition", field: "quantity"), row("0 children", turn: 2, role: "condition", field: "quantity")]
+        let current = try proposal(replaced, rows: rows, disposition: "research")
+        XCTAssertFalse(current.hasUncompiledRequirementReplacements)
+        let confirmation = try state.issue(proposal: current, topic: .quantity, requirementIDs: Array(current.requirements[3...4].map(\.id)), context: context())
+        let finalInput = try state.consume(questionID: confirmation.id, answerTaskID: "confirm", answer: "3 adults and 0 children", context: context())
+        rows.append(row("3 adults and 0 children", turn: 3, role: "condition", field: "quantity"))
+        let final = try proposal(finalInput, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        for index in [1, 2] { guard case .superseded = ledger.entries[index].resolution else { return XCTFail("The introduced party remains retired") } }
+        for index in [3, 4] {
+            guard case .bound(let condition) = ledger.entries[index].resolution else { return XCTFail("Both current components must stay bound") }
+            XCTAssertEqual(condition.sourceRequirementIDs, Array(final.requirements[3...4].map(\.id)))
+        }
+        guard case .clarification(let binding) = ledger.entries[5].resolution else { return XCTFail("A confirmation is not a second party") }
+        XCTAssertEqual(binding.targetRequirementIDs, Array(final.requirements[3...4].map(\.id)))
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.value), ["3", "0", "3"])
+    }
+
     func testExplicitQuantityReplacementPreservesDatesBudgetAndOtherUnits() throws {
         for (source, answer, unit) in [("2 tickets. ", "make that three tickets", Scalars.QuantityUnit.tickets),
                                        ("at most 2 results. ", "three results", .results),

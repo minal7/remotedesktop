@@ -881,7 +881,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 }
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
                 if case .superseded(let record)? = conditions[requirement.id] {
-                    return result(record.topic == .replaceQuantity ? .quantityRequirementSuperseded : .dateRequirementSuperseded)
+                    return result(record.topic.isQuantityReplacement ? .quantityRequirementSuperseded : .dateRequirementSuperseded)
                 }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if case .unresolved(let reason)? = conditions[requirement.id],

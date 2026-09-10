@@ -49,3 +49,5 @@ Sixteen changed Swift files pass parse-only checks. Active inventories select 18
 5. Continue active-work progress detection, durable recovery and the rest of the [repair checklist](../../../TODO.md). Model competence, thermal behavior and the 8 GB Mac target remain unqualified. Alternate models and RTX 3080 adaptation remain available for a later measured need; no model comparison, distillation, pruning or new SSH attempt occurred here.
 
 Real travel, concert, movie and login-handoff tests remain deferred until explicit permission.
+
+The follow-up [whole-party correction repair](BROWSER_PARTY_REPLACEMENT_REVIEW.md) adds a separate explicit topic for replacing both adult/child counts. It also corrects the scalar-ticket form fixture's stale field label. Shared origins, inferred component changes and actual execution remain unqualified.

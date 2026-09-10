@@ -33,7 +33,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                          topic: ComputerUseBrowserClarificationTopic = .replaceDate) {
             self.topic = topic
             self.answerTurns = answerTurns; replacementRequirementIDs = replacements
-            id = ComputerUseTaskContract.digest([topic == .replaceDate ? "browser-date-supersession-v1" : "browser-quantity-supersession-v1", input.digest, requirementID]
+            let version = topic == .replaceDate ? "browser-date-supersession-v1"
+                : (topic == .replaceParty ? "browser-party-supersession-v1" : "browser-quantity-supersession-v1")
+            id = ComputerUseTaskContract.digest([version, input.digest, requirementID]
                 + answerTurns.map(String.init) + replacements)
         }
         var description: String { "BrowserScalarSupersession(topic: \(topic.rawValue), turns: \(answerTurns.count), replacements: \(replacementRequirementIDs.count))" }
@@ -55,6 +57,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             case currency(Currency), priceBasis(PriceBasis), fees(Fees), date(DayRange)
             case quantity(Comparison?, Int64?, QuantityUnit?)
             case party(PartyComposition)
+            fileprivate var isQuantity: Bool {
+                switch self { case .quantity, .party: return true; default: return false }
+            }
             fileprivate var identity: [String] {
                 switch self { case .currency(let value): return ["currency", value.rawValue]
                 case .priceBasis(let value): return ["priceBasis", value.rawValue]
@@ -329,6 +334,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     let entries: [Entry]
     private let dateOrigins: [String: [String]]
     private let quantityOrigins: [String: [String]]
+    private let partyOrigins: Set<String>
     func hasQuantityOrigin(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool { quantityOrigins[requirement.id] != nil }
     private let rootDateGroups: [RootDateGroup]
     func hasDateOrigin(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool { dateOrigins[requirement.id] != nil }
@@ -370,21 +376,22 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     var quantityReplacementContexts: [ReplacementContext] {
         let indices = Dictionary(uniqueKeysWithValues: proposal.requirements.enumerated().map { ($0.element.id, $0.offset) })
         return entries.enumerated().compactMap { index, entry in
-            guard case .superseded(let record) = entry.resolution, record.topic == .replaceQuantity else { return nil }
+            guard case .superseded(let record) = entry.resolution, record.topic.isQuantityReplacement else { return nil }
             return .init(requirement: index, replacements: record.replacementRequirementIDs.compactMap { indices[$0] },
                 remaining: [], superseded: [], answerTurns: record.answerTurns)
         }
     }
     var hasUncompiledQuantityReplacements: Bool {
         let applied = Set(quantityReplacementContexts.flatMap(\.answerTurns))
-        return proposal.input.clarifications.enumerated().contains { $0.element.topic == .replaceQuantity && !applied.contains($0.offset + 1) }
+        return proposal.input.clarifications.enumerated().contains { $0.element.topic.isQuantityReplacement && !applied.contains($0.offset + 1) }
     }
     var hasUncompiledRequirementReplacements: Bool { hasUncompiledDateReplacements || hasUncompiledQuantityReplacements }
 
-    /// One complete scalar count with a known unit. Party compositions and
-    /// shared answers need their own dependency-aware correction flow.
-    func quantityReplacementTargets(for selected: [ComputerUseBrowserGoalProposal.Requirement]) -> [ComputerUseBrowserGoalProposal.Requirement]? {
-        guard !selected.isEmpty else { return nil }
+    /// One complete origin. A scalar count and a structured party require
+    /// different visible questions; neither can replace the other's meaning.
+    func quantityReplacementTargets(for selected: [ComputerUseBrowserGoalProposal.Requirement],
+                                    topic: ComputerUseBrowserClarificationTopic = .replaceQuantity) -> [ComputerUseBrowserGoalProposal.Requirement]? {
+        guard !selected.isEmpty, topic.isQuantityReplacement else { return nil }
         let groups = selected.compactMap { quantityOrigins[$0.id] }
         guard groups.count == selected.count, Set(groups).count == 1, let targets = groups.first,
               (1...8).contains(targets.count) else { return nil }
@@ -399,14 +406,18 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             if case .superseded = $0.resolution { return $0.requirementID }; return nil
         }) else { return nil }
         let targetIDs = Set(targets)
+        guard topic == .replaceParty ? targetIDs.isSubset(of: partyOrigins) : targetIDs.isDisjoint(with: partyOrigins) else { return nil }
+        // Selecting one source fragment cannot discard another party component.
+        guard selectedIDs.isDisjoint(with: targetIDs) || targetIDs.isSubset(of: selectedIDs) else { return nil }
         guard !entries.contains(where: {
-            guard case .clarification(let binding) = $0.resolution, case .quantity = binding.parameter else { return false }
+            guard case .clarification(let binding) = $0.resolution, binding.parameter.isQuantity else { return false }
             return !targetIDs.isDisjoint(with: binding.targetRequirementIDs) && Set(binding.targetRequirementIDs) != targetIDs
         }) else { return nil }
         guard targets.allSatisfy({ id in
             guard let entry = entries.first(where: { $0.requirementID == id }) else { return false }
             switch entry.resolution {
-            case .bound(let condition): if case .quantity = condition.predicate { return true }; return false
+            case .bound(let condition):
+                switch condition.predicate { case .quantity: return topic == .replaceQuantity; case .party: return topic == .replaceParty; default: return false }
             case .unresolved(.ambiguousClarification), .unresolved(.contradictoryClarification): return true
             default: return false
             }
@@ -609,6 +620,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 case .date, .replaceDate: literal = Self.isNativeDateAnswer(answer.answer, input: proposal.input, turn: index + 1)
                 case .quantity: literal = Self.quantityAnswer(answer.answer) != nil
                 case .replaceQuantity: literal = Self.quantityReplacementAnswer(answer.answer) != nil
+                case .replaceParty: literal = Self.partyLiteral(Self.conditionSource(answer.answer)) != nil
                 default: literal = Self.parameter(answer.answer, topic: answer.topic) != nil
                 }
                 if literal {
@@ -621,6 +633,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         dateOrigins = dates.origins
         let quantities = Self.applyingQuantityClarifications(proposal, to: dates.entries)
         quantityOrigins = quantities.origins
+        partyOrigins = quantities.partyOrigins
         entries = Self.reconcilingClarificationTargets(Self.reconcilingRootDateGroups(dateGroups,
             entries: Self.reconcilingPartyGroups(grouping.groups, entries: quantities.entries)))
     }
@@ -864,7 +877,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let historical = proposal.input.clarifications.flatMap { partyClauses($0.priorRequirements, input: proposal.input) }
             .filter { $0.eligible && !$0.continued }
         let answerSpans = proposal.input.clarifications.enumerated().compactMap { index, turn -> ScalarSpan? in
-            guard turn.topic == .quantity, partyLiteral(conditionSource(turn.answer)) != nil else { return nil }
+            guard turn.topic == .quantity || turn.topic == .replaceParty, partyLiteral(conditionSource(turn.answer)) != nil else { return nil }
             return answerSpan(turn.answer, turn: index + 1)
         }
         var grouped: [ScalarSpan: [PartyClause]] = [:], ambiguous: Set<String> = []
@@ -921,6 +934,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 return false
             }
             if bound { continue }
+            let supersessions = indices.compactMap { index -> [String]? in
+                guard case .superseded(let record) = entries[index].resolution, record.topic == .replaceParty else { return nil }
+                return record.answerTurns.map(String.init) + ["replacements"] + record.replacementRequirementIDs
+            }
+            if supersessions.count == indices.count, Set(supersessions).count == 1 { continue }
             if let first = indices.first, case .clarification = entries[first].resolution,
                indices.allSatisfy({ entries[$0].resolution == entries[first].resolution }) { continue }
             let failures = indices.compactMap { index -> UnresolvedReason? in
@@ -1221,8 +1239,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     /// A scoped quantity answer fills missing units, confirms a known count,
     /// or refines an all-people party to adults/children. It cannot replace a
     /// different count/comparator or cross inventory, party and result scopes.
-    private static func applyingQuantityClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry]) -> (entries: [Entry], origins: [String: [String]]) {
-        guard proposal.disposition == .research else { return (original, [:]) }
+    private static func applyingQuantityClarifications(_ proposal: ComputerUseBrowserGoalProposal, to original: [Entry])
+        -> (entries: [Entry], origins: [String: [String]], partyOrigins: Set<String>) {
+        guard proposal.disposition == .research else { return (original, [:], []) }
         var entries = original
         let answerTurns = Set(proposal.input.clarifications.enumerated().compactMap { $0.element.topic.isQuantityTopic ? $0.offset + 1 : nil })
         var quantityIndices = proposal.requirements.indices.filter {
@@ -1238,11 +1257,18 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         }
         var previousTargets: [Int: [Int]] = [:]
         var originGroups: [Int: [Int]] = [:], originUnits: [Int: QuantityUnit] = [:]
+        var partyOriginRows: Set<Int> = []
         for row in quantityIndices {
-            guard case .bound(let condition) = original[row].resolution,
-                  case .quantity(_, _, let unit) = condition.predicate,
-                  condition.sourceRequirementIDs == [original[row].requirementID] else { continue }
-            originGroups[row] = [row]; originUnits[row] = unit
+            guard case .bound(let condition) = original[row].resolution else { continue }
+            switch condition.predicate {
+            case .quantity(_, _, let unit) where condition.sourceRequirementIDs == [original[row].requirementID]:
+                originGroups[row] = [row]; originUnits[row] = unit
+            case .party:
+                let group = quantityIndices.filter { condition.sourceRequirementIDs.contains(original[$0].requirementID) }
+                guard group.count == condition.sourceRequirementIDs.count else { continue }
+                originGroups[row] = group; partyOriginRows.insert(row)
+            default: break
+            }
         }
         func history(_ resolution: Resolution) -> [String] {
             switch resolution {
@@ -1290,7 +1316,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 }
             }
             guard !invalidScope, !(missingDetail && !targets.isEmpty) else { unresolved(.clarificationScope); continue }
-            if answer.topic == .replaceQuantity {
+            if answer.topic.isQuantityReplacement {
                 let ordered = targets.sorted(), groups = ordered.compactMap { originGroups[$0] }
                 let sourceRanges = answer.scope.map { $0.sourceByteOffset..<($0.sourceByteOffset + $0.source.utf8.count) }
                 guard !missingDetail, let first = ordered.first, let last = ordered.last, groups.count == ordered.count,
@@ -1308,13 +1334,21 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                       Self.coversQuantityAnswer(answerIndices.map {
                           let row = proposal.requirements[$0]; return row.sourceByteOffset..<(row.sourceByteOffset + row.sourceByteCount)
                       }, turn: turn, input: proposal.input) else { unresolved(.clarificationScope); continue }
-                guard let parts = Self.quantityReplacementAnswer(answer.answer), let unit = parts.unit,
-                      ordered.allSatisfy({ originUnits[$0] == unit }) else { unresolved(.contradictoryClarification); continue }
+                let predicate: Predicate
+                if answer.topic == .replaceParty {
+                    guard let party = Self.partyLiteral(Self.conditionSource(answer.answer)),
+                          ordered.allSatisfy(partyOriginRows.contains) else { unresolved(.contradictoryClarification); continue }
+                    predicate = .party(party)
+                } else {
+                    guard let parts = Self.quantityReplacementAnswer(answer.answer), let unit = parts.unit,
+                          ordered.allSatisfy({ originUnits[$0] == unit && !partyOriginRows.contains($0) }) else { unresolved(.contradictoryClarification); continue }
+                    predicate = .quantity(parts.comparison, parts.count, unit)
+                }
                 let targetIDs = Set(ordered.map { original[$0].requirementID })
                 // A shared confirmation cannot be discarded with just one of
                 // its origins. Admission also withholds this unsupported case.
                 guard !entries.contains(where: {
-                    guard case .clarification(let binding) = $0.resolution, case .quantity = binding.parameter else { return false }
+                    guard case .clarification(let binding) = $0.resolution, binding.parameter.isQuantity else { return false }
                     return !targetIDs.isDisjoint(with: binding.targetRequirementIDs) && Set(binding.targetRequirementIDs) != targetIDs
                 }) else { unresolved(.clarificationScope); continue }
                 let replacementIDs = answerIndices.map { original[$0].requirementID }
@@ -1324,13 +1358,15 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                     guard targets.contains(row) || priorTurns.contains(proposal.requirements[row].sourceTurnIndex) else { continue }
                     entries[row] = .init(requirementID: original[row].requirementID,
                         resolution: .superseded(.init(input: proposal.input, requirementID: original[row].requirementID,
-                            answerTurns: [turn], replacements: replacementIDs, topic: .replaceQuantity)))
+                            answerTurns: [turn], replacements: replacementIDs, topic: answer.topic)))
                 }
                 for row in answerIndices {
                     entries[row] = .init(requirementID: original[row].requirementID,
                         resolution: .bound(.init(inputDigest: proposal.input.digest, requirementID: original[row].requirementID,
-                            predicate: .quantity(parts.comparison, parts.count, unit), sourceRequirementIDs: replacementIDs)))
-                    originGroups[row] = answerIndices; originUnits[row] = unit
+                            predicate: predicate, sourceRequirementIDs: replacementIDs)))
+                    originGroups[row] = answerIndices
+                    if case .quantity(_, _, let unit) = predicate { originUnits[row] = unit }
+                    else { partyOriginRows.insert(row) }
                 }
                 quantityIndices.append(contentsOf: answerIndices)
                 previousTargets[turn] = answerIndices
@@ -1340,9 +1376,17 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 unresolved(.ambiguousClarification); continue
             }
             let knownTargets = targets.sorted()
-            if case .quantity(_, _, let statedUnit) = parameter,
-               !knownTargets.isEmpty, knownTargets.allSatisfy({ originGroups[$0] != nil
-                   && (statedUnit == nil || originUnits[$0] == statedUnit) }) {
+            let compatibleOrigin: Bool
+            switch parameter {
+            case .quantity(_, _, let statedUnit):
+                compatibleOrigin = knownTargets.allSatisfy { row in
+                    if partyOriginRows.contains(row) { return statedUnit.map { [.people, .adults, .children].contains($0) } ?? false }
+                    return originGroups[row] != nil && (statedUnit == nil || originUnits[row] == statedUnit)
+                }
+            case .party: compatibleOrigin = knownTargets.allSatisfy(partyOriginRows.contains)
+            default: compatibleOrigin = false
+            }
+            if !knownTargets.isEmpty, compatibleOrigin {
                 // Retain the origin of a literal conflict so an explicit
                 // replacement question can resolve it without losing history.
                 previousTargets[turn] = knownTargets
@@ -1382,8 +1426,12 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                             predicate: condition.predicate, historicalRequirementIDs: ids, sourceRequirementIDs: sourceIDs))
                     } else { value = resolution }
                     entries[row] = .init(requirementID: entries[row].requirementID, resolution: value)
-                    if case .bound(let condition) = value, case .quantity(_, _, let unit) = condition.predicate {
-                        originGroups[row] = primaries; originUnits[row] = unit
+                    if case .bound(let condition) = value {
+                        if case .quantity(_, _, let unit) = condition.predicate {
+                            originGroups[row] = primaries; originUnits[row] = unit
+                        } else if case .party = condition.predicate {
+                            originGroups[row] = primaries; partyOriginRows.insert(row)
+                        }
                     }
                 }
                 let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: sourceIDs)
@@ -1457,10 +1505,15 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard replacements.count == targets.count else { unresolved(.contradictoryClarification); continue }
             for (target, resolution) in replacements {
                 entries[target] = .init(requirementID: entries[target].requirementID, resolution: resolution)
-                if case .bound(let condition) = resolution, case .quantity(_, _, let unit) = condition.predicate {
-                    if originGroups[target] == nil { originGroups[target] = [target] }
-                    originUnits[target] = unit
-                } else { originGroups[target] = nil; originUnits[target] = nil }
+                if case .bound(let condition) = resolution {
+                    if case .quantity(_, _, let unit) = condition.predicate {
+                        if originGroups[target] == nil { originGroups[target] = [target] }
+                        originUnits[target] = unit; partyOriginRows.remove(target)
+                    } else if case .party = condition.predicate {
+                        originGroups[target] = original.indices.filter { condition.sourceRequirementIDs.contains(original[$0].requirementID) }
+                        originUnits[target] = nil; partyOriginRows.insert(target)
+                    }
+                } else { originGroups[target] = nil; originUnits[target] = nil; partyOriginRows.remove(target) }
             }
             let ordered = targets.sorted()
             let binding = ClarificationBinding(input: proposal.input, turn: turn, parameter: parameter, targets: ordered.map { entries[$0].requirementID })
@@ -1475,7 +1528,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 origins[original[row].requirementID] = targets.map { original[$0].requirementID }
             }
         }
-        return (entries, origins)
+        let partyOrigins = Set(origins.compactMap { id, group -> String? in
+            let rows = original.indices.filter { group.contains(original[$0].requirementID) }
+            return !rows.isEmpty && rows.allSatisfy(partyOriginRows.contains) ? id : nil
+        })
+        return (entries, origins, partyOrigins)
     }
 
     private static func answerSpan(_ answer: String, turn: Int) -> ScalarSpan? {

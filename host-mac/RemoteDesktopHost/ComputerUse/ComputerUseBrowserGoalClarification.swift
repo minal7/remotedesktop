@@ -3,10 +3,11 @@ import Foundation
 /// Host-authored task questions only. Account authentication continues to use
 /// visible manual takeover, not this answer channel or model-authored text.
 enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
-    case origin, destination, location, date, replaceDate, time, quantity, replaceQuantity, currency, priceBasis, fees, source
+    case origin, destination, location, date, replaceDate, time, quantity, replaceQuantity, replaceParty, currency, priceBasis, fees, source
     var isDateTopic: Bool { self == .date || self == .replaceDate }
-    var isQuantityTopic: Bool { self == .quantity || self == .replaceQuantity }
-    var isReplacement: Bool { self == .replaceDate || self == .replaceQuantity }
+    var isQuantityReplacement: Bool { self == .replaceQuantity || self == .replaceParty }
+    var isQuantityTopic: Bool { self == .quantity || isQuantityReplacement }
+    var isReplacement: Bool { self == .replaceDate || isQuantityReplacement }
     var question: String {
         switch self {
         case .origin: return "Where will you be traveling from?"
@@ -17,6 +18,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .time: return "What local time or time range should I use?"
         case .quantity: return "How many results, tickets or people do you mean? Please specify which, and adult/child counts when relevant."
         case .replaceQuantity: return "What count should replace the selected quantity requirement? Give the count and the same unit, for example three tickets. This replaces the whole selected count, including any at least or at most limit. Other requirements stay in place."
+        case .replaceParty: return "What adult and child counts should replace the whole selected party? Please give both counts, including zero when needed, for example 3 adults and 0 children. This replaces both counts together. Other requirements stay in place."
         case .currency: return "Which currency do you mean? Please give its three-letter code."
         case .priceBasis: return "Is the budget a total, per person or per ticket?"
         case .fees: return "Should the price limit include fees?"
@@ -38,7 +40,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .location: return [.location]
         case .date, .replaceDate: return [.date]
         case .time: return [.time]
-        case .quantity, .replaceQuantity: return [.quantity]
+        case .quantity, .replaceQuantity, .replaceParty: return [.quantity]
         case .currency, .priceBasis: return [.price]
         case .fees: return [.fees, .price]
         case .source: return [.source, .navigationSource, .answerSource]
@@ -232,8 +234,8 @@ final class ComputerUseBrowserGoalClarification {
             // later literal the model happened to select.
             guard let origins = proposal.dateReplacementTargets(for: selected) else { throw Failure.invalidProposal }
             requirements = origins
-        } else if topic == .replaceQuantity {
-            guard let origins = proposal.quantityReplacementTargets(for: selected) else { throw Failure.invalidProposal }
+        } else if topic.isQuantityReplacement {
+            guard let origins = proposal.quantityReplacementTargets(for: selected, topic: topic) else { throw Failure.invalidProposal }
             requirements = origins
         } else { requirements = selected }
         let scope = try requirements.map { requirement -> ComputerUseBrowserGoalClarificationTurn.Scope in

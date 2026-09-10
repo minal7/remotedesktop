@@ -283,18 +283,30 @@ struct ComputerUseBrowserFormPartyHistory: Equatable, Sendable, CustomStringConv
     func context(in interpretation: ComputerUseBrowserGoalProposal, aliases: [String: String],
                  normalizations: [ComputerUseBrowserResearchFormInput.Normalization]) throws -> [String: Any] {
         guard interpretation.input.continues(goal) else { throw ComputerUseBrowserResearchFormError.inputChanged }
+        let scalars = ComputerUseBrowserScalarRequirements(proposal: interpretation)
         let values: [[String: Any]] = try parties.map { party in
             guard let alias = aliases[party.sourceID] else { throw ComputerUseBrowserResearchFormError.invalidInput }
             let current = normalizations.filter { $0.partySourceID == party.sourceID && $0.isPartyComponent }
             let sameCounts = current.count == party.components.count && party.components.allSatisfy { old in
                 current.contains { $0.unit == old.unit && $0.value.utf8.elementsEqual(old.value.utf8) }
             }
-            return ["party":alias, "sources":try party.sources.map { try $0.context(in: interpretation) },
-                "current_native_requirement":current.isEmpty ? "unresolved" : sameCounts ? "same_counts" : "changed_counts",
+            let sourceIndices = Set(try party.sources.flatMap { try $0.indices(in: interpretation) })
+            let replacements = sourceIndices.compactMap { index -> [String]? in
+                guard case .superseded(let record) = scalars.entries[index].resolution, record.topic == .replaceParty else { return nil }
+                return record.replacementRequirementIDs
+            }
+            let superseded = !sourceIndices.isEmpty && replacements.count == sourceIndices.count
+            var value: [String: Any] = ["party":alias, "sources":try party.sources.map { try $0.context(in: interpretation) },
+                "current_native_requirement":superseded ? "superseded" : current.isEmpty ? "unresolved" : sameCounts ? "same_counts" : "changed_counts",
                 "components_at_stage":party.components.map { component in
                     ["unit":component.unit, "value":component.value, "state":component.state.rawValue,
                      "recorded_fields":component.recordedFields] as [String: Any]
                 }]
+            if superseded {
+                let ids = Set(replacements.flatMap { $0 })
+                value["replacement_requirements"] = interpretation.requirements.indices.filter { ids.contains(interpretation.requirements[$0].id) }
+            }
+            return value
         }
         return ["historical":true, "current_field_verification":false, "accepted_answer_count_at_stage":goal.clarifications.count,
             "required_repair_when_recorded":receipt.requiresRepairAtPublication, "parties":values]

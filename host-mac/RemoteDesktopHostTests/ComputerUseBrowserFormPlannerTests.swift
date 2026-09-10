@@ -286,12 +286,100 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: false)
     }
 
+    func testEveryQuestionDecoderRequiresTheWholePartyForExplicitReplacement() async throws {
+        let rows = [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and ", field: "quantity"), row("1 child.", field: "quantity")]
+        let goal = try proposal(rows: rows), fixture = try await FormPlannerFixture(goal: goal, body: partyForm(adults: 1, children: 0))
+        defer { fixture.close() }
+        let actionInput = try ComputerUseBrowserActionInput(interpretation: goal, evidence: fixture.input.evidence.page,
+            navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
+        for indices in [[1], [2], [1, 2]] {
+            let question: [String: Any] = ["topic":"replaceParty", "requirements":indices]
+            let content = try ResearchAnswerFixture.json(["question":question])
+            let goalContent = try ResearchAnswerFixture.json(["disposition":"clarification", "requirements":rows, "question":question])
+            if indices.count == 1 {
+                XCTAssertThrowsError(try ComputerUseBrowserGoalProposal.decode(content: goalContent, input: goal.input))
+                XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput))
+                XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input))
+            } else {
+                let ids = indices.map { goal.requirements[$0].id }
+                XCTAssertEqual(try ComputerUseBrowserGoalProposal.decode(content: goalContent, input: goal.input).question?.requirementIDs, ids)
+                XCTAssertEqual(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput).questionRequest?.requirementIDs, ids)
+                XCTAssertEqual(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input).question?.requirementIDs, ids)
+            }
+        }
+    }
+
     func testRepartitionedOriginalDateStillRequiresFreshFormCriteriaAfterReplacement() async throws {
         try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: true)
     }
 
     func testExplicitQuantityReplacementRequiresFreshFormCriteriaBeforeQuerying() async throws {
         try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: false, quantity: true)
+    }
+
+    func testExplicitPartyReplacementRepairsComponentsAndTotalBeforeQuerying() async throws {
+        for (adults, children) in [(3, 0), (2, 2)] {
+            var rows = [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child. ", field: "quantity"), row("Leave Reference unchanged.")]
+            let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)
+            let total = adults + children, route = "/results?adults=\(adults)&children=\(children)&people=\(total)"
+            var edits = 0, queryPreparations = 0
+            let fixture = try await FormPlannerFixture(goal: initial, body: """
+                <form action='/results'><label>Adults<input type='number' name='adults' value='1'></label>
+                <label>Children<input type='number' name='children' value='0'></label>
+                <label>People<input type='number' name='people' value='1'></label>
+                <label>Reference<input value='private-reference'></label><button>Search</button></form>
+                """, additionalRoutes: [route:.init(body: "<p>Corrected party received</p>")],
+                domScriptDidDispatch: { if $0 == .edit { edits += 1 }; if $0 == .prepareFormQuery { queryPreparations += 1 } })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let owner = ComputerUseBrowserResearchTask(input: initial.input, browser: fixture.browser, goalPlanner: goals,
+                resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: directory, planningWorker: fixture.planningWorker, mayAct: { true })
+            defer { owner.retire() }
+            _ = try await owner.interpretGoal()
+            let firstAction = try await owner.planNextAction(using: ReplacementFormActionFixture(editing: ["Adults":[1], "Children":[1], "People":[1]], preservation: 2))
+            let first = try await owner.prepareFormInput(for: firstAction)
+            let firstPlan = try ComputerUseBrowserFormProposal.decode(content: plan([
+                ["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"],
+                ["field":"field3", "normalized":"value2-people"]], preserve: [["field":"field4", "requirement":2]]), input: first)
+            let oldReceipt = try await owner.executeForm(firstPlan, input: first)
+            XCTAssertEqual(edits, 3)
+            let question = try owner.issueQuestion(topic: .replaceParty, requirementIDs: [initial.requirements[1].id], controllerID: "phone", controllerSessionID: "session")
+            let answerText = "\(adults) adults and \(children) children"
+            let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "party-correction", answer: answerText, controllerID: "phone", controllerSessionID: "session")
+            for part in ["\(adults) adults and ", "\(children) children"] { var answer = row(part, field: "quantity"); answer["turn"] = 1; rows.append(answer) }
+            let current = try decodeGoal(rows, input: updated); goals.value = current
+            _ = try await owner.interpretGoal()
+            let oldPage = try await owner.observeFormResultPage(after: oldReceipt)
+            let submit = try XCTUnwrap(oldPage.page.controls.first { $0.kind == "submit" }).id
+            do { _ = try await owner.openFormQuery(after: oldReceipt, controlID: submit, evidence: oldPage); XCTFail("Old component or total receipts cannot authorize the new party") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
+            XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 3)
+            let action = try await owner.planNextAction(using: ReplacementFormActionFixture(editing: ["Adults":[3], "Children":[4], "People":[3, 4]], preservation: 2))
+            XCTAssertTrue(action.input.queryControlIDs.isEmpty)
+            let actionContext = try object(Data(action.input.contextJSON.utf8))
+            let history = try XCTUnwrap(actionContext["form_history"] as? [[String: Any]])
+            let snapshot = try XCTUnwrap(history.first?["party_criteria_at_stage"] as? [String: Any])
+            let parties = try XCTUnwrap(snapshot["parties"] as? [[String: Any]])
+            XCTAssertEqual(parties.first?["current_native_requirement"] as? String, "superseded")
+            XCTAssertEqual(parties.first?["replacement_requirements"] as? [Int], [3, 4])
+            XCTAssertEqual(snapshot["current_field_verification"] as? Bool, false)
+            let prepared = try await owner.prepareFormInput(for: action)
+            XCTAssertEqual(Set(prepared.requiredRepairFieldAliases), ["field1", "field2", "field3"])
+            XCTAssertEqual(prepared.requiredPreservation.count, 1)
+            XCTAssertEqual(prepared.previous?.partyCoverage(in: current).first?.components.map(\.state), [.missing, .missing])
+            XCTAssertEqual(prepared.normalizations.map(\.value), [String(adults), String(children), String(total)])
+            let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([
+                ["field":"field1", "normalized":"value4-adults"], ["field":"field2", "normalized":"value4-children"],
+                ["field":"field3", "normalized":"value4-people"]], preserve: [["field":"field4", "requirement":2]]), input: prepared)
+            let receipt = try await owner.executeForm(proposed, input: prepared)
+            XCTAssertEqual(receipt.editCount, 2); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1, "The unchanged count still needs fresh source verification")
+            XCTAssertEqual(edits, 5); XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt, receipt])
+            let page = try await owner.observeFormResultPage(after: receipt), control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
+            _ = try await owner.openFormQuery(after: receipt, controlID: control, evidence: page)
+            XCTAssertEqual(fixture.server.count("/results?adults=2&children=1&people=3"), 0)
+            XCTAssertEqual(fixture.server.count(route), 1)
+            XCTAssertEqual(owner.input.userTurns, [initial.input.prompt, answerText])
+        }
     }
 
     func testNativeDateInputUsesTheAcceptedAnswerClockAfterMidnight() async throws {
@@ -362,10 +450,10 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
         let owner = ComputerUseBrowserResearchTask(input: initial.input, browser: fixture.browser, goalPlanner: goals,
-            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: directory, mayAct: { true })
+            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: directory, planningWorker: fixture.planningWorker, mayAct: { true })
         defer { owner.retire() }
         _ = try await owner.interpretGoal()
-        let firstAction = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [1], preservationIndex: 2))
+        let firstAction = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [1], preservationIndex: 2, fieldLabel: label))
         let first = try await owner.prepareFormInput(for: firstAction)
         let oldPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
             preserve: [["field":"field2", "requirement":2]]), input: first)
@@ -389,7 +477,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
         XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 1)
         XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt])
-        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [replacementIndex], preservationIndex: preservationIndex))
+        let action = try await owner.planNextAction(using: IntroducedDateActionFixture(indices: [replacementIndex], preservationIndex: preservationIndex, fieldLabel: label))
         XCTAssertTrue(action.input.queryControlIDs.isEmpty)
         XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.readableRequirementIndices))
         XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.effectFieldRequirementIndices))
@@ -1906,9 +1994,22 @@ private struct PartyCoverageActionFixture: ComputerUseBrowserActionPlanning {
 private struct IntroducedDateActionFixture: ComputerUseBrowserActionPlanning {
     let indices: [Int]
     var preservationIndex: Int? = nil
+    var fieldLabel: String = "Departure"
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
-        if let review = try FormEffectScopeFixture.response(input, editing: ["Departure":indices],
+        if let review = try FormEffectScopeFixture.response(input, editing: [fieldLabel:indices],
             preserving: preservationIndex.map { ["Reference":$0] } ?? [:]) {
+            return try .decode(content: review, input: input)
+        }
+        let form = try XCTUnwrap(input.formIDs.first)
+        return try .decode(content: ResearchAnswerFixture.json(["form":form, "preserve":[]]), input: input)
+    }
+}
+
+private struct ReplacementFormActionFixture: ComputerUseBrowserActionPlanning {
+    let editing: [String: [Int]]
+    let preservation: Int
+    func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
+        if let review = try FormEffectScopeFixture.response(input, editing: editing, preserving: ["Reference":preservation]) {
             return try .decode(content: review, input: input)
         }
         let form = try XCTUnwrap(input.formIDs.first)
