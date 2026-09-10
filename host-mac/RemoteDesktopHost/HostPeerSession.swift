@@ -36,7 +36,7 @@ final class HostPeerSession: NSObject {
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
     private let peerSenderID: String
-    private let onUserInput: @Sendable () -> Void
+    private let onUserInput: @Sendable () -> Bool
     private let onPeerAuthorizationChanged:
         @Sendable (PeerAuthorization) -> Void
     private let onEnded: @Sendable (String) -> Void
@@ -101,7 +101,7 @@ final class HostPeerSession: NSObject {
         iceConfig: ICEConfig,
         audioEnabled: Bool,
         peerSenderID: String,
-        onUserInput: @escaping @Sendable () -> Void,
+        onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
         onEnded: @escaping @Sendable (String) -> Void
@@ -719,8 +719,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 log.warning("dropping remote input received before authenticated hello")
                 return
             }
-            onUserInput()
-            injector.apply(message)
+            injector.applyDirectInput(message, interruptAutomation: onUserInput)
         case let .qos(targetFps, maxBitrateKbps, prefer):
             guard helloAuthenticated else {
                 log.warning("dropping video quality request received before authenticated hello")

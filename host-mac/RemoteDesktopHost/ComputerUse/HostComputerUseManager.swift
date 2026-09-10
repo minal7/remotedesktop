@@ -4550,11 +4550,9 @@ final class HostComputerUseManager: ObservableObject {
         userIntervened()
     }
 
-    /// The WebRTC callback invokes this synchronously before injecting the
-    /// person's event. Cancellation and UI state then follow on MainActor.
-    /// This closes the small race where the model could otherwise inject one
-    /// more action after the user had already touched the screen.
-    /// Actual physical/direct input, including while already paused. The
+    /// Physical input closes the gate under the injection lock before its
+    /// lifecycle update follows on MainActor. Direct phone input instead uses
+    /// recordUserInputInInjectionTransaction under its packet transaction. The
     /// callback carries no key, text, pointer coordinate or authentication data.
     @discardableResult
     nonisolated func recordUserInputForIntervention() -> ComputerUseActionGate.InputIntervention? {
@@ -4564,6 +4562,12 @@ final class HostComputerUseManager: ObservableObject {
             return intervention != nil
         }
         return intervention
+    }
+
+    /// Direct phone input uses InputInjector.applyDirectInput, which already
+    /// holds the injection lock and owns release/dispatch. Do not reacquire it.
+    nonisolated func recordUserInputInInjectionTransaction() -> ComputerUseActionGate.InputIntervention? {
+        actionGate.recordUserInput()
     }
 
     @discardableResult
@@ -5150,6 +5154,9 @@ final class HostComputerUseManager: ObservableObject {
     private static let pausedInputChangedGuidance =
         "You used the Mac while AI was paused. Choose Resume again when you are ready."
 
+    private static let heldInputGuidance =
+        "Finish the current input and release any held keys or mouse buttons, then choose Resume."
+
     private func pausedInputSnapshot(for context: ExecutionContext) -> ComputerUseActionGate.PausedInputSnapshot? {
         guard case .paused = activity, pausedInputOwner == PausedInputOwner(context), let scope = pausedInputScopeID else { return nil }
         return actionGate.pausedInputSnapshot(scopeID: scope)
@@ -5410,13 +5417,14 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        guard actionGate.beginApprovedAutomation() else {
+        let admission = injector.admitAutomation { actionGate.beginApprovedAutomation() }
+        guard admission == .admitted else {
             // Direct input can close the gate synchronously before its
             // MainActor lifecycle callback arrives. That close owns the race:
             // keep the held task resumable and never execute the approval.
             cancelApprovalIfNeeded(pendingApproval)
-            pauseAfterApprovedOperationWasBlocked(
-                context: pendingApproval.context)
+            pauseForLocalIntervention(pendingApproval.context,
+                guidance: admission == .inputHeld ? Self.heldInputGuidance : nil)
             return
         }
 
@@ -6461,10 +6469,10 @@ final class HostComputerUseManager: ObservableObject {
             await precedingExecution?.value
             guard !Task.isCancelled,
                   currentExecutionToken == token else { return }
-            guard actionGate.activatePendingAutomation(admissionID) else {
-                pauseAfterPendingAutomationWasBlocked(
-                    context: context,
-                    token: token)
+            let admission = injector.admitAutomation { actionGate.activatePendingAutomation(admissionID) }
+            guard admission == .admitted else {
+                pauseAfterPendingAutomationWasBlocked(context: context, token: token,
+                    guidance: admission == .inputHeld ? Self.heldInputGuidance : nil)
                 return
             }
             do {
@@ -6589,10 +6597,11 @@ final class HostComputerUseManager: ObservableObject {
 
     private func pauseAfterPendingAutomationWasBlocked(
         context: ExecutionContext,
-        token: UUID
+        token: UUID,
+        guidance: String? = nil
     ) {
         guard currentExecutionToken == token else { return }
-        pauseForLocalIntervention(context)
+        pauseForLocalIntervention(context, guidance: guidance)
     }
 
     private func continueApprovedVisualAction(

@@ -823,11 +823,11 @@ final class HostSession: ObservableObject {
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
                                 onUserInput: { [weak computerUse] in
-                                    if let intervention = computerUse?.recordUserInputForIntervention() {
-                                        Task { @MainActor [weak computerUse] in
-                                            computerUse?.applyUserInputIntervention(intervention)
-                                        }
+                                    guard let intervention = computerUse?.recordUserInputInInjectionTransaction() else { return false }
+                                    Task { @MainActor [weak computerUse] in
+                                        computerUse?.applyUserInputIntervention(intervention)
                                     }
+                                    return true
                                 },
                                 onPeerAuthorizationChanged: { [weak self, weak computerUse] update in
                                     guard let computerUse else { return }

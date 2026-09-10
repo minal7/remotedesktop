@@ -1725,13 +1725,14 @@ final class ComputerUseTests: XCTestCase {
     private func browserControlFixture(executor: any ComputerUseExecuting, ledgerURL: URL,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         approvalTargetProvider: ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
-        domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil) throws
+        domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil,
+        injector: InputInjector = InputInjector()) throws
         -> (manager: HostComputerUseManager, browser: ComputerUseOwnedBrowser,
             channel: FakeHostComputerUseChannel, ledger: ComputerUseTaskLedger) {
         let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
         let channel = FakeHostComputerUseChannel()
         var browser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(injector: injector, executor: executor,
             taskLedger: ledger, browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: domScriptDidDispatch, mayAct: mayAct)
                 browser = owned
@@ -3837,10 +3838,11 @@ final class ComputerUseTests: XCTestCase {
         let events = CapturedCGEventStore()
         let injector = InputInjector(eventPoster: { events.append($0) })
 
-        injector.apply(.pointer(x: 80, y: 90, buttons: 1))
-        injector.apply(.key(usage: 0x04, down: true, modifiers: 0))
+        injector.applyDirectInput(.pointer(x: 80, y: 90, buttons: 1)) { false }
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0)) { false }
         injector.releaseHeldInput()
 
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
         let posted = events.values()
         XCTAssertEqual(posted.filter { $0.type == .leftMouseUp }.count, 1)
         XCTAssertEqual(posted.filter { $0.type == .keyUp }.count, 1)
@@ -6458,6 +6460,168 @@ final class ComputerUseTests: XCTestCase {
             executor.prompts.count,
             1,
             "A canceled task must replay its terminal result without running again")
+    }
+
+    private func injectManualInput(_ message: ControlMessage, injector: InputInjector,
+        manager: HostComputerUseManager) -> ComputerUseActionGate.InputIntervention? {
+        var receipt: ComputerUseActionGate.InputIntervention?
+        injector.applyDirectInput(message) {
+            receipt = manager.recordUserInputInInjectionTransaction()
+            return receipt != nil
+        }
+        return receipt
+    }
+
+    func testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease() throws {
+        let events = CapturedCGEventStore(), gate = ComputerUseActionGate()
+        let injector = InputInjector(eventPoster: { events.append($0) })
+        let admission = gate.reservePendingAutomation()
+        XCTAssertTrue(gate.adoptPendingAutomation(admission)); XCTAssertTrue(gate.activatePendingAutomation(admission))
+        var receipt: ComputerUseActionGate.InputIntervention?
+        injector.applyDirectInput(.pointer(x: 40, y: 50, buttons: 1)) {
+            XCTAssertTrue(events.values().isEmpty, "Interruption must be recorded before the first direct event")
+            receipt = gate.recordUserInput()
+            return receipt != nil
+        }
+        XCTAssertNotNil(receipt); XCTAssertFalse(gate.allowsActions)
+        var triedAdmission = false
+        XCTAssertEqual(injector.admitAutomation { triedAdmission = true; return true }, .inputHeld)
+        XCTAssertFalse(triedAdmission)
+        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 1)) { gate.recordUserInput() != nil }
+        injector.applyDirectInput(.key(usage: 0xE3, down: true, modifiers: 8)) { gate.recordUserInput() != nil }
+        let heldEventCount = events.values().count
+        XCTAssertFalse(injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { false }))
+        XCTAssertFalse(injector.apply(.text("stale AI text"), ifAllowed: { false }))
+        XCTAssertThrowsError(try injector.performHostEffectIfAllowed(ifAllowed: { false }) {
+            XCTFail("A stale AX write must not dispatch")
+        })
+        XCTAssertEqual(events.values().count, heldEventCount, "Rejected AI work must not release manual holds")
+        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 0)) { gate.recordUserInput() != nil }
+        XCTAssertEqual(injector.admitAutomation { true }, .inputHeld, "The held modifier still belongs to manual input")
+        injector.applyDirectInput(.key(usage: 0xE3, down: false, modifiers: 0)) { gate.recordUserInput() != nil }
+        XCTAssertEqual(injector.admitAutomation { false }, .interrupted)
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+        let posted = events.values()
+        XCTAssertEqual(posted.filter { $0.type == .leftMouseDown }.count, 1)
+        XCTAssertEqual(posted.filter { $0.type == .leftMouseUp }.count, 1)
+        XCTAssertEqual(posted.filter { $0.type == .keyDown }.count, 1)
+        XCTAssertEqual(posted.filter { $0.type == .keyUp }.count, 1)
+        XCTAssertTrue(posted.contains { $0.type == .leftMouseDragged })
+        var callbacks = 0
+        let text = "A👩🏽‍💻é"
+        injector.applyDirectInput(.text(text)) { callbacks += 1; return false }
+        XCTAssertEqual(callbacks, 1)
+        let textEvents = events.values().dropFirst(posted.count)
+        XCTAssertEqual(textEvents.filter { $0.type == .keyDown }.compactMap(\.unicodeText), text.map(String.init))
+        XCTAssertEqual(textEvents.filter { $0.type == .keyUp }.compactMap(\.unicodeText), text.map(String.init))
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+        injector.applyDirectInput(.bye(reason: "fixture")) { XCTFail("Non-input packets cannot enter an input transaction"); return true }
+        XCTAssertEqual(events.values().count, posted.count + text.count * 2)
+    }
+
+    func testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased() async throws {
+        for localResume in [false, true] {
+          for pointer in [false, true] {
+            let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+            let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url, injector: injector)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "held-input-resume", kind: .prompt, body: "Find concert tickets")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { fixture.manager.activity == .paused }
+            let owner = try XCTUnwrap(fixture.browser.taskControls?.ownerID)
+            let down: ControlMessage = pointer ? .pointer(x: 30, y: 40, buttons: 1) : .key(usage: 0xE1, down: true, modifiers: 1)
+            let up: ControlMessage = pointer ? .pointer(x: 30, y: 40, buttons: 0) : .key(usage: 0xE1, down: false, modifiers: 0)
+            XCTAssertNil(injectManualInput(down, injector: injector, manager: fixture.manager))
+            if localResume {
+                fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
+            } else {
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+                XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), 2)
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: fixture.channel))
+            }
+            await waitUntil { fixture.manager.activity == .paused && fixture.ledger.hostControlEpoch(taskID: prompt.id) == 3 }
+            XCTAssertEqual(executor.callCount, 1)
+            XCTAssertEqual(fixture.browser.taskControls?.ownerID, owner)
+            XCTAssertEqual(injector.admitAutomation { true }, .inputHeld)
+            XCTAssertFalse(events.values().contains { $0.type == .keyUp || $0.type == .leftMouseUp }, "Resume must not force-release the person's gesture")
+            await waitUntil {
+                await fixture.channel.sentMessages().contains { $0.body.contains("release any held keys or mouse buttons") }
+            }
+            XCTAssertNil(injectManualInput(up, injector: injector, manager: fixture.manager))
+            if localResume {
+                fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
+            } else {
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 3, hostEpoch: 3), channel: fixture.channel))
+                XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), 4)
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 4, hostEpoch: 4), channel: fixture.channel))
+            }
+            await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+            XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+          }
+        }
+    }
+
+    func testNewPromptWaitsForAlreadyHeldRemoteInputBeforeStartingInference() async throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let executor = ReadinessHookComputerUseExecutor(results: [.completed("Found the requested information")])
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: true, modifiers: 0), injector: injector, manager: manager))
+        let prompt = makeEnvelope(id: "held-before-new-task", kind: .prompt, body: "Find movie tickets")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { manager.activity == .paused }
+        XCTAssertEqual(executor.callCount, 0); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: false, modifiers: 0), injector: injector, manager: manager))
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
+        XCTAssertEqual(executor.callCount, 0); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 2)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
+        await waitUntil { executor.callCount == 1 && manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body])
+        XCTAssertEqual(events.values().filter { $0.type == .keyDown }.count, 1)
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+    }
+
+    func testHeldRemoteInputPreventsApprovalAcceptanceBeforeItsActorCallback() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [
+            .approvalRequired(message: "Send", action: .key(usage: 0x28, modifiers: 0), continuation: .init(taskID: "", nonce: UUID())),
+            .completed("Continued")])
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var actions: [ComputerUsePredictedAction] = []
+        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, approvalTargetProvider: { _ in
+                .init(context: "Fixture send", applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "fixture-send")
+            }, actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "held-before-approval", kind: .prompt, body: "Reply to the message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await channel.sentMessages()
+        let request = try ComputerUseApprovalRequest.decodeBody(try XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        let receipt = try XCTUnwrap(injectManualInput(.pointer(x: 60, y: 70, buttons: 1), injector: injector, manager: manager))
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
+            body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true).encodedBody()), channel: channel))
+        XCTAssertEqual(manager.activity, .paused); XCTAssertTrue(actions.isEmpty)
+        XCTAssertEqual(executor.cancelledVisualApprovals.count, 1)
+        XCTAssertEqual(injector.admitAutomation { true }, .inputHeld)
+        XCTAssertFalse(events.values().contains { $0.type == .leftMouseUp })
+        manager.applyUserInputIntervention(receipt)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertNil(injectManualInput(.pointer(x: 60, y: 70, buttons: 0), injector: injector, manager: manager))
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
+        await waitUntil { executor.callCount == 2 && manager.activity == .idle }
+        XCTAssertTrue(actions.isEmpty); XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
     }
 
     func testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission() throws {

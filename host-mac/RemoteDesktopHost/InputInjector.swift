@@ -25,6 +25,8 @@ final class InputInjector: @unchecked Sendable {
     private var lastPointer = CGPoint.zero
     private var pressedKeys: [Int: UInt16] = [:]
     private var pendingUnicodeStroke: (id: UUID, release: CGEvent)?
+    private var directInputTransactions = 0
+    private var heldInputIsDirect = false
     private var lastClickButton: CGMouseButton?
     private var lastClickPosition = CGPoint.zero
     private var lastClickUptime: TimeInterval = -.infinity
@@ -49,6 +51,47 @@ final class InputInjector: @unchecked Sendable {
 
     enum AutomationGateError: Error { case interrupted }
 
+    enum AutomationAdmission: Equatable {
+        case admitted, inputHeld, interrupted
+    }
+
+    /// A handback cannot activate automation between a direct-input callback
+    /// and its last event, or while that input still owns a key/button. The
+    /// admission closure must only change the action gate, never inject input.
+    func admitAutomation(_ admission: () -> Bool) -> AutomationAdmission {
+        lock.lock()
+        defer { lock.unlock() }
+        guard directInputTransactions == 0, prevButtons == 0,
+              pressedKeys.isEmpty, pendingUnicodeStroke == nil else { return .inputHeld }
+        guard admission() else { return .interrupted }
+        heldInputIsDirect = false
+        return .admitted
+    }
+
+    /// Encloses occurrence recording and direct dispatch in one tracked
+    /// transaction. Text retains its existing per-grapheme lock yields, but
+    /// automation admission stays closed until the entire packet has finished.
+    /// The interruption callback runs under this injector's lock and must not
+    /// call back into the injector.
+    func applyDirectInput(_ message: ControlMessage, interruptAutomation: () -> Bool) {
+        switch message {
+        case .pointer, .scroll, .key, .text: break
+        case .hello, .qos, .bye: return
+        }
+        lock.lock()
+        directInputTransactions += 1
+        let interrupted = interruptAutomation()
+        if interrupted || !heldInputIsDirect { releaseHeldAutomationInputLocked() }
+        heldInputIsDirect = true
+        lock.unlock()
+        defer {
+            lock.lock()
+            directInputTransactions -= 1
+            lock.unlock()
+        }
+        apply(message)
+    }
+
     /// AX mutations use the same ownership boundary as synthesized input.
     /// Once interruptAutomation returns, a queued AX setter cannot pass an
     /// earlier gate check and overwrite the person's intervening input.
@@ -59,7 +102,7 @@ final class InputInjector: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard ifAllowed() else {
-            releaseHeldInputLocked()
+            releaseHeldAutomationInputLocked()
             throw AutomationGateError.interrupted
         }
         return try effect()
@@ -80,7 +123,7 @@ final class InputInjector: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard ifAllowed() else {
-            releaseHeldInputLocked()
+            releaseHeldAutomationInputLocked()
             return false
         }
         switch message {
@@ -318,7 +361,7 @@ final class InputInjector: @unchecked Sendable {
         for character in s {
             lock.lock()
             guard ifAllowed() else {
-                releaseHeldInputLocked()
+                releaseHeldAutomationInputLocked()
                 lock.unlock()
                 return false
             }
@@ -340,6 +383,14 @@ final class InputInjector: @unchecked Sendable {
 
     /// Caller must hold `lock` so releases cannot interleave with another
     /// direct or automated injection.
+    private func releaseHeldAutomationInputLocked() {
+        // A late, rejected AI event must not release the person's new drag or
+        // modifier. Direct input takes ownership after releasing old AI holds;
+        // automation takes ownership only through neutral-input admission.
+        guard !heldInputIsDirect else { return }
+        releaseHeldInputLocked()
+    }
+
     private func releaseHeldInputLocked() {
         if let stroke = pendingUnicodeStroke {
             pendingUnicodeStroke = nil
@@ -355,6 +406,7 @@ final class InputInjector: @unchecked Sendable {
             post(mouse: .otherMouseUp, at: lastPointer, button: .center)
         }
         prevButtons = 0
+        heldInputIsDirect = false
 
         let keys = pressedKeys
         pressedKeys.removeAll()
