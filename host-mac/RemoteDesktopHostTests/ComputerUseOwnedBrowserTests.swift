@@ -7,6 +7,175 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testLocationInboxRetainsReportedURLsAndBoundsOverflow() throws {
+        let inbox = ComputerUseBrowserLocationInbox(), epoch = UUID()
+        let source = inbox.beginSurface(ownershipEpoch: epoch)
+        let a = try XCTUnwrap(URL(string: "https://one.test/a")), b = try XCTUnwrap(URL(string: "https://two.test/b"))
+        let delivery = try XCTUnwrap(inbox.enqueue(a, from: source))
+        XCTAssertNil(inbox.enqueue(b, from: source)); XCTAssertNil(inbox.enqueue(a, from: source)); XCTAssertNil(inbox.enqueue(nil, from: source))
+        XCTAssertTrue(inbox.hasPending)
+        let batch = try XCTUnwrap(inbox.take(delivery))
+        XCTAssertEqual(batch.urls, [a, b, a, nil]); XCTAssertEqual(batch.delivery.ownershipEpoch, epoch)
+        XCTAssertFalse(batch.overflowed); XCTAssertFalse(inbox.hasPending)
+        XCTAssertNil(inbox.take(delivery))
+        let overflow = try XCTUnwrap(inbox.enqueue(a, from: source))
+        for _ in 0..<64 { XCTAssertNil(inbox.enqueue(b, from: source)) }
+        let bounded = try XCTUnwrap(inbox.take(overflow))
+        XCTAssertEqual(bounded.urls.count, 64); XCTAssertEqual(bounded.urls.first ?? nil, a)
+        XCTAssertTrue(bounded.overflowed); XCTAssertFalse(inbox.hasPending)
+        let later = try XCTUnwrap(inbox.enqueue(b, from: source))
+        XCTAssertFalse(try XCTUnwrap(inbox.take(later)).overflowed)
+        let oversized = try XCTUnwrap(URL(string: "https://one.test/" + String(repeating: "x", count: 8_193)))
+        let omitted = try XCTUnwrap(inbox.enqueue(oversized, from: source))
+        let missingValue = try XCTUnwrap(inbox.take(omitted))
+        XCTAssertEqual(missingValue.urls, [nil]); XCTAssertTrue(missingValue.overflowed)
+    }
+
+    func testLocationInboxRetiresDeliveryWithoutConsumingSuccessorEvents() throws {
+        let inbox = ComputerUseBrowserLocationInbox(), firstEpoch = UUID(), nextEpoch = UUID()
+        let source = inbox.beginSurface(ownershipEpoch: firstEpoch)
+        let url = try XCTUnwrap(URL(string: "https://account.test/return"))
+        let old = try XCTUnwrap(inbox.enqueue(url, from: source))
+        XCTAssertNil(inbox.changeOwner(to: nextEpoch, requiringEmpty: true), "A claim cannot discard an unprocessed notification")
+        XCTAssertTrue(inbox.hasPending)
+        let change = try XCTUnwrap(inbox.changeOwner(to: nextEpoch, requiringEmpty: false))
+        XCTAssertEqual(change.retired?.delivery, old); XCTAssertEqual(change.retired?.urls, [url])
+        let next = try XCTUnwrap(inbox.enqueue(nil, from: source))
+        XCTAssertEqual(next.ownershipEpoch, nextEpoch)
+        XCTAssertNil(inbox.take(old)); XCTAssertTrue(inbox.hasPending)
+        XCTAssertEqual(try XCTUnwrap(inbox.take(next)).urls, [nil])
+        let replacementSource = inbox.beginSurface(ownershipEpoch: nextEpoch)
+        XCTAssertNotEqual(replacementSource, source)
+        XCTAssertNil(inbox.enqueue(url, from: source)); XCTAssertFalse(inbox.hasPending)
+        let current = try XCTUnwrap(inbox.enqueue(url, from: replacementSource))
+        inbox.endSurface()
+        XCTAssertNil(inbox.activeSource); XCTAssertFalse(inbox.hasPending)
+        XCTAssertNil(inbox.take(current)); XCTAssertNil(inbox.enqueue(url, from: replacementSource))
+    }
+
+    func testQueuedLocationChangesRevokeIdlePageEvidenceUntilDelivery() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        var nativeView: WKWebView?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, _ in nativeView = view }, mayAct: { true })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "queued-urls")
+        let document = try await browser.navigate(taskID: "queued-urls", operationID: "page", to: base)
+        let view = try XCTUnwrap(nativeView), source = try XCTUnwrap(browser.locationChanges.activeSource)
+        let before = try browser.navigationDispatchHistory(taskID: "queued-urls")
+        let reported = try XCTUnwrap(URL(string: "https://intervening.test/private-return?code=not-a-credential"))
+        let delivery = try XCTUnwrap(browser.locationChanges.enqueue(reported, from: source))
+        XCTAssertNil(browser.locationChanges.enqueue(base, from: source))
+        XCTAssertFalse(browser.hasOwnership(taskID: "queued-urls")); XCTAssertNil(browser.currentDocument(taskID: "queued-urls"))
+        XCTAssertTrue(browser.isLoadingPage)
+        XCTAssertFalse(browser.validate(document))
+        XCTAssertThrowsError(try browser.claim(taskID: "replacement")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+        do { _ = try await browser.navigate(taskID: "queued-urls", operationID: "blocked", to: base.appendingPathComponent("blocked")); XCTFail("Unprocessed changes cannot dispatch a request") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertFalse(browser.hasNavigationAttempt(operationID: "blocked")); XCTAssertEqual(server.count("/blocked"), 0)
+        browser.deliverLocationChanges(in: view, delivery: delivery)
+        XCTAssertFalse(browser.locationChanges.hasPending)
+        XCTAssertFalse(browser.isLoadingPage)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "queued-urls", required: true), session)
+        XCTAssertNil(browser.currentDocument(taskID: "queued-urls")); XCTAssertFalse(browser.hasPageAwaitingHandback)
+        XCTAssertEqual(browser.receipt(taskID: "queued-urls", operationID: "page"), document)
+        let history = try browser.navigationDispatchHistory(taskID: "queued-urls")
+        let changes = Array(history.observations.dropFirst(before.observations.count))
+        XCTAssertEqual(changes.map(\.phase), [.unorderedLocationChange, .unorderedLocationChange])
+        XCTAssertEqual(changes.map(\.origin), [try ComputerUseBrowserSourceOrigin(reported), try ComputerUseBrowserSourceOrigin(base)])
+        XCTAssertTrue(changes.allSatisfy { $0.binding == .none && $0.control == .unknown && $0.policyCheck == .notChecked && $0.attemptID == nil && $0.navigationCorrelationID == nil })
+        XCTAssertEqual(view.url, base, "An equal current URL cannot erase a reported intervening change")
+        XCTAssertEqual(browser.displayedSite, ComputerUseBrowserSite.displayName(for: base))
+        let next = try await browser.navigate(taskID: "queued-urls", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next)); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testRetiredLocationDeliveryCannotClearAReplacementPage() async throws {
+        for close in [false, true] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            var nativeView: WKWebView?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, _ in nativeView = view }, mayAct: { true })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "same-task")
+            _ = try await browser.navigate(taskID: "same-task", operationID: "old", to: base.appendingPathComponent("old"))
+            let oldView = try XCTUnwrap(nativeView), oldSource = try XCTUnwrap(browser.locationChanges.activeSource)
+            let oldDelivery = try XCTUnwrap(browser.locationChanges.enqueue(base.appendingPathComponent("old-change"), from: oldSource))
+            if close { browser.close() } else { browser.stop() }
+            _ = try browser.prepareWorkflowSession(taskID: "same-task")
+            let next = try await browser.navigate(taskID: "same-task", operationID: "next", to: base.appendingPathComponent("next"))
+            let currentView = try XCTUnwrap(nativeView)
+            let history = try browser.navigationDispatchHistory(taskID: "same-task")
+            let retirement = try XCTUnwrap(history.claimEvents.first { $0.phase == .retired })
+            let oldEvent = try XCTUnwrap(history.observations.first { $0.phase == .unorderedLocationChange })
+            XCTAssertEqual(oldEvent.ownershipEpoch, retirement.ownershipEpoch); XCTAssertLessThan(oldEvent.order, retirement.order)
+            browser.deliverLocationChanges(in: oldView, delivery: oldDelivery)
+            XCTAssertTrue(browser.validate(next)); XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "same-task"), history)
+            let source = try XCTUnwrap(browser.locationChanges.activeSource)
+            let currentDelivery = try XCTUnwrap(browser.locationChanges.enqueue(base.appendingPathComponent("new-change"), from: source))
+            browser.deliverLocationChanges(in: oldView, delivery: oldDelivery)
+            XCTAssertTrue(browser.locationChanges.hasPending, "An old scheduled delivery cannot consume the new owner's changes")
+            browser.deliverLocationChanges(in: currentView, delivery: currentDelivery)
+            XCTAssertFalse(browser.locationChanges.hasPending); XCTAssertFalse(browser.validate(next))
+            XCTAssertEqual(browser.taskID, "same-task")
+        }
+    }
+
+    func testQueuedLocationChangesDoNotInvalidateAnExactPendingLoad() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        weak var owner: ComputerUseOwnedBrowser?
+        var scheduled: (WKWebView, ComputerUseBrowserLocationInbox.Delivery)?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, navigation in
+            guard scheduled == nil, let owner, let navigation, let source = owner.locationChanges.activeSource else { return }
+            guard let delivery = owner.locationChanges.enqueue(base.appendingPathComponent("reported"), from: source) else { return XCTFail("Missing delivery") }
+            scheduled = (view, delivery)
+            owner.webView(view, didStartProvisionalNavigation: navigation)
+            XCTAssertFalse(owner.locationChanges.hasPending, "A native callback must process earlier queued changes before testing page readiness")
+        }, mayAct: { true })
+        owner = browser
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "pending-location")
+        let document = try await browser.navigate(taskID: "pending-location", operationID: "page", to: base)
+        XCTAssertTrue(browser.validate(document))
+        let history = try browser.navigationDispatchHistory(taskID: "pending-location")
+        XCTAssertEqual(history.attempts.last?.outcome, .documentCommitted)
+        XCTAssertEqual(history.observations.filter { $0.phase == .unorderedLocationChange }.count, 1)
+        let delivered = try XCTUnwrap(scheduled)
+        browser.deliverLocationChanges(in: delivered.0, delivery: delivered.1)
+        XCTAssertTrue(browser.validate(document)); XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "pending-location"), history)
+        XCTAssertEqual(server.count("/"), 1); XCTAssertEqual(server.count("/reported"), 0)
+    }
+
+    func testLocationDrainPublicationCannotContinueIntoReplacementOwner() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        var nativeView: WKWebView?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, _ in nativeView = view }, mayAct: { true })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "original")
+        _ = try await browser.navigate(taskID: "original", operationID: "page", to: base)
+        let view = try XCTUnwrap(nativeView), source = try XCTUnwrap(browser.locationChanges.activeSource)
+        let delivery = try XCTUnwrap(browser.locationChanges.enqueue(base.appendingPathComponent("changed"), from: source))
+        var replacement: ComputerUseBrowserHandbackRequirement?, status: String?
+        let subscription = browser.$displayedSite.dropFirst().sink { _ in
+            guard replacement == nil else { return }
+            browser.stop()
+            do { replacement = try browser.prepareWorkflowSession(taskID: "replacement"); status = browser.detail }
+            catch { XCTFail("Admission must reopen after logical URL invalidation: \(error)") }
+        }
+        defer { subscription.cancel() }
+        browser.deliverLocationChanges(in: view, delivery: delivery)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), try XCTUnwrap(replacement))
+        XCTAssertEqual(browser.detail, try XCTUnwrap(status), "Old delivery cannot publish Page changed into its successor")
+        let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next)); XCTAssertEqual(server.count("/next"), 1)
+    }
+
     private func replayNativeCallbacks(_ navigation: WKNavigation, in view: WKWebView, to browser: ComputerUseOwnedBrowser) {
         browser.webView(view, didStartProvisionalNavigation: navigation)
         browser.webView(view, didReceiveServerRedirectForProvisionalNavigation: navigation)
@@ -3127,6 +3296,53 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
 @MainActor
 final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
+    func testQueuedLocationDeliveryResumesAfterNativeChildCleanup() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: delivers a queued URL during a native child-window close notification")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+            "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/ready');</script>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "cleanup-delivery")
+        _ = try await browser.navigate(taskID: "cleanup-delivery", operationID: "login", to: base.appendingPathComponent("login"))
+        let (_, parent) = try fixtureWindow("AI Browser — Remote Desktop")
+        let deadline = ContinuousClock.now + .seconds(5)
+        while server.count("/signal") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(server.count("/signal"), 1)
+        allowed = false
+        browser.updateTaskControls(.init(taskID: "cleanup-delivery", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true), handler: { _, _ in })
+        server.releaseHeldResponses()
+        while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(server.count("/ready"), 1)
+        let (popup, _) = try fixtureWindow("Sign-in window — AI Browser")
+        var delivered = false
+        let subscription = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: popup).sink { _ in
+            guard let source = browser.locationChanges.activeSource,
+                  let ticket = browser.locationChanges.enqueue(base, from: source) else { return XCTFail("Missing current retained-view delivery") }
+            delivered = true
+            browser.deliverLocationChanges(in: parent, delivery: ticket)
+            XCTAssertTrue(browser.locationChanges.hasPending, "Native cleanup must finish before this delivery is processed")
+        }
+        defer { subscription.cancel() }
+        browser.stop()
+        XCTAssertTrue(delivered)
+        let deliveryDeadline = ContinuousClock.now + .seconds(2)
+        while browser.locationChanges.hasPending && ContinuousClock.now < deliveryDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(browser.locationChanges.hasPending, "A delivery deferred by cleanup must receive another wake-up")
+        XCTAssertNil(browser.taskID); XCTAssertTrue(browser.hasSession)
+        allowed = true
+        _ = try browser.prepareWorkflowSession(taskID: "replacement")
+        let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next)); XCTAssertEqual(server.count("/next"), 1)
+    }
+
     private func fixtureWindow(_ title: String) throws -> (NSWindow, WKWebView) {
         let window = try XCTUnwrap(NSApp.windows.first { $0.title == title && $0.isVisible })
         func webView(in view: NSView) -> WKWebView? {

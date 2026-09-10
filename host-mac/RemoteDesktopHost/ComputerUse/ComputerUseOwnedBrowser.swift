@@ -525,6 +525,90 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     var debugDescription: String { description }
 }
 
+/// Cross-thread URL notification ingress. No WebKit/AppKit object or actor
+/// callback is accessed under this lock. Delivery tickets never address a
+/// later source/owner, including when an older scheduled task arrives last.
+final class ComputerUseBrowserLocationInbox: @unchecked Sendable {
+    struct Source: Equatable, Sendable { fileprivate let id = UUID() }
+    struct Delivery: Equatable, Sendable {
+        let source: Source
+        let ownershipEpoch: UUID
+        fileprivate let id = UUID()
+    }
+    struct Batch: Sendable {
+        let delivery: Delivery
+        let urls: [URL?]
+        let overflowed: Bool
+    }
+    struct OwnerChange { let retired: Batch? }
+    private let lock = NSLock()
+    private var source: Source?
+    private var ownershipEpoch = UUID()
+    private var delivery: Delivery?
+    private var urls: [URL?] = []
+    private var overflowed = false
+
+    var activeSource: Source? { lock.lock(); defer { lock.unlock() }; return source }
+    var hasPending: Bool { lock.lock(); defer { lock.unlock() }; return delivery != nil }
+    func isCurrent(_ expected: Delivery) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return delivery == expected
+    }
+
+    func beginSurface(ownershipEpoch: UUID) -> Source {
+        lock.lock(); defer { lock.unlock() }
+        let source = Source()
+        self.source = source; self.ownershipEpoch = ownershipEpoch
+        clearPending()
+        return source
+    }
+
+    func endSurface() {
+        lock.lock(); defer { lock.unlock() }
+        source = nil
+        clearPending()
+    }
+
+    func changeOwner(to epoch: UUID, requiringEmpty: Bool) -> OwnerChange? {
+        lock.lock(); defer { lock.unlock() }
+        guard !requiringEmpty || delivery == nil else { return nil }
+        let retired = currentBatch()
+        ownershipEpoch = epoch
+        clearPending()
+        return OwnerChange(retired: retired)
+    }
+
+    /// Only the first event needs a scheduled delivery. Later notifications
+    /// join that exact ticket until it is consumed or its owner is retired.
+    func enqueue(_ url: URL?, from source: Source) -> Delivery? {
+        lock.lock(); defer { lock.unlock() }
+        guard self.source == source else { return nil }
+        if urls.count < 64 {
+            if let url, url.absoluteString.utf8.count > 8_192 {
+                urls.append(nil); overflowed = true
+            } else { urls.append(url) }
+        } else { overflowed = true }
+        guard delivery == nil else { return nil }
+        let next = Delivery(source: source, ownershipEpoch: ownershipEpoch)
+        delivery = next
+        return next
+    }
+
+    func take(_ expected: Delivery? = nil) -> Batch? {
+        lock.lock(); defer { lock.unlock() }
+        if let expected, delivery != expected { return nil }
+        guard let result = currentBatch() else { return nil }
+        clearPending()
+        return result
+    }
+
+    private func currentBatch() -> Batch? {
+        delivery.map { Batch(delivery: $0, urls: urls, overflowed: overflowed) }
+    }
+
+    private func clearPending() { delivery = nil; urls.removeAll(keepingCapacity: true); overflowed = false }
+}
+
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
     case observedNavigationRetired
     case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, sourceNotAllowed
@@ -623,6 +707,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         init(view: WKWebView, pendingID: UUID) { self.view = view; self.pendingID = pendingID }
     }
     private var nativeNavigationDispatch: NativeNavigationDispatch?
+    let locationChanges = ComputerUseBrowserLocationInbox()
+    private var processingLocationChanges = false
+    private var hasPendingLocationChanges: Bool { processingLocationChanges || locationChanges.hasPending }
+    @MainActor
+    private final class DeferredLocationDelivery {
+        weak var view: WKWebView?
+        let delivery: ComputerUseBrowserLocationInbox.Delivery
+        init(view: WKWebView, delivery: ComputerUseBrowserLocationInbox.Delivery) { self.view = view; self.delivery = delivery }
+    }
+    private var deferredLocationDelivery: DeferredLocationDelivery?
     @MainActor
     private final class NativeRetirement {
         let view: WKWebView?
@@ -770,10 +864,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func claim(taskID: String) throws {
         guard !isNativeCleanupActive, nativeNavigationDispatch == nil else { throw ComputerUseBrowserError.busy }
+        guard !hasPendingLocationChanges else { throw ComputerUseBrowserError.busy }
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
+        guard !hasPendingLocationChanges else { throw ComputerUseBrowserError.busy }
         if self.taskID != taskID {
+            let nextEpoch = UUID()
+            guard locationChanges.changeOwner(to: nextEpoch, requiringEmpty: true) != nil else { throw ComputerUseBrowserError.busy }
             retirePageObservations(.claimChanged)
             if self.taskID != nil {
                 navigationDispatchLog?.recordClaim(phase: .retired, parentSessionID: browser == nil ? nil : browserSessionID,
@@ -783,7 +881,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 navigationDispatchLog = .init(taskID: taskID, contextID: contextID,
                     beganAfterAnotherClaim: navigationDispatchLog != nil)
             }
-            ownershipEpoch = UUID()
+            ownershipEpoch = nextEpoch
             self.taskID = taskID
             sourcePolicy = nil
             generation &+= 1
@@ -798,7 +896,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    func hasOwnership(taskID: String) -> Bool { !isNativeCleanupActive && self.taskID == taskID && mayAct() && !hasOpenSignInWindow }
+    func hasOwnership(taskID: String) -> Bool {
+        guard !isNativeCleanupActive, !hasPendingLocationChanges, self.taskID == taskID, !hasOpenSignInWindow else { return false }
+        let epoch = ownershipEpoch
+        guard mayAct() else { return false }
+        return !isNativeCleanupActive && !hasPendingLocationChanges && self.taskID == taskID
+            && ownershipEpoch == epoch && !hasOpenSignInWindow
+    }
 
     var hasOpenSignInWindow: Bool { signInBrowser != nil }
     var hasSession: Bool { browser != nil }
@@ -814,7 +918,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// A new current-form request may acquire the already-open owned page.
     /// This creates an ownership token, never a new navigation receipt.
     func acquireCurrentDocument(taskID: String) throws -> ComputerUseBrowserDocument {
-        guard pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
+        guard !hasPendingLocationChanges, pending == nil, pendingDOM == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), let previous = document, browser?.isLoading == false,
               previous.generation == generation, browser?.url == previous.committedURL else { throw ComputerUseBrowserError.pageChanged }
         try claim(taskID: taskID)
@@ -828,7 +932,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// A paused person's navigation is observable, but has no automation
     /// authority until the host accepts an authenticated explicit Resume and
     /// joins the previous executor. Merely opening the action gate is not enough.
-    var isLoadingPage: Bool { browser?.isLoading == true || pending != nil || observedNavigation != nil }
+    var isLoadingPage: Bool { hasPendingLocationChanges || browser?.isLoading == true || pending != nil || observedNavigation != nil }
 
     var hasPageAwaitingHandback: Bool {
         guard let observedUserPage else { return false }
@@ -836,7 +940,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func isCurrentPageObservation(_ page: ObservedPage) -> Bool {
-        page.generation == generation && pending == nil
+        !hasPendingLocationChanges && page.generation == generation && pending == nil
             && observedNavigation == nil && browser?.isLoading == false
             && browser?.url == page.url
     }
@@ -927,7 +1031,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let view = browser, let url = view.url, Self.validatedURL(url) != nil else { throw ComputerUseBrowserError.pageChanged }
         let previousOwner = self.taskID, epoch = ownershipEpoch, revision = locationRevision, generation = self.generation
         func isCurrent() -> Bool {
-            !Task.isCancelled && (try? assertAdmission()) != nil && mayAct() && !hasOpenSignInWindow
+            !Task.isCancelled && (try? assertAdmission()) != nil && mayAct() && !hasOpenSignInWindow && !hasPendingLocationChanges
                 && browser === view && self.taskID == previousOwner && ownershipEpoch == epoch
                 && locationRevision == revision && self.generation == generation && view.url == url && !view.isLoading
                 && pending == nil && observedNavigation == nil
@@ -995,7 +1099,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private var hasUnnavigatedContents: Bool {
         guard let browser else { return false }
-        return !sessionHasNavigationActivity && browser.url == nil && !browser.isLoading
+        return !hasPendingLocationChanges && !sessionHasNavigationActivity && browser.url == nil && !browser.isLoading
             && pending == nil && pendingDOM == nil && observedNavigation == nil
             && document == nil && loadedPageIdentity == nil && receipts.isEmpty
             && observedUserPage == nil && observedActivePage == nil && !hasOpenSignInWindow
@@ -1044,6 +1148,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func performNativeHandback(taskID: String, requirement: ComputerUseBrowserHandbackRequirement, nativeOperationID: UUID) async throws {
+        guard !hasPendingLocationChanges else { throw ComputerUseBrowserError.busy }
         if hasUnnavigatedContents, let browser {
             guard mayAct() else { throw ComputerUseBrowserError.ownershipLost }
             try Task.checkCancellation()
@@ -1844,6 +1949,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func retireBrowser(releasesBrowser: Bool, closingWindow: NSWindow? = nil,
                                windowControlRequest: (() -> Void)? = nil) {
+        defer { resumeLocationDeliveryIfNeeded() }
         if let active = nativeRetirement {
             // Native callbacks can upgrade Stop to Close, but cannot start a
             // second cleanup or share its view with a new claim midway through.
@@ -1859,6 +1965,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         retirement.windowIsClosing = closingWindow != nil
         retirement.windowControlRequest = windowControlRequest
         nativeRetirement = retirement
+        let nextEpoch = UUID()
+        if let retired = locationChanges.changeOwner(to: nextEpoch, requiringEmpty: false)?.retired {
+            recordUnorderedLocations(retired)
+            sessionHasNavigationActivity = true
+        }
+        deferredLocationDelivery = nil
 
         // Record old lifetimes and detach their logical authority before any
         // native teardown, continuation resumption or observable publication.
@@ -1873,7 +1985,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         taskID = nil
         sourcePolicy = nil
-        ownershipEpoch = UUID()
+        ownershipEpoch = nextEpoch
         generation &+= 1
         document = nil
         loadedPageIdentity = nil
@@ -1911,6 +2023,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pendingDOM = nil
         browser = nil
         window = nil
+        locationChanges.endSurface()
+        deferredLocationDelivery = nil
         urlObservation = nil
         retirement.view?.navigationDelegate = nil
         retirement.view?.uiDelegate = nil
@@ -1956,6 +2070,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640), configuration: configuration)
         view.navigationDelegate = self
         view.uiDelegate = self
+        let changes = locationChanges
+        let source = changes.beginSurface(ownershipEpoch: ownershipEpoch)
         urlObservation = view.observe(\.url, options: [.new]) { [weak self] view, change in
             let url = change.newValue ?? nil
             if Thread.isMainThread {
@@ -1963,41 +2079,134 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 // until after Pause would misclassify an earlier AI-time
                 // change, and could lose an A -> B -> A history transition.
                 MainActor.assumeIsolated {
-                    self?.locationChanged(in: view, to: url, ordered: true)
+                    self?.receiveOrderedLocationChange(in: view, to: url, source: source)
                 }
-            } else {
+            } else if let delivery = changes.enqueue(url, from: source) {
                 Task { @MainActor [weak self, weak view] in
                     guard let view else { return }
-                    // An unexpectedly unordered notification cannot confer
-                    // handback authority. Invalidate using the current URL.
-                    self?.locationChanged(in: view, to: view.url, ordered: false)
+                    self?.deliverLocationChanges(in: view, delivery: delivery)
                 }
             }
         }
         browser = view
+        resumeLocationDeliveryIfNeeded()
         return view
     }
 
-    private func locationChanged(in view: WKWebView, to url: URL?, ordered: Bool) {
+    private func receiveOrderedLocationChange(in view: WKWebView, to url: URL?, source: ComputerUseBrowserLocationInbox.Source) {
+        guard !isNativeCleanupActive, browser === view, locationChanges.activeSource == source else { return }
+        // Preserve the reported URL even if another change has already won.
+        // Mixed/deferred delivery cannot mint a same-document handback.
+        if hasPendingLocationChanges || view.url != url {
+            if let delivery = locationChanges.enqueue(url, from: source) {
+                Task { @MainActor [weak self, weak view] in
+                    guard let view else { return }
+                    self?.deliverLocationChanges(in: view, delivery: delivery)
+                }
+            }
+            return
+        }
+        locationChanged(in: view, to: url)
+    }
+
+    func deliverLocationChanges(in view: WKWebView, delivery: ComputerUseBrowserLocationInbox.Delivery) {
+        guard locationChanges.isCurrent(delivery) else { return }
+        guard browser === view else {
+            // An observation can be registered before makeBrowser installs
+            // its view. Resume that exact delivery after registration ends.
+            if browser == nil { deferredLocationDelivery = .init(view: view, delivery: delivery) }
+            return
+        }
+        if isNativeCleanupActive || processingLocationChanges {
+            deferredLocationDelivery = .init(view: view, delivery: delivery)
+            return
+        }
+        drainLocationChanges(in: view, delivery: delivery)
+    }
+
+    private func resumeLocationDeliveryIfNeeded() {
+        guard !isNativeCleanupActive, !processingLocationChanges, let deferred = deferredLocationDelivery else { return }
+        deferredLocationDelivery = nil
+        guard let view = deferred.view else { return }
+        Task { @MainActor [weak self, weak view] in
+            guard let view else { return }
+            self?.deliverLocationChanges(in: view, delivery: deferred.delivery)
+        }
+    }
+
+    private func recordUnorderedLocations(_ batch: ComputerUseBrowserLocationInbox.Batch) {
+        guard taskID != nil, batch.delivery.ownershipEpoch == ownershipEpoch else { return }
+        if batch.overflowed { navigationDispatchLog?.observationsOverflowed = true }
+        // The URL is the notification's captured value. Native navigation,
+        // policy and control classification were unavailable at ingress.
+        for url in batch.urls {
+            navigationDispatchLog?.observe(phase: .unorderedLocationChange, decision: .observed, binding: .none,
+                control: .unknown, surface: .mainDocument, policyCheck: .notChecked, configuredPolicy: nil,
+                url: url, attemptID: nil, navigationCorrelationID: nil, parentSessionID: browserSessionID,
+                ownershipEpoch: ownershipEpoch, generation: generation, signInWindowID: nil, instantBack: nil)
+        }
+    }
+
+    private func drainLocationChanges(in view: WKWebView, delivery: ComputerUseBrowserLocationInbox.Delivery? = nil) {
+        defer { resumeLocationDeliveryIfNeeded() }
+        guard browser === view, !isNativeCleanupActive, !processingLocationChanges,
+              let batch = locationChanges.take(delivery), batch.delivery.ownershipEpoch == ownershipEpoch else { return }
+        processingLocationChanges = true
+        recordUnorderedLocations(batch)
+        sessionHasNavigationActivity = true
+        locationRevision &+= UInt64(max(1, batch.urls.count + (batch.overflowed ? 1 : 0)))
+        // An exact native load can still establish its eventual document at
+        // finish. These notifications alone cannot preserve an idle document
+        // or create a same-document observation, even if the URL returned to A.
+        let invalidatedIdlePage = pending == nil && observedNavigation == nil
+        if invalidatedIdlePage {
+            generation &+= 1
+            document = nil
+            loadedPageIdentity = nil
+            retirePageObservations(.locationChanged)
+        }
+        let currentURL = view.url
+        processingLocationChanges = false
+        let callback = navigationCallbackScope(in: view)
+        guard isCurrentNavigationCallback(callback) else { return }
+        displayedSite = ComputerUseBrowserSite.displayName(for: currentURL)
+        guard isCurrentNavigationCallback(callback) else { return }
+        if invalidatedIdlePage { detail = "Page changed" }
+    }
+
+    private func prepareNavigationCallback(in view: WKWebView) -> Bool {
+        guard !isNativeCleanupActive, !processingLocationChanges, let parent = browser,
+              view === parent || view === signInBrowser else { return false }
+        let epoch = ownershipEpoch, task = taskID, childID = signInInstanceID
+        drainLocationChanges(in: parent)
+        return !isNativeCleanupActive && !processingLocationChanges && browser === parent
+            && ownershipEpoch == epoch && taskID == task
+            && (view === parent || (view === signInBrowser && signInInstanceID == childID))
+    }
+
+    private func locationChanged(in view: WKWebView, to url: URL?) {
         guard !isNativeCleanupActive else { return }
         guard browser === view, view.url == url else { return }
         locationRevision &+= 1
-        if url != nil || !ordered { sessionHasNavigationActivity = true }
-        recordNavigationSlot(ordered ? .locationChanged : .unorderedLocationChange, url: url)
+        if url != nil { sessionHasNavigationActivity = true }
+        recordNavigationSlot(.locationChanged, url: url)
         let callback = navigationCallbackScope(in: view)
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         guard isCurrentNavigationCallback(callback) else { return }
         let changed = document.map { $0.committedURL != url } ?? false
         let observedChanged = (observedUserPage.map { $0.url != url } ?? false)
             || (observedActivePage.map { $0.url != url } ?? false)
-        guard pending == nil, changed || observedChanged || !ordered else { return }
+        guard pending == nil, changed || observedChanged else { return }
         let previousIdentity = loadedPageIdentity
         generation &+= 1
         document = nil
         retirePageObservations(.locationChanged)
-        if ordered, let taskID, !view.isLoading, observedNavigation == nil,
+        if let taskID, !view.isLoading, observedNavigation == nil,
            let previousIdentity, let url, Self.validatedURL(url) != nil {
-            let source: ComputerUseBrowserDocument.Source = mayAct() ? .activePageObservation : .userControlObservation
+            let changedScope = navigationCallbackScope(in: view)
+            let active = mayAct()
+            guard isCurrentNavigationCallback(changedScope) else { return }
+            let source: ComputerUseBrowserDocument.Source = active ? .activePageObservation : .userControlObservation
             let evidence = NavigationHistory.PageObservation(taskID: taskID, parentSessionID: browserSessionID,
                 ownershipEpoch: ownershipEpoch, generation: generation, url: url, basis: .sameDocumentCandidate,
                 navigationCorrelationID: nil, source: source, requiresExplicitHandback: false)
@@ -2017,7 +2226,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private var canOpenSignInWindow: Bool {
-        !isNativeCleanupActive && nativeNavigationDispatch == nil && isUserControllingTask && !hasOpenSignInWindow && pending == nil
+        !isNativeCleanupActive && !hasPendingLocationChanges && nativeNavigationDispatch == nil && isUserControllingTask && !hasOpenSignInWindow && pending == nil
             && pendingDOM == nil && browser?.isLoading == false
     }
 
@@ -2320,6 +2529,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func deferNavigationCallback(_ phase: NavigationHistory.Phase, in view: WKWebView,
                                          navigation: WKNavigation?, replay: @escaping () -> Void) -> Bool {
+        guard prepareNavigationCallback(in: view) else { return true }
         guard !isNativeCleanupActive, let dispatch = nativeNavigationDispatch, dispatch.view === view else { return false }
         guard !isRetiredMainNavigation(navigation, in: view) else { return true }
         // Preserve notification order and its original binding. Replaying
@@ -2384,7 +2594,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func isCurrentNavigationCallback(_ scope: NavigationCallbackScope?) -> Bool {
-        guard !isNativeCleanupActive, let scope else { return false }
+        guard !isNativeCleanupActive, !hasPendingLocationChanges, let scope else { return false }
         return browser === scope.parent && scope.view === (scope.isSignIn ? signInBrowser : browser)
             && taskID == scope.taskID && browserSessionID == scope.sessionID && ownershipEpoch == scope.ownershipEpoch
             && takeoverEpoch == scope.takeoverEpoch && generation == scope.generation && locationRevision == scope.locationRevision
@@ -2395,7 +2605,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationActionPolicy) -> Void) {
-        guard !isNativeCleanupActive else { decisionHandler(.cancel); return }
+        guard prepareNavigationCallback(in: webView) else { decisionHandler(.cancel); return }
         let callback = navigationCallbackScope(in: webView)
         func decide(_ decision: WKNavigationActionPolicy, control: NavigationHistory.Control = .unknown,
                     policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
@@ -2469,7 +2679,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                  decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void) {
-        guard !isNativeCleanupActive else { decisionHandler(.cancel); return }
+        guard prepareNavigationCallback(in: webView) else { decisionHandler(.cancel); return }
         let callback = navigationCallbackScope(in: webView)
         func decide(_ decision: WKNavigationResponsePolicy, control: NavigationHistory.Control = .unknown,
                     policyCheck: NavigationHistory.PolicyCheck = .notChecked) {
@@ -2525,7 +2735,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     @available(macOS 26.0, *)
     func webView(_ webView: WKWebView, shouldGoTo backForwardListItem: WKBackForwardListItem,
                  willUseInstantBack: Bool, completionHandler: @escaping (Bool) -> Void) {
-        guard !isNativeCleanupActive else { completionHandler(false); return }
+        guard prepareNavigationCallback(in: webView) else { completionHandler(false); return }
         let callback = navigationCallbackScope(in: webView)
         let url = backForwardListItem.url
         func decide(_ permitted: Bool, control: NavigationHistory.Control = .unknown,
@@ -2577,7 +2787,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func handleProvisionalStart(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
-        guard !isNativeCleanupActive else { return }
+        guard prepareNavigationCallback(in: webView) else { return }
         if webView === signInBrowser {
             if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
             return
@@ -2643,7 +2853,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func handleNavigationFinished(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
-        guard !isNativeCleanupActive else { return }
+        guard prepareNavigationCallback(in: webView) else { return }
         guard !isRetiredMainNavigation(navigation, in: webView) else { return }
         if recordCallback { recordNavigationCallback(.documentFinished, in: webView, navigation: navigation) }
         guard webView === browser, let navigation else { return }
@@ -2749,7 +2959,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func handleNavigationFailure(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
-        guard !isNativeCleanupActive else { return }
+        guard prepareNavigationCallback(in: webView) else { return }
         guard !isRetiredMainNavigation(navigation, in: webView) else { return }
         if recordCallback { recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation) }
         if webView === signInBrowser {
@@ -2765,6 +2975,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        defer { resumeLocationDeliveryIfNeeded() }
         guard nativeRetirement == nil else { return }
         if let cleanup = processFailureCleanup {
             // A child and its opener can report termination during the same
@@ -2776,6 +2987,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             return
         }
+        guard prepareNavigationCallback(in: webView) else { return }
         guard let parent = browser, webView === parent || webView === signInBrowser else { return }
         recordNavigationCallback(.webContentTerminated, in: webView, navigation: nil)
         let cleanup = ProcessFailureCleanup(parent: parent, taskID: taskID, sessionID: browserSessionID,
