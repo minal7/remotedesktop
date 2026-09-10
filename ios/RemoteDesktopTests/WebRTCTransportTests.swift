@@ -205,7 +205,9 @@ final class WebRTCTransportTests: XCTestCase {
         let generation = session.remoteInputGeneration, capture = session.remoteKeyboardCaptureIdentity
         let hardware = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
         let field = SoftKeyboardCapture.CaptureField()
-        field.bindSession(session)
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(field, in: session)
         XCTAssertTrue(field.canSendInput)
         let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
         session.send(.key(usage: 4, down: true, modifiers: 0), from: hardware)
@@ -235,7 +237,7 @@ final class WebRTCTransportTests: XCTestCase {
         session.endRemoteInputSource(hardware)
         XCTAssertEqual(visual.sentMessages.count, count + 2)
         let replacement = SoftKeyboardCapture.CaptureField()
-        replacement.bindSession(session); replacement.insertText("new explicit input")
+        try keyboardWindow.focus(replacement, in: session); replacement.insertText("new explicit input")
         XCTAssertTrue(replacement.canSendInput)
         XCTAssertEqual(visual.sentMessages.count, count + 3)
         XCTAssertTrue(session.isRemoteInputSourceCurrent(pointer))

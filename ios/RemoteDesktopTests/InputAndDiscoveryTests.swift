@@ -720,7 +720,9 @@ final class InputAndDiscoveryTests: XCTestCase {
         transport.makeScreenReady()
 
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
-        field.session = session
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(field, in: session)
 
         field.insertText("HUMAN-CONTROL-2468")
 
@@ -739,7 +741,9 @@ final class InputAndDiscoveryTests: XCTestCase {
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
-        field.bindSession(session)
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(field, in: session)
         XCTAssertTrue(field.canSendInput)
         session.toggleSoftModifier(.cmd)
         transport.onInputUnavailable?()
@@ -755,7 +759,7 @@ final class InputAndDiscoveryTests: XCTestCase {
         field.bindSession(session)
         XCTAssertFalse(field.canSendInput, "A retired native text input object cannot acquire a new generation")
         let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
-        replacement.bindSession(session)
+        try keyboardWindow.focus(replacement, in: session)
         XCTAssertTrue(replacement.canSendInput); XCTAssertEqual(session.softModifierMask, 0)
         let expected = "  e\u{301} 😀\n"
         field.insertText("late native commit")
@@ -767,8 +771,8 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardProposedEditsDoNotSendUntilNativeCommit() throws {
-        let (transport, session, field) = makeCompositionFixture()
-        defer { field.stopCapture(); session.reset() }
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); field.stopCapture(); session.reset() }
         XCTAssertTrue(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 0), replacementString: "proposed"))
         XCTAssertEqual(try inputSourceTrace(transport), [])
         XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: NSNotFound, length: 0), replacementString: "invalid"))
@@ -781,8 +785,8 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardCompositionCommitsOnceAndKeepsLocalDeleteAndReturnLocal() throws {
-        let (transport, session, field) = makeCompositionFixture()
-        defer { field.stopCapture(); session.reset() }
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); field.stopCapture(); session.reset() }
         field.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
         XCTAssertNotNil(field.markedTextRange)
         field.deleteBackward()
@@ -804,8 +808,8 @@ final class InputAndDiscoveryTests: XCTestCase {
     @MainActor
     func test_softKeyboardCompositionIsDiscardedAcrossRetirementAndFocusLoss() throws {
         for boundary in ["focus", "activity", "replacement", "stop"] {
-            let (transport, session, field) = makeCompositionFixture()
-            defer { field.stopCapture(); session.reset() }
+            let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+            defer { keyboardWindow.close(); field.stopCapture(); session.reset() }
             field.setMarkedText("未確定", selectedRange: NSRange(location: 3, length: 0))
             XCTAssertNotNil(field.markedTextRange)
             var replacement: SoftKeyboardCapture.CaptureField?
@@ -816,7 +820,7 @@ final class InputAndDiscoveryTests: XCTestCase {
                 field.bindSession(session)
             case "replacement":
                 replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
-                replacement?.bindSession(session)
+                try keyboardWindow.focus(try XCTUnwrap(replacement), in: session)
             default: field.stopCapture()
             }
             field.unmarkText()
@@ -832,15 +836,15 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardDeferredNativeCommitCannotReachAReplacementSource() async throws {
-        let (transport, session, field) = makeCompositionFixture()
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
         let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
-        defer { field.stopCapture(); replacement.stopCapture(); session.reset() }
+        defer { keyboardWindow.close(); field.stopCapture(); replacement.stopCapture(); session.reset() }
         // An editing notification outside the overridden native mutation calls
         // is observed on the next actor turn, after UIKit has set marked ranges.
         field.text = "retired value"
         field.sendActions(for: .editingChanged)
         XCTAssertEqual(try inputSourceTrace(transport), [])
-        replacement.bindSession(session)
+        try keyboardWindow.focus(replacement, in: session)
         replacement.insertText("current value")
         await Task.yield()
         field.unmarkText()
@@ -850,14 +854,15 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardCommitKeepsItsSourceAcrossReentrantReplacement() throws {
-        let (transport, session, field) = makeCompositionFixture()
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
         let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
-        defer { transport.onSend = nil; field.stopCapture(); replacement.stopCapture(); session.reset() }
+        defer { transport.onSend = nil; keyboardWindow.close(); field.stopCapture(); replacement.stopCapture(); session.reset() }
         field.setMarkedText("first", selectedRange: NSRange(location: 5, length: 0))
         transport.onSend = {
             transport.onSend = nil
             XCTAssertEqual(field.text, "", "Retire the local buffer before external delivery")
-            replacement.bindSession(session)
+            do { try keyboardWindow.focus(replacement, in: session) }
+            catch { XCTFail("Could not focus replacement: \(error)") }
             field.unmarkText()
             replacement.insertText("second")
         }
@@ -868,8 +873,8 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardEmptyDeleteAndExplicitShortcutsSendOneOwnedKeyPair() throws {
-        let (transport, session, field) = makeCompositionFixture()
-        defer { field.stopCapture(); session.reset() }
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); field.stopCapture(); session.reset() }
         XCTAssertTrue(field.hasText)
         field.deleteBackward()
         field.insertText("\n")
@@ -883,13 +888,162 @@ final class InputAndDiscoveryTests: XCTestCase {
     }
 
     @MainActor
-    private func makeCompositionFixture() -> (RecordingSoftKeyboardTransport, SessionModel, SoftKeyboardCapture.CaptureField) {
+    func test_softCaptureCannotSendBeforeSuccessfulNativeFocus() throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        let field = SoftKeyboardCapture.CaptureField()
+        defer { field.stopCapture(); session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        field.bindSession(session)
+        XCTAssertFalse(field.canBecomeFirstResponder)
+        XCTAssertFalse(field.becomeFirstResponder())
+        XCTAssertFalse(field.canSendInput)
+        field.insertText("windowless"); field.deleteBackward()
+        XCTAssertFalse(field.textFieldShouldReturn(field))
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 0), replacementString: "proposed"))
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(field, in: session)
+        field.insertText("focused")
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:focused"])
+    }
+
+    @MainActor
+    func test_softCaptureLocalFocusLossRejectsLateCommitsAndReleasesModifiers() async throws {
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); session.reset() }
+        let dismissed = expectation(description: "Close the retired remote keyboard")
+        var dismissals = 0
+        field.onKeyboardDismiss = { dismissals += 1; dismissed.fulfill() }
+        field.setMarkedText("未確定", selectedRange: NSRange(location: 3, length: 0))
+        session.toggleSoftModifier(.cmd)
+        let local = focusLocalField(in: keyboardWindow)
+        XCTAssertFalse(field.canSendInput); XCTAssertEqual(session.softModifierMask, 0)
+        field.bindSession(session)
+        XCTAssertFalse(field.becomeFirstResponder())
+        field.insertText("late commit"); field.deleteBackward()
+        field.setMarkedText("late marked text", selectedRange: NSRange(location: 0, length: 0))
+        field.unmarkText(); XCTAssertFalse(field.textFieldShouldReturn(field))
+        field.text = "late native notification"
+        field.sendActions(for: .editingChanged)
+        await fulfillment(of: [dismissed], timeout: 1)
+        XCTAssertEqual(dismissals, 1)
+        XCTAssertTrue(local.isFirstResponder)
+        XCTAssertEqual(field.text, "")
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:227:true:8", "key:227:false:0"])
+    }
+
+    @MainActor
+    func test_softCaptureDelayedDismissalCannotCloseItsReplacement() async throws {
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); session.reset() }
+        var oldDismissals = 0, nextDismissals = 0
+        field.onKeyboardDismiss = { oldDismissals += 1 }
+        let local = focusLocalField(in: keyboardWindow)
+        XCTAssertTrue(local.isFirstResponder)
+        let replacement = SoftKeyboardCapture.CaptureField()
+        replacement.onKeyboardDismiss = { nextDismissals += 1 }
+        try keyboardWindow.focus(replacement, in: session)
+        // Both the deferred native resignation callback and an old accessory
+        // action refer to the retired field, even in the same input generation.
+        let toolbar = try XCTUnwrap(field.inputAccessoryView as? UIToolbar)
+        let oldButton = try XCTUnwrap(toolbar.items?.compactMap { $0.customView as? UIButton }.first)
+        oldButton.sendActions(for: .touchUpInside)
+        await Task.yield()
+        field.insertText("retired"); replacement.insertText("current")
+        XCTAssertEqual(oldDismissals, 0); XCTAssertEqual(nextDismissals, 0)
+        XCTAssertTrue(replacement.isFirstResponder); XCTAssertTrue(replacement.canSendInput)
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
+    }
+
+    @MainActor
+    func test_softCaptureWindowLossRequiresANewNativeField() throws {
+        for boundary in ["detach", "key window"] {
+            let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+            defer { keyboardWindow.close(); session.reset() }
+            field.setMarkedText("provisional", selectedRange: NSRange(location: 11, length: 0))
+            if boundary == "detach" {
+                field.removeFromSuperview()
+                keyboardWindow.window.rootViewController?.view.addSubview(field)
+            } else {
+                let other = try RemoteKeyboardTestWindow()
+                XCTAssertFalse(keyboardWindow.window.isKeyWindow)
+                other.close()
+                keyboardWindow.window.makeKey()
+            }
+            field.bindSession(session)
+            XCTAssertFalse(field.becomeFirstResponder(), boundary)
+            XCTAssertFalse(field.canSendInput, boundary)
+            field.unmarkText(); field.insertText("late text")
+            XCTAssertEqual(try inputSourceTrace(transport), [], boundary)
+            let replacement = SoftKeyboardCapture.CaptureField()
+            try keyboardWindow.focus(replacement, in: session)
+            replacement.insertText("reopened")
+            XCTAssertEqual(try inputSourceTrace(transport), ["text:reopened"], boundary)
+        }
+    }
+
+    @MainActor
+    func test_softCaptureFocusLossDuringKeyDownReleasesExactlyOnce() throws {
+        let (transport, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { transport.onSend = nil; keyboardWindow.close(); session.reset() }
+        var local: UITextField?
+        transport.onSend = {
+            transport.onSend = nil
+            local = self.focusLocalField(in: keyboardWindow)
+        }
+        field.insertText("\n")
+        XCTAssertTrue(local?.isFirstResponder == true)
+        XCTAssertFalse(field.canSendInput)
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:40:true:0", "key:40:false:0"])
+        field.insertText("late text"); field.deleteBackward()
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:40:true:0", "key:40:false:0"])
+    }
+
+    @MainActor
+    func test_softCaptureDelayedFocusCannotStealANewerLocalResponder() async throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let keyboardWindow = try RemoteKeyboardTestWindow(), field = SoftKeyboardCapture.CaptureField()
+        defer { field.stopCapture(); keyboardWindow.close(); session.reset() }
+        let dismissed = expectation(description: "Retire the superseded focus request")
+        field.onKeyboardDismiss = { dismissed.fulfill() }
+        keyboardWindow.window.rootViewController?.view.addSubview(field)
+        field.bindSession(session) // Schedules focus; no native source exists yet.
+        XCTAssertFalse(field.canSendInput)
+        let local = focusLocalField(in: keyboardWindow)
+        await fulfillment(of: [dismissed], timeout: 1)
+        XCTAssertTrue(local.isFirstResponder)
+        XCTAssertFalse(field.canSendInput); XCTAssertFalse(field.becomeFirstResponder())
+        field.insertText("obsolete focus request")
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+    }
+
+    @MainActor
+    private func focusLocalField(in fixture: RemoteKeyboardTestWindow,
+                                 file: StaticString = #filePath, line: UInt = #line) -> UITextField {
+        let field = UITextField(frame: CGRect(x: 20, y: 160, width: 280, height: 44))
+        fixture.window.rootViewController?.view.addSubview(field)
+        XCTAssertTrue(field.becomeFirstResponder(), file: file, line: line)
+        return field
+    }
+
+    @MainActor
+    private func makeCompositionFixture() throws -> (RecordingSoftKeyboardTransport, SessionModel, SoftKeyboardCapture.CaptureField, RemoteKeyboardTestWindow) {
         let transport = RecordingSoftKeyboardTransport()
         let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         session.connect(code: "123456"); transport.makeScreenReady()
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
-        field.bindSession(session)
-        return (transport, session, field)
+        do {
+            let keyboardWindow = try RemoteKeyboardTestWindow()
+            try keyboardWindow.focus(field, in: session)
+            return (transport, session, field, keyboardWindow)
+        } catch {
+            field.stopCapture(); session.reset()
+            throw error
+        }
     }
 
     @MainActor
@@ -1066,9 +1220,11 @@ final class InputAndDiscoveryTests: XCTestCase {
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let old = SoftKeyboardCapture.CaptureField(frame: .zero)
-        old.bindSession(session)
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(old, in: session)
         let next = SoftKeyboardCapture.CaptureField(frame: .zero)
-        next.bindSession(session)
+        try keyboardWindow.focus(next, in: session)
         XCTAssertFalse(old.canSendInput); XCTAssertTrue(next.canSendInput)
         old.bindSession(session)
         old.deleteBackward()
@@ -1242,7 +1398,9 @@ final class InputAndDiscoveryTests: XCTestCase {
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
-        field.bindSession(session)
+        let keyboardWindow = try RemoteKeyboardTestWindow()
+        defer { keyboardWindow.close() }
+        try keyboardWindow.focus(field, in: session)
         session.setApplicationInputActive(false)
         session.setApplicationInputActive(true)
         transport.onFirstVideoFrame?()
@@ -1253,7 +1411,7 @@ final class InputAndDiscoveryTests: XCTestCase {
         field.bindSession(session)
         XCTAssertFalse(field.canSendInput)
         let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
-        replacement.bindSession(session)
+        try keyboardWindow.focus(replacement, in: session)
         XCTAssertTrue(replacement.canSendInput)
         field.insertText("late native commit")
         XCTAssertEqual(transport.sentPayloads.count, count)
@@ -1282,7 +1440,8 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardCapture_exposesHittableDismissAccessory() throws {
-        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        let (_, session, field, keyboardWindow) = try makeCompositionFixture()
+        defer { keyboardWindow.close(); session.reset() }
         var didDismiss = false
         field.onKeyboardDismiss = { didDismiss = true }
 

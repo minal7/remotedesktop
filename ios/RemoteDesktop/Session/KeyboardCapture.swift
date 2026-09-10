@@ -34,7 +34,6 @@ struct SoftKeyboardCapture: UIViewRepresentable {
 
     func makeUIView(context: Context) -> UIView {
         let tf = CaptureField()
-        tf.bindSession(session)
         tf.onKeyboardDismiss = context.coordinator.dismissKeyboard
         tf.autocorrectionType = .no
         tf.autocapitalizationType = .none
@@ -44,26 +43,19 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         tf.smartInsertDeleteType = .no
         tf.keyboardType = .default
         tf.returnKeyType = .default
-        // Defer to next runloop tick — UITextField can't become first
-        // responder until it's been added to the window hierarchy.
-        Task { @MainActor in if tf.canSendInput { _ = tf.becomeFirstResponder() } }
+        tf.bindSession(session)
         return tf
     }
 
     func updateUIView(_ v: UIView, context: Context) {
         guard let tf = v as? CaptureField else { return }
-        tf.bindSession(session)
         context.coordinator.isOpen = $isOpen
         tf.onKeyboardDismiss = context.coordinator.dismissKeyboard
         if !isOpen {
             tf.stopCapture()
             return
         }
-        if !tf.canSendInput, tf.isFirstResponder {
-            tf.resignFirstResponder()
-        } else if isOpen, tf.canSendInput, !tf.isFirstResponder {
-            tf.becomeFirstResponder()
-        }
+        tf.bindSession(session)
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
@@ -83,23 +75,19 @@ struct SoftKeyboardCapture: UIViewRepresentable {
     }
 
     final class CaptureField: UITextField, UITextFieldDelegate {
-        weak var session: SessionModel? {
-            didSet {
-                if oldValue !== session {
-                    if hasBoundSource { stopped = true }
-                    let source = inputSource
-                    inputSource = nil; inputGeneration = nil
-                    if let source { oldValue?.endRemoteInputSource(source) }
-                    retireBinding()
-                    synchronizeBinding()
-                }
-            }
-        }
-        private var inputGeneration: UUID?
+        private static weak var active: CaptureField?
+        private(set) weak var session: SessionModel?
+        private weak var owningWindow: UIWindow?
+        private var captureIdentity: RemoteKeyboardCaptureIdentity?
         private var inputSource: RemoteInputSourceLease?
         private var hasBoundSource = false
         private var stopped = false
-        private var detached = false
+        private var focusTask: Task<Void, Never>?
+        private var focusRequestID: UUID?
+        private var initialFocusRequested = false
+        private var dismissalTask: Task<Void, Never>?
+        private var dismissalID: UUID?
+        private var windowObserver: NSObjectProtocol?
         private var nativeMutationDepth = 0
         private var mutationStartedWithMarkedText = false
         private var isDiscardingNativeText = false
@@ -118,64 +106,175 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         override var hasText: Bool { true }
 
         var canSendInput: Bool {
-            guard !stopped, !detached, let session, session.allowsRemoteKeyboardInput, let inputSource else { return false }
+            guard nativeFocusIsCurrent, let session, let inputSource else { return false }
             return session.isRemoteInputSourceCurrent(inputSource)
+        }
+
+        private var bindingIsCurrent: Bool {
+            !stopped && Self.active === self && session?.allowsRemoteKeyboardInput == true
+                && captureIdentity == session?.remoteKeyboardCaptureIdentity
+        }
+
+        private var nativeFocusIsCurrent: Bool {
+            bindingIsCurrent && isFirstResponder && window != nil && window === owningWindow
+                && window?.isKeyWindow == true && window?.rootViewController?.presentedViewController == nil
         }
 
         func bindSession(_ session: SessionModel) {
             guard !stopped else { return }
-            self.session = session
-            synchronizeBinding()
+            if captureIdentity != nil {
+                guard self.session === session, captureIdentity == session.remoteKeyboardCaptureIdentity else {
+                    stopCapture(); return
+                }
+            } else {
+                let previous = Self.active
+                Self.active = self
+                previous?.stopCapture()
+                guard Self.active === self, !stopped else { stopped = true; return }
+                self.session = session
+                captureIdentity = session.remoteKeyboardCaptureIdentity
+            }
+            if hasBoundSource, !canSendInput { retireBinding(notifyDismissal: true); return }
+            requestInitialFocus()
         }
 
-        private func retireBinding() {
-            // UIKit's later input callbacks do not carry our source token.
-            // Once a native field has owned a source it cannot be recycled
-            // into another generation; SwiftUI installs a new field instead.
-            if hasBoundSource { stopped = true }
+        private func retireBinding(notifyDismissal: Bool = false, resign: Bool = true) {
+            guard !stopped else { return }
+            stopped = true
+            focusTask?.cancel(); focusTask = nil; focusRequestID = nil
             let source = inputSource
-            inputSource = nil; inputGeneration = nil
-            if let source { session?.endRemoteInputSource(source) }
-            resignFirstResponder()
+            inputSource = nil; owningWindow = nil
             discardNativeText()
+            if let source { session?.endRemoteInputSource(source) }
+            if Self.active === self, captureIdentity == session?.remoteKeyboardCaptureIdentity {
+                session?.releaseSoftModifiers()
+            }
+            if resign, isFirstResponder { _ = super.resignFirstResponder() }
+            if notifyDismissal { scheduleOwnedDismissal() }
         }
 
         func stopCapture() {
-            stopped = true
             retireBinding()
+            dismissalTask?.cancel(); dismissalTask = nil; dismissalID = nil
+            if Self.active === self { Self.active = nil }
+            if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
+            windowObserver = nil
             session = nil
+            captureIdentity = nil
             onKeyboardDismiss = nil
+        }
+
+        override var canBecomeFirstResponder: Bool {
+            bindingIsCurrent && window?.isKeyWindow == true
+                && window?.rootViewController?.presentedViewController == nil
+                && super.canBecomeFirstResponder
+        }
+
+        override func becomeFirstResponder() -> Bool {
+            guard canBecomeFirstResponder else { return false }
+            focusTask?.cancel(); focusTask = nil; focusRequestID = nil
+            initialFocusRequested = true
+            if hasBoundSource {
+                guard canSendInput else { retireBinding(notifyDismissal: true); return false }
+                return true
+            }
+            guard let session, let identity = captureIdentity, let window else { return false }
+            guard super.becomeFirstResponder() else { retireBinding(notifyDismissal: true); return false }
+            guard bindingIsCurrent, isFirstResponder, self.window === window, window.isKeyWindow,
+                  window.rootViewController?.presentedViewController == nil,
+                  let source = session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: identity.input) else {
+                retireBinding(notifyDismissal: true); return false
+            }
+            guard self.session === session, captureIdentity == identity, bindingIsCurrent,
+                  isFirstResponder, self.window === window, window.isKeyWindow,
+                  session.isRemoteInputSourceCurrent(source) else {
+                session.endRemoteInputSource(source)
+                retireBinding(notifyDismissal: true); return false
+            }
+            hasBoundSource = true
+            inputSource = source; owningWindow = window
+            guard self.session === session, captureIdentity == identity, canSendInput else {
+                retireBinding(notifyDismissal: true); return false
+            }
+            return true
+        }
+
+        override func willMove(toWindow newWindow: UIWindow?) {
+            if hasBoundSource, newWindow !== owningWindow { retireBinding(notifyDismissal: true) }
+            super.willMove(toWindow: newWindow)
         }
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
-            detached = window == nil
-            if detached { retireBinding() }
-            else { synchronizeBinding() }
+            if window == nil, captureIdentity != nil { retireBinding(notifyDismissal: true) }
+            else { requestInitialFocus() }
         }
 
-        private func synchronizeBinding() {
-            guard !stopped, !detached else { return }
-            let next = session?.allowsRemoteKeyboardInput == true ? session?.remoteInputGeneration : nil
-            guard next != inputGeneration else { return }
-            retireBinding()
-            guard !stopped else { return }
-            if let next, let source = session?.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: next) {
-                inputGeneration = next
-                inputSource = source
-                hasBoundSource = true
+        private func requestInitialFocus() {
+            guard !hasBoundSource, !initialFocusRequested, canBecomeFirstResponder, let window else { return }
+            initialFocusRequested = true
+            let id = UUID()
+            focusRequestID = id
+            let origin = Self.firstResponder(in: window)
+            let hadOrigin = origin != nil
+            focusTask = Task { @MainActor [weak self, weak window, weak origin] in
+                guard !Task.isCancelled, let self, self.focusRequestID == id else { return }
+                self.focusTask = nil; self.focusRequestID = nil
+                guard let window, self.window === window, self.canBecomeFirstResponder,
+                      !hadOrigin || origin != nil,
+                      Self.firstResponder(in: window) === origin else {
+                    self.retireBinding(notifyDismissal: true); return
+                }
+                _ = self.becomeFirstResponder()
+            }
+        }
+
+        private static func firstResponder(in root: UIView) -> UIView? {
+            var pending = [root]
+            while let view = pending.popLast() {
+                if view.isFirstResponder { return view }
+                pending.append(contentsOf: view.subviews)
+            }
+            return nil
+        }
+
+        private func scheduleOwnedDismissal() {
+            guard Self.active === self, let session, let identity = captureIdentity,
+                  session.remoteKeyboardCaptureIdentity == identity else { return }
+            dismissalTask?.cancel()
+            let id = UUID()
+            dismissalID = id
+            // Native retirement may happen during a SwiftUI update. Close the
+            // exact still-owned keyboard on a later actor turn, never a successor.
+            dismissalTask = Task { @MainActor [weak self, weak session] in
+                guard !Task.isCancelled, let self, let session, self.dismissalID == id else { return }
+                self.dismissalTask = nil; self.dismissalID = nil
+                guard Self.active === self, self.session === session, self.captureIdentity == identity,
+                      session.remoteKeyboardCaptureIdentity == identity else { return }
+                self.onKeyboardDismiss?()
             }
         }
 
         private var destination: Destination? {
-            guard canSendInput, let session, let inputSource else { return nil }
+            guard canSendInput, let session, let inputSource else {
+                if hasBoundSource, !stopped { retireBinding(notifyDismissal: true) }
+                return nil
+            }
             return .init(session: session, source: inputSource, modifiers: session.softModifierMask)
+        }
+
+        private func sendOwned(_ message: ControlMessage, to destination: Destination) {
+            guard session === destination.session, inputSource == destination.source, canSendInput else {
+                if hasBoundSource, !stopped { retireBinding(notifyDismissal: true) }
+                return
+            }
+            destination.session.send(message, from: destination.source)
         }
 
         private func sendKey(_ usage: Int, to destination: Destination, modifiers: UInt16? = nil) {
             let mask = modifiers ?? destination.modifiers
-            destination.session.send(.key(usage: usage, down: true, modifiers: mask), from: destination.source)
-            destination.session.send(.key(usage: usage, down: false, modifiers: mask), from: destination.source)
+            sendOwned(.key(usage: usage, down: true, modifiers: mask), to: destination)
+            sendOwned(.key(usage: usage, down: false, modifiers: mask), to: destination)
         }
 
         override init(frame: CGRect) {
@@ -184,6 +283,14 @@ struct SoftKeyboardCapture: UIViewRepresentable {
             text = ""
             addTarget(self, action: #selector(nativeTextDidChange), for: .editingChanged)
             inputAccessoryView = makeKeyboardAccessory()
+            windowObserver = NotificationCenter.default.addObserver(forName: UIWindow.didResignKeyNotification,
+                object: nil, queue: .main) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self, let window = notification.object as? UIWindow,
+                          window === self.window || window === self.owningWindow else { return }
+                    self.retireBinding(notifyDismissal: true)
+                }
+            }
         }
         required init?(coder: NSCoder) { fatalError() }
 
@@ -298,7 +405,7 @@ struct SoftKeyboardCapture: UIViewRepresentable {
                       let shortcut = SoftKeyboardShortcutMapper.map(value, baseModifiers: target.modifiers) {
                 sendKey(shortcut.usage, to: target, modifiers: shortcut.modifiers)
             } else {
-                target.session.send(.text(value), from: target.source)
+                sendOwned(.text(value), to: target)
             }
         }
 
@@ -325,10 +432,14 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         }
 
         override func resignFirstResponder() -> Bool {
-            // Resignation can unmark text. Discard it before UIKit can turn a
-            // hidden/dismissed composition into a committed remote value.
-            discardNativeText()
+            // Retire authority before UIKit can confirm or deliver more text.
+            retireBinding(notifyDismissal: true, resign: false)
             return super.resignFirstResponder()
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            guard textField === self else { return }
+            retireBinding(notifyDismissal: true)
         }
 
         private func makeKeyboardAccessory() -> UIView {
@@ -358,10 +469,16 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         }
 
         @objc private func dismissKeyboardFromAccessory() {
-            // A retiring field may still receive its old accessory action.
-            let ownsDismissal = !stopped && (session == nil || canSendInput)
+            let ownsDismissal = canSendInput
+            let owner = session, identity = captureIdentity
             retireBinding()
-            if ownsDismissal { onKeyboardDismiss?() }
+            if ownsDismissal, Self.active === self, session === owner,
+               identity == owner?.remoteKeyboardCaptureIdentity { onKeyboardDismiss?() }
+        }
+
+        deinit {
+            focusTask?.cancel(); dismissalTask?.cancel(); deferredCommit?.cancel()
+            if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
         }
     }
 }
