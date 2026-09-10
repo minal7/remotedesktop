@@ -5,6 +5,307 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureLifecycleJoinsPreparationAndAdmitsEarlyNativeFrames() async throws {
+        let trace = CaptureLifecycleTrace()
+        let stream = CaptureLifecycleTestStream()
+        let startEntered = expectation(description: "native start entered")
+        let releaseStart = CaptureLifecycleTestLatch()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in trace.append("stop") }
+        let owner = lifecycle.beginOwner(context: "peer")
+        defer { Task { await releaseStart.open(); await lifecycle.endAll().value } }
+        let first = try lifecycle.start(for: owner, prepare: {
+            trace.append("prepare"); return stream
+        }, startStream: { _ in
+            startEntered.fulfill()
+            await releaseStart.wait()
+        })
+        let second = try lifecycle.start(for: owner, prepare: {
+            trace.append("unexpected preparation"); return stream
+        }, startStream: { _ in trace.append("unexpected start") })
+        await fulfillment(of: [startEntered], timeout: 2)
+        XCTAssertFalse(lifecycle.isRunning(for: owner))
+        XCTAssertTrue(lifecycle.withStream(stream) { context, _ in trace.append("early frame for " + context) })
+        await releaseStart.open()
+        try await first.value
+        try await second.value
+        XCTAssertTrue(lifecycle.isRunning(for: owner))
+        XCTAssertEqual(trace.values, ["prepare", "early frame for peer"])
+        await lifecycle.endOwner(owner).value
+        XCTAssertEqual(trace.values.last, "stop")
+    }
+
+    func test_captureLifecycleStopDuringPreparationJoinsAndCleansItsPreparedStream() async throws {
+        try await exerciseCaptureRetirement(duringPreparation: true)
+    }
+
+    func test_captureLifecycleStopDuringNativeStartJoinsBeforeStoppingOrReplacing() async throws {
+        try await exerciseCaptureRetirement(duringPreparation: false)
+    }
+
+    private func exerciseCaptureRetirement(duringPreparation: Bool) async throws {
+        let trace = CaptureLifecycleTrace()
+        let old = CaptureLifecycleTestStream()
+        let next = CaptureLifecycleTestStream()
+        let nativeEntered = expectation(description: "suspended native operation")
+        let stopEntered = expectation(description: "old native stop")
+        let releaseNative = CaptureLifecycleTestLatch()
+        let releaseStop = CaptureLifecycleTestLatch()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { stream in
+            if stream === old {
+                trace.append("old stop entered")
+                stopEntered.fulfill()
+                await releaseStop.wait()
+                trace.append("old stop finished")
+            }
+        }
+        defer { Task { await releaseNative.open(); await releaseStop.open(); await lifecycle.endAll().value } }
+        let owner = lifecycle.beginOwner(context: "old")
+        let oldStart = try lifecycle.start(for: owner, prepare: {
+            if duringPreparation { nativeEntered.fulfill(); await releaseNative.wait() }
+            return old
+        }, startStream: { _ in
+            trace.append("old start entered")
+            if !duringPreparation { nativeEntered.fulfill(); await releaseNative.wait() }
+        })
+        await fulfillment(of: [nativeEntered], timeout: 2)
+        let teardown = lifecycle.endOwner(owner)
+        XCTAssertFalse(lifecycle.withStream(old) { _, _ in XCTFail("Retired media was delivered") })
+        XCTAssertThrowsError(try lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }))
+        let successor = lifecycle.beginOwner(context: "next")
+        let nextStart = try lifecycle.start(for: successor, prepare: {
+            trace.append("next preparation"); return next
+        }, startStream: { _ in trace.append("next start") })
+        await releaseNative.open()
+        await fulfillment(of: [stopEntered], timeout: 2)
+        XCTAssertFalse(trace.values.contains("next preparation"), "Native teardown is still pending")
+        XCTAssertEqual(trace.values.contains("old start entered"), !duringPreparation)
+        await releaseStop.open()
+        await teardown.value
+        do { try await oldStart.value; XCTFail("Retired startup reported success") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        try await nextStart.value
+        XCTAssertEqual(Array(trace.values.suffix(3)), ["old stop finished", "next preparation", "next start"])
+        // An old close arriving after replacement must leave it running.
+        await lifecycle.endOwner(owner).value
+        XCTAssertTrue(lifecycle.isRunning(for: successor))
+        await lifecycle.endOwner(successor).value
+    }
+
+    func test_captureLifecycleOldOwnerCloseDoesNotWaitForSuccessorTeardown() async throws {
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let nextStopping = expectation(description: "successor stop entered")
+        let oldClosed = expectation(description: "old owner close returned")
+        let release = CaptureLifecycleTestLatch()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { stream in
+            if stream === next { nextStopping.fulfill(); await release.wait() }
+        }
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        let owner = lifecycle.beginOwner(context: "old")
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        let successor = lifecycle.beginOwner(context: "next")
+        try await lifecycle.start(for: successor, prepare: { next }, startStream: { _ in }).value
+        let nextTeardown = lifecycle.endOwner(successor)
+        await fulfillment(of: [nextStopping], timeout: 2)
+        let lateClose = Task {
+            await lifecycle.endOwner(owner).value
+            oldClosed.fulfill()
+        }
+        await fulfillment(of: [oldClosed], timeout: 2)
+        await release.open()
+        await nextTeardown.value
+        await lateClose.value
+    }
+
+    func test_captureLifecycleForeignFramesCannotAdvanceTheCurrentFrameBoundary() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "old")
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        let successor = lifecycle.beginOwner(context: "next")
+        try await lifecycle.start(for: successor, prepare: { next }, startStream: { _ in }).value
+        var order = CaptureVideoFrameOrder()
+        let oldQueued = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))
+        let current = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 42)))
+        XCTAssertFalse(lifecycle.withStream(old) { _, _ in _ = order.admit(oldQueued) })
+        XCTAssertTrue(lifecycle.withStream(next) { context, _ in
+            XCTAssertEqual(context, "next")
+            XCTAssertTrue(order.admit(current), "Retired output cannot poison the accepted boundary")
+        })
+        XCTAssertFalse(lifecycle.streamStopped(old) { _, _ in XCTFail("Old failure reached successor") })
+        XCTAssertTrue(lifecycle.isRunning(for: successor))
+        await lifecycle.endAll().value
+    }
+
+    func test_captureLifecycleUnexpectedStopRetiresBeforeNotifyingAndIssuesOneReceipt() async throws {
+        let trace = CaptureLifecycleTrace()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in trace.append("native stop") }
+        let stream = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "peer")
+        try await lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in }).value
+        var receipt: CaptureStopReceipt?
+        XCTAssertTrue(lifecycle.streamStopped(stream) { context, event in
+            XCTAssertEqual(context, "peer")
+            XCTAssertFalse(lifecycle.isRunning(for: owner))
+            XCTAssertFalse(lifecycle.withStream(stream) { _, _ in XCTFail("Admission must retire first") })
+            receipt = event
+        })
+        let event = try XCTUnwrap(receipt)
+        XCTAssertTrue(lifecycle.consumeStop(event) { trace.append("consumed") })
+        XCTAssertFalse(lifecycle.consumeStop(event) { trace.append("duplicate consumption") })
+        XCTAssertFalse(lifecycle.streamStopped(stream) { _, _ in XCTFail("Duplicate stop was delivered") })
+        await lifecycle.endAll().value
+        XCTAssertEqual(trace.values.filter { $0 == "native stop" }.count, 1)
+        XCTAssertEqual(trace.values.filter { $0 == "consumed" }.count, 1)
+        XCTAssertFalse(trace.values.contains("duplicate consumption"))
+    }
+
+    func test_captureLifecycleNewAttemptAndOwnerInvalidateDeferredStopReceipts() async throws {
+        for replaceOwner in [false, true] {
+            let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+            let stream = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+            let owner = lifecycle.beginOwner(context: "old")
+            try await lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in }).value
+            var receipt: CaptureStopReceipt?
+            lifecycle.streamStopped(stream) { _, value in receipt = value }
+            let successor = replaceOwner ? lifecycle.beginOwner(context: "next") : owner
+            let nextStart = try lifecycle.start(for: successor, prepare: { next }, startStream: { _ in })
+            XCTAssertFalse(lifecycle.consumeStop(try XCTUnwrap(receipt)) { XCTFail("Deferred failure was still authoritative") })
+            try await nextStart.value
+            XCTAssertTrue(lifecycle.isRunning(for: successor))
+            await lifecycle.endAll().value
+        }
+    }
+
+    func test_captureLifecycleLateStartupFailureCannotRetireItsSuccessor() async throws {
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let entered = expectation(description: "old start entered")
+        let release = CaptureLifecycleTestLatch()
+        let trace = CaptureLifecycleTrace()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { stream in
+            trace.append(stream === old ? "old stop" : "next stop")
+        }
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        let owner = lifecycle.beginOwner(context: "old")
+        let oldStart = try lifecycle.start(for: owner, prepare: { old }, startStream: { _ in
+            entered.fulfill(); await release.wait(); throw CaptureLifecycleTestError.start
+        })
+        await fulfillment(of: [entered], timeout: 2)
+        let successor = lifecycle.beginOwner(context: "next")
+        let nextStart = try lifecycle.start(for: successor, prepare: { next }, startStream: { _ in })
+        await release.open()
+        do { try await oldStart.value; XCTFail("Expected startup failure") }
+        catch { XCTAssertEqual(error as? CaptureLifecycleTestError, .start) }
+        try await nextStart.value
+        XCTAssertTrue(lifecycle.isRunning(for: successor))
+        XCTAssertFalse(lifecycle.streamStopped(old) { _, _ in XCTFail("Retired error was delivered") })
+        XCTAssertEqual(trace.values, ["old stop"])
+        await lifecycle.endAll().value
+    }
+
+    func test_captureLifecycleReentrantConsumerCanRetireWithoutReclaimingReplacement() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "old")
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        var successor: CaptureOwnerLease?
+        XCTAssertTrue(lifecycle.withStream(old) { _, _ in
+            _ = lifecycle.endOwner(owner)
+            successor = lifecycle.beginOwner(context: "next")
+            XCTAssertFalse(lifecycle.withStream(old) { _, _ in XCTFail("Recursive retired admission") })
+        })
+        let replacement = try XCTUnwrap(successor)
+        try await lifecycle.start(for: replacement, prepare: { next }, startStream: { _ in }).value
+        await lifecycle.endOwner(owner).value
+        XCTAssertTrue(lifecycle.isRunning(for: replacement))
+        await lifecycle.endAll().value
+    }
+
+    func test_captureLifecycleRetirementWaitsForTheSynchronousMediaConsumer() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let stream = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "peer")
+        try await lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in }).value
+        let trace = CaptureLifecycleTrace()
+        let entered = expectation(description: "consumer entered")
+        let retiring = expectation(description: "retirement requested")
+        let retired = expectation(description: "retirement returned")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal(); Task { await lifecycle.endAll().value } }
+        DispatchQueue.global().async {
+            lifecycle.withStream(stream) { _, _ in
+                trace.append("consumer entered")
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+                trace.append("consumer finished")
+            }
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        DispatchQueue.global().async {
+            retiring.fulfill()
+            _ = lifecycle.endOwner(owner)
+            trace.append("retirement returned")
+            retired.fulfill()
+        }
+        await fulfillment(of: [retiring], timeout: 2)
+        release.signal()
+        await fulfillment(of: [retired], timeout: 2)
+        XCTAssertEqual(trace.values, ["consumer entered", "consumer finished", "retirement returned"])
+        XCTAssertFalse(lifecycle.withStream(stream) { _, _ in XCTFail("Media escaped retirement") })
+        await lifecycle.endAll().value
+    }
+
+    func test_captureLifecycleFailedStartCleansBeforeRetryingTheSameOwner() async throws {
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let entered = expectation(description: "failed startup cleanup")
+        let release = CaptureLifecycleTestLatch()
+        let trace = CaptureLifecycleTrace()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { stream in
+            if stream === old {
+                entered.fulfill(); await release.wait(); trace.append("old cleanup finished")
+            }
+        }
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        let owner = lifecycle.beginOwner(context: "peer")
+        let failed = try lifecycle.start(for: owner, prepare: { old }, startStream: { _ in throw CaptureLifecycleTestError.start })
+        do { try await failed.value; XCTFail("Expected startup failure") }
+        catch { XCTAssertEqual(error as? CaptureLifecycleTestError, .start) }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertFalse(lifecycle.withStream(old) { _, _ in XCTFail("Failed start still admitted media") })
+        let retry = try lifecycle.start(for: owner, prepare: {
+            trace.append("next preparation"); return next
+        }, startStream: { _ in })
+        XCTAssertEqual(trace.values, [])
+        await release.open()
+        try await retry.value
+        XCTAssertEqual(trace.values, ["old cleanup finished", "next preparation"])
+        XCTAssertTrue(lifecycle.isRunning(for: owner))
+        await lifecycle.endAll().value
+    }
+
+    func test_captureLifecycleFailedNativeStopBlocksReplacementPreparation() async throws {
+        let trace = CaptureLifecycleTrace()
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in
+            trace.append("failed stop"); throw CaptureLifecycleTestError.stop
+        }
+        let owner = lifecycle.beginOwner(context: "old")
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        await lifecycle.endOwner(owner).value
+        let successor = lifecycle.beginOwner(context: "next")
+        let nextStart = try lifecycle.start(for: successor, prepare: {
+            trace.append("unexpected preparation"); return next
+        }, startStream: { _ in trace.append("unexpected start") })
+        do { try await nextStart.value; XCTFail("A failed stop is not a resource barrier") }
+        catch {
+            let failure = try XCTUnwrap(error as? CaptureStreamTeardownFailure)
+            XCTAssertEqual(failure.underlying as? CaptureLifecycleTestError, .stop)
+        }
+        XCTAssertFalse(lifecycle.isRunning(for: successor))
+        XCTAssertFalse(lifecycle.withStream(old) { _, _ in XCTFail("Failed cleanup reopened retired input") })
+        await lifecycle.endAll().value
+        XCTAssertEqual(trace.values, ["failed stop"])
+    }
+
     func test_captureFrameMetadataRequiresCompleteStatus() {
         for status: Int? in [nil, -1, SCFrameStatus.idle.rawValue, SCFrameStatus.blank.rawValue,
                             SCFrameStatus.started.rawValue, SCFrameStatus.suspended.rawValue, SCFrameStatus.stopped.rawValue] {
@@ -370,5 +671,36 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertEqual(policy.maximumFramesPerSecond, 30)
         XCTAssertEqual(policy.maximumBitrateBps, 30_000_000)
         XCTAssertEqual(policy.degradationPreference, .maintainResolution)
+    }
+}
+
+private final class CaptureLifecycleTestStream: @unchecked Sendable {}
+private enum CaptureLifecycleTestError: Error, Equatable { case start, stop }
+
+private actor CaptureLifecycleTestLatch {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    func wait() async {
+        if isOpen { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
+}
+
+private final class CaptureLifecycleTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [String] = []
+    func append(_ value: String) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(value)
+    }
+    var values: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
     }
 }

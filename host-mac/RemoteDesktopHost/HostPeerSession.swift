@@ -199,7 +199,7 @@ final class HostPeerSession: NSObject {
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
-    private let closeStateLock = NSLock()
+    private let closeStateLock = NSRecursiveLock()
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -216,11 +216,12 @@ final class HostPeerSession: NSObject {
     private var adaptedVideoHeight: Int?
     private var captureMaximumMacroblocksPerFrame =
         DesktopVideoQuality.fallbackH264MaximumMacroblocksPerFrame
-    private var captureStarted = false
+    private var captureOwner: CaptureOwnerLease?
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
     private var captureRestartTask: Task<Void, Never>?
+    private var captureRestartID: UUID?
     private var captureTeardownTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
@@ -315,9 +316,8 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
-        captureMaximumMacroblocksPerFrame = DesktopVideoQuality
-            .maximumMacroblocksPerFrame(
-                negotiatedCodecs: videoSender?.parameters.codecs ?? [])
+        setCaptureMacroblockLimit(DesktopVideoQuality.maximumMacroblocksPerFrame(
+            negotiatedCodecs: videoSender?.parameters.codecs ?? []))
         applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy)
         startAudioRecordingIfNeeded()
         try await signaling.send(SignalingEnvelope(
@@ -330,9 +330,7 @@ final class HostPeerSession: NSObject {
             ts: Date().timeIntervalSince1970))
         flushBufferedLocalICEAfterAnswer()
 
-        if !captureStarted {
-            try await startCapture()
-        }
+        try await startCapture()
     }
 
     func addRemoteIce(_ payload: [String: String]) {
@@ -358,9 +356,21 @@ final class HostPeerSession: NSObject {
             return captureTeardownTask
         }
         ended = true
-        inputAuthorization.close()
         captureRestartTask?.cancel()
         captureRestartTask = nil
+        captureRestartID = nil
+        let owner = captureOwner
+        closeStateLock.unlock()
+        inputAuthorization.close()
+        // Never acquire the capture gate under the peer lock: capture consumers
+        // can synchronously enter native peer callbacks. Retire admission before
+        // resetting those consumers, then serialize the remaining peer cleanup.
+        let teardown = owner.map { capture.endSession($0) } ?? Task {}
+        closeStateLock.lock()
+        if let captureTeardownTask {
+            closeStateLock.unlock()
+            return captureTeardownTask
+        }
         resetBufferedLocalICE()
         send(.bye(reason: reason))
         dataChannel?.close()
@@ -374,16 +384,7 @@ final class HostPeerSession: NSObject {
             audioBridge.detach(from: factory.audioDeviceModule)
         }
         stopAudioRecording()
-        // Clear capture callbacks before stopping to prevent the
-        // delegate's didStopWithError from re-firing onEnded.
-        capture.onStopped = nil
-        capture.onVideoFrame = nil
-        capture.onAudioSample = nil
-        let teardown = Task {
-            await capture.stop()
-        }
         captureTeardownTask = teardown
-        captureStarted = false
         localMediaConfigured = false
         closeStateLock.unlock()
         return teardown
@@ -473,27 +474,40 @@ final class HostPeerSession: NSObject {
     }
 
     private func configureCaptureCallbacks() {
-        capture.onVideoFrame = { [weak self] frame in
-            self?.pushVideoFrame(frame)
-        }
-        if audioEnabled {
-            capture.onAudioSample = { [weak self] sampleBuffer in
-                self?.audioBridge.enqueue(sampleBuffer)
-            }
-        } else {
-            capture.onAudioSample = nil
-        }
-        capture.onStopped = { [weak self] error in
-            guard let self, !self.ended else { return }
-            self.handleCaptureStopped(error)
-        }
+        captureOwner = capture.beginSession(callbacks: ScreenCapture.Callbacks(
+            onVideoFrame: { [weak self] frame in self?.pushVideoFrame(frame) },
+            onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
+            onStopped: { [weak self] receipt, error in
+                // Do not acquire the peer lock inside the capture gate. The
+                // one-use receipt is rechecked after this queue handoff.
+                Task { [weak self] in self?.handleCaptureStopped(receipt, error: error) }
+            }))
+    }
+
+    private func captureStartParameters() throws -> (CaptureOwnerLease, Int) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let captureOwner else { throw CancellationError() }
+        return (captureOwner, captureMaximumMacroblocksPerFrame)
+    }
+
+    private func setCaptureMacroblockLimit(_ limit: Int) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended else { return }
+        captureMaximumMacroblocksPerFrame = limit
+    }
+
+    private var isEnded: Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        return ended
     }
 
     private func startCapture() async throws {
-        try await capture.start(
-            audioEnabled: audioEnabled,
-            maximumMacroblocksPerFrame: captureMaximumMacroblocksPerFrame)
-        captureStarted = true
+        let (owner, limit) = try captureStartParameters()
+        try await capture.start(for: owner, audioEnabled: audioEnabled,
+                                maximumMacroblocksPerFrame: limit)
     }
 
     private func applyVideoSenderPolicy(
@@ -523,55 +537,95 @@ final class HostPeerSession: NSObject {
             nil,
             currentBitrateBps: nil,
             maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
+        let captureLimit = (try? captureStartParameters().1) ?? 0
         log.info(
-            "desktop video quality captureMacroblocks=\(self.captureMaximumMacroblocksPerFrame, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
+            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
-    private func handleCaptureStopped(_ error: Error?) {
-        captureStarted = false
-        guard let error else {
-            log.error("screen capture stopped without an error")
-            onEnded("Screen capture stopped.")
-            return
-        }
-
-        guard ScreenCapture.isSystemStopped(error) else {
-            log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
-            onEnded("Screen capture stopped.")
-            return
-        }
-
-        restartCaptureAfterSystemStop(error)
-    }
-
-    private func restartCaptureAfterSystemStop(_ error: Error) {
-        guard captureRestartTask == nil else {
-            log.info("screen capture restart already pending")
-            return
-        }
-
-        log.warning("screen capture was stopped by the system; attempting in-place restart: \(String(describing: error), privacy: .public)")
-        captureRestartTask = Task { [weak self] in
-            await self?.restartCaptureLoop()
-        }
-    }
-
-    private func restartCaptureLoop() async {
-        var attempt = 0
-        while !Task.isCancelled {
+    private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
+        // All composed transitions acquire capture admission before the peer
+        // lock. Validation and the restart decision share that same admission.
+        capture.consumeStop(receipt) {
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
             guard !ended else { return }
+            guard ScreenCapture.isSystemStopped(error) else {
+                log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
+                onEnded("Screen capture stopped.")
+                return
+            }
+            guard captureRestartTask == nil else { return }
+            log.warning("screen capture was stopped by the system; attempting in-place restart: \(String(describing: error), privacy: .public)")
+            let id = UUID()
+            captureRestartID = id
+            captureRestartTask = Task { [weak self] in
+                await self?.restartCaptureLoop(id: id)
+            }
+        }
+    }
+
+    private func ownsCaptureRestart(_ id: UUID) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        return !ended && captureRestartID == id
+    }
+
+    /// A second stop may arrive after native start returns but before this
+    /// worker retires. Keep retrying if it consumed that stop while we existed;
+    /// otherwise the queued stop callback will create the next worker.
+    private func finishCaptureRestartIfRunning(_ id: UUID) -> Bool {
+        guard let (owner, _) = try? captureStartParameters() else { return false }
+        var finished = false
+        capture.withRunningSession(owner) {
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
+            guard !ended, captureRestartID == id else { return }
+            captureRestartID = nil
+            captureRestartTask = nil
+            finished = true
+        }
+        return finished
+    }
+
+    private func retireCaptureRestart(_ id: UUID) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard captureRestartID == id else { return }
+        captureRestartID = nil
+        captureRestartTask = nil
+    }
+
+    private func endAfterCaptureTeardownFailure(_ id: UUID) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureRestartID == id else { return }
+        captureRestartID = nil
+        captureRestartTask = nil
+        onEnded("Screen capture cleanup failed. Restart the Mac host app before reconnecting.")
+    }
+
+    private func restartCaptureLoop(id: UUID) async {
+        defer { retireCaptureRestart(id) }
+        var attempt = 0
+        while !Task.isCancelled && ownsCaptureRestart(id) {
             do {
                 try await startCapture()
-                log.info("screen capture restarted after system stop")
-                captureRestartTask = nil
-                return
+                if finishCaptureRestartIfRunning(id) {
+                    log.info("screen capture restarted after system stop")
+                    return
+                }
             } catch {
-                attempt += 1
-                captureStarted = false
-                log.error("screen capture restart attempt \(attempt, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-                let delay = captureRestartBackoff[min(attempt - 1, captureRestartBackoff.count - 1)]
-                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled, ownsCaptureRestart(id) else { return }
+                if error is CaptureStreamTeardownFailure {
+                    endAfterCaptureTeardownFailure(id)
+                    return
+                }
+                log.error("screen capture restart failed: \(String(describing: error), privacy: .public)")
             }
+            let delay = captureRestartBackoff[min(attempt, captureRestartBackoff.count - 1)]
+            attempt = min(attempt + 1, captureRestartBackoff.count - 1)
+            do { try await Task.sleep(for: delay) }
+            catch { return }
         }
     }
 
@@ -810,7 +864,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
-        guard !ended, self.peerConnection === peerConnection else { return }
+        guard !isEnded, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
             inputAuthorization.connectionChanged(connected: true)

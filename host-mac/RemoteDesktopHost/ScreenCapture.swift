@@ -155,6 +155,235 @@ enum CaptureSizing {
     }
 }
 
+/// A peer and each native start have separate identities. Neither can be
+/// reconstructed from a stream timestamp or a delayed callback.
+struct CaptureOwnerLease: Equatable, Sendable {
+    fileprivate let id = UUID()
+    fileprivate let retirement = CaptureOwnerRetirement()
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id }
+}
+
+/// Retained by the lease so a late close can join its own barrier without
+/// waiting for a successor's teardown or retaining an unbounded owner map.
+fileprivate final class CaptureOwnerRetirement: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    func finish(with task: Task<Void, Never>) {
+        lock.lock(); defer { lock.unlock() }
+        if self.task == nil { self.task = task }
+    }
+    func barrier() -> Task<Void, Never> {
+        lock.lock(); defer { lock.unlock() }
+        return task ?? Task {}
+    }
+}
+struct CaptureAttemptLease: Equatable, Sendable { fileprivate let id = UUID() }
+struct CaptureStopReceipt: Equatable, Sendable {
+    fileprivate let owner: CaptureOwnerLease
+    fileprivate let attempt: CaptureAttemptLease
+}
+
+struct CaptureStreamTeardownFailure: Error {
+    let underlying: Error
+}
+
+/// Serializes admission with retirement without holding a lock across a native
+/// await. The synchronous consumer runs inside the gate: retiring a stream
+/// cannot return while that stream is still entering its consumer. Consumers
+/// must not synchronously wait for asynchronous start/stop work.
+final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unchecked Sendable {
+    private final class Attempt: @unchecked Sendable {
+        let id = CaptureAttemptLease()
+        let owner: CaptureOwnerLease
+        var stream: Stream?
+        var task: Task<Void, Error>!
+        var running = false
+        init(owner: CaptureOwnerLease) { self.owner = owner }
+    }
+
+    // Recursive only for synchronous consumer-driven retirement on this thread.
+    private let lock = NSRecursiveLock()
+    private var owner: CaptureOwnerLease?
+    private var context: Context?
+    private var active: Attempt?
+    private var lastStop: CaptureStopReceipt?
+    private var teardown: Task<Void, Never>?
+    private let stopStream: @Sendable (Stream) async throws -> Void
+    private var teardownFailure: Error?
+
+    init(stopStream: @escaping @Sendable (Stream) async throws -> Void) {
+        self.stopStream = stopStream
+    }
+
+    func beginOwner(context: Context) -> CaptureOwnerLease {
+        locked {
+            retireOwner()
+            let lease = CaptureOwnerLease()
+            owner = lease
+            self.context = context
+            lastStop = nil
+            return lease
+        }
+    }
+
+    /// Concurrent requests from this owner join the same preparation/start.
+    /// A replacement waits for its predecessor's native teardown before preparing.
+    /// Preparation must create a new stream object for every attempt.
+    func start(for owner: CaptureOwnerLease,
+               prepare: @escaping @Sendable () async throws -> Stream,
+               startStream: @escaping @Sendable (Stream) async throws -> Void) throws -> Task<Void, Error> {
+        try locked {
+            guard self.owner == owner else { throw CancellationError() }
+            if let active { return active.task }
+            let attempt = Attempt(owner: owner)
+            let predecessor = teardown
+            active = attempt
+            lastStop = nil
+            attempt.task = Task { [self] in
+                await predecessor?.value
+                do {
+                    try requireCurrent(attempt)
+                    let stream = try await prepare()
+                    try install(stream, for: attempt)
+                    // Install before the native await: early output belongs to
+                    // this attempt, and retirement must join this call even if
+                    // cancellation happens between install and startStream.
+                    try await startStream(stream)
+                    try finishStart(attempt)
+                } catch {
+                    retireIfCurrent(attempt)
+                    throw error
+                }
+            }
+            return attempt.task
+        }
+    }
+
+    func endOwner(_ owner: CaptureOwnerLease) -> Task<Void, Never> {
+        locked {
+            if self.owner == owner { retireOwner() }
+            return owner.retirement.barrier()
+        }
+    }
+
+    func endAll() -> Task<Void, Never> {
+        locked {
+            retireOwner()
+            return teardown ?? Task {}
+        }
+    }
+
+    private func retireOwner() {
+        guard let owner else { return }
+        self.owner = nil
+        context = nil
+        lastStop = nil
+        retireAttempt()
+        owner.retirement.finish(with: teardown ?? Task {})
+    }
+
+    func isRunning(for owner: CaptureOwnerLease) -> Bool {
+        withRunningOwner(owner) {}
+    }
+
+    @discardableResult
+    func withRunningOwner(_ owner: CaptureOwnerLease, _ body: () -> Void) -> Bool {
+        locked {
+            guard self.owner == owner, active?.running == true else { return false }
+            body()
+            return true
+        }
+    }
+
+    @discardableResult
+    func withStream(_ stream: Stream, _ body: (Context, CaptureAttemptLease) -> Void) -> Bool {
+        locked {
+            guard let active, active.owner == owner, active.stream === stream,
+                  let context else { return false }
+            body(context, active.id)
+            return true
+        }
+    }
+
+    /// Retire before notifying. Deferred handlers need the one-use receipt,
+    /// which a new attempt or owner invalidates before starting any native work.
+    @discardableResult
+    func streamStopped(_ stream: Stream, _ body: (Context, CaptureStopReceipt) -> Void) -> Bool {
+        locked {
+            guard let active, active.owner == owner, active.stream === stream,
+                  let context else { return false }
+            let receipt = CaptureStopReceipt(owner: active.owner, attempt: active.id)
+            retireAttempt()
+            lastStop = receipt
+            body(context, receipt)
+            return true
+        }
+    }
+
+    func consumeStop(_ receipt: CaptureStopReceipt, _ body: () -> Void = {}) -> Bool {
+        locked {
+            guard owner == receipt.owner, active == nil, lastStop == receipt else { return false }
+            lastStop = nil
+            body()
+            return true
+        }
+    }
+
+    private func requireCurrent(_ attempt: Attempt) throws {
+        try locked {
+            try Task.checkCancellation()
+            guard active === attempt, owner == attempt.owner else { throw CancellationError() }
+            // A failed native stop is not a completed resource barrier. Keep
+            // replacement capture closed instead of accumulating live streams.
+            if let teardownFailure { throw CaptureStreamTeardownFailure(underlying: teardownFailure) }
+        }
+    }
+
+    private func install(_ stream: Stream, for attempt: Attempt) throws {
+        try locked {
+            // Retain the prepared stream even on retirement so its outputs are
+            // cleaned up by the exact teardown job after this task finishes.
+            attempt.stream = stream
+            try requireCurrent(attempt)
+        }
+    }
+
+    private func finishStart(_ attempt: Attempt) throws {
+        try locked {
+            try requireCurrent(attempt)
+            attempt.running = true
+        }
+    }
+
+    private func retireIfCurrent(_ attempt: Attempt) {
+        locked {
+            if active === attempt { retireAttempt() }
+        }
+    }
+
+    /// Must be called under lock. Only this transition schedules native stop.
+    /// The join includes preparation and start even when they ignore cancellation.
+    private func retireAttempt() {
+        guard let attempt = active else { return }
+        active = nil
+        attempt.task.cancel()
+        let task = attempt.task!
+        teardown = Task { [self] in
+            _ = await task.result
+            if let stream = locked({ attempt.stream }) {
+                do { try await stopStream(stream) }
+                catch { locked { teardownFailure = error } }
+            }
+        }
+    }
+
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+}
+
 /// Captures the main display as validated video frames and, when opted in,
 /// system audio as sample buffers. Consumers handle their own encoder
 /// marshalling on the capture queues.
@@ -162,8 +391,6 @@ enum CaptureSizing {
 /// Not `@MainActor`: callbacks fire on the capture queue and we don't
 /// want a per-frame actor hop at 30 fps.
 final class ScreenCapture: NSObject, @unchecked Sendable {
-    private var stream: SCStream?
-    private var stopping = false
     private let videoQueue = DispatchQueue(
         label: "com.threadmark.remotedesktop.host.capture.video",
         qos: .userInteractive)
@@ -171,16 +398,44 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         label: "com.threadmark.remotedesktop.host.capture.audio",
         qos: .userInteractive)
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
-    private var loggedFirstVideoSample = false
-    private var loggedFirstAudioSample = false
+    private var loggedFirstVideoAttempt: CaptureAttemptLease?
+    private var loggedFirstAudioAttempt: CaptureAttemptLease?
     private var videoFrameOrder = CaptureVideoFrameOrder()
 
-    /// Invoked on `videoQueue` only for a complete, valid, advancing frame.
-    var onVideoFrame: (@Sendable (CapturedVideoFrame) -> Void)?
-    /// Invoked on `audioQueue` for each captured audio chunk.
-    var onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
-    /// Invoked on an arbitrary queue when the stream ends unexpectedly.
-    var onStopped: (@Sendable (Error?) -> Void)?
+    struct Callbacks: Sendable {
+        /// Synchronous consumers run inside the stream ownership gate.
+        let onVideoFrame: @Sendable (CapturedVideoFrame) -> Void
+        let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
+        let onStopped: @Sendable (CaptureStopReceipt, Error) -> Void
+    }
+
+    private let lifecycle = CaptureStreamLifecycle<SCStream, Callbacks> { stream in
+        do { try await stream.stopCapture() }
+        catch {
+            guard !ScreenCapture.isAlreadyStopped(error) else { return }
+            Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
+                .error("stop failed: \(String(describing: error), privacy: .public)")
+            throw error
+        }
+    }
+
+    func beginSession(callbacks: Callbacks) -> CaptureOwnerLease {
+        lifecycle.beginOwner(context: callbacks)
+    }
+
+    func endSession(_ owner: CaptureOwnerLease) -> Task<Void, Never> {
+        lifecycle.endOwner(owner)
+    }
+
+    @discardableResult
+    func consumeStop(_ receipt: CaptureStopReceipt, _ body: () -> Void) -> Bool {
+        lifecycle.consumeStop(receipt, body)
+    }
+
+    @discardableResult
+    func withRunningSession(_ owner: CaptureOwnerLease, _ body: () -> Void) -> Bool {
+        lifecycle.withRunningOwner(owner, body)
+    }
 
     enum CaptureError: Error { case noDisplay }
 
@@ -188,15 +443,24 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
     func start(
+        for owner: CaptureOwnerLease,
         audioEnabled: Bool,
         maximumMacroblocksPerFrame: Int
     ) async throws {
-        guard stream == nil else { return }
-        stopping = false
-        loggedFirstVideoSample = false
-        loggedFirstAudioSample = false
+        let task = try lifecycle.start(for: owner, prepare: { [self] in
+            try await makeStream(audioEnabled: audioEnabled,
+                                 maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
+        }, startStream: { stream in
+            try await stream.startCapture()
+        })
+        try await task.value
+        guard lifecycle.isRunning(for: owner) else { throw CancellationError() }
+    }
+
+    private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int) async throws -> SCStream {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
+        try Task.checkCancellation()
         guard let display = content.displays.first(where: {
             $0.displayID == CGMainDisplayID()
         }) ?? content.displays.first else {
@@ -227,25 +491,13 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
             try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         }
 
-        try await s.startCapture()
-        stream = s
         log.info(
-            "capture started points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
+            "capture configured points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
+        return s
     }
 
     func stop() async {
-        guard let s = stream else { return }
-        stopping = true
-        stream = nil
-        do { try await s.stopCapture() }
-        catch {
-            guard !Self.isAlreadyStopped(error) else {
-                stopping = false
-                return
-            }
-            log.error("stop failed: \(String(describing: error), privacy: .public)")
-        }
-        stopping = false
+        await lifecycle.endAll().value
     }
 }
 
@@ -284,49 +536,45 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         of type: SCStreamOutputType
     ) {
         guard sampleBuffer.isValid else { return }
-        switch type {
-        case .screen:
-            guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: mach_absolute_time()),
-                  videoFrameOrder.admit(frame.metadata) else { return }
-            if !loggedFirstVideoSample {
-                loggedFirstVideoSample = true
-                let imageBuffer = frame.imageBuffer
-                let width = CVPixelBufferGetWidth(imageBuffer)
-                let height = CVPixelBufferGetHeight(imageBuffer)
-                let pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer)
-                let macroblocks = CaptureSizing.macroblockCount(width: width, height: height)
-                log.info(
-                    "received first video sample effective=\(width, privacy: .public)x\(height, privacy: .public) macroblocks=\(macroblocks, privacy: .public) pixelFormat=\(pixelFormat, privacy: .public)")
+        lifecycle.withStream(stream) { callbacks, attempt in
+            switch type {
+            case .screen:
+                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: mach_absolute_time()),
+                      videoFrameOrder.admit(frame.metadata) else { return }
+                if loggedFirstVideoAttempt != attempt {
+                    loggedFirstVideoAttempt = attempt
+                    let pixelFormat = CVPixelBufferGetPixelFormatType(frame.imageBuffer)
+                    let macroblocks = CaptureSizing.macroblockCount(width: frame.metadata.width, height: frame.metadata.height)
+                    log.info(
+                        "received first video sample effective=\(frame.metadata.width, privacy: .public)x\(frame.metadata.height, privacy: .public) macroblocks=\(macroblocks, privacy: .public) pixelFormat=\(pixelFormat, privacy: .public)")
+                }
+                callbacks.onVideoFrame(frame)
+            case .audio:
+                if loggedFirstAudioAttempt != attempt,
+                   let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
+                    loggedFirstAudioAttempt = attempt
+                    let format = AVAudioFormat(cmAudioFormatDescription: formatDescription)
+                    log.info(
+                        "received first system audio sample sr=\(format.sampleRate, privacy: .public) ch=\(format.channelCount, privacy: .public) frames=\(CMSampleBufferGetNumSamples(sampleBuffer), privacy: .public)")
+                }
+                callbacks.onAudioSample?(sampleBuffer)
+            case .microphone: break
+            @unknown default: break
             }
-            onVideoFrame?(frame)
-        case .audio:
-            if !loggedFirstAudioSample,
-               let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
-                loggedFirstAudioSample = true
-                let format = AVAudioFormat(cmAudioFormatDescription: formatDescription)
-                log.info(
-                    "received first system audio sample sr=\(format.sampleRate, privacy: .public) ch=\(format.channelCount, privacy: .public) frames=\(CMSampleBufferGetNumSamples(sampleBuffer), privacy: .public)")
-            }
-            onAudioSample?(sampleBuffer)
-        case .microphone: break
-        @unknown default: break
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        if self.stream === stream {
-            self.stream = nil
+        lifecycle.streamStopped(stream) { callbacks, receipt in
+            if Self.isSystemStopped(error) {
+                log.warning("stream stopped by the system: \(String(describing: error), privacy: .public)")
+            } else {
+                log.error("stream stopped: \(String(describing: error), privacy: .public)")
+            }
+            // Intentional stop and foreign streams are already outside the
+            // gate. Even an unexpected 'already stopped' must retire readiness.
+            callbacks.onStopped(receipt, error)
         }
-        guard !Self.isAlreadyStopped(error) else { return }
-        if Self.isSystemStopped(error) {
-            log.warning("stream stopped by the system: \(String(describing: error), privacy: .public)")
-        } else {
-            log.error("stream stopped: \(String(describing: error), privacy: .public)")
-        }
-        // Don't fire onStopped during an intentional stop() call —
-        // the caller already knows and will handle teardown.
-        guard !stopping else { return }
-        onStopped?(error)
     }
 }
 
