@@ -6453,6 +6453,104 @@ final class ComputerUseTests: XCTestCase {
             "A canceled task must replay its terminal result without running again")
     }
 
+    func testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted() async throws {
+        for localResume in [false, true] {
+          for intervene in [false, true] {
+            let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+            let url = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            var actions: [ComputerUsePredictedAction] = []
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url, actionPerformer: { actions.append($0) })
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let prompt = makeEnvelope(id: "resume-readiness-owner", kind: .prompt, body: "Find concert tickets")
+            fixture.manager.authorizePeer(senderID: prompt.senderID)
+            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+            await waitUntil { fixture.manager.activity == .paused }
+            let controls = try XCTUnwrap(fixture.browser.taskControls), oldTools = try XCTUnwrap(executor.lastTools)
+            var checked = false, inputRevokedAdmission = false
+            executor.runOnNextReadinessCheck {
+                checked = true
+                XCTAssertEqual(fixture.manager.activity, .paused)
+                XCTAssertEqual(fixture.browser.taskControls?.ownerID, controls.ownerID)
+                XCTAssertEqual(fixture.browser.taskControls?.phase, .paused)
+                XCTAssertThrowsError(try oldTools.perform(.typeText("stale task input"))) {
+                    guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
+                }
+                if intervene { inputRevokedAdmission = fixture.manager.blockActionsForUserIntervention() }
+            }
+            if localResume { fixture.browser.requestTaskControl(.resume, displayed: controls) }
+            else {
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1,
+                    hostEpoch: fixture.ledger.hostControlEpoch(taskID: prompt.id)), channel: fixture.channel))
+            }
+            XCTAssertTrue(checked); XCTAssertEqual(inputRevokedAdmission, intervene)
+            if intervene {
+                XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+                XCTAssertEqual(fixture.browser.taskControls?.ownerID, controls.ownerID)
+                if localResume {
+                    fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
+                } else {
+                    XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2,
+                        hostEpoch: fixture.ledger.hostControlEpoch(taskID: prompt.id)), channel: fixture.channel))
+                }
+            }
+            await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+            XCTAssertTrue(actions.isEmpty)
+            XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+          }
+        }
+    }
+
+    func testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.completed("First execution")])
+        let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "preprompt-admission", kind: .prompt, body: "Find movie tickets")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: prompt.id, revision: 1), channel: channel))
+        XCTAssertTrue(manager.handle(prompt, channel: channel)); XCTAssertEqual(manager.activity, .paused)
+        XCTAssertEqual(executor.callCount, 0)
+        var revoked = false
+        executor.runOnNextReadinessCheck { revoked = manager.blockActionsForUserIntervention() }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 0), channel: channel))
+        XCTAssertTrue(revoked); XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 3, hostEpoch: 1), channel: channel))
+        await waitUntil { executor.callCount == 1 && manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body])
+    }
+
+    func testUnreadyResumeAbandonsItsReservationAndKeepsTheOriginalPausedOwner() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var actions: [ComputerUsePredictedAction] = []
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url, actionPerformer: { actions.append($0) })
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "unready-resume", kind: .prompt, body: "Find travel tickets")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        let controls = try XCTUnwrap(fixture.browser.taskControls), oldTools = try XCTUnwrap(executor.lastTools)
+        executor.ready = false
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1,
+            hostEpoch: fixture.ledger.hostControlEpoch(taskID: prompt.id)), channel: fixture.channel))
+        XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(fixture.browser.taskControls?.ownerID, controls.ownerID)
+        XCTAssertFalse(fixture.manager.blockActionsForUserIntervention(), "An abandoned reservation cannot remain pending")
+        XCTAssertThrowsError(try oldTools.perform(.typeText("unready stale input"))) {
+            guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
+        }
+        executor.ready = true
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2,
+            hostEpoch: fixture.ledger.hostControlEpoch(taskID: prompt.id)), channel: fixture.channel))
+        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+        XCTAssertTrue(actions.isEmpty); XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+    }
+
     func test_cancelKeepsGateClosedWhileCancellationIgnoringExecutorUnwinds() async throws {
         let executor = CancellationIgnoringToolExecutor()
         var performedActions: [ComputerUsePredictedAction] = []
@@ -10293,6 +10391,8 @@ private final class ReadinessHookComputerUseExecutor:
     let runtimeName = "Readiness-hook test runtime"
     private var results: [ComputerUseExecutionResult]
     private var readinessHook: (() -> Void)?
+    var ready = true
+    private(set) var lastTools: ComputerUseHostTools?
     private(set) var prompts: [String] = []
     private(set) var trustedUserPrompts: [String] = []
     private(set) var cancelledVisualApprovals:
@@ -10303,7 +10403,7 @@ private final class ReadinessHookComputerUseExecutor:
         let hook = readinessHook
         readinessHook = nil
         hook?()
-        return true
+        return ready
     }
 
     init(results: [ComputerUseExecutionResult]) {
@@ -10319,6 +10419,7 @@ private final class ReadinessHookComputerUseExecutor:
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
+        lastTools = tools
         prompts.append(prompt)
         return nextResult(taskID: "legacy-test-task")
     }
@@ -10331,6 +10432,7 @@ private final class ReadinessHookComputerUseExecutor:
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         trustedUserPrompts.append(trustedUserPrompt)
+        lastTools = tools
         prompts.append(prompt)
         return nextResult(taskID: taskID)
     }

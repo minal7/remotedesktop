@@ -1,0 +1,20 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseTests/testInterventionDuringPredecessorJoinInvalidatesPendingAutomation",
+    "RemoteDesktopHostTests/ComputerUseTests/testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck",
+    "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/testStopThenImmediatePromptJoinsCancelledExecutionBeforeRuntimeReuse",
+    "RemoteDesktopHostTests/ComputerUseTests/testUnreadyResumeAbandonsItsReservationAndKeepsTheOriginalPausedOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/test_cancelKeepsGateClosedWhileCancellationIgnoringExecutorUnwinds",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseTests/testInterventionDuringPredecessorJoinInvalidatesPendingAutomation",
+    "RemoteDesktopHostTests/ComputerUseTests/testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck",
+    "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/testStopThenImmediatePromptJoinsCancelledExecutionBeforeRuntimeReuse",
+    "RemoteDesktopHostTests/ComputerUseTests/testUnreadyResumeAbandonsItsReservationAndKeepsTheOriginalPausedOwner",
+    "RemoteDesktopHostTests/ComputerUseTests/test_cancelKeepsGateClosedWhileCancellationIgnoringExecutorUnwinds",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ]
+}

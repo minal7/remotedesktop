@@ -3088,7 +3088,8 @@ final class ComputerUseHostTools {
 private final class ComputerUseActionGate: @unchecked Sendable {
     private let lock = NSLock()
     private var value = true
-    private var automationPending = false
+    private var pendingAutomationID: UUID?
+    private var pendingAutomationAdopted = false
     private var automationActive = false
     private var approvalPending = false
 
@@ -3103,22 +3104,44 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     /// Claims one automation while it waits for a cancelled predecessor to
     /// join. Actions stay closed, but direct input still owns an intervention
     /// race and can invalidate this pending claim synchronously off-main.
-    func beginAutomationPending() {
+    func reservePendingAutomation() -> UUID {
         lock.withLock {
+            let id = UUID()
             value = false
-            automationPending = true
+            pendingAutomationID = id
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = false
+            return id
+        }
+    }
+
+    /// Resume reserves before readiness/claim work. Adoption cannot recreate
+    /// a reservation invalidated by direct input during that synchronous work.
+    func adoptPendingAutomation(_ id: UUID) -> Bool {
+        lock.withLock {
+            guard pendingAutomationID == id, !pendingAutomationAdopted else { return false }
+            pendingAutomationAdopted = true
+            return true
+        }
+    }
+
+    func abandonReservedAutomation(_ id: UUID) {
+        lock.withLock {
+            guard pendingAutomationID == id, !pendingAutomationAdopted else { return }
+            value = false
+            pendingAutomationID = nil
         }
     }
 
     /// Opens the pending claim only if no intervention, stop, or newer state
     /// transition took ownership while the predecessor was unwinding.
-    func activatePendingAutomation() -> Bool {
+    func activatePendingAutomation(_ id: UUID) -> Bool {
         lock.withLock {
-            guard automationPending else { return false }
+            guard pendingAutomationID == id, pendingAutomationAdopted else { return false }
             value = true
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = true
             approvalPending = false
             return true
@@ -3133,7 +3156,8 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock {
             guard approvalPending else { return false }
             value = true
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = true
             approvalPending = false
             return true
@@ -3147,7 +3171,7 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     @discardableResult
     func endAutomation(allowsActions: Bool) -> Bool {
         lock.withLock {
-            let ownsTransition = automationPending
+            let ownsTransition = pendingAutomationID != nil
                 || automationActive
                 || approvalPending
             if !allowsActions {
@@ -3155,7 +3179,8 @@ private final class ComputerUseActionGate: @unchecked Sendable {
             } else if ownsTransition {
                 value = true
             }
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = false
             return value
@@ -3165,7 +3190,8 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     func beginApprovalWait() {
         lock.withLock {
             value = false
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = true
         }
@@ -3173,11 +3199,12 @@ private final class ComputerUseActionGate: @unchecked Sendable {
 
     func blockForIntervention() -> Bool {
         lock.withLock {
-            guard automationPending
+            guard pendingAutomationID != nil
                     || automationActive
                     || approvalPending else { return false }
             value = false
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = false
             return true
@@ -5083,22 +5110,27 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        self.pausedExecution = nil
-        lastUserIntervention = nil
-        actionGate.setAllowsActions(true)
-        actionGate.endAutomation(allowsActions: true)
-        activity = .idle
-
+        // Own a closed admission before readiness checks or durable prompt
+        // claiming. Direct input can revoke it even while activity is idle.
+        let pendingAutomationID = actionGate.reservePendingAutomation()
+        defer { actionGate.abandonReservedAutomation(pendingAutomationID) }
         if !pausedExecution.hasStarted {
+            // An unstarted prompt owns no live browser handoff. The ordinary
+            // claim path may terminalize without adopting this reservation.
+            self.pausedExecution = nil
+            lastUserIntervention = nil
+            activity = .idle
             // This Prompt was durably claimed while a pre-delivered Pause was
             // in force. Re-enter the normal claim path: the ledger atomically
             // marks executionStarted and returns `.new` exactly once.
             startExecution(
                 for: pausedExecution.envelope,
-                channel: pausedExecution.channel)
+                channel: pausedExecution.channel, pendingAutomationID: pendingAutomationID)
             return
         }
 
+        // Preserve the paused owner and its provider window through readiness.
+        // Publishing idle here would clear browser controls and close sign-in.
         guard let executor, executor.isReady else {
             self.pausedExecution = pausedExecution
             activity = .paused
@@ -5126,7 +5158,7 @@ final class HostComputerUseManager: ObservableObject {
             browserClarification: pausedExecution.browserClarification,
             browserHandbackRequirement: pausedExecution.browserHandbackRequirement,
             channel: pausedExecution.channel,
-            isResuming: true)
+            isResuming: true, pendingAutomationID: pendingAutomationID)
     }
 
     private func stopExecution(_ context: ExecutionContext) {
@@ -5973,7 +6005,8 @@ final class HostComputerUseManager: ObservableObject {
 
     private func startExecution(
         for envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        pendingAutomationID: UUID? = nil
     ) {
         let activeTaskID = currentExecution?.envelope.id
             ?? pausedExecution?.envelope.id
@@ -6223,7 +6256,7 @@ final class HostComputerUseManager: ObservableObject {
             conversation: request.conversation,
             textClarification: continuation,
             browserClarification: browserContinuation,
-            channel: channel)
+            channel: channel, pendingAutomationID: pendingAutomationID)
     }
 
     private func beginExecution(
@@ -6235,14 +6268,9 @@ final class HostComputerUseManager: ObservableObject {
         browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
         browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil,
         channel: any HostComputerUseChannel,
-        isResuming: Bool = false
+        isResuming: Bool = false,
+        pendingAutomationID: UUID? = nil
     ) {
-        let precedingExecution = executionTask
-        precedingExecution?.cancel()
-        // Keep native injection closed while retaining intervention ownership.
-        // A person's input during this join must invalidate the successor even
-        // though its executor has not started yet.
-        actionGate.beginAutomationPending()
         let context = ExecutionContext(
             envelope: envelope,
             channel: channel,
@@ -6251,9 +6279,21 @@ final class HostComputerUseManager: ObservableObject {
             textClarification: textClarification,
             browserClarification: browserClarification,
             browserHandbackRequirement: browserHandbackRequirement)
+        let admissionID = pendingAutomationID ?? actionGate.reservePendingAutomation()
+        guard actionGate.adoptPendingAutomation(admissionID) else {
+            pauseForLocalIntervention(context)
+            return
+        }
+        let precedingExecution = executionTask
+        precedingExecution?.cancel()
+        // Keep this exact reservation through predecessor joining. An input
+        // event may revoke it before or after adoption, and a later run cannot
+        // substitute a new reservation for this continuation.
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
+        pausedExecution = nil
+        lastUserIntervention = nil
         activity = .working(isResuming ? "Continuing…" : "Starting…")
         sendStatus("working", replyingTo: envelope, channel: channel)
         let capturedContext = context
@@ -6266,7 +6306,7 @@ final class HostComputerUseManager: ObservableObject {
             await precedingExecution?.value
             guard !Task.isCancelled,
                   currentExecutionToken == token else { return }
-            guard actionGate.activatePendingAutomation() else {
+            guard actionGate.activatePendingAutomation(admissionID) else {
                 pauseAfterPendingAutomationWasBlocked(
                     context: context,
                     token: token)
