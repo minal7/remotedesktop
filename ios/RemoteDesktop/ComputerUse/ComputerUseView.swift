@@ -135,7 +135,7 @@ struct ComputerUseView: View {
                                 ? "Ready"
                                 : "Paused")
 
-                    if session.hasInteractiveRemoteScreen {
+                    if session.isRemoteScreenSessionReady {
                         // The visible placeholder owns this identifier before
                         // the sidecar has a fresh frame. Keep it queryable once
                         // live pixels replace that placeholder.
@@ -244,10 +244,10 @@ struct ComputerUseView: View {
                 RemoteScreenView(accessories: accessories, zoom: zoom)
                     .background(.black)
                     .allowsHitTesting(
-                        session.hasInteractiveRemoteScreen && model.isConnected && !model.isLiveScreenPrivacyShielded)
-                    .accessibilityHidden(!session.hasInteractiveRemoteScreen || model.isLiveScreenPrivacyShielded)
+                        session.hasInteractiveRemoteScreen && model.isConnected)
+                    .accessibilityHidden(!session.hasInteractiveRemoteScreen)
             }
-            if !session.hasInteractiveRemoteScreen {
+            if !session.isRemoteScreenSessionReady {
                 Color(uiColor: .secondarySystemGroupedBackground)
                     .overlay {
                         VStack(spacing: 10) {
@@ -270,7 +270,7 @@ struct ComputerUseView: View {
                     .accessibilityIdentifier("computer-use-local-connection")
             }
 
-            if session.hasInteractiveRemoteScreen,
+            if session.isRemoteScreenSessionReady,
                model.isLiveScreenPrivacyShielded {
                 postMailPrivacyShield
             } else if session.hasInteractiveRemoteScreen {
@@ -319,7 +319,7 @@ struct ComputerUseView: View {
     }
 
     private var screenAccessibilityLabel: String {
-        if !session.hasInteractiveRemoteScreen {
+        if !session.isRemoteScreenSessionReady {
             return "Secure local AI connection to \(session.hostName ?? model.hostName)"
         }
         if model.isLiveScreenPrivacyShielded {
@@ -332,7 +332,7 @@ struct ComputerUseView: View {
     }
 
     private var screenAccessibilityHint: String {
-        if !session.hasInteractiveRemoteScreen {
+        if !session.isRemoteScreenSessionReady {
             return "Prompts and results use the secure local connection. Use the Mac directly if AI asks for help."
         }
         if model.isLiveScreenPrivacyShielded {

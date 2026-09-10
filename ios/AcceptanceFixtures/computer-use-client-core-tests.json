@@ -38,7 +38,13 @@
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_wrongDrawableForeignTicketAndDuplicateCallbacksCannotCompleteSuccessor",
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_gpuCompletedWorkStillWaitsForPresentationOrExplicitRetirement",
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_pixelGeometryConvertsCropOriginBeforeAdaptationAndRotation",
-    "RemoteDesktopTests/RemoteVideoPresentationTests/test_pixelGeometryRejectsUnsupportedOrOutOfBoundsFramesBeforeCoreImage"
+    "RemoteDesktopTests/RemoteVideoPresentationTests/test_pixelGeometryRejectsUnsupportedOrOutOfBoundsFramesBeforeCoreImage",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyShieldReleasesAllSourcesAndBlocksInputUntilExplicitReveal",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyCleanupRejectsReentrantInputAndHonorsAConcurrentReveal",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyEdgeDuringSourceCleanupPreservesEveryOwnedRelease",
+    "RemoteDesktopTests/WebRTCTransportTests/test_disconnectDuringPrivacyCleanupCannotSubmitTheInterruptedPrompt",
+    "RemoteDesktopTests/WebRTCTransportTests/test_retiredPromptPrivacyCallbackCannotCoverAReplacementRemoteSession",
+    "RemoteDesktopTests/RemoteScreenObscurationTests/test_approvalBackdropClosesInputPolicyUntilTheApprovalIsDismissed"
   ],
   "expectedTests": [
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
@@ -87,6 +93,7 @@
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresInsideBeginAndTheOwningGesture",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresObservedLocationAndBoundedDeltas",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion",
+    "RemoteDesktopTests/RemoteScreenObscurationTests/test_approvalBackdropClosesInputPolicyUntilTheApprovalIsDismissed",
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_contextRetirementSuppressesReceiptAndKeepsNativeCapacityUntilCompletion",
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_gpuCompletedWorkStillWaitsForPresentationOrExplicitRetirement",
     "RemoteDesktopTests/RemoteVideoPresentationTests/test_observationExpiryReportsOnceWithoutReleasingUnfinishedGPUWork",
@@ -108,9 +115,14 @@
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementDuringCreationRemovesTheUninstalledObject",
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementDuringInstallationCannotRemoveItsSuccessor",
     "RemoteDesktopTests/RemoteVideoRendererTests/test_surfaceRetirementIsolatesDeferredOldFramesAndSizesFromReplacement",
+    "RemoteDesktopTests/WebRTCTransportTests/test_disconnectDuringPrivacyCleanupCannotSubmitTheInterruptedPrompt",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyCleanupRejectsReentrantInputAndHonorsAConcurrentReveal",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyEdgeDuringSourceCleanupPreservesEveryOwnedRelease",
+    "RemoteDesktopTests/WebRTCTransportTests/test_privacyShieldReleasesAllSourcesAndBlocksInputUntilExplicitReveal",
     "RemoteDesktopTests/WebRTCTransportTests/test_rendererLossReleasesRemoteControlsAndRestoresWithoutAnotherHello",
+    "RemoteDesktopTests/WebRTCTransportTests/test_retiredPromptPrivacyCallbackCannotCoverAReplacementRemoteSession",
     "RemoteDesktopTests/WebRTCTransportTests/test_sidecarPreparesRendererAndTransfersItAcrossTransportReplacement",
     "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererCleanupCannotWithdrawAReplacementPresentation",
     "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererLossPreservesTLSAndRepublishesLayoutBeforeReadiness"

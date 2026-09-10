@@ -89,7 +89,19 @@ final class SessionModel: ObservableObject {
     @Published private(set) var experience: Experience = .remoteControl {
         didSet { updateVideoRendererTarget() }
     }
-    @Published private(set) var computerUseSession: ComputerUseSessionModel?
+    @Published private(set) var computerUseSession: ComputerUseSessionModel? {
+        didSet {
+            oldValue?.onRemoteScreenObscurationChange = nil
+            if let model = computerUseSession {
+                model.onRemoteScreenObscurationChange = { [weak self, weak model] in
+                    guard let self, let model, self.computerUseSession === model else { return }
+                    self.updateRemoteScreenObscuration()
+                }
+            }
+            updateRemoteScreenObscuration()
+        }
+    }
+    @Published private(set) var isRemoteScreenObscured = false
     @Published private(set) var computerUseConnectionMode:
         ComputerUseConnectionMode = .liveScreen {
         didSet { updateVideoRendererTarget() }
@@ -99,6 +111,13 @@ final class SessionModel: ObservableObject {
     @Published private(set) var isCloudAccountRevalidationPending = false
 
     var hasInteractiveRemoteScreen: Bool {
+        isRemoteScreenSessionReady && !isRemoteScreenObscured
+    }
+
+    /// Current transport/submission readiness, independently of task privacy.
+    /// The view uses this to retain the explicit reveal control while covered.
+    /// This is not proof of a fresh capture or a drawable presentation.
+    var isRemoteScreenSessionReady: Bool {
         guard inputActivity.allowsInput, !isCloudAccountRevalidationPending else { return false }
         guard experience == .computerUse,
               computerUseConnectionMode == .localPromptOnly else {
@@ -145,6 +164,8 @@ final class SessionModel: ObservableObject {
     private var desiredInputActivity: RemoteInputActivity
     private var isUpdatingInputActivity = false
     private var isRetiringInputSources = false
+    private var isUpdatingRemoteScreenObscuration = false
+    private var inputSourceCleanupDepth = 0
     private let videoRendererBinding = RemoteVideoRendererBinding()
     private var transport: Transport? {
         didSet { updateVideoRendererTarget() }
@@ -399,19 +420,25 @@ final class SessionModel: ObservableObject {
 
     func beginRemoteInputSource(_ kind: RemoteInputSourceKind,
                                 expectedInputGeneration: UUID) -> RemoteInputSourceLease? {
-        guard !isRetiringInputSources, hasInteractiveRemoteScreen,
+        guard acceptsNewRemoteInput,
               remoteInputGeneration == expectedInputGeneration else { return nil }
         if let previous = inputSources[kind]?.lease { endRemoteInputSource(previous) }
         // Sending cleanup may synchronously invalidate a failed transport.
-        guard hasInteractiveRemoteScreen, remoteInputGeneration == expectedInputGeneration else { return nil }
+        guard acceptsNewRemoteInput, remoteInputGeneration == expectedInputGeneration else { return nil }
         let lease = RemoteInputSourceLease(kind: kind, generation: expectedInputGeneration)
         inputSources[kind] = InputSource(lease: lease)
         return lease
     }
 
     func isRemoteInputSourceCurrent(_ lease: RemoteInputSourceLease) -> Bool {
-        !isRetiringInputSources && hasInteractiveRemoteScreen && lease.generation == remoteInputGeneration
+        acceptsNewRemoteInput && lease.generation == remoteInputGeneration
             && inputSources[lease.kind]?.lease == lease
+    }
+
+    private var acceptsNewRemoteInput: Bool {
+        !isRetiringInputSources && !isUpdatingRemoteScreenObscuration
+            && computerUseSession?.isRemoteScreenObscured != true
+            && hasInteractiveRemoteScreen
     }
 
     private var heldSourceKeys: Set<Int> {
@@ -465,6 +492,11 @@ final class SessionModel: ObservableObject {
     func endRemoteInputSource(_ lease: RemoteInputSourceLease) {
         guard inputSources[lease.kind]?.lease == lease,
               let source = inputSources.removeValue(forKey: lease.kind) else { return }
+        inputSourceCleanupDepth += 1
+        defer {
+            inputSourceCleanupDepth -= 1
+            if inputSourceCleanupDepth == 0 { updateRemoteScreenObscuration() }
+        }
         // Retire before posting. Late callbacks cannot append to this source,
         // and every release is still fenced by the original wire lifetime.
         var remaining = source.keys
@@ -487,7 +519,7 @@ final class SessionModel: ObservableObject {
     func send(_ message: ControlMessage, expectedInputGeneration: UUID? = nil) {
         switch message {
         case .pointer, .scroll, .key, .text:
-            guard !isRetiringInputSources else { return }
+            guard acceptsNewRemoteInput else { return }
         case .hello, .qos, .bye: break
         }
         transmit(message, expectedInputGeneration: expectedInputGeneration)
@@ -519,6 +551,31 @@ final class SessionModel: ObservableObject {
             videoRendererBinding.bind(computerUseVisualSidecar)
         } else {
             videoRendererBinding.bind(transport as? VideoRenderingTransport)
+        }
+    }
+
+    private func updateRemoteScreenObscuration() {
+        // A policy edge during an existing key/button release must wait for
+        // every release in that scope. New input already reads the model's
+        // requested policy directly, so deferring this commit cannot admit it.
+        guard !isUpdatingRemoteScreenObscuration, !isRetiringInputSources,
+              inputSourceCleanupDepth == 0 else { return }
+        isUpdatingRemoteScreenObscuration = true
+        defer { isUpdatingRemoteScreenObscuration = false }
+        while isRemoteScreenObscured != (computerUseSession?.isRemoteScreenObscured ?? false) {
+            if computerUseSession?.isRemoteScreenObscured == true {
+                let owner = computerUseSession
+                let generation = remoteInputGeneration
+                // Cleanup alone may still use the old visible input scope.
+                // Public admission stays closed throughout synchronous callbacks.
+                releaseRemoteInputSources()
+                if computerUseSession === owner, remoteInputGeneration == generation {
+                    remoteInputGeneration = UUID()
+                }
+            }
+            // Cleanup may reveal the screen, replace the session or disconnect.
+            // Sample its current policy rather than restoring the old request.
+            isRemoteScreenObscured = computerUseSession?.isRemoteScreenObscured ?? false
         }
     }
 
@@ -899,7 +956,10 @@ final class SessionModel: ObservableObject {
     private func releaseRemoteInputSources() {
         guard !isRetiringInputSources else { return }
         isRetiringInputSources = true
-        defer { isRetiringInputSources = false }
+        defer {
+            isRetiringInputSources = false
+            updateRemoteScreenObscuration()
+        }
         for kind: RemoteInputSourceKind in [.softKeyboard, .hardwareKeyboard, .pointer] {
             if let source = inputSources[kind]?.lease { endRemoteInputSource(source) }
         }

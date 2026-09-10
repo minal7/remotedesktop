@@ -65,7 +65,9 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     @Published private(set) var messages: [ChatMessage] = []
-    @Published private(set) var state: State = .ready
+    @Published private(set) var state: State = .ready {
+        didSet { onRemoteScreenObscurationChange?() }
+    }
     @Published private(set) var statusText = "Ready for a request"
     /// Bounded, task-scoped host progress retained independently of the current
     /// status label. A LAN poll can deliver several ordered updates together;
@@ -86,7 +88,18 @@ final class ComputerUseSessionModel: ObservableObject {
     /// unrelated desktop content. Cover the remote pixels for the task's full
     /// lifecycle, starting before the request leaves the phone, until the
     /// person explicitly chooses to reveal the Mac again.
-    @Published private(set) var isLiveScreenPrivacyShielded = false
+    @Published private(set) var isLiveScreenPrivacyShielded = false {
+        didSet { onRemoteScreenObscurationChange?() }
+    }
+
+    /// Synchronous owner notification: input must close when pixels are
+    /// covered, without waiting for SwiftUI to remove keyboard responders.
+    var onRemoteScreenObscurationChange: (@MainActor () -> Void)?
+    var isRemoteScreenObscured: Bool {
+        if isLiveScreenPrivacyShielded { return true }
+        if case .approvalRequired = state { return true }
+        return false
+    }
 
     var hasActivePrompt: Bool { activePromptID != nil }
     var isCancellationPending: Bool {
@@ -409,6 +422,8 @@ final class ComputerUseSessionModel: ObservableObject {
             // deterministically clarified by the host.
             isLiveScreenPrivacyShielded = true
         }
+        guard !isStopped, !requiresRecoveryReconnect,
+              stateGeneration == operationGeneration else { return false }
         let message = ChatMessage(
             id: messageID,
             author: .user,
@@ -760,7 +775,8 @@ final class ComputerUseSessionModel: ObservableObject {
             statusText = "Couldn’t safely save your choice. No response was sent."
             return
         }
-        advanceStateGeneration()
+        let operationGeneration = advanceStateGeneration()
+        let promptID = activePromptID
         latestTerminalOutcome = nil
         if approved, Self.requiresPersistentPrivacyShield(request) {
             // Set this before the approval response leaves the phone. The
@@ -768,6 +784,7 @@ final class ComputerUseSessionModel: ObservableObject {
             // activate immediately once the host receives the response.
             isLiveScreenPrivacyShielded = true
         }
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         state = .working
         statusText = approved
             ? "Approved — your Mac is continuing…"
@@ -1267,15 +1284,18 @@ final class ComputerUseSessionModel: ObservableObject {
                 pendingControlIntent = nil
                 controlRetryTask?.cancel()
                 controlRetryTask = nil
-                advanceStateGeneration()
+                let operationGeneration = advanceStateGeneration()
+                let promptID = activePromptID
                 if Self.requiresPersistentPrivacyShield(request) {
                     // The structured host approval is the authoritative fallback
                     // if future Mail phrasing is broader than the bounded
                     // request-side classifier below.
                     isLiveScreenPrivacyShielded = true
                 }
+                guard isCurrentOperation(operationGeneration, promptID: promptID) else { continue }
                 latestTerminalOutcome = .userInterventionRequired
                 state = .approvalRequired(request)
+                guard isCurrentOperation(operationGeneration, promptID: promptID) else { continue }
                 responseTimeoutTask?.cancel()
                 responseTimeoutTask = nil
                 statusText = "Your approval is needed"
@@ -1694,6 +1714,8 @@ final class ComputerUseSessionModel: ObservableObject {
         if Self.requiresPersistentPrivacyShield(request) {
             isLiveScreenPrivacyShielded = true
         }
+        guard !isStopped, !requiresRecoveryReconnect,
+              stateGeneration == operationGeneration else { return }
         if activePromptID != messageID {
             guard rememberActivePrompt(
                 prompt,

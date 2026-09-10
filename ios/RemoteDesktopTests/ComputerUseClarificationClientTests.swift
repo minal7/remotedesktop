@@ -1215,6 +1215,37 @@ final class ComputerUseActionEvidenceClientTests: XCTestCase {
 }
 
 @MainActor
+final class RemoteScreenObscurationTests: XCTestCase {
+    func test_approvalBackdropClosesInputPolicyUntilTheApprovalIsDismissed() async throws {
+        let fixture = ClarificationClientFixture()
+        let model = fixture.model
+        defer { model.onRemoteScreenObscurationChange = nil; model.stop() }
+        var observedObscuration: Bool?
+        model.onRemoteScreenObscurationChange = { [weak model] in
+            observedObscuration = model?.isRemoteScreenObscured
+        }
+        model.start(); XCTAssertTrue(model.sendPrompt("Find concert tickets."))
+        XCTAssertFalse(model.isRemoteScreenObscured)
+        let root = try await fixture.channel.prompt(at: 0)
+        let approval = ComputerUseApprovalRequest(taskID: root.id, message: "Review this action.")
+        await fixture.channel.deliver(try approval.encodedBody(), kind: .approvalRequest)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(model.state, .approvalRequired(approval))
+        XCTAssertFalse(model.isLiveScreenPrivacyShielded)
+        XCTAssertTrue(model.isRemoteScreenObscured)
+        XCTAssertEqual(observedObscuration, true)
+        model.revealLiveScreen()
+        XCTAssertTrue(model.isRemoteScreenObscured, "Reveal cannot remove a separate approval backdrop")
+        XCTAssertEqual(observedObscuration, true)
+        model.respondToApproval(approval, approved: false)
+        XCTAssertEqual(model.state, .working)
+        XCTAssertFalse(model.isRemoteScreenObscured)
+        XCTAssertEqual(observedObscuration, false)
+        XCTAssertTrue(model.hasActivePrompt); XCTAssertTrue(model.isConnected)
+    }
+}
+
+@MainActor
 private final class ClarificationClientFixture {
     let channel = ClarificationClientChannel()
     let store = ClarificationClientStore()

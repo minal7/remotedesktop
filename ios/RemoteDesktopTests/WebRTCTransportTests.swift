@@ -10,6 +10,179 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_privacyShieldReleasesAllSourcesAndBlocksInputUntilExplicitReveal() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        defer { session.reset() }
+        let generation = session.remoteInputGeneration
+        let hardware = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        let keyboard = try XCTUnwrap(session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: generation))
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: hardware)
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: keyboard)
+        session.send(.pointer(x: 20, y: 30, buttons: 1), from: pointer)
+        session.send(.scroll(x: 20, y: 30, dx: 1, dy: 2, phase: .begin), from: pointer)
+        session.toggleSoftModifier(.shift)
+        let beforeShield = visual.sentMessages.count
+
+        XCTAssertTrue(prompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertTrue(prompt.isLiveScreenPrivacyShielded)
+        XCTAssertTrue(session.isRemoteScreenObscured)
+        XCTAssertTrue(session.isRemoteScreenSessionReady, "Keep the explicit reveal control reachable")
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertEqual(session.softModifierMask, 0)
+        let releases = Array(visual.sentMessages.dropFirst(beforeShield).map(\.message))
+        XCTAssertEqual(releases.count, 5)
+        XCTAssertEqual(releases.compactMap { message -> Int? in
+            if case let .key(usage, down, _) = message, !down { return usage }
+            return nil
+        }.sorted(), [4, 5, SoftModifier.shift.hidUsage].sorted())
+        XCTAssertTrue(releases.contains { if case .pointer(x: 20, y: 30, buttons: 0) = $0 { return true }; return false })
+        XCTAssertTrue(releases.contains { if case .scroll(x: 20, y: 30, dx: 0, dy: 0, phase: .end) = $0 { return true }; return false })
+        let count = visual.sentMessages.count
+        let hiddenGeneration = session.remoteInputGeneration
+        for kind: RemoteInputSourceKind in [.hardwareKeyboard, .softKeyboard, .softModifiers, .pointer] {
+            XCTAssertNil(session.beginRemoteInputSource(kind, expectedInputGeneration: hiddenGeneration))
+        }
+        session.send(.key(usage: 6, down: true, modifiers: 0))
+        session.send(.text("hidden text"))
+        session.send(.pointer(x: 20, y: 30, buttons: 1))
+        session.send(.scroll(x: 20, y: 30, dx: 1, dy: 2, phase: .begin))
+        session.toggleSoftModifier(.shift)
+        XCTAssertEqual(visual.sentMessages.count, count)
+        XCTAssertTrue(session.computerUseSession === prompt)
+        XCTAssertTrue(prompt.isConnected); XCTAssertTrue(session.isComputerUsePromptTransportReady)
+        XCTAssertEqual(session.computerUseVisualSidecarState, .live)
+        XCTAssertTrue(visual.disconnectReasons.isEmpty)
+
+        prompt.revealLiveScreen()
+        XCTAssertFalse(session.isRemoteScreenObscured); XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        XCTAssertEqual(session.remoteInputGeneration, hiddenGeneration)
+        session.send(.text("late callback"), from: keyboard)
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: hardware)
+        session.send(.pointer(x: 20, y: 30, buttons: 1), from: pointer)
+        session.send(.text("old generation"), expectedInputGeneration: generation)
+        session.endRemoteInputSource(hardware); session.endRemoteInputSource(keyboard); session.endRemoteInputSource(pointer)
+        XCTAssertEqual(visual.sentMessages.count, count)
+        let replacement = try XCTUnwrap(session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: hiddenGeneration))
+        session.send(.text("visible input"), from: replacement)
+        XCTAssertEqual(visual.sentMessages.count, count + 1)
+    }
+
+    func test_privacyCleanupRejectsReentrantInputAndHonorsAConcurrentReveal() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        defer { visual.onSend = nil; session.reset() }
+        let generation = session.remoteInputGeneration
+        let source = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        let count = visual.sentMessages.count
+        var cleanupCalls = 0
+        visual.onSend = { message in
+            guard case .key(usage: 4, down: false, modifiers: _) = message else { return }
+            cleanupCalls += 1
+            session.send(.text("inside cleanup"))
+            XCTAssertNil(session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+            prompt.revealLiveScreen()
+            session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        }
+        XCTAssertTrue(prompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertEqual(cleanupCalls, 1); XCTAssertEqual(visual.sentMessages.count, count + 1)
+        XCTAssertFalse(prompt.isLiveScreenPrivacyShielded); XCTAssertFalse(session.isRemoteScreenObscured)
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(source))
+        XCTAssertTrue(prompt.isConnected); XCTAssertTrue(session.computerUseSession === prompt)
+    }
+
+    func test_privacyEdgeDuringSourceCleanupPreservesEveryOwnedRelease() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        defer { visual.onSend = nil; session.reset() }
+        let generation = session.remoteInputGeneration
+        let source = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: source)
+        let count = visual.sentMessages.count
+        visual.onSend = { message in
+            guard case .key(usage: 4, down: false, modifiers: _) = message else { return }
+            XCTAssertTrue(prompt.sendPrompt("Draft an email to Alex."))
+            XCTAssertEqual(session.remoteInputGeneration, generation, "Remaining releases still own this scope")
+            session.send(.text("hidden during deferred cleanup"))
+            XCTAssertNil(session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: generation))
+        }
+        session.endRemoteInputSource(source)
+        let releases = Array(visual.sentMessages.dropFirst(count).map(\.message))
+        XCTAssertEqual(releases.count, 2)
+        XCTAssertEqual(releases.compactMap { message -> Int? in
+            if case let .key(usage, down, _) = message, !down { return usage }
+            return nil
+        }, [4, 5])
+        XCTAssertTrue(session.isRemoteScreenObscured); XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertTrue(prompt.isConnected); XCTAssertTrue(session.computerUseSession === prompt)
+    }
+
+    func test_disconnectDuringPrivacyCleanupCannotSubmitTheInterruptedPrompt() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture()
+        defer { visual.onSend = nil; session.reset() }
+        let source = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        visual.onSend = { message in
+            guard case .key(usage: 4, down: false, modifiers: _) = message else { return }
+            session.reset()
+        }
+        XCTAssertFalse(prompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertFalse(prompt.hasActivePrompt); XCTAssertFalse(prompt.isConnected)
+        XCTAssertTrue(prompt.messages.isEmpty)
+        XCTAssertNil(session.computerUseSession)
+        XCTAssertFalse(session.isRemoteScreenObscured)
+        XCTAssertEqual(session.state, .idle)
+    }
+
+    func test_retiredPromptPrivacyCallbackCannotCoverAReplacementRemoteSession() async throws {
+        let connected = expectation(description: "replacement remote transport")
+        let ordinary = RecordingTargetTransport(connected: connected)
+        let (session, _, prompt) = try await makePrivacyFixture(ordinaryTransport: ordinary)
+        defer { session.reset() }
+        let oldCallback = try XCTUnwrap(prompt.onRemoteScreenObscurationChange)
+        XCTAssertTrue(prompt.sendPrompt("Draft an email to Alex."))
+        XCTAssertTrue(session.isRemoteScreenObscured)
+        session.reset()
+        XCTAssertNil(prompt.onRemoteScreenObscurationChange)
+        XCTAssertFalse(session.isRemoteScreenObscured)
+        session.connect(code: "654321")
+        await fulfillment(of: [connected], timeout: 1)
+        ordinary.onHostHello?(compatibleComputerUseHello())
+        ordinary.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); ordinary.onFirstVideoFrame?()
+        let generation = session.remoteInputGeneration
+        oldCallback()
+        XCTAssertTrue(prompt.isLiveScreenPrivacyShielded)
+        XCTAssertFalse(session.isRemoteScreenObscured); XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        XCTAssertEqual(session.remoteInputGeneration, generation)
+        let count = ordinary.sentMessages.count
+        session.send(.text("replacement input"))
+        XCTAssertEqual(ordinary.sentMessages.count, count + 1)
+    }
+
+    private func makePrivacyFixture(ordinaryTransport: RecordingTargetTransport? = nil) async throws
+        -> (SessionModel, RecordingTargetTransport, ComputerUseSessionModel) {
+        let connected = expectation(description: "privacy visual transport")
+        let visual = RecordingTargetTransport(connected: connected), channel = IdleComputerUseSessionChannel()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+            transportFactory: { ordinaryTransport ?? visual }, computerUseVisualTransportFactory: { visual },
+            localAccountBindingValidator: { _ in }, localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
+            localPendingStore: EmptyComputerUsePendingPromptStore(), accountChangeNotificationCenter: NotificationCenter())
+        session.connect(code: "123456", experience: .computerUse, computerUseHostID: "HOST-B", hostName: "Mac",
+            localComputerUseEndpoint: LocalComputerUseEndpoint(host: "127.0.0.1", port: 443),
+            localCredentialID: String(repeating: "b", count: 64), localCloudAccountBinding: accountBinding)
+        await fulfillment(of: [connected], timeout: 1)
+        let prompt = try XCTUnwrap(session.computerUseSession)
+        visual.onHostHello?(compatibleComputerUseHello())
+        visual.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); visual.onFirstVideoFrame?()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        return (session, visual, prompt)
+    }
+
     func test_rendererLossReleasesRemoteControlsAndRestoresWithoutAnotherHello() async throws {
         let connected = expectation(description: "remote transport")
         let transport = RecordingTargetTransport(connected: connected)
@@ -1151,6 +1324,7 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
     private(set) var expectedHostID: String?
     private(set) var sentMessages: [SentMessage] = []
     private(set) var disconnectReasons: [String] = []
+    var onSend: ((ControlMessage) -> Void)?
 
     init(
         connected: XCTestExpectation,
@@ -1168,6 +1342,7 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
 
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {
         sentMessages.append(SentMessage(message: message, seq: seq, ts: ts))
+        onSend?(message)
     }
     func disconnect(reason: String) {
         disconnectReasons.append(reason)
