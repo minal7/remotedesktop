@@ -141,6 +141,21 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
 
     var exactWireBody: String { wireBody ?? prompt }
 
+    /// Swift string equality treats canonically equivalent Unicode as equal.
+    /// Recovery ownership includes every encoded string's exact bytes.
+    static func sameRecoveryState(_ lhs: Self?, _ rhs: Self?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (.some(let lhs), .some(let rhs)):
+            guard lhs == rhs else { return false }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            guard let left = try? encoder.encode(lhs), let right = try? encoder.encode(rhs) else { return false }
+            return left == right
+        default: return false
+        }
+    }
+
     var localAccountBinding: CloudKitAccountBinding? {
         localAccountBindingRawValue.flatMap(CloudKitAccountBinding.init)
     }
@@ -209,6 +224,22 @@ enum ComputerUsePendingPromptReadError: LocalizedError {
     }
 }
 
+enum ComputerUsePendingPromptMutationResult: Equatable, Sendable {
+    case applied
+    case conflict
+    case unavailable
+}
+
+/// All production instances participate in this process-wide transaction
+/// boundary. This is not a lock on other processes or older app versions.
+private enum ComputerUsePendingPromptAccess {
+    static let lock = NSRecursiveLock()
+    static func serialized<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock(); defer { lock.unlock() }
+        return try body()
+    }
+}
+
 protocol ComputerUsePendingPromptStoring: Sendable {
     /// A nil result means a successful lookup found no usable record. Read
     /// failures must remain distinguishable so callers cannot replace an
@@ -229,6 +260,9 @@ protocol ComputerUsePendingPromptStoring: Sendable {
     ) -> ComputerUsePendingPrompt?
     @discardableResult
     func save(_ pending: ComputerUsePendingPrompt) -> Bool
+    func replace(_ pending: ComputerUsePendingPrompt,
+                 expecting previous: ComputerUsePendingPrompt?) -> ComputerUsePendingPromptMutationResult
+    func remove(ifMatching previous: ComputerUsePendingPrompt) -> ComputerUsePendingPromptMutationResult
     func remove(hostID: String)
     func remove(
         hostID: String,
@@ -237,6 +271,39 @@ protocol ComputerUsePendingPromptStoring: Sendable {
 }
 
 extension ComputerUsePendingPromptStoring {
+    func replace(_ pending: ComputerUsePendingPrompt,
+                 expecting previous: ComputerUsePendingPrompt?) -> ComputerUsePendingPromptMutationResult {
+        ComputerUsePendingPromptAccess.serialized {
+            guard pending.hasCanonicalLocalAccountBinding, pending.hasValidQuestionRecovery,
+                  previous.map({ $0.hostID == pending.hostID && $0.localAccountBinding == pending.localAccountBinding }) ?? true else {
+                return .unavailable
+            }
+            do {
+                let current = try read(hostID: pending.hostID, pairingCode: previous?.pairingCode ?? pending.pairingCode,
+                    localAccountBinding: pending.localAccountBinding)
+                guard ComputerUsePendingPrompt.sameRecoveryState(current, previous) else { return .conflict }
+                return save(pending) ? .applied : .unavailable
+            } catch ComputerUsePendingPromptReadError.pairingChanged { return .conflict }
+            catch { return .unavailable }
+        }
+    }
+
+    func remove(ifMatching previous: ComputerUsePendingPrompt) -> ComputerUsePendingPromptMutationResult {
+        ComputerUsePendingPromptAccess.serialized {
+            do {
+                let current = try read(hostID: previous.hostID, pairingCode: previous.pairingCode,
+                    localAccountBinding: previous.localAccountBinding)
+                guard ComputerUsePendingPrompt.sameRecoveryState(current, previous) else { return .conflict }
+                remove(hostID: previous.hostID, localAccountBinding: previous.localAccountBinding)
+                // Alternate stores retain their void removal API. Require a
+                // successful read of absence before reporting retirement.
+                return try read(hostID: previous.hostID, pairingCode: previous.pairingCode,
+                    localAccountBinding: previous.localAccountBinding) == nil ? .applied : .unavailable
+            } catch ComputerUsePendingPromptReadError.pairingChanged { return .conflict }
+            catch { return .unavailable }
+        }
+    }
+
     func read(hostID: String, pairingCode: String,
               localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt? {
         load(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding)
@@ -364,6 +431,13 @@ final class ComputerUsePendingPromptStore:
         hostID: String,
         localAccountBinding: CloudKitAccountBinding?
     ) throws -> ComputerUsePendingPrompt? {
+        try ComputerUsePendingPromptAccess.serialized {
+            try readPendingUnlocked(hostID: hostID, localAccountBinding: localAccountBinding)
+        }
+    }
+
+    private func readPendingUnlocked(hostID: String,
+                                    localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt? {
         var query = baseQuery(
             hostID: hostID,
             localAccountBinding: localAccountBinding)
@@ -390,6 +464,10 @@ final class ComputerUsePendingPromptStore:
 
     @discardableResult
     func save(_ pending: ComputerUsePendingPrompt) -> Bool {
+        ComputerUsePendingPromptAccess.serialized { saveUnlocked(pending) }
+    }
+
+    private func saveUnlocked(_ pending: ComputerUsePendingPrompt) -> Bool {
         guard pending.hasCanonicalLocalAccountBinding, pending.hasValidQuestionRecovery else { return false }
         guard let data = try? JSONEncoder().encode(pending) else { return false }
         let query = baseQuery(
@@ -415,9 +493,23 @@ final class ComputerUsePendingPromptStore:
         hostID: String,
         localAccountBinding: CloudKitAccountBinding?
     ) {
-        _ = keychain.delete(baseQuery(
-            hostID: hostID,
-            localAccountBinding: localAccountBinding))
+        ComputerUsePendingPromptAccess.serialized {
+            _ = keychain.delete(baseQuery(hostID: hostID, localAccountBinding: localAccountBinding))
+        }
+    }
+
+    func remove(ifMatching previous: ComputerUsePendingPrompt) -> ComputerUsePendingPromptMutationResult {
+        ComputerUsePendingPromptAccess.serialized {
+            do {
+                let current = try read(hostID: previous.hostID, pairingCode: previous.pairingCode,
+                    localAccountBinding: previous.localAccountBinding)
+                guard ComputerUsePendingPrompt.sameRecoveryState(current, previous) else { return .conflict }
+                let status = keychain.delete(baseQuery(hostID: previous.hostID, localAccountBinding: previous.localAccountBinding))
+                if status == errSecSuccess { return .applied }
+                return status == errSecItemNotFound ? .conflict : .unavailable
+            } catch ComputerUsePendingPromptReadError.pairingChanged { return .conflict }
+            catch { return .unavailable }
+        }
     }
 
     private func baseQuery(

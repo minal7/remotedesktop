@@ -110,6 +110,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private let pairingCode: String
     private let sessionID: String
     private let pendingStore: any ComputerUsePendingPromptStoring
+    private var activePendingRecord: ComputerUsePendingPrompt?
     /// An unreadable initial record may own a different session ID. Only a
     /// newly authenticated connection may select that recovered session.
     private var requiresRecoveryReconnect = false
@@ -212,6 +213,7 @@ final class ComputerUseSessionModel: ObservableObject {
         }
 
         if let restored {
+            activePendingRecord = restored
             activePromptID = restored.messageID
             activePromptText = restored.prompt
             activePromptBody = restored.exactWireBody
@@ -491,7 +493,7 @@ final class ComputerUseSessionModel: ObservableObject {
         guard !requiresRecoveryReconnect, activePromptID == nil else { return false }
         if waitingQuestionRecord != nil, !requireWaitingQuestionOwnership() { return false }
         advanceStateGeneration()
-        clearQuestionRecovery(removingStoredRecord: true)
+        guard clearQuestionRecovery(removingStoredRecord: true) else { return false }
         resetComposerMode()
         latestTerminalOutcome = nil
         state = .ready
@@ -549,31 +551,30 @@ final class ComputerUseSessionModel: ObservableObject {
             return
         }
         let replacement = record.retainingQuestion(updated)
-        guard pendingStore.save(replacement) else { statusText = "Couldn’t securely save this draft for recovery."; return }
+        guard replaceRecoveryRecord(replacement, expecting: record) else { statusText = "Couldn’t securely save this draft for recovery."; return }
         waitingQuestionRecord = replacement
     }
 
-    private func clearQuestionRecovery(removingStoredRecord: Bool) {
-        if removingStoredRecord, waitingQuestionRecord != nil, ownsWaitingQuestionRecord() {
-            pendingStore.remove(hostID: hostID, localAccountBinding: localAccountBinding)
+    @discardableResult
+    private func clearQuestionRecovery(removingStoredRecord: Bool) -> Bool {
+        if removingStoredRecord, let record = waitingQuestionRecord {
+            if pendingStore.remove(ifMatching: record) == .unavailable {
+                statusText = "Couldn’t securely retire this question. Its saved recovery data has been kept."
+                return false
+            }
         }
         waitingQuestionRecord = nil; questionDraft = nil; questionProbeID = nil
         questionProbeSendTask?.cancel(); questionProbeSendTask = nil
         questionProbeTimeoutTask?.cancel(); questionProbeTimeoutTask = nil
         questionDraftSaveTask?.cancel(); questionDraftSaveTask = nil
-    }
-
-    private func ownsWaitingQuestionRecord() -> Bool {
-        (try? readWaitingQuestionOwnership()) == true
+        return true
     }
 
     private func readWaitingQuestionOwnership() throws -> Bool {
         guard let record = waitingQuestionRecord else { return false }
         guard let current = try pendingStore.read(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding),
-              current == record else { return false }
-        return Self.sameTextBytes(current.wireBody, record.wireBody) && Self.sameTextBytes(current.prompt, record.prompt)
-            && Self.sameTextBytes(current.question?.text, record.question?.text)
-            && Self.sameTextBytes(current.question?.draft, record.question?.draft)
+              ComputerUsePendingPrompt.sameRecoveryState(current, record) else { return false }
+        return true
     }
 
     private func requireWaitingQuestionOwnership() -> Bool {
@@ -655,7 +656,7 @@ final class ComputerUseSessionModel: ObservableObject {
         guard let updated = try? ComputerUsePendingQuestion(reference: question.reference, text: text, answerPolicy: result.answerPolicy,
             receivedAt: question.receivedAt, validUntil: question.validUntil, draft: questionDraft) else { return }
         let replacement = record.retainingQuestion(updated)
-        guard pendingStore.save(replacement) else {
+        guard replaceRecoveryRecord(replacement, expecting: record) else {
             questionProbeTimeoutTask?.cancel(); state = .error("Couldn’t securely restore this question.")
             statusText = "Couldn’t securely restore this question. Check again or start a new request."
             return
@@ -930,12 +931,27 @@ final class ComputerUseSessionModel: ObservableObject {
     private func launchOutboundTask(
         _ operation: @escaping @MainActor (ComputerUseSessionModel) async -> Void
     ) {
-        guard !isStopped else { return }
+        guard !isStopped, !requiresRecoveryReconnect else { return }
         let id = UUID()
+        let generation = stateGeneration, promptID = activePromptID
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.finishOutboundTask(id) }
-            guard !Task.isCancelled, !self.isStopped else { return }
+            guard !Task.isCancelled, !self.isStopped, !self.requiresRecoveryReconnect else { return }
+            guard self.isCurrentOperation(generation, promptID: promptID) else { return }
+            if let record = self.activePendingRecord {
+                do {
+                    let current = try self.pendingStore.read(hostID: self.hostID, pairingCode: self.pairingCode,
+                        localAccountBinding: self.localAccountBinding)
+                    guard ComputerUsePendingPrompt.sameRecoveryState(current, record) else {
+                        self.requireRecoveryReconnect("The saved request changed. Reconnect to recover the current request.")
+                        return
+                    }
+                } catch {
+                    self.requireRecoveryReconnect("Secure recovery data could not be read. Reconnect before continuing this request.")
+                    return
+                }
+            }
             await operation(self)
         }
         outboundTasks[id] = task
@@ -997,6 +1013,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private func handleControlPersistenceFailure(
         _ kind: ComputerUseEnvelope.Kind
     ) {
+        guard !requiresRecoveryReconnect else { return }
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         switch kind {
@@ -1025,6 +1042,7 @@ final class ComputerUseSessionModel: ObservableObject {
         promptID: String?
     ) -> Bool {
         !isStopped
+            && !requiresRecoveryReconnect
             && stateGeneration == generation
             && activePromptID == promptID
     }
@@ -1044,7 +1062,7 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     private func pollLoop() async {
-        while !Task.isCancelled, !isStopped {
+        while !Task.isCancelled, !isStopped, !requiresRecoveryReconnect {
             do {
                 let envelopes = try await channel.poll()
                 guard !Task.isCancelled, !isStopped else { return }
@@ -1053,6 +1071,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     restoreStatusText()
                 }
                 consume(envelopes)
+                guard !Task.isCancelled, !requiresRecoveryReconnect else { return }
                 try await channel.acknowledge(envelopes)
                 guard !Task.isCancelled, !isStopped else { return }
                 // Approval and completion often arrive back-to-back. Poll
@@ -1077,6 +1096,7 @@ final class ComputerUseSessionModel: ObservableObject {
 
     private func consume(_ envelopes: [ComputerUseEnvelope]) {
         for envelope in envelopes {
+            guard !requiresRecoveryReconnect else { return }
             switch envelope.kind {
             case .assistant:
                 let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body)
@@ -1125,7 +1145,8 @@ final class ComputerUseSessionModel: ObservableObject {
                         let record = ComputerUsePendingPrompt(hostID: hostID, pairingCode: pairingCode, sessionID: sessionID,
                             messageID: activePromptID, prompt: prompt, wireBody: wireBody, createdAt: createdAt,
                             localAccountBinding: localAccountBinding, clarificationValidUntil: activeClarificationValidUntil, question: question)
-                        guard record.hasValidQuestionRecovery, pendingStore.save(record) else {
+                        guard record.hasValidQuestionRecovery, let previous = activePendingRecord,
+                              replaceRecoveryRecord(record, expecting: previous) else {
                             state = .error("Couldn’t securely save this question.")
                             statusText = "Couldn’t securely save this question. Checking the original request again."
                             continue
@@ -1146,6 +1167,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     resetComposerMode()
                     latestTerminalOutcome = .userInterventionRequired; userInterventionGuidance = nil; state = .ready
                     clearActivePrompt(removingStoredRecord: savedQuestion == nil)
+                    guard !requiresRecoveryReconnect else { continue }
                     waitingQuestionRecord = savedQuestion; questionDraft = savedQuestion?.question?.draft
                     awaitClarification(retry.reference, answerPolicy: retry.answerPolicy, originalDeadline: recovery.deadline)
                     if case .answer = composerMode {
@@ -1491,6 +1513,7 @@ final class ComputerUseSessionModel: ObservableObject {
             userInterventionGuidance = nil
             hostControlPaused = false
             _ = persistActivePrompt()
+            guard !requiresRecoveryReconnect else { return }
             state = .working
             statusText = "Your Mac is working on it…"
             scheduleResponseTimeout()
@@ -1504,6 +1527,7 @@ final class ComputerUseSessionModel: ObservableObject {
             userInterventionGuidance = interventionGuidance
             hostControlPaused = true
             _ = persistActivePrompt()
+            guard !requiresRecoveryReconnect else { return }
             responseTimeoutTask?.cancel()
             responseTimeoutTask = nil
             state = .paused
@@ -1514,6 +1538,7 @@ final class ComputerUseSessionModel: ObservableObject {
             userInterventionGuidance = nil
             hostControlPaused = false
             _ = persistActivePrompt()
+            guard !requiresRecoveryReconnect else { return }
             if pendingControlIntent?.kind == .cancel,
                activePromptID != nil,
                activePromptBody != nil {
@@ -1594,6 +1619,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 : "Ready for another request"
         }
         clearActivePrompt(removingStoredRecord: savedQuestion == nil)
+        guard !requiresRecoveryReconnect else { return }
         waitingQuestionRecord = savedQuestion; questionDraft = savedQuestion?.question?.draft
         if let reference {
             awaitClarification(reference, answerPolicy: answerPolicy, originalDeadline: savedQuestion?.question?.validUntil)
@@ -1621,6 +1647,7 @@ final class ComputerUseSessionModel: ObservableObject {
         // an app relaunch because `stabilizeAuthoritativePause` has no newer
         // control to allocate.
         _ = persistActivePrompt()
+        guard !requiresRecoveryReconnect else { return }
         stabilizeAuthoritativePause()
     }
 
@@ -1745,7 +1772,7 @@ final class ComputerUseSessionModel: ObservableObject {
         createdAt: Date,
         clarificationValidUntil: Date? = nil
     ) -> Bool {
-        guard pendingStore.save(ComputerUsePendingPrompt(
+        let record = ComputerUsePendingPrompt(
             hostID: hostID,
             pairingCode: pairingCode,
             sessionID: sessionID,
@@ -1756,9 +1783,11 @@ final class ComputerUseSessionModel: ObservableObject {
             localAccountBinding: localAccountBinding,
             controlRevision: nil,
             lastControlKind: nil,
-            approvalDecision: nil, clarificationValidUntil: clarificationValidUntil)) else {
+            approvalDecision: nil, clarificationValidUntil: clarificationValidUntil)
+        guard replaceRecoveryRecord(record, expecting: waitingQuestionRecord ?? activePendingRecord) else {
             return false
         }
+        activePendingRecord = record
         activePromptID = messageID
         activePromptText = prompt
         activePromptBody = wireBody
@@ -1785,8 +1814,9 @@ final class ComputerUseSessionModel: ObservableObject {
         guard let messageID = activePromptID,
               let prompt = activePromptText,
               let wireBody = activePromptBody,
-              let createdAt = activePromptCreatedAt else { return false }
-        return pendingStore.save(ComputerUsePendingPrompt(
+              let createdAt = activePromptCreatedAt,
+              let previous = activePendingRecord else { return false }
+        let record = ComputerUsePendingPrompt(
             hostID: hostID,
             pairingCode: pairingCode,
             sessionID: sessionID,
@@ -1803,10 +1833,46 @@ final class ComputerUseSessionModel: ObservableObject {
             lastControlHostEpoch: lastControlHostEpoch,
             hostControlPaused: hostControlPaused,
             approvalDecision: approvalSubmission,
-            interventionGuidance: userInterventionGuidance, clarificationValidUntil: activeClarificationValidUntil))
+            interventionGuidance: userInterventionGuidance, clarificationValidUntil: activeClarificationValidUntil)
+        guard replaceRecoveryRecord(record, expecting: previous) else { return false }
+        activePendingRecord = record
+        return true
+    }
+
+    private func replaceRecoveryRecord(_ record: ComputerUsePendingPrompt,
+                                       expecting previous: ComputerUsePendingPrompt?) -> Bool {
+        switch pendingStore.replace(record, expecting: previous) {
+        case .applied: return true
+        case .conflict:
+            requireRecoveryReconnect("The saved request changed. Reconnect to recover the current request.")
+            return false
+        case .unavailable: return false
+        }
+    }
+
+    private func requireRecoveryReconnect(_ message: String) {
+        requiresRecoveryReconnect = true
+        isLiveScreenPrivacyShielded = true
+        advanceStateGeneration()
+        pollingTask?.cancel()
+        promptRefreshTask?.cancel(); controlRetryTask?.cancel(); responseTimeoutTask?.cancel()
+        questionProbeSendTask?.cancel(); questionProbeTimeoutTask?.cancel(); questionDraftSaveTask?.cancel()
+        questionProbeID = nil
+        for task in outboundTasks.values { task.cancel() }
+        state = .error(message); statusText = message
     }
 
     private func clearActivePrompt(removingStoredRecord: Bool = true) {
+        if removingStoredRecord, let previous = activePendingRecord {
+            switch pendingStore.remove(ifMatching: previous) {
+            case .applied: break
+            case .conflict:
+                requireRecoveryReconnect("The saved request changed. Reconnect to recover the current request.")
+            case .unavailable:
+                requireRecoveryReconnect("The task ended, but its saved recovery data could not be removed. Reconnect before sending another request.")
+            }
+        }
+        activePendingRecord = nil
         activePromptID = nil
         activePromptText = nil
         activePromptBody = nil
@@ -1830,9 +1896,6 @@ final class ComputerUseSessionModel: ObservableObject {
         promptRefreshTask = nil
         controlRetryTask?.cancel()
         controlRetryTask = nil
-        if removingStoredRecord {
-            pendingStore.remove(hostID: hostID, localAccountBinding: localAccountBinding)
-        }
     }
 
     private func startPromptRefresh(resendImmediately: Bool) {

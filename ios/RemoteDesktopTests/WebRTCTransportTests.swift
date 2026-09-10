@@ -111,6 +111,33 @@ final class WebRTCTransportTests: XCTestCase {
         }
     }
 
+    func test_localRecoveryConditionalRebindCannotOverwriteARecordChangedAfterTheFinalLookup() async throws {
+        let original = ComputerUsePendingPrompt(hostID: "HOST-B", pairingCode: "654321", sessionID: "saved-session",
+            messageID: "saved-task", prompt: "Find concerts.", createdAt: Date(), localAccountBinding: accountBinding)
+        let newer = ComputerUsePendingPrompt(hostID: original.hostID, pairingCode: original.pairingCode, sessionID: original.sessionID,
+            messageID: "newer-task", prompt: "Find movies.", createdAt: Date(), localAccountBinding: accountBinding)
+        let store = HandshakeRecoveryStore(before: original, after: .success(original), replaceOnConditionalRead: newer)
+        let channel = IdleComputerUseSessionChannel()
+        let unexpectedTransport = RecordingTargetTransport(connected: XCTestExpectation(description: "unexpected visual connection"))
+        let model = SessionModel(
+            computerUseVisualTransportFactory: { XCTFail("No visual connection after a recovery ownership conflict"); return unexpectedTransport },
+            localAccountBindingValidator: { _ in },
+            localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
+            localPendingStore: store, accountChangeNotificationCenter: NotificationCenter())
+        defer { model.disconnect() }
+        model.connect(code: "123456", experience: .computerUse, computerUseHostID: original.hostID, hostName: "Mac",
+            localComputerUseEndpoint: LocalComputerUseEndpoint(host: "127.0.0.1", port: 443),
+            localCredentialID: String(repeating: "b", count: 64), localCloudAccountBinding: accountBinding)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.error == nil {
+            guard ContinuousClock.now < deadline else { return XCTFail("A conflicting rebind must stop recovery") }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(model.state, .idle); XCTAssertNil(model.computerUseSession)
+        XCTAssertEqual(store.snapshot, newer); XCTAssertEqual(store.writeCount, 0)
+        XCTAssertTrue(model.error?.contains("could not be saved safely") == true)
+    }
+
     func test_remoteSessionOfferRequestsReceiveOnlyVideoAndHostAudio()
         async throws {
         let channel = FakeWebRTCSignalingChannel()
@@ -777,10 +804,13 @@ private final class HandshakeRecoveryStore: ComputerUsePendingPromptStoring, @un
     private let before: ComputerUsePendingPrompt
     private let after: Result<ComputerUsePendingPrompt?, ComputerUsePendingPromptReadError>
     private var current: ComputerUsePendingPrompt?
+    private var replaceOnConditionalRead: ComputerUsePendingPrompt?
     private var reads = 0
     private var writes = 0
-    init(before: ComputerUsePendingPrompt, after: Result<ComputerUsePendingPrompt?, ComputerUsePendingPromptReadError>) {
+    init(before: ComputerUsePendingPrompt, after: Result<ComputerUsePendingPrompt?, ComputerUsePendingPromptReadError>,
+         replaceOnConditionalRead: ComputerUsePendingPrompt? = nil) {
         self.before = before; self.after = after; self.current = before
+        self.replaceOnConditionalRead = replaceOnConditionalRead
     }
     var readCount: Int { lock.lock(); defer { lock.unlock() }; return reads }
     var writeCount: Int { lock.lock(); defer { lock.unlock() }; return writes }
@@ -794,6 +824,10 @@ private final class HandshakeRecoveryStore: ComputerUsePendingPromptStoring, @un
     }
     func load(hostID: String, pairingCode: String) -> ComputerUsePendingPrompt? {
         lock.lock(); defer { lock.unlock() }
+        if let replaceOnConditionalRead {
+            current = replaceOnConditionalRead
+            self.replaceOnConditionalRead = nil
+        }
         guard current?.hostID == hostID, current?.pairingCode == pairingCode else { return nil }
         return current
     }

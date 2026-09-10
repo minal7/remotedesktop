@@ -4,6 +4,143 @@ import Security
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testConditionalRecoveryWritesAcrossStoreInstancesHaveOneWinnerAndPreserveExactUnicode() async throws {
+        let keychain = ClarificationKeychainFixture()
+        let first = ComputerUsePendingPromptStore(service: "fixture", keychain: keychain)
+        let second = ComputerUsePendingPromptStore(service: "fixture", keychain: keychain)
+        let original = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "session-1",
+            messageID: "task-1", prompt: "Find tickets.", createdAt: Date())
+        XCTAssertEqual(first.replace(original, expecting: nil), .applied)
+        let precomposed = ComputerUsePendingPrompt(hostID: original.hostID, pairingCode: original.pairingCode,
+            sessionID: original.sessionID, messageID: original.messageID, prompt: "Find é tickets.", createdAt: original.createdAt)
+        let decomposed = ComputerUsePendingPrompt(hostID: original.hostID, pairingCode: original.pairingCode,
+            sessionID: original.sessionID, messageID: original.messageID, prompt: "Find e\u{301} tickets.", createdAt: original.createdAt)
+        XCTAssertEqual(precomposed, decomposed)
+        XCTAssertFalse(ComputerUsePendingPrompt.sameRecoveryState(precomposed, decomposed))
+        let a = Task.detached { first.replace(precomposed, expecting: original) }
+        let b = Task.detached { second.replace(decomposed, expecting: original) }
+        let outcomes = [await a.value, await b.value]
+        XCTAssertEqual(outcomes.filter { $0 == .applied }.count, 1)
+        XCTAssertEqual(outcomes.filter { $0 == .conflict }.count, 1)
+        let winner = try XCTUnwrap(first.read(hostID: original.hostID, pairingCode: original.pairingCode, localAccountBinding: nil))
+        let loser = ComputerUsePendingPrompt.sameRecoveryState(winner, precomposed) ? decomposed : precomposed
+        let before = keychain.snapshot, mutations = keychain.mutationCount
+        XCTAssertEqual(second.replace(original, expecting: loser), .conflict)
+        XCTAssertEqual(second.remove(ifMatching: loser), .conflict)
+        XCTAssertEqual(first.remove(ifMatching: original), .conflict)
+        XCTAssertEqual(first.replace(original, expecting: nil), .conflict)
+        XCTAssertEqual(keychain.snapshot, before); XCTAssertEqual(keychain.mutationCount, mutations)
+        XCTAssertEqual(second.remove(ifMatching: winner), .applied)
+        XCTAssertNil(try first.read(hostID: original.hostID, pairingCode: original.pairingCode, localAccountBinding: nil))
+    }
+
+    func testConditionalRecoveryMutationFailuresDoNotEraseOrReplaceTheOwnedRecord() throws {
+        let keychain = ClarificationKeychainFixture()
+        let observedStore = ComputerUsePendingPromptStore(service: "observed", keychain: keychain)
+        let record = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "session-1",
+            messageID: "task-1", prompt: "Find tickets.", createdAt: Date())
+        XCTAssertEqual(observedStore.replace(record, expecting: nil), .applied)
+        let bytes = keychain.snapshot
+        keychain.readStatus = errSecInteractionNotAllowed
+        XCTAssertEqual(observedStore.replace(record.rebindingPairingCode("654321"), expecting: record), .unavailable)
+        XCTAssertEqual(observedStore.remove(ifMatching: record), .unavailable)
+        keychain.readStatus = nil; keychain.updateStatus = errSecNotAvailable
+        XCTAssertEqual(observedStore.replace(record.rebindingPairingCode("654321"), expecting: record), .unavailable)
+        XCTAssertEqual(keychain.snapshot, bytes)
+        keychain.updateStatus = nil; keychain.deleteStatus = errSecInteractionNotAllowed
+        XCTAssertEqual(observedStore.remove(ifMatching: record), .unavailable)
+        XCTAssertEqual(keychain.snapshot, bytes)
+        keychain.deleteStatus = nil
+        XCTAssertEqual(observedStore.replace(record.rebindingPairingCode("654321"), expecting: record), .applied)
+        let reboundBytes = keychain.snapshot
+        XCTAssertEqual(observedStore.replace(record, expecting: record), .conflict)
+        XCTAssertEqual(observedStore.remove(ifMatching: record), .conflict)
+        XCTAssertEqual(keychain.snapshot, reboundBytes)
+        XCTAssertEqual(observedStore.remove(ifMatching: record.rebindingPairingCode("654321")), .applied)
+        XCTAssertNil(keychain.snapshot)
+        XCTAssertEqual(observedStore.remove(ifMatching: record), .conflict)
+    }
+
+    func testStaleActiveClientCannotReplaceOrDeleteANewerTaskThroughRepliesControlsOrRefresh() async throws {
+        for action in ["terminal", "question", "pause", "resume", "approval", "refresh"] {
+            let fixture = ClarificationClientFixture()
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+            let root = try await fixture.channel.prompt(at: 0)
+            let approval = ComputerUseApprovalRequest(taskID: root.id, message: "Approve the original action?")
+            if action == "approval" {
+                await fixture.channel.deliver(try approval.encodedBody(), kind: .approvalRequest)
+                try await fixture.channel.waitForDelivery()
+            }
+            if action == "refresh" { fixture.model.stop() }
+            let newer = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "other-session",
+                messageID: "other-task", prompt: "Find movie tickets.", createdAt: Date())
+            XCTAssertTrue(fixture.store.save(newer))
+            switch action {
+            case "terminal":
+                await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "Done.", outcome: .taskCompleted).encodedBody())
+            case "question":
+                let ref = try ComputerUseClarificationReference(taskID: root.id, expiresAt: Date().addingTimeInterval(300))
+                await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "Which city?", outcome: .userInterventionRequired,
+                    clarification: ref, supportsClarificationRecovery: true).encodedBody())
+            case "pause": fixture.model.takeControl()
+            case "resume": fixture.model.resumeAI()
+            case "approval": fixture.model.respondToApproval(approval, approved: true)
+            default: fixture.model.start()
+            }
+            try await fixture.wait { fixture.model.promptValidationMessage("New task")?.contains("reconnect") == true }
+            XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), newer, action)
+            XCTAssertFalse(fixture.model.sendPrompt("Replace it")); XCTAssertFalse(fixture.model.startNewRequest())
+            let count = await fixture.channel.sentCount(); XCTAssertEqual(count, 1, action)
+        }
+    }
+
+    func testQuestionRetirementFailureKeepsItsRecoveryUntilExplicitRetrySucceeds() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let reference = try await fixture.question(for: root, supportsRecovery: true)
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        fixture.store.permitsRemove = false
+        XCTAssertFalse(fixture.model.startNewRequest())
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        guard case .answer(let retained, _) = fixture.model.composerMode else { return XCTFail("Keep the question when retirement fails") }
+        XCTAssertEqual(retained, reference)
+        fixture.store.permitsRemove = true
+        XCTAssertTrue(fixture.model.startNewRequest())
+        XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertTrue(fixture.model.sendPrompt("Find movies."))
+        _ = try await fixture.channel.prompt(at: 1)
+    }
+
+    func testTerminalRetirementFailureRequiresRecoveryWithTheOriginalTaskIdentity() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        fixture.store.permitsRemove = false
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "Done.", outcome: .taskCompleted).encodedBody())
+        try await fixture.wait { !fixture.model.hasActivePrompt }
+        XCTAssertEqual(fixture.model.latestTerminalOutcome, .taskCompleted)
+        XCTAssertFalse(fixture.model.sendPrompt("Another task"))
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        fixture.model.stop(); fixture.store.permitsRemove = true
+        let channel = ClarificationClientChannel()
+        let recovered = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+            pendingStore: fixture.store, channel: channel)
+        defer { recovered.stop() }
+        recovered.start()
+        let replay = try await channel.prompt(at: 0)
+        XCTAssertEqual(replay.id, root.id); XCTAssertTrue(replay.body.utf8.elementsEqual(root.body.utf8))
+        await channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: "Done.", outcome: .taskCompleted).encodedBody())
+        try await channel.waitForDelivery()
+        XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertTrue(recovered.sendPrompt("Another task"))
+        _ = try await channel.prompt(at: 1)
+    }
+
     func testSecureStoreReadFailuresAndInvalidRecordsNeverDeleteRecoveryData() throws {
         let keychain = ClarificationKeychainFixture()
         let store = ComputerUsePendingPromptStore(service: "fixture", keychain: keychain)
@@ -1021,6 +1158,11 @@ private final class ClarificationClientStore: ComputerUsePendingPromptStoring, @
     private var saved: ComputerUsePendingPrompt?
     private var allowsSave = true
     private var allowsRead = true
+    private var allowsRemove = true
+    var permitsRemove: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return allowsRemove }
+        set { lock.lock(); defer { lock.unlock() }; allowsRemove = newValue }
+    }
     var permitsRead: Bool {
         get { lock.lock(); defer { lock.unlock() }; return allowsRead }
         set { lock.lock(); defer { lock.unlock() }; allowsRead = newValue }
@@ -1044,7 +1186,7 @@ private final class ClarificationClientStore: ComputerUsePendingPromptStoring, @
     }
     func remove(hostID: String) {
         lock.lock(); defer { lock.unlock() }
-        if saved?.hostID == hostID { saved = nil }
+        if allowsRemove, saved?.hostID == hostID { saved = nil }
     }
 }
 
@@ -1052,6 +1194,8 @@ private final class ClarificationKeychainFixture: ComputerUsePendingPromptKeycha
     private let lock = NSLock()
     private var data: Data?
     private var status: OSStatus?
+    private var updateFailure: OSStatus?
+    private var deleteFailure: OSStatus?
     private var mutations = 0
     var snapshot: Data? {
         get { lock.lock(); defer { lock.unlock() }; return data }
@@ -1061,6 +1205,14 @@ private final class ClarificationKeychainFixture: ComputerUsePendingPromptKeycha
         get { lock.lock(); defer { lock.unlock() }; return status }
         set { lock.lock(); defer { lock.unlock() }; status = newValue }
     }
+    var updateStatus: OSStatus? {
+        get { lock.lock(); defer { lock.unlock() }; return updateFailure }
+        set { lock.lock(); defer { lock.unlock() }; updateFailure = newValue }
+    }
+    var deleteStatus: OSStatus? {
+        get { lock.lock(); defer { lock.unlock() }; return deleteFailure }
+        set { lock.lock(); defer { lock.unlock() }; deleteFailure = newValue }
+    }
     var mutationCount: Int { lock.lock(); defer { lock.unlock() }; return mutations }
     func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
         lock.lock(); defer { lock.unlock() }
@@ -1069,6 +1221,7 @@ private final class ClarificationKeychainFixture: ComputerUsePendingPromptKeycha
     func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
         mutations += 1
+        if let updateFailure { return updateFailure }
         guard data != nil else { return errSecItemNotFound }
         data = attributes[kSecValueData as String] as? Data
         return errSecSuccess
@@ -1080,7 +1233,9 @@ private final class ClarificationKeychainFixture: ComputerUsePendingPromptKeycha
     }
     func delete(_ query: [String: Any]) -> OSStatus {
         lock.lock(); defer { lock.unlock() }
-        mutations += 1; data = nil
+        mutations += 1
+        if let deleteFailure { return deleteFailure }
+        data = nil
         return errSecSuccess
     }
 }

@@ -1,0 +1,18 @@
+{
+  "selectors": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testConditionalRecoveryMutationFailuresDoNotEraseOrReplaceTheOwnedRecord",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testConditionalRecoveryWritesAcrossStoreInstancesHaveOneWinnerAndPreserveExactUnicode",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testQuestionRetirementFailureKeepsItsRecoveryUntilExplicitRetrySucceeds",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testStaleActiveClientCannotReplaceOrDeleteANewerTaskThroughRepliesControlsOrRefresh",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testTerminalRetirementFailureRequiresRecoveryWithTheOriginalTaskIdentity",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryConditionalRebindCannotOverwriteARecordChangedAfterTheFinalLookup"
+  ],
+  "expectedTests": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testConditionalRecoveryMutationFailuresDoNotEraseOrReplaceTheOwnedRecord",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testConditionalRecoveryWritesAcrossStoreInstancesHaveOneWinnerAndPreserveExactUnicode",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testQuestionRetirementFailureKeepsItsRecoveryUntilExplicitRetrySucceeds",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testStaleActiveClientCannotReplaceOrDeleteANewerTaskThroughRepliesControlsOrRefresh",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testTerminalRetirementFailureRequiresRecoveryWithTheOriginalTaskIdentity",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryConditionalRebindCannotOverwriteARecordChangedAfterTheFinalLookup"
+  ]
+}

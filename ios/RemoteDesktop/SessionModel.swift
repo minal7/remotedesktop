@@ -460,7 +460,7 @@ final class SessionModel: ObservableObject {
                 if let currentRecovery,
                    currentRecovery.pairingCode != code {
                     let rebound = currentRecovery.rebindingPairingCode(code)
-                    guard pendingStore.save(rebound) else {
+                    guard pendingStore.replace(rebound, expecting: currentRecovery) == .applied else {
                         throw SignalingError.transport(
                             "The recovered AI task could not be saved safely. No task was resent.")
                     }

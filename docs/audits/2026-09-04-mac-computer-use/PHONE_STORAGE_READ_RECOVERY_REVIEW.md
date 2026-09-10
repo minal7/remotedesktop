@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows [saved phone question recovery](PHONE_QUESTION_RECOVERY_REVIEW.md). No build, typecheck, assertion/test run, app/browser launch, model invocation, account login or SSH attempt occurred.
 
+Follow-up: [conditional recovery mutation](PHONE_STORAGE_MUTATION_REVIEW.md) binds writes and retirement to the owned record across cooperating app-process store instances, reports deletion failure and conditions reconnect rebinding. Cross-process coordination remains open. Counts below describe this read-recovery checkpoint.
+
 ## First-principles findings
 
 A failed lookup is not evidence that no task exists. The previous production Keychain loader grouped a non-successful `SecItemCopyMatching` result with malformed, mismatched and expired records, then called `remove(hostID:localAccountBinding:)`. A temporary read failure could therefore cause deletion of the recovery entry. The same nil return told the session model and local connection coordinator that they could start without a previous task. This threatened pending prompt identity, exact answer bytes, saved questions, control intent and approval recovery.
