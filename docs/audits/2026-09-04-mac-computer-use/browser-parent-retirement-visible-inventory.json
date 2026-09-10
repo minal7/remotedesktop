@@ -1,0 +1,10 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testNativeWindowCleanupRejectsMidwayClaimsAndCoalescesNestedClose",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testUserParentWindowCloseNotifiesItsDisplayedControlOnceAfterRetirement"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testNativeWindowCleanupRejectsMidwayClaimsAndCoalescesNestedClose",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testUserParentWindowCloseNotifiesItsDisplayedControlOnceAfterRetirement"
+  ]
+}

@@ -6,6 +6,123 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testParentCloseStatusCannotReleaseAReplacementSession() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let original = try browser.prepareWorkflowSession(taskID: "original")
+        var replaced = false
+        var replacement: ComputerUseBrowserHandbackRequirement?
+        let subscription = browser.$detail.sink { status in
+            guard status == "Stopped", !replaced else { return }
+            replaced = true
+            do { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
+            catch { XCTFail("Native cleanup must finish before final status can admit a replacement: \(error)") }
+        }
+        defer { subscription.cancel() }
+        browser.close()
+        let current = try XCTUnwrap(replacement)
+        XCTAssertNotEqual(current.sessionID, original.sessionID)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+        XCTAssertTrue(try browser.isUnnavigatedSession(current))
+        let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testParentRetirementCannotOfferHandbackOrEraseReplacementFromChildPublication() async throws {
+        for close in [false, true] {
+            for replace in [false, true] {
+                let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                    "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/ready');</script>")])
+                let base = try await server.start()
+                defer { server.stop() }
+                var allowed = true, observedRetirement = false, details: [String] = []
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+                defer { browser.close() }
+                _ = try browser.prepareWorkflowSession(taskID: "parent")
+                _ = try await browser.navigate(taskID: "parent", operationID: "login", to: base.appendingPathComponent("login"))
+                try await waitUntil { server.count("/signal") == 1 }
+                allowed = false
+                browser.updateTaskControls(.init(taskID: "parent", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true), handler: { _, _ in })
+                server.releaseHeldResponses()
+                try await waitUntil { browser.hasOpenSignInWindow && server.count("/ready") == 1 }
+                var replacement: ComputerUseBrowserHandbackRequirement?
+                let detailSubscription = browser.$detail.sink { details.append($0) }
+                let subscription = browser.$signInSite.dropFirst().sink { site in
+                    guard site == nil, !observedRetirement else { return }
+                    observedRetirement = true
+                    XCTAssertNil(browser.taskID, "Parent authority must retire before child-clear publication")
+                    XCTAssertFalse(browser.hasOpenSignInWindow)
+                    if replace {
+                        allowed = true
+                        do { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
+                        catch { XCTFail("Replacement admission follows native cleanup: \(error)") }
+                    }
+                }
+                defer { subscription.cancel(); detailSubscription.cancel() }
+                if close { browser.close() } else { browser.stop() }
+                XCTAssertTrue(observedRetirement)
+                XCTAssertFalse(details.contains { $0.hasPrefix("Sign-in window closed") }, "A cancelled parent must not offer child handback")
+                allowed = true
+                if replace {
+                    XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), try XCTUnwrap(replacement))
+                    XCTAssertEqual(browser.taskID, "replacement")
+                } else {
+                    XCTAssertNil(browser.taskID)
+                    XCTAssertEqual(browser.hasSession, !close)
+                    XCTAssertEqual(browser.detail, "Stopped")
+                    _ = try browser.prepareWorkflowSession(taskID: "replacement")
+                }
+                let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+                XCTAssertTrue(browser.validate(next))
+                XCTAssertEqual(server.count("/login"), 1); XCTAssertEqual(server.count("/provider"), 1); XCTAssertEqual(server.count("/next"), 1)
+            }
+        }
+    }
+
+    func testParentStopKeepsDispatchedDOMOccupiedUntilCallbackOrClose() async throws {
+        for close in [false, true] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            var stopped = false
+            weak var owner: ComputerUseOwnedBrowser?
+            var replacement: ComputerUseBrowserHandbackRequirement?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+                guard command == .pageSnapshot, !stopped, let owner else { return }
+                stopped = true
+                owner.stop()
+                XCTAssertThrowsError(try owner.claim(taskID: "replacement")) {
+                    XCTAssertEqual($0 as? ComputerUseBrowserError, .busy, "Stop cannot release an unfinished native DOM slot")
+                }
+                if close {
+                    owner.close()
+                    do { replacement = try owner.prepareWorkflowSession(taskID: "replacement") }
+                    catch { XCTFail("Close must release only the old browser's slot: \(error)") }
+                }
+            }, mayAct: { true })
+            owner = browser
+            defer { browser.close() }
+            let original = try browser.prepareWorkflowSession(taskID: "original")
+            let document = try await browser.navigate(taskID: "original", operationID: "page", to: base.appendingPathComponent("page"))
+            do { _ = try await browser.observePage(document: document); XCTFail("Stopped DOM work cannot return a current result") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            XCTAssertTrue(stopped)
+            await browser.joinDOMCompletion(document: document)
+            if !close { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
+            let current = try XCTUnwrap(replacement)
+            if close { XCTAssertNotEqual(current.sessionID, original.sessionID) }
+            else { XCTAssertEqual(current.sessionID, original.sessionID) }
+            XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+            let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+            XCTAssertTrue(browser.validate(next))
+            XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/next"), 1)
+        }
+    }
+
     func testSignInCreationPublicationCannotReturnARetiredChild() async throws {
         for publication in ["site", "detail"] {
             for ending in ["child", "owner"] {
@@ -2803,6 +2920,92 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
 @MainActor
 final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
+    func testUserParentWindowCloseNotifiesItsDisplayedControlOnceAfterRetirement() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: closes a local fixture window through AppKit")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "user-close")
+        _ = try await browser.navigate(taskID: "user-close", operationID: "page", to: base)
+        let parent = try XCTUnwrap(NSApp.windows.first { $0.title == "AI Browser — Remote Desktop" && $0.isVisible })
+        let controls = ComputerUseBrowserTaskControls(taskID: "user-close", scopeID: UUID(), presentationID: UUID(), phase: .working, canResume: false)
+        var requests: [ComputerUseBrowserTaskControls.Action] = []
+        browser.updateTaskControls(controls, handler: { [weak browser] displayed, action in
+            guard let browser else { return XCTFail("Missing retiring browser") }
+            XCTAssertEqual(displayed, controls)
+            requests.append(action)
+            XCTAssertNil(browser.taskID); XCTAssertFalse(browser.hasSession)
+            XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+            browser.close(); browser.stop()
+        })
+        parent.performClose(nil)
+        XCTAssertEqual(requests, [.stop])
+        XCTAssertFalse(parent.isVisible); XCTAssertNil(parent.contentView)
+        XCTAssertEqual(browser.detail, "Closed")
+        let replacement = try browser.prepareWorkflowSession(taskID: "replacement")
+        XCTAssertTrue(try browser.isUnnavigatedSession(replacement))
+        XCTAssertEqual(server.count("/"), 1)
+    }
+
+    func testNativeWindowCleanupRejectsMidwayClaimsAndCoalescesNestedClose() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: presents local fixture windows and exercises native close notifications")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for withChild in [false, true] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: withChild
+                ? "<script>fetch('/signal').then(() => window.open('/provider'));</script>" : "<p>Parent fixture</p>"),
+                "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/ready');</script>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "native-close")
+            _ = try await browser.navigate(taskID: "native-close", operationID: "login", to: base.appendingPathComponent("login"))
+            let parent = try XCTUnwrap(NSApp.windows.first { $0.title == "AI Browser — Remote Desktop" && $0.isVisible })
+            var child: NSWindow?
+            if withChild {
+                let deadline = ContinuousClock.now + .seconds(5)
+                while server.count("/signal") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/signal"), 1)
+                allowed = false
+                browser.updateTaskControls(.init(taskID: "native-close", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true), handler: { _, _ in
+                    XCTFail("Programmatic retirement must not invent a user window-close command")
+                })
+                server.releaseHeldResponses()
+                while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/ready"), 1)
+                child = try XCTUnwrap(NSApp.windows.first { $0.title == "Sign-in window — AI Browser" && $0.isVisible })
+            }
+            var notifications = 0
+            let subscription = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: child ?? parent).sink { _ in
+                notifications += 1
+                XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+                browser.close() // Upgrades an in-progress parent Stop when the child is closing.
+                browser.stop()
+            }
+            defer { subscription.cancel() }
+            if withChild { browser.stop() } else { browser.close() }
+            XCTAssertEqual(notifications, 1)
+            XCTAssertFalse(parent.isVisible); XCTAssertNil(parent.contentView)
+            if let child { XCTAssertFalse(child.isVisible); XCTAssertNil(child.contentView) }
+            XCTAssertFalse(browser.hasSession); XCTAssertFalse(browser.hasOpenSignInWindow); XCTAssertNil(browser.taskID)
+            allowed = true
+            let replacement = try browser.prepareWorkflowSession(taskID: "replacement")
+            XCTAssertTrue(try browser.isUnnavigatedSession(replacement), "The native cleanup barrier must end before future admission")
+        }
+    }
+
     func testSignedHostOwnsVisibleSignInWindowAndClosingItPreservesThePausedParent() async throws {
         guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: presents only local fixture browser and sign-in windows")
