@@ -3837,9 +3837,10 @@ final class ComputerUseTests: XCTestCase {
     func test_inputInjectorReleasesHeldRemoteInputWhenVisualTransportEnds() {
         let events = CapturedCGEventStore()
         let injector = InputInjector(eventPoster: { events.append($0) })
+        let inputSession = injector.beginDirectInputSession()
 
-        injector.applyDirectInput(.pointer(x: 80, y: 90, buttons: 1)) { false }
-        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0)) { false }
+        injector.applyDirectInput(.pointer(x: 80, y: 90, buttons: 1), session: inputSession) { false }
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: inputSession) { false }
         injector.releaseHeldInput()
 
         XCTAssertEqual(injector.admitAutomation { true }, .admitted)
@@ -6463,13 +6464,218 @@ final class ComputerUseTests: XCTestCase {
     }
 
     private func injectManualInput(_ message: ControlMessage, injector: InputInjector,
-        manager: HostComputerUseManager) -> ComputerUseActionGate.InputIntervention? {
+        inputSession: InputInjector.DirectInputSession, manager: HostComputerUseManager) -> ComputerUseActionGate.InputIntervention? {
         var receipt: ComputerUseActionGate.InputIntervention?
-        injector.applyDirectInput(message) {
+        injector.applyDirectInput(message, session: inputSession) {
             receipt = manager.recordUserInputInInjectionTransaction()
             return receipt != nil
         }
         return receipt
+    }
+
+    func testWebRTCDeauthorizationCannotReleaseInputAfterOwnerReplacement() {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let fence = ComputerUseWebRTCAuthorizationFence()
+        fence.set(senderID: "IOS-PEER", generation: 1)
+        let old = injector.beginDirectInputSession()
+        injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: old) { false }
+        let cleanupEntered = DispatchSemaphore(value: 0), finishCleanup = DispatchSemaphore(value: 0)
+        let replacementAttempted = DispatchSemaphore(value: 0), replacementFinished = DispatchSemaphore(value: 0)
+        let cleanupFinished = DispatchSemaphore(value: 0)
+        defer { finishCleanup.signal() }
+        DispatchQueue.global().async {
+            XCTAssertTrue(fence.performIfOwned(senderID: "IOS-PEER", generation: 1) {
+                cleanupEntered.signal()
+                guard finishCleanup.wait(timeout: .now() + 3) == .success else {
+                    XCTFail("The fixture must release old cleanup"); return false
+                }
+                injector.releaseHeldInput()
+                return true
+            })
+            cleanupFinished.signal()
+        }
+        guard cleanupEntered.wait(timeout: .now() + 3) == .success else {
+            return XCTFail("Old cleanup must enter before replacement")
+        }
+        DispatchQueue.global().async {
+            replacementAttempted.signal()
+            fence.set(senderID: "IOS-PEER", generation: 2)
+            let current = injector.beginDirectInputSession()
+            injector.applyDirectInput(.pointer(x: 40, y: 50, buttons: 1), session: current) { false }
+            replacementFinished.signal()
+        }
+        XCTAssertEqual(replacementAttempted.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(replacementFinished.wait(timeout: .now() + 0.05), .timedOut,
+            "Replacement must wait for the checked cleanup to finish")
+        finishCleanup.signal()
+        XCTAssertEqual(cleanupFinished.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(replacementFinished.wait(timeout: .now() + 3), .success)
+        let posted = events.values()
+        XCTAssertEqual(posted.filter { $0.type == .keyUp }.count, 1)
+        XCTAssertEqual(posted.filter { $0.type == .leftMouseDown }.count, 1)
+        XCTAssertFalse(posted.contains { $0.type == .leftMouseUp })
+        XCTAssertFalse(fence.performIfOwned(senderID: "IOS-PEER", generation: 1) {
+            XCTFail("Stale cleanup cannot run against replacement input"); injector.releaseHeldInput(); return true
+        })
+        XCTAssertEqual(events.values().count, posted.count)
+        XCTAssertEqual(injector.admitAutomation { true }, .inputHeld)
+        injector.releaseHeldInput()
+    }
+
+    func testDirectInputAuthorizationRequiresHelloAndConnectionAndRenewsOnReconnect() throws {
+        for helloFirst in [false, true] {
+            let injector = InputInjector(eventPoster: { _ in XCTFail("Authorization cannot post input") })
+            let states = PeerInputStateProbe()
+            let authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+            let channel = NSObject(), channelID = ObjectIdentifier(channel)
+            XCTAssertNil(authority.inputSession(for: channelID))
+            XCTAssertTrue(authority.openChannel(channelID))
+            if helloFirst { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1)) }
+            else { XCTAssertTrue(authority.connectionChanged(connected: true)) }
+            XCTAssertNil(authority.inputSession(for: channelID))
+            XCTAssertTrue(states.values().isEmpty, "An incomplete initial handshake must not report a control loss")
+            if helloFirst { XCTAssertTrue(authority.connectionChanged(connected: true)) }
+            else { XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 1)) }
+            let first = try XCTUnwrap(authority.inputSession(for: channelID))
+            XCTAssertEqual(states.values().last, .init(authorized: true, orderedComputerUseControls: 1))
+            XCTAssertTrue(authority.acceptHello(channel: channelID, orderedControls: 0))
+            XCTAssertEqual(authority.inputSession(for: channelID), first, "Repeated hello cannot replace a held input lifetime")
+            XCTAssertEqual(states.values().last, .init(authorized: true, orderedComputerUseControls: 0))
+            XCTAssertTrue(authority.connectionChanged(connected: false))
+            XCTAssertNil(authority.inputSession(for: channelID))
+            XCTAssertFalse(injector.applyDirectInput(.text("stale"), session: first) { XCTFail("Revoked packets cannot interrupt AI"); return false })
+            XCTAssertEqual(states.values().last, .init(authorized: false, orderedComputerUseControls: 0))
+            XCTAssertTrue(authority.connectionChanged(connected: true))
+            let resumed = try XCTUnwrap(authority.inputSession(for: channelID))
+            XCTAssertNotEqual(resumed, first)
+            XCTAssertFalse(injector.applyDirectInput(.text("stale retry"), session: first) { XCTFail("Reconnect cannot reauthorize an old packet"); return false })
+            authority.close()
+            XCTAssertFalse(authority.connectionChanged(connected: true))
+            XCTAssertFalse(authority.acceptHello(channel: channelID, orderedControls: 1))
+            XCTAssertFalse(authority.openChannel(channelID))
+            XCTAssertNil(authority.inputSession(for: channelID))
+        }
+    }
+
+    func testDirectInputChannelReplacementRejectsForeignAndLateCallbacks() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let first = NSObject(), second = NSObject()
+        let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
+        XCTAssertTrue(authority.connectionChanged(connected: true))
+        XCTAssertTrue(authority.openChannel(firstID)); XCTAssertTrue(authority.acceptHello(channel: firstID, orderedControls: 1))
+        let old = try XCTUnwrap(authority.inputSession(for: firstID))
+        XCTAssertTrue(injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: old) { false })
+        let stateCount = states.values().count, eventCount = events.values().count
+        XCTAssertFalse(authority.openChannel(secondID), "The protocol permits only one live control channel")
+        XCTAssertFalse(authority.acceptHello(channel: secondID, orderedControls: 1))
+        XCTAssertFalse(authority.closeChannel(secondID)); XCTAssertFalse(authority.close(ifChannel: secondID))
+        XCTAssertEqual(states.values().count, stateCount); XCTAssertEqual(events.values().count, eventCount)
+        XCTAssertTrue(authority.closeChannel(firstID))
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        XCTAssertTrue(authority.openChannel(secondID))
+        XCTAssertNil(authority.inputSession(for: secondID), "A replacement channel needs its own hello")
+        XCTAssertTrue(authority.acceptHello(channel: secondID, orderedControls: 1))
+        let current = try XCTUnwrap(authority.inputSession(for: secondID))
+        XCTAssertNotEqual(current, old)
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 25, y: 35, buttons: 1), session: current) { false })
+        let currentEvents = events.values().count
+        XCTAssertFalse(authority.closeChannel(firstID)); XCTAssertFalse(authority.close(ifChannel: firstID))
+        XCTAssertFalse(authority.acceptHello(channel: firstID, orderedControls: 1))
+        XCTAssertEqual(events.values().count, currentEvents)
+        XCTAssertEqual(authority.inputSession(for: secondID), current)
+        XCTAssertTrue(authority.close(ifChannel: secondID))
+        XCTAssertEqual(events.values().filter { $0.type == .leftMouseUp }.count, 1)
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+    }
+
+    func testRevokedDirectSessionCannotPostOrReleaseANewerManualOrAIHold() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let old = injector.beginDirectInputSession()
+        XCTAssertTrue(injector.applyDirectInput(.key(usage: 0x04, down: true, modifiers: 0), session: old) { false })
+        let current = injector.beginDirectInputSession()
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 10, y: 20, buttons: 1), session: current) { false })
+        let count = events.values().count
+        injector.endDirectInputSession(old)
+        for message: ControlMessage in [.pointer(x: 0, y: 0, buttons: 0), .key(usage: 0x04, down: false, modifiers: 0),
+            .scroll(x: 0, y: 0, dx: 0, dy: 1, phase: .changed), .text("stale") ] {
+            XCTAssertFalse(injector.applyDirectInput(message, session: old) { XCTFail("Stale sessions cannot call the input handler"); return true })
+        }
+        XCTAssertEqual(events.values().count, count)
+        XCTAssertEqual(injector.admitAutomation { true }, .inputHeld)
+        injector.endDirectInputSession(current)
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+        XCTAssertTrue(injector.apply(.key(usage: 0x05, down: true, modifiers: 0), ifAllowed: { true }))
+        let aiCount = events.values().count
+        injector.endDirectInputSession(old)
+        XCTAssertFalse(injector.applyDirectInput(.text("stale after AI admission"), session: current) { XCTFail("Retired input cannot release AI holds"); return true })
+        XCTAssertEqual(events.values().count, aiCount)
+        injector.releaseHeldInput()
+    }
+
+    func testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput() throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector)
+        let channel = NSObject(), id = ObjectIdentifier(channel)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        authority.acceptHello(channel: id, orderedControls: 1)
+        let old = try XCTUnwrap(authority.inputSession(for: id))
+        var current: InputInjector.DirectInputSession?
+        var graphemes = 0, interruptions = 0
+        XCTAssertFalse(injector.applyDirectInput(.text("👩🏽‍💻AB"), session: old, afterTextGrapheme: {
+            graphemes += 1
+            authority.connectionChanged(connected: false)
+            authority.connectionChanged(connected: true)
+            current = authority.inputSession(for: id)
+            if let current {
+                XCTAssertTrue(injector.applyDirectInput(.pointer(x: 30, y: 40, buttons: 1), session: current) { false })
+            } else { XCTFail("Reconnect must have a new input lifetime") }
+        }) { interruptions += 1; return false })
+        XCTAssertEqual(graphemes, 1); XCTAssertEqual(interruptions, 1)
+        let posted = events.values()
+        XCTAssertEqual(posted.filter { $0.type == .keyDown }.compactMap(\.unicodeText), ["👩🏽‍💻"])
+        XCTAssertEqual(posted.filter { $0.type == .keyUp }.compactMap(\.unicodeText), ["👩🏽‍💻"])
+        XCTAssertFalse(posted.contains { $0.type == .leftMouseUp })
+        XCTAssertEqual(injector.admitAutomation { true }, .inputHeld)
+        XCTAssertFalse(injector.applyDirectInput(.text("👩🏽‍💻AB"), session: old) { XCTFail("Old text cannot replay after reconnect"); return true })
+        injector.endDirectInputSession(try XCTUnwrap(current))
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+    }
+
+    func testRevokedDirectPacketCannotPauseAReplacementTaskButCurrentInputCan() async throws {
+        let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
+        let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let authority = HostPeerInputAuthorization(injector: injector)
+        let nativeChannel = NSObject(), channelID = ObjectIdentifier(nativeChannel)
+        authority.openChannel(channelID); authority.connectionChanged(connected: true); authority.acceptHello(channel: channelID, orderedControls: 1)
+        let old = try XCTUnwrap(authority.inputSession(for: channelID))
+        let first = makeEnvelope(id: "old-direct-packet-task", kind: .prompt, body: "Find concerts")
+        manager.authorizePeer(senderID: first.senderID)
+        XCTAssertTrue(manager.handle(first, channel: channel)); await waitUntil { executor.callCount == 1 }
+        authority.connectionChanged(connected: false)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: first.id, revision: 1), channel: channel))
+        authority.connectionChanged(connected: true)
+        let current = try XCTUnwrap(authority.inputSession(for: channelID))
+        let next = makeEnvelope(id: "new-direct-packet-task", kind: .prompt, body: "Find movies")
+        XCTAssertTrue(manager.handle(next, channel: channel)); await waitUntil { executor.callCount == 2 }
+        let running = manager.activity
+        XCTAssertFalse(injector.applyDirectInput(.text("stale packet"), session: old) {
+            XCTFail("A revoked packet cannot record input against the new task")
+            return manager.recordUserInputInInjectionTransaction() != nil
+        })
+        XCTAssertEqual(manager.activity, running); XCTAssertEqual(ledger.hostControlEpoch(taskID: next.id), 0)
+        XCTAssertTrue(events.values().isEmpty)
+        let receipt = try XCTUnwrap(injectManualInput(.text("current manual input"), injector: injector, inputSession: current, manager: manager))
+        manager.applyUserInputIntervention(receipt)
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(ledger.hostControlEpoch(taskID: next.id), 1)
+        XCTAssertEqual(executor.trustedUserPrompts, [first.body, next.body])
+        authority.close()
     }
 
     func testPhysicalInputSamplingCoversAllKeyCodesAndDistinguishesHeldFromUnavailable() {
@@ -6627,10 +6833,11 @@ final class ComputerUseTests: XCTestCase {
     func testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease() throws {
         let events = CapturedCGEventStore(), gate = ComputerUseActionGate()
         let injector = InputInjector(eventPoster: { events.append($0) })
+        let inputSession = injector.beginDirectInputSession()
         let admission = gate.reservePendingAutomation()
         XCTAssertTrue(gate.adoptPendingAutomation(admission)); XCTAssertTrue(gate.activatePendingAutomation(admission))
         var receipt: ComputerUseActionGate.InputIntervention?
-        injector.applyDirectInput(.pointer(x: 40, y: 50, buttons: 1)) {
+        injector.applyDirectInput(.pointer(x: 40, y: 50, buttons: 1), session: inputSession) {
             XCTAssertTrue(events.values().isEmpty, "Interruption must be recorded before the first direct event")
             receipt = gate.recordUserInput()
             return receipt != nil
@@ -6639,8 +6846,8 @@ final class ComputerUseTests: XCTestCase {
         var triedAdmission = false
         XCTAssertEqual(injector.admitAutomation { triedAdmission = true; return true }, .inputHeld)
         XCTAssertFalse(triedAdmission)
-        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 1)) { gate.recordUserInput() != nil }
-        injector.applyDirectInput(.key(usage: 0xE3, down: true, modifiers: 8)) { gate.recordUserInput() != nil }
+        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 1), session: inputSession) { gate.recordUserInput() != nil }
+        injector.applyDirectInput(.key(usage: 0xE3, down: true, modifiers: 8), session: inputSession) { gate.recordUserInput() != nil }
         let heldEventCount = events.values().count
         XCTAssertFalse(injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { false }))
         XCTAssertFalse(injector.apply(.text("stale AI text"), ifAllowed: { false }))
@@ -6648,9 +6855,9 @@ final class ComputerUseTests: XCTestCase {
             XCTFail("A stale AX write must not dispatch")
         })
         XCTAssertEqual(events.values().count, heldEventCount, "Rejected AI work must not release manual holds")
-        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 0)) { gate.recordUserInput() != nil }
+        injector.applyDirectInput(.pointer(x: 45, y: 55, buttons: 0), session: inputSession) { gate.recordUserInput() != nil }
         XCTAssertEqual(injector.admitAutomation { true }, .inputHeld, "The held modifier still belongs to manual input")
-        injector.applyDirectInput(.key(usage: 0xE3, down: false, modifiers: 0)) { gate.recordUserInput() != nil }
+        injector.applyDirectInput(.key(usage: 0xE3, down: false, modifiers: 0), session: inputSession) { gate.recordUserInput() != nil }
         XCTAssertEqual(injector.admitAutomation { false }, .interrupted)
         XCTAssertEqual(injector.admitAutomation { true }, .admitted)
         let posted = events.values()
@@ -6661,13 +6868,13 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(posted.contains { $0.type == .leftMouseDragged })
         var callbacks = 0
         let text = "A👩🏽‍💻é"
-        injector.applyDirectInput(.text(text)) { callbacks += 1; return false }
+        injector.applyDirectInput(.text(text), session: inputSession) { callbacks += 1; return false }
         XCTAssertEqual(callbacks, 1)
         let textEvents = events.values().dropFirst(posted.count)
         XCTAssertEqual(textEvents.filter { $0.type == .keyDown }.compactMap(\.unicodeText), text.map(String.init))
         XCTAssertEqual(textEvents.filter { $0.type == .keyUp }.compactMap(\.unicodeText), text.map(String.init))
         XCTAssertEqual(injector.admitAutomation { true }, .admitted)
-        injector.applyDirectInput(.bye(reason: "fixture")) { XCTFail("Non-input packets cannot enter an input transaction"); return true }
+        injector.applyDirectInput(.bye(reason: "fixture"), session: inputSession) { XCTFail("Non-input packets cannot enter an input transaction"); return true }
         XCTAssertEqual(events.values().count, posted.count + text.count * 2)
     }
 
@@ -6675,6 +6882,7 @@ final class ComputerUseTests: XCTestCase {
         for localResume in [false, true] {
           for pointer in [false, true] {
             let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+            let inputSession = injector.beginDirectInputSession()
             let executor = ReadinessHookComputerUseExecutor(results: [.userInterventionRequired("Finish signing in."), .completed("Continued")])
             let url = temporaryLedgerURL()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -6687,7 +6895,7 @@ final class ComputerUseTests: XCTestCase {
             let owner = try XCTUnwrap(fixture.browser.taskControls?.ownerID)
             let down: ControlMessage = pointer ? .pointer(x: 30, y: 40, buttons: 1) : .key(usage: 0xE1, down: true, modifiers: 1)
             let up: ControlMessage = pointer ? .pointer(x: 30, y: 40, buttons: 0) : .key(usage: 0xE1, down: false, modifiers: 0)
-            XCTAssertNil(injectManualInput(down, injector: injector, manager: fixture.manager))
+            XCTAssertNil(injectManualInput(down, injector: injector, inputSession: inputSession, manager: fixture.manager))
             if localResume {
                 fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
             } else {
@@ -6703,7 +6911,7 @@ final class ComputerUseTests: XCTestCase {
             await waitUntil {
                 await fixture.channel.sentMessages().contains { $0.body.contains("release any held keys or mouse buttons") }
             }
-            XCTAssertNil(injectManualInput(up, injector: injector, manager: fixture.manager))
+            XCTAssertNil(injectManualInput(up, injector: injector, inputSession: inputSession, manager: fixture.manager))
             if localResume {
                 fixture.browser.requestTaskControl(.resume, displayed: try XCTUnwrap(fixture.browser.taskControls))
             } else {
@@ -6719,19 +6927,20 @@ final class ComputerUseTests: XCTestCase {
 
     func testNewPromptWaitsForAlreadyHeldRemoteInputBeforeStartingInference() async throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let inputSession = injector.beginDirectInputSession()
         let executor = ReadinessHookComputerUseExecutor(results: [.completed("Found the requested information")])
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
-        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: true, modifiers: 0), injector: injector, manager: manager))
+        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: true, modifiers: 0), injector: injector, inputSession: inputSession, manager: manager))
         let prompt = makeEnvelope(id: "held-before-new-task", kind: .prompt, body: "Find movie tickets")
         manager.authorizePeer(senderID: prompt.senderID)
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         await waitUntil { manager.activity == .paused }
         XCTAssertEqual(executor.callCount, 0); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
-        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: false, modifiers: 0), injector: injector, manager: manager))
+        XCTAssertNil(injectManualInput(.key(usage: 0x04, down: false, modifiers: 0), injector: injector, inputSession: inputSession, manager: manager))
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
         XCTAssertEqual(executor.callCount, 0); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 2)
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
@@ -6746,6 +6955,7 @@ final class ComputerUseTests: XCTestCase {
             .approvalRequired(message: "Send", action: .key(usage: 0x28, modifiers: 0), continuation: .init(taskID: "", nonce: UUID())),
             .completed("Continued")])
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
+        let inputSession = injector.beginDirectInputSession()
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var actions: [ComputerUsePredictedAction] = []
@@ -6760,7 +6970,7 @@ final class ComputerUseTests: XCTestCase {
         await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
         let messages = await channel.sentMessages()
         let request = try ComputerUseApprovalRequest.decodeBody(try XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
-        let receipt = try XCTUnwrap(injectManualInput(.pointer(x: 60, y: 70, buttons: 1), injector: injector, manager: manager))
+        let receipt = try XCTUnwrap(injectManualInput(.pointer(x: 60, y: 70, buttons: 1), injector: injector, inputSession: inputSession, manager: manager))
         XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
             body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true).encodedBody()), channel: channel))
         XCTAssertEqual(manager.activity, .paused); XCTAssertTrue(actions.isEmpty)
@@ -6769,7 +6979,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertFalse(events.values().contains { $0.type == .leftMouseUp })
         manager.applyUserInputIntervention(receipt)
         XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
-        XCTAssertNil(injectManualInput(.pointer(x: 60, y: 70, buttons: 0), injector: injector, manager: manager))
+        XCTAssertNil(injectManualInput(.pointer(x: 60, y: 70, buttons: 0), injector: injector, inputSession: inputSession, manager: manager))
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
         await waitUntil { executor.callCount == 2 && manager.activity == .idle }
@@ -11414,6 +11624,13 @@ private struct CapturedCGEvent {
     let keyCode: Int64
     let modifierFlags: CGEventFlags
     let syntheticTag: Int64
+}
+
+private final class PeerInputStateProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var states: [HostPeerInputAuthorization.State] = []
+    func append(_ state: HostPeerInputAuthorization.State) { lock.withLock { states.append(state) } }
+    func values() -> [HostPeerInputAuthorization.State] { lock.withLock { states } }
 }
 
 private final class PhysicalInputStateProbe: @unchecked Sendable {

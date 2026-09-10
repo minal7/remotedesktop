@@ -1,0 +1,34 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputAuthorizationRequiresHelloAndConnectionAndRenewsOnReconnect",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputChannelReplacementRejectsForeignAndLateCallbacks",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testRevokedDirectPacketCannotPauseAReplacementTaskButCurrentInputCan",
+    "RemoteDesktopHostTests/ComputerUseTests/testRevokedDirectSessionCannotPostOrReleaseANewerManualOrAIHold",
+    "RemoteDesktopHostTests/ComputerUseTests/testWebRTCDeauthorizationCannotReleaseInputAfterOwnerReplacement",
+    "RemoteDesktopHostTests/ComputerUseTests/test_currentDeauthorizationReleasesInputWhileStaleGenerationCannot",
+    "RemoteDesktopHostTests/ComputerUseTests/test_hostPeerAcceptsEveryDirectInputAfterAuthenticatedHello",
+    "RemoteDesktopHostTests/ComputerUseTests/test_hostPeerRejectsEveryDirectInputBeforeAuthenticatedHello",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal",
+    "RemoteDesktopHostTests/ComputerUseTests/test_staleWebRTCCallbackCannotDeauthorizeReplacementGeneration"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputAuthorizationRequiresHelloAndConnectionAndRenewsOnReconnect",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputChannelReplacementRejectsForeignAndLateCallbacks",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease",
+    "RemoteDesktopHostTests/ComputerUseTests/testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput",
+    "RemoteDesktopHostTests/ComputerUseTests/testPhysicalHeldOrUnavailableStateKeepsLocalAndPhoneHandbackPaused",
+    "RemoteDesktopHostTests/ComputerUseTests/testRemoteHeldInputBlocksLocalAndPhoneResumeUntilTheGestureIsReleased",
+    "RemoteDesktopHostTests/ComputerUseTests/testRevokedDirectPacketCannotPauseAReplacementTaskButCurrentInputCan",
+    "RemoteDesktopHostTests/ComputerUseTests/testRevokedDirectSessionCannotPostOrReleaseANewerManualOrAIHold",
+    "RemoteDesktopHostTests/ComputerUseTests/testWebRTCDeauthorizationCannotReleaseInputAfterOwnerReplacement",
+    "RemoteDesktopHostTests/ComputerUseTests/test_currentDeauthorizationReleasesInputWhileStaleGenerationCannot",
+    "RemoteDesktopHostTests/ComputerUseTests/test_hostPeerAcceptsEveryDirectInputAfterAuthenticatedHello",
+    "RemoteDesktopHostTests/ComputerUseTests/test_hostPeerRejectsEveryDirectInputBeforeAuthenticatedHello",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal",
+    "RemoteDesktopHostTests/ComputerUseTests/test_staleWebRTCCallbackCannotDeauthorizeReplacementGeneration"
+  ]
+}

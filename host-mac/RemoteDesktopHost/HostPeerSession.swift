@@ -17,6 +17,108 @@ extension ICEConfig {
     }
 }
 
+/// Serializes direct-input authority separately from media teardown. The
+/// change callback must not re-enter this object; it runs inside the same lock
+/// so authorization notifications keep the order of native transitions.
+final class HostPeerInputAuthorization: @unchecked Sendable {
+    struct State: Equatable, Sendable {
+        let authorized: Bool
+        let orderedComputerUseControls: Int
+    }
+    private let lock = NSLock()
+    private let injector: InputInjector
+    private let onChange: @Sendable (State) -> Void
+    private var channelID: ObjectIdentifier?
+    private var helloCapabilities: Int?
+    private var connected = false
+    private var closed = false
+    private var session: InputInjector.DirectInputSession?
+
+    init(injector: InputInjector, onChange: @escaping @Sendable (State) -> Void = { _ in }) {
+        self.injector = injector; self.onChange = onChange
+    }
+
+    @discardableResult
+    func openChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            if let channelID { return channelID == id }
+            channelID = id; helloCapabilities = nil
+            return true
+        }
+    }
+
+    @discardableResult
+    func acceptHello(channel id: ObjectIdentifier, orderedControls: Int) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id else { return false }
+            helloCapabilities = max(0, orderedControls)
+            reconcileLocked(publishWhenUnauthorized: false)
+            return true
+        }
+    }
+
+    @discardableResult
+    func connectionChanged(connected: Bool, terminal: Bool = false) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            self.connected = connected && !terminal
+            if terminal { closed = true; channelID = nil; helloCapabilities = nil }
+            reconcileLocked(publishWhenUnauthorized: !self.connected)
+            return true
+        }
+    }
+
+    @discardableResult
+    func closeChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id else { return false }
+            channelID = nil; helloCapabilities = nil
+            reconcileLocked()
+            return true
+        }
+    }
+
+    func ownsChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock { !closed && channelID == id }
+    }
+
+    func inputSession(for id: ObjectIdentifier) -> InputInjector.DirectInputSession? {
+        lock.withLock { !closed && channelID == id ? session : nil }
+    }
+
+    func close() { _ = connectionChanged(connected: false, terminal: true) }
+
+    @discardableResult
+    func close(ifChannel id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id else { return false }
+            closed = true; connected = false; channelID = nil; helloCapabilities = nil
+            reconcileLocked()
+            return true
+        }
+    }
+
+    private func retireSessionLocked() {
+        if let session { injector.endDirectInputSession(session) }
+        session = nil
+    }
+
+    private func reconcileLocked(publishWhenUnauthorized: Bool = true) {
+        if !closed, connected, channelID != nil, helloCapabilities != nil {
+            if session == nil { session = injector.beginDirectInputSession() }
+        } else { retireSessionLocked() }
+        // A partially completed initial handshake is not a loss of control.
+        // Merely opening the visual sidecar must not interrupt a live LAN task.
+        if session != nil || publishWhenUnauthorized { publishLocked() }
+    }
+
+    private func publishLocked() {
+        onChange(.init(authorized: session != nil,
+            orderedComputerUseControls: session == nil ? 0 : (helloCapabilities ?? 0)))
+    }
+}
+
 final class HostPeerSession: NSObject {
     struct PeerAuthorization: Equatable, Sendable {
         let senderID: String
@@ -35,10 +137,8 @@ final class HostPeerSession: NSObject {
     private let injector: InputInjector
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
-    private let peerSenderID: String
     private let onUserInput: @Sendable () -> Bool
-    private let onPeerAuthorizationChanged:
-        @Sendable (PeerAuthorization) -> Void
+    private let inputAuthorization: HostPeerInputAuthorization
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
@@ -63,8 +163,6 @@ final class HostPeerSession: NSObject {
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
-    private var helloAuthenticated = false
-    private var orderedComputerUseControls = 0
     private var captureRestartTask: Task<Void, Never>?
     private var captureTeardownTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
@@ -78,9 +176,8 @@ final class HostPeerSession: NSObject {
         .seconds(10),
     ]
 
-    /// Pointer and keyboard packets are privileged only after the peer has
-    /// completed the protocol hello. A WebRTC data channel opening is not, by
-    /// itself, authorization to control the Mac.
+    /// Message-kind/protocol classification only. Dispatch also requires the
+    /// current channel's exact connected input session, rechecked by the injector.
     nonisolated static func acceptsDirectInput(
         _ message: ControlMessage,
         helloAuthenticated: Bool
@@ -112,9 +209,11 @@ final class HostPeerSession: NSObject {
         self.injector = injector
         self.iceConfig = iceConfig
         self.audioEnabled = audioEnabled
-        self.peerSenderID = peerSenderID
         self.onUserInput = onUserInput
-        self.onPeerAuthorizationChanged = onPeerAuthorizationChanged
+        self.inputAuthorization = HostPeerInputAuthorization(injector: injector) { state in
+            onPeerAuthorizationChanged(PeerAuthorization(senderID: peerSenderID,
+                authorized: state.authorized, orderedComputerUseControls: state.orderedComputerUseControls))
+        }
         self.onEnded = onEnded
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
@@ -202,10 +301,7 @@ final class HostPeerSession: NSObject {
             return captureTeardownTask
         }
         ended = true
-        helloAuthenticated = false
-        injector.releaseHeldInput()
-        notifyPeerAuthorization(authorized: false)
-        orderedComputerUseControls = 0
+        inputAuthorization.close()
         captureRestartTask?.cancel()
         captureRestartTask = nil
         resetBufferedLocalICE()
@@ -256,15 +352,6 @@ final class HostPeerSession: NSObject {
                 userInfo: [NSLocalizedDescriptionKey: "Couldn't create the peer connection."])
         }
         return peerConnection
-    }
-
-    private func notifyPeerAuthorization(authorized: Bool) {
-        onPeerAuthorizationChanged(PeerAuthorization(
-            senderID: peerSenderID,
-            authorized: authorized,
-            orderedComputerUseControls: authorized
-                ? orderedComputerUseControls
-                : 0))
     }
 
     private func configureLocalMedia(on peerConnection: RTCPeerConnection?) throws {
@@ -480,7 +567,8 @@ final class HostPeerSession: NSObject {
     }
 
     private func sendHelloAckAndDisplay() {
-        guard let dataChannel, dataChannel.readyState == .open else {
+        guard let dataChannel, dataChannel.readyState == .open,
+              inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil else {
             return
         }
 
@@ -662,25 +750,32 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
-        guard !ended else { return }
+        guard !ended, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
-            if helloAuthenticated {
-                notifyPeerAuthorization(authorized: true)
-            }
+            inputAuthorization.connectionChanged(connected: true)
+            // Hello and the transport-state callback can arrive in either
+            // order. Publish readiness only once both have authorized input.
+            sendHelloAckAndDisplay()
         case .disconnected:
-            // Transient — ICE may recover on its own. Log but don't tear down.
-            notifyPeerAuthorization(authorized: false)
+            // ICE may recover, but queued input loses this exact session now.
+            inputAuthorization.connectionChanged(connected: false)
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
-            notifyPeerAuthorization(authorized: false)
-            onEnded("The peer connection closed.")
+            if inputAuthorization.connectionChanged(connected: false, terminal: true) {
+                onEnded("The peer connection closed.")
+            }
         default:
             break
         }
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
+        guard self.peerConnection === peerConnection, dataChannel.label == "control",
+              inputAuthorization.openChannel(ObjectIdentifier(dataChannel)) else {
+            dataChannel.close()
+            return
+        }
         self.dataChannel = dataChannel
         dataChannel.delegate = self
     }
@@ -689,39 +784,42 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
-            helloAuthenticated = false
-            notifyPeerAuthorization(authorized: false)
-            orderedComputerUseControls = 0
+            inputAuthorization.closeChannel(ObjectIdentifier(dataChannel))
         }
     }
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        guard let message = ControlMessage.decode(buffer.data) else {
+        guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)),
+              dataChannel.readyState == .open,
+              let message = ControlMessage.decode(buffer.data) else {
             return
         }
         switch message {
         case .hello(let proto, let orderedComputerUseControls):
             guard proto == HostConfig.protocolVersion else {
-                close(reason: "protocol")
+                if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
+                    close(reason: "protocol")
+                    onEnded("protocol")
+                }
                 return
             }
-            self.orderedComputerUseControls = orderedComputerUseControls
-            helloAuthenticated = true
-            notifyPeerAuthorization(authorized: true)
+            guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
+                orderedControls: orderedComputerUseControls) else { return }
             sendHelloAckAndDisplay()
         case .bye(let reason):
-            close(reason: reason)
-            onEnded(reason)
+            if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
+                close(reason: reason)
+                onEnded(reason)
+            }
         case .pointer, .scroll, .key, .text:
-            guard Self.acceptsDirectInput(
-                message,
-                helloAuthenticated: helloAuthenticated) else {
+            guard let session = inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)),
+                  Self.acceptsDirectInput(message, helloAuthenticated: true) else {
                 log.warning("dropping remote input received before authenticated hello")
                 return
             }
-            injector.applyDirectInput(message, interruptAutomation: onUserInput)
+            injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput)
         case let .qos(targetFps, maxBitrateKbps, prefer):
-            guard helloAuthenticated else {
+            guard inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil else {
                 log.warning("dropping video quality request received before authenticated hello")
                 return
             }

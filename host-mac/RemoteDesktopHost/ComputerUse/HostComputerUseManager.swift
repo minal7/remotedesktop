@@ -3302,7 +3302,7 @@ private final class ComputerUsePeerAuthorizationEpoch: @unchecked Sendable {
 /// Lock-protected ownership consulted by the WebRTC disconnect callback before
 /// it crosses to MainActor. A rejected second peer must never close the active
 /// LAN owner's native-action gate.
-private final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
+final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
     private struct Owner: Equatable {
         let senderID: String
         let generation: UInt64
@@ -3325,9 +3325,12 @@ private final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
         }
     }
 
-    func owns(senderID: String, generation: UInt64) -> Bool {
+    /// Keeps the owner check and its synchronous effect in one transition.
+    /// The effect must not re-enter this fence or wait on MainActor.
+    func performIfOwned(senderID: String, generation: UInt64, _ effect: () -> Bool) -> Bool {
         lock.withLock {
-            owner == Owner(senderID: senderID, generation: generation)
+            guard owner == Owner(senderID: senderID, generation: generation) else { return false }
+            return effect()
         }
     }
 }
@@ -4587,20 +4590,19 @@ final class HostComputerUseManager: ObservableObject {
     /// current-peer loss releases direct-input state even when automation was
     /// already paused: a person can press a button (which pauses AI) and lose
     /// the data channel before sending the matching release. The generation
-    /// check runs first so a late callback from an old peer cannot release input
-    /// owned by its replacement or interrupt the replacement's LAN task.
+    /// check and cleanup share one ownership transition so replacement cannot
+    /// slip between the check and release or action-gate interruption.
     @discardableResult
     nonisolated func blockActionsForWebRTCDeauthorization(
         senderID: String,
         generation: UInt64
     ) -> Bool {
-        guard webRTCAuthorizationFence.owns(
+        webRTCAuthorizationFence.performIfOwned(
             senderID: senderID,
-            generation: generation) else {
-            return false
+            generation: generation) {
+            injector.releaseHeldInput()
+            return blockActionsForUserIntervention()
         }
-        injector.releaseHeldInput()
-        return blockActionsForUserIntervention()
     }
 
     @discardableResult

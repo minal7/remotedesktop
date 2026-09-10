@@ -35,6 +35,10 @@ final class InputInjector: @unchecked Sendable {
     private var pendingUnicodeStroke: (id: UUID, release: CGEvent)?
     private var directInputTransactions = 0
     private var heldInputIsDirect = false
+    struct DirectInputSession: Equatable, Sendable {
+        fileprivate let id: UUID
+    }
+    private var directInputSession: DirectInputSession?
     private var lastClickButton: CGMouseButton?
     private var lastClickPosition = CGPoint.zero
     private var lastClickUptime: TimeInterval = -.infinity
@@ -119,17 +123,39 @@ final class InputInjector: @unchecked Sendable {
         return .admitted
     }
 
-    /// Encloses occurrence recording and direct dispatch in one tracked
-    /// transaction. Text retains its existing per-grapheme lock yields, but
-    /// automation admission stays closed until the entire packet has finished.
-    /// The interruption callback runs under this injector's lock and must not
-    /// call back into the injector.
-    func applyDirectInput(_ message: ControlMessage, interruptAutomation: () -> Bool) {
+    /// A new authenticated peer/channel lifetime retires any older manual
+    /// holds. An old session can neither dispatch input nor release its successor.
+    func beginDirectInputSession() -> DirectInputSession {
+        lock.withLock {
+            if heldInputIsDirect { releaseHeldInputLocked() }
+            let session = DirectInputSession(id: UUID())
+            directInputSession = session
+            return session
+        }
+    }
+
+    func endDirectInputSession(_ session: DirectInputSession) {
+        lock.withLock {
+            guard directInputSession == session else { return }
+            directInputSession = nil
+            if heldInputIsDirect { releaseHeldInputLocked() }
+        }
+    }
+
+    /// Records and dispatches one packet under an exact live input session.
+    /// Text rechecks that session between complete graphemes. Revocation waits
+    /// on the same posting lock; stale packets perform no callback or cleanup.
+    /// The interruption callback must not call back into the injector.
+    @discardableResult
+    func applyDirectInput(_ message: ControlMessage, session: DirectInputSession,
+                          afterTextGrapheme: (() -> Void)? = nil,
+                          interruptAutomation: () -> Bool) -> Bool {
         switch message {
         case .pointer, .scroll, .key, .text: break
-        case .hello, .qos, .bye: return
+        case .hello, .qos, .bye: return false
         }
         lock.lock()
+        guard directInputSession == session else { lock.unlock(); return false }
         directInputTransactions += 1
         let interrupted = interruptAutomation()
         if interrupted || !heldInputIsDirect { releaseHeldAutomationInputLocked() }
@@ -140,7 +166,15 @@ final class InputInjector: @unchecked Sendable {
             directInputTransactions -= 1
             lock.unlock()
         }
-        apply(message)
+        if case .text(let text) = message {
+            return injectText(text, ifAllowed: { directInputSession == session },
+                releaseOnDenial: false, afterGrapheme: afterTextGrapheme)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+        guard directInputSession == session else { return false }
+        applyNonTextLocked(message)
+        return true
     }
 
     /// AX mutations use the same ownership boundary as synthesized input.
@@ -177,6 +211,11 @@ final class InputInjector: @unchecked Sendable {
             releaseHeldAutomationInputLocked()
             return false
         }
+        applyNonTextLocked(message)
+        return true
+    }
+
+    private func applyNonTextLocked(_ message: ControlMessage) {
         switch message {
         case .pointer(let x, let y, let buttons):
             injectPointer(x: x, y: y, buttons: buttons)
@@ -189,7 +228,6 @@ final class InputInjector: @unchecked Sendable {
         case .hello, .qos, .bye:
             break   // handled by HostSession, not injection
         }
-        return true
     }
 
     /// Serializes a person's intervention against the same event-posting lock
@@ -404,7 +442,9 @@ final class InputInjector: @unchecked Sendable {
 
     private func injectText(
         _ s: String,
-        ifAllowed: () -> Bool
+        ifAllowed: () -> Bool,
+        releaseOnDenial: Bool = true,
+        afterGrapheme: (() -> Void)? = nil
     ) -> Bool {
         // Send one complete extended grapheme at a time. A Unicode scalar is
         // not necessarily one UTF-16 code unit: truncating it to `UniChar`
@@ -412,7 +452,7 @@ final class InputInjector: @unchecked Sendable {
         for character in s {
             lock.lock()
             guard ifAllowed() else {
-                releaseHeldAutomationInputLocked()
+                if releaseOnDenial { releaseHeldAutomationInputLocked() }
                 lock.unlock()
                 return false
             }
@@ -428,6 +468,9 @@ final class InputInjector: @unchecked Sendable {
                 unicodeString: &chars)
             if let up { post(up) }
             lock.unlock()
+            // A complete down/up pair is indivisible; this observation seam
+            // runs outside the lock and carries no text or key data.
+            afterGrapheme?()
         }
         return true
     }
