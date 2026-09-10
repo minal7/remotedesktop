@@ -377,7 +377,7 @@ final class HostPeerSession: NSObject {
         // Clear capture callbacks before stopping to prevent the
         // delegate's didStopWithError from re-firing onEnded.
         capture.onStopped = nil
-        capture.onVideoSample = nil
+        capture.onVideoFrame = nil
         capture.onAudioSample = nil
         let teardown = Task {
             await capture.stop()
@@ -473,8 +473,8 @@ final class HostPeerSession: NSObject {
     }
 
     private func configureCaptureCallbacks() {
-        capture.onVideoSample = { [weak self] sampleBuffer in
-            self?.pushVideoSample(sampleBuffer)
+        capture.onVideoFrame = { [weak self] frame in
+            self?.pushVideoFrame(frame)
         }
         if audioEnabled {
             capture.onAudioSample = { [weak self] sampleBuffer in
@@ -575,10 +575,8 @@ final class HostPeerSession: NSObject {
         }
     }
 
-    private func pushVideoSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
-        }
+    private func pushVideoFrame(_ captured: CapturedVideoFrame) {
+        let imageBuffer = captured.imageBuffer
         let normalizedSize = CaptureSizing.normalized(
             width: CVPixelBufferGetWidth(imageBuffer),
             height: CVPixelBufferGetHeight(imageBuffer))
@@ -593,9 +591,8 @@ final class HostPeerSession: NSObject {
         }
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let timestampNs = Int64(CMTimeGetSeconds(presentationTime) * 1_000_000_000)
-        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timestampNs)
+        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0,
+                                  timeStampNs: captured.metadata.captureTimeNanoseconds)
         videoSource.capturer(videoCapturer, didCapture: frame)
     }
 

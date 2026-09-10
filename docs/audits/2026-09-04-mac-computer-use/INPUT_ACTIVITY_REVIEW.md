@@ -43,6 +43,8 @@ The [28-method source inventory](input-activity-client-inventory.json) includes 
 
 ## Remaining sequence
 
+The subsequent [capture-source review](CAPTURE_FRAME_EVIDENCE_REVIEW.md) repairs complete-frame admission and clock conversion, records the native timestamp transformations, and gives the detailed sequence for the still-missing end-to-end frame proof.
+
 1. Prove capture freshness for input recovery and foreground return. This repair retains transport presentation evidence across an activity interruption. Activity returning is not evidence of newly captured pixels, and a later decoder callback is also insufficient by itself. Establish a native capture/frame identity boundary before claiming that resumed input targets a current Mac screen. Do not treat a fixture's explicitly delivered frame callback as this proof.
 2. Qualify real UIKit scene/application ordering, Control Center/system alerts, split-view interruptions, lock/unlock, window attachment/removal, keyboard holds, drag/scroll release, GameController reconnect behavior and queued callbacks. The prepared scene tests exercise model leases; they do not create a real window scene or deliver actual UIKit lifecycle events.
 3. Review focus changes within an otherwise active scene, input responder/IME semantics, lock keys and multiple coalesced keyboards. Scene activity does not by itself identify the text field that owns a particular key.

@@ -44,6 +44,8 @@ Seventeen Swift files pass parse-only checks. Documentation checks cover 219 Mar
 
 ## Remaining sequence
 
+The subsequent [capture-source review](CAPTURE_FRAME_EVIDENCE_REVIEW.md) repairs complete-frame admission and clock conversion, records the native timestamp transformations, and gives the detailed sequence for the still-missing end-to-end frame proof.
+
 1. Establish capture-generation evidence for recovered video. A new decoder callback and correctly scoped display dimensions do not prove that pixels were captured after the host handshake. Review native timestamp/frame identity, buffered video, track replacement and the acceptance boundary before calling recovered pixels current. Also review the pre-release extension's coordinated host/phone rollout; an intermediate development host that advertised scoped input but omitted scoped display cannot satisfy the new display requirement.
 2. A subsequent [input-source repair](INPUT_SOURCE_OWNERSHIP_REVIEW.md) adds per-source holds, replacement/disconnect/window/dismantle cleanup and successor-safe controls. Qualify actual view/device behavior and continue background/focus/process lifecycle and lock-state/IME semantics. Source tracking does not prove native delivery or release effects.
 3. Qualify UIKit recognizer cancellation, touches that remain down through recovery, scroll continuation, text composition/responder teardown, hardware held-key suppression and GameController queue delivery. The prepared view fixture checks enablement, not real touches, keyboard devices or a rendered restoration screen. Sampling key state is not complete input history.

@@ -1,8 +1,142 @@
 import CoreMedia
+import CoreVideo
+import ScreenCaptureKit
 import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureFrameMetadataRequiresCompleteStatus() {
+        for status: Int? in [nil, -1, SCFrameStatus.idle.rawValue, SCFrameStatus.blank.rawValue,
+                            SCFrameStatus.started.rawValue, SCFrameStatus.suspended.rawValue, SCFrameStatus.stopped.rawValue] {
+            XCTAssertNil(frameMetadata(status: status))
+        }
+        XCTAssertNotNil(frameMetadata())
+    }
+
+    func test_captureFrameMetadataUsesDisplayClockAndPreservesIntegerMediaTime() throws {
+        let exact: Int64 = 9_000_000_000_000_001
+        let metadata = try XCTUnwrap(frameMetadata(presentationTime: CMTime(value: exact, timescale: 1_000_000_000)))
+        XCTAssertEqual(metadata.captureTimeNanoseconds, 42_000_000_000)
+        XCTAssertEqual(metadata.presentationTimeNanoseconds, exact, "Do not round through Double seconds")
+        XCTAssertEqual(metadata.displayTimeHostTicks, displayTicks(seconds: 42))
+        XCTAssertEqual(metadata.width, 800); XCTAssertEqual(metadata.height, 600)
+        let third = try XCTUnwrap(frameMetadata(presentationTime: CMTime(value: 1, timescale: 3)))
+        XCTAssertEqual(third.presentationTimeNanoseconds, 333_333_333)
+        XCTAssertEqual(third.captureTimeNanoseconds, metadata.captureTimeNanoseconds, "Media PTS is not WindowServer display time")
+    }
+
+    func test_captureFrameMetadataDoesNotUseInvalidOrForeignEpochMediaTimeAsCaptureEvidence() throws {
+        for time in [CMTime.invalid, .indefinite, .positiveInfinity, .negativeInfinity,
+                     CMTime(value: -1, timescale: 1), CMTime(value: 1, timescale: 0),
+                     CMTime(value: Int64.max, timescale: 1),
+                     CMTime(value: 1, timescale: 1, flags: .valid, epoch: 1)] {
+            let metadata = try XCTUnwrap(frameMetadata(presentationTime: time))
+            XCTAssertNil(metadata.presentationTimeNanoseconds)
+            XCTAssertEqual(metadata.captureTimeNanoseconds, 42_000_000_000,
+                           "Valid WindowServer timing does not depend on optional media timing")
+        }
+    }
+
+    func test_captureFrameMetadataRejectsMissingZeroFutureDisplayTimeAndEmptyDimensions() {
+        XCTAssertNil(frameMetadata(displayTime: nil))
+        XCTAssertNil(frameMetadata(displayTime: 0))
+        XCTAssertNil(frameMetadata(displayTime: displayTicks(seconds: 44)))
+        XCTAssertNil(frameMetadata(width: 0))
+        XCTAssertNil(frameMetadata(height: -1))
+        XCTAssertNotNil(frameMetadata(displayTime: displayTicks(seconds: 43)), "The observation boundary itself is permitted")
+    }
+
+    func test_captureFrameOrderRejectsDuplicatesAndRegressionsWithoutAdvancingItsBoundary() throws {
+        var order = CaptureVideoFrameOrder()
+        let first = try XCTUnwrap(frameMetadata())
+        let older = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 41)))
+        let next = try XCTUnwrap(frameMetadata(displayTime: displayTicks(seconds: 43)))
+        XCTAssertTrue(order.admit(first))
+        XCTAssertFalse(order.admit(first))
+        XCTAssertFalse(order.admit(older))
+        let sameNanosecond = CaptureVideoFrameMetadata(displayTimeHostTicks: first.displayTimeHostTicks + 1,
+            captureTimeNanoseconds: first.captureTimeNanoseconds, presentationTimeNanoseconds: 0, width: 800, height: 600)
+        XCTAssertFalse(order.admit(sameNanosecond))
+        XCTAssertTrue(order.admit(next))
+        XCTAssertFalse(order.admit(first))
+    }
+
+    func test_capturedVideoFrameRetainsTheCompleteSampleBufferAndItsClockEvidence() throws {
+        let sample = try captureSample()
+        let image = try XCTUnwrap(CMSampleBufferGetImageBuffer(sample))
+        let frame = try XCTUnwrap(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 43)))
+        XCTAssertTrue(frame.imageBuffer === image)
+        XCTAssertEqual(frame.metadata.width, 2); XCTAssertEqual(frame.metadata.height, 2)
+        XCTAssertEqual(frame.metadata.captureTimeNanoseconds, 42_000_000_000)
+        XCTAssertEqual(frame.metadata.presentationTimeNanoseconds, 3_500_000_000)
+    }
+
+    func test_capturedVideoFrameRejectsAbsentMalformedAndIncompleteAttachments() throws {
+        let malformed: [(Any?, Any?)] = [
+            (nil, NSNumber(value: displayTicks(seconds: 42))),
+            (NSNumber(value: SCFrameStatus.complete.rawValue), nil),
+            (NSNumber(value: false), NSNumber(value: displayTicks(seconds: 42))),
+            (NSNumber(value: SCFrameStatus.complete.rawValue), NSNumber(value: true)),
+            (NSNumber(value: 0.5), NSNumber(value: displayTicks(seconds: 42))),
+            (NSNumber(value: SCFrameStatus.complete.rawValue), NSNumber(value: 5.5)),
+            (NSNumber(value: SCFrameStatus.idle.rawValue), NSNumber(value: displayTicks(seconds: 42))),
+        ]
+        for (status, time) in malformed {
+            let sample = try captureSample(status: status, displayTime: time)
+            XCTAssertNil(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 43)))
+        }
+        let sample = try captureSample()
+        XCTAssertNil(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 41)))
+    }
+
+    func test_capturedVideoFrameRejectsInvalidAndNotReadyBuffers() throws {
+        let pending = try captureSample(dataReady: false)
+        XCTAssertTrue(pending.isValid); XCTAssertFalse(CMSampleBufferDataIsReady(pending))
+        XCTAssertNil(CapturedVideoFrame(sampleBuffer: pending, observedAtHostTime: displayTicks(seconds: 43)))
+        let invalid = try captureSample()
+        XCTAssertEqual(CMSampleBufferInvalidate(invalid), noErr)
+        XCTAssertNil(CapturedVideoFrame(sampleBuffer: invalid, observedAtHostTime: displayTicks(seconds: 43)))
+    }
+
+    private func displayTicks(seconds: Int64) -> UInt64 {
+        CMClockConvertHostTimeToSystemUnits(CMTime(value: seconds, timescale: 1))
+    }
+
+    private func frameMetadata(status: Int? = SCFrameStatus.complete.rawValue,
+                               displayTime: UInt64? = CMClockConvertHostTimeToSystemUnits(CMTime(value: 42, timescale: 1)),
+                               presentationTime: CMTime = CMTime(value: 7, timescale: 2),
+                               width: Int = 800, height: Int = 600) -> CaptureVideoFrameMetadata? {
+        CaptureVideoFrameMetadata.read(status: status,
+            displayTimeHostTicks: displayTime,
+            presentationTime: presentationTime, width: width, height: height,
+            observedAtHostTime: displayTicks(seconds: 43))
+    }
+
+    private func captureSample(status: Any? = NSNumber(value: SCFrameStatus.complete.rawValue),
+                               displayTime: Any? = NSNumber(value: CMClockConvertHostTimeToSystemUnits(CMTime(value: 42, timescale: 1))),
+                               dataReady: Bool = true) throws -> CMSampleBuffer {
+        var image: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 2, 2, kCVPixelFormatType_32BGRA, nil, &image), kCVReturnSuccess)
+        let imageBuffer = try XCTUnwrap(image)
+        var format: CMVideoFormatDescription?
+        XCTAssertEqual(CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer, formatDescriptionOut: &format), noErr)
+        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: 7, timescale: 2), decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
+            imageBuffer: imageBuffer, dataReady: dataReady, makeDataReadyCallback: nil, makeDataReadyRefcon: nil,
+            formatDescription: try XCTUnwrap(format), sampleTiming: &timing,
+            sampleBufferOut: &sample), noErr)
+        let result = try XCTUnwrap(sample)
+        let rows = try XCTUnwrap(CMSampleBufferGetSampleAttachmentsArray(result, createIfNecessary: true) as? [NSMutableDictionary])
+        let row = try XCTUnwrap(rows.first)
+        if let status { row[SCStreamFrameInfo.status.rawValue] = status }
+        if let displayTime {
+            row[SCStreamFrameInfo.displayTime.rawValue] = displayTime
+        }
+        return result
+    }
+
     func test_normalizedCaptureDimensions_leaveEvenSizesUntouched() {
         let normalized = CaptureSizing.normalized(width: 1728, height: 1116)
 

@@ -1,8 +1,84 @@
 import AVFoundation
 import CoreMedia
+import Darwin
 import Foundation
 import ScreenCaptureKit
 import os
+
+/// Capture-clock evidence stays separate from delivery time and media time.
+/// The display ticks are supplied by WindowServer, not sampled when a queued
+/// callback eventually reaches this process.
+struct CaptureVideoFrameMetadata: Equatable {
+    let displayTimeHostTicks: UInt64
+    let captureTimeNanoseconds: Int64
+    let presentationTimeNanoseconds: Int64?
+    let width: Int
+    let height: Int
+
+    static func read(status: Int?, displayTimeHostTicks: UInt64?,
+                     presentationTime: CMTime, width: Int, height: Int,
+                     observedAtHostTime: UInt64) -> Self? {
+        guard status == SCFrameStatus.complete.rawValue,
+              let displayTimeHostTicks, displayTimeHostTicks > 0,
+              displayTimeHostTicks <= observedAtHostTime,
+              width > 0, height > 0,
+              let captureTimeNanoseconds = nanoseconds(
+                CMClockMakeHostTimeFromSystemUnits(displayTimeHostTicks)) else { return nil }
+        return Self(displayTimeHostTicks: displayTimeHostTicks,
+                    captureTimeNanoseconds: captureTimeNanoseconds,
+                    presentationTimeNanoseconds: nanoseconds(presentationTime),
+                    width: width, height: height)
+    }
+
+    private static func nanoseconds(_ time: CMTime) -> Int64? {
+        guard time.isValid, time.isNumeric, time.epoch == 0,
+              time.timescale > 0, time.value >= 0 else { return nil }
+        let converted = CMTimeConvertScale(time, timescale: 1_000_000_000, method: .roundTowardZero)
+        guard converted.isNumeric, converted.timescale == 1_000_000_000,
+              converted.value >= 0 else { return nil }
+        return converted.value
+    }
+}
+
+struct CapturedVideoFrame {
+    let imageBuffer: CVPixelBuffer
+    let metadata: CaptureVideoFrameMetadata
+
+    init?(sampleBuffer: CMSampleBuffer, observedAtHostTime: UInt64) {
+        guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer),
+              let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let rows = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]], let attachments = rows.first,
+              let rawStatus = attachments[.status] as? NSNumber,
+              CFGetTypeID(rawStatus) != CFBooleanGetTypeID(),
+              let rawDisplayTime = attachments[.displayTime] as? NSNumber,
+              CFGetTypeID(rawDisplayTime) != CFBooleanGetTypeID(),
+              let status = rawStatus as? Int, rawStatus == NSNumber(value: status),
+              let displayTime = rawDisplayTime as? UInt64, rawDisplayTime == NSNumber(value: displayTime),
+              let metadata = CaptureVideoFrameMetadata.read(
+                status: status, displayTimeHostTicks: displayTime,
+                presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                width: CVPixelBufferGetWidth(imageBuffer), height: CVPixelBufferGetHeight(imageBuffer),
+                observedAtHostTime: observedAtHostTime) else { return nil }
+        self.imageBuffer = imageBuffer
+        self.metadata = metadata
+    }
+}
+
+/// Used only on ScreenCapture's serial video queue. A delayed or repeated
+/// complete sample cannot make the media timeline move backward.
+struct CaptureVideoFrameOrder {
+    private var last: CaptureVideoFrameMetadata?
+
+    mutating func admit(_ metadata: CaptureVideoFrameMetadata) -> Bool {
+        if let last {
+            guard metadata.displayTimeHostTicks > last.displayTimeHostTicks,
+                  metadata.captureTimeNanoseconds > last.captureTimeNanoseconds else { return false }
+        }
+        last = metadata
+        return true
+    }
+}
 
 enum CaptureSizing {
     static let targetFramesPerSecond = Int32(DesktopVideoQuality.targetFramesPerSecond)
@@ -79,10 +155,9 @@ enum CaptureSizing {
     }
 }
 
-/// Thin wrapper around `SCStream` that captures the main display and,
-/// when the user opted in, system audio as `CMSampleBuffer`s delivered on the
-/// capture queues. Consumers — the WebRTC video/audio encoders in
-/// Phase 3 — handle their own marshalling.
+/// Captures the main display as validated video frames and, when opted in,
+/// system audio as sample buffers. Consumers handle their own encoder
+/// marshalling on the capture queues.
 ///
 /// Not `@MainActor`: callbacks fire on the capture queue and we don't
 /// want a per-frame actor hop at 30 fps.
@@ -98,9 +173,10 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
     private var loggedFirstVideoSample = false
     private var loggedFirstAudioSample = false
+    private var videoFrameOrder = CaptureVideoFrameOrder()
 
-    /// Invoked on `videoQueue` for each captured frame.
-    var onVideoSample: (@Sendable (CMSampleBuffer) -> Void)?
+    /// Invoked on `videoQueue` only for a complete, valid, advancing frame.
+    var onVideoFrame: (@Sendable (CapturedVideoFrame) -> Void)?
     /// Invoked on `audioQueue` for each captured audio chunk.
     var onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
     /// Invoked on an arbitrary queue when the stream ends unexpectedly.
@@ -210,9 +286,11 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         guard sampleBuffer.isValid else { return }
         switch type {
         case .screen:
-            if !loggedFirstVideoSample,
-               let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: mach_absolute_time()),
+                  videoFrameOrder.admit(frame.metadata) else { return }
+            if !loggedFirstVideoSample {
                 loggedFirstVideoSample = true
+                let imageBuffer = frame.imageBuffer
                 let width = CVPixelBufferGetWidth(imageBuffer)
                 let height = CVPixelBufferGetHeight(imageBuffer)
                 let pixelFormat = CVPixelBufferGetPixelFormatType(imageBuffer)
@@ -220,7 +298,7 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                 log.info(
                     "received first video sample effective=\(width, privacy: .public)x\(height, privacy: .public) macroblocks=\(macroblocks, privacy: .public) pixelFormat=\(pixelFormat, privacy: .public)")
             }
-            onVideoSample?(sampleBuffer)
+            onVideoFrame?(frame)
         case .audio:
             if !loggedFirstAudioSample,
                let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {
