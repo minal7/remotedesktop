@@ -150,8 +150,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         return true
     }
 
-    /// Current transport/submission readiness, independently of task privacy.
-    /// This is not proof of a fresh capture or a drawable presentation.
+    /// Current transport/local-presentation readiness, independently of task
+    /// privacy. Native output and host capture freshness remain unqualified.
     var isRemoteScreenSessionReady: Bool {
         guard inputActivity.allowsInput, !isCloudAccountRevalidationPending else { return false }
         guard experience == .computerUse,
@@ -161,7 +161,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         return computerUseVisualSidecarState == .live && hasReceivedVideoFrame && display != nil
     }
 
-    /// Prepare the sink before asking it for a submitted-frame readiness edge.
+    /// Prepare the sink before asking it for a drawable-presentation edge.
     /// Keep the container mounted through transient frame loss. Candidate
     /// visibility and input readiness have separate policies below.
     var shouldPrepareRemoteScreenRenderer: Bool {
@@ -627,7 +627,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
         if experience == .computerUse,
            computerUseConnectionMode == .localPromptOnly {
-            // Only fresh-frame-gated direct input belongs on the visual
+            // Only presentation-gated direct input belongs on the visual
             // sidecar. AI prompts and approval controls use the independent
             // ComputerUseSessionModel TLS channel and never pass through here.
             computerUseVisualSidecar?.sendDirectInput(message)
@@ -1051,7 +1051,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         t.onFirstVideoFrame = { [weak self, weak t] in
             guard let self, let t, self.transport === t, self.inputHelloReceived,
                   self.state == .connected else { return }
-            // Record renderer-submission readiness even while the account shield is
+            // Record local presentation readiness even while the account shield is
             // up. WebRTC reports this edge only once, while the pending flag
             // still keeps pixels hidden and outbound prompt/control disabled.
             self.hasReceivedVideoFrame = true

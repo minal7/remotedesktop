@@ -50,13 +50,13 @@ protocol Transport: AnyObject {
     /// Revokes the previous input/screen lifetime before a recovery handshake.
     /// Consumers discard local holds; they must not send releases to a new lifetime.
     var onInputUnavailable: (@MainActor () -> Void)? { get set }
-    /// The renderer attachment lost its submitted-frame readiness, while the
+    /// The renderer attachment lost its local presentation readiness, while the
     /// host input handshake/display remain valid. Release existing controls
     /// under that scope before disabling local input; do not restart AI tasks.
     var onVideoFrameUnavailable: (@MainActor () -> Void)? { get set }
-    /// Fires after the current renderer subscription forwards its first valid
-    /// decoded frame. Submission does not prove GPU presentation or capture
-    /// freshness. Non-video fixtures may synthesize this event explicitly.
+    /// WebRTC fires after successful GPU work and presentation of an exact
+    /// drawable in the current attachment/context. This is not host capture
+    /// freshness or an occlusion proof. Non-video fixtures synthesize it explicitly.
     var onFirstVideoFrame: (@MainActor () -> Void)? { get set }
     var onDisconnect: (@MainActor (String) -> Void)? { get set }
 

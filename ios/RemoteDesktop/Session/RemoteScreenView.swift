@@ -1,7 +1,6 @@
 import SwiftUI
 import UIKit
 import LiveKitWebRTC
-import Metal
 
 /// The capture surface for the remote session: renders incoming video
 /// and routes every input channel back to the
@@ -794,6 +793,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         contentView.center = CGPoint(
             x: bounds.midX + zoomOffset.x,
             y: bounds.midY + zoomOffset.y)
+        videoView.updateViewport(contentView.convert(bounds, from: self))
         cursorLayer.clamp(to: visibleContentRect)
         if zoomController?.captureView === self { zoomController?.report(scale: zoomScale) }
     }
@@ -860,27 +860,23 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 }
 
-/// The container survives transport recovery; each native child belongs to
-/// just one attachment. Deferred work inside an old RTC view can only touch
-/// that removed child, never the replacement's cached frame or drawable size.
+/// The container survives transport recovery; its driver and Metal layer are
+/// fresh for every attachment. Removed attachments cannot present into a successor.
 private final class RemoteVideoSurfaceView: UIView, RemoteVideoSurface {
-    private lazy var lifetime = RemoteVideoSurfaceLifetime<MetalSafeRTCVideoView>(
-        make: {
-            guard RTCMTLVideoView.isMetalAvailable() else { return nil }
-            return MetalSafeRTCVideoView(frame: .zero)
-        },
+    private var viewport: CGRect?
+    private lazy var lifetime = RemoteVideoSurfaceLifetime<RemoteVideoPresentationSurface>(
+        make: { RemoteVideoPresentationSurface.make() },
         install: { [weak self] renderer, display in
             guard let self else { return }
-            renderer.backgroundColor = UIColor(white: 0.05, alpha: 1)
-            renderer.isUserInteractionEnabled = false
-            self.addSubview(renderer)
+            renderer.view.backgroundColor = UIColor(white: 0.05, alpha: 1)
+            self.addSubview(renderer.view)
             self.layout(renderer, display: display)
         },
         remove: { renderer in
-            renderer.isHidden = true
-            renderer.isEnabled = false
-            renderer.removeFromSuperview()
-        })
+            renderer.retire()
+            renderer.view.removeFromSuperview()
+        },
+        presentation: { $0.presentation })
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -894,104 +890,23 @@ private final class RemoteVideoSurfaceView: UIView, RemoteVideoSurface {
         lifetime.prepare(display: display)
     }
 
+    func updateViewport(_ viewport: CGRect) {
+        self.viewport = viewport
+        if let renderer = lifetime.renderer, let display = lifetime.display { layout(renderer, display: display) }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let renderer = lifetime.renderer, let display = lifetime.display {
-            layout(renderer, display: display)
-        }
+        if let renderer = lifetime.renderer, let display = lifetime.display { layout(renderer, display: display) }
     }
 
-    private func layout(_ renderer: MetalSafeRTCVideoView, display: DisplayInfo) {
-        // Use the attachment's immutable display, not a delayed SwiftUI
-        // publication that could belong to another input scope.
+    private func layout(_ renderer: RemoteVideoPresentationSurface, display: DisplayInfo) {
         let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
-        renderer.videoContentMode = layout.contentMode
-        renderer.frame = layout.videoRect
-        renderer.setNeedsLayout()
-        renderer.layoutIfNeeded()
-    }
-}
-
-/// LiveKit's `RTCMTLVideoView` treats the pixel dimensions delivered to
-/// `RTCVideoRenderer.setSize(_:)` as points, then multiplies them by the iOS
-/// screen scale when sizing its `MTKView` drawable. A 3456-pixel Retina frame
-/// therefore requests a 10,368-pixel texture on an @3x iPhone, exceeding the
-/// 8192-pixel Metal limit exposed by Simulator.
-///
-/// Keep decoding the negotiated frame at full quality, but bound only the
-/// renderer's drawable request. Full-display surfaces use the logical
-/// display's shared video/input rectangle independently of this drawable
-/// rounding. Older hosts retain their existing aspect-fit presentation.
-private final class MetalSafeRTCVideoView: RTCMTLVideoView {
-    /// WebRTC invokes `setSize(_:)` on its renderer queue, so that callback
-    /// must not consult `UIView.window`, `UIWindow.screen`, or trait state.
-    /// Capture the immutable sizing inputs while UIKit constructs the view on
-    /// the main thread and use only those values from the renderer callback.
-    private let rendererDisplayScale: CGFloat
-    private let rendererMaximumTextureDimension: Int
-
-    override init(frame: CGRect) {
-        rendererDisplayScale = UIScreen.main.scale
-        rendererMaximumTextureDimension = MetalVideoRenderSizing
-            .maximumTextureDimension2D(for: MTLCreateSystemDefaultDevice())
-        super.init(frame: frame)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("MetalSafeRTCVideoView is created programmatically")
-    }
-
-    override func setSize(_ size: CGSize) {
-        super.setSize(MetalVideoRenderSizing.rendererFrameSize(
-            size,
-            displayScale: rendererDisplayScale,
-            maximumTextureDimension: rendererMaximumTextureDimension))
-    }
-}
-
-enum MetalVideoRenderSizing {
-    /// Metal does not expose a public `maxTextureDimension2D` property. The
-    /// limit is instead specified by GPU family. Apple3 and later permit a
-    /// 16K 2D texture; the portable fallback is 8K. Simulator needs the 8K
-    /// ceiling explicitly because its MTLSimDevice reports that validation
-    /// limit even when the host Mac belongs to a newer family.
-    static func maximumTextureDimension2D(for device: MTLDevice?) -> Int {
-#if targetEnvironment(simulator)
-        _ = device
-        return 8_192
-#else
-        guard let device else { return 8_192 }
-        return device.supportsFamily(.apple3) ? 16_384 : 8_192
-#endif
-    }
-
-    static func rendererFrameSize(
-        _ frameSize: CGSize,
-        displayScale: CGFloat,
-        maximumTextureDimension: Int
-    ) -> CGSize {
-        guard frameSize.width.isFinite,
-              frameSize.height.isFinite,
-              frameSize.width > 0,
-              frameSize.height > 0 else {
-            return frameSize
-        }
-
-        let safeDisplayScale = displayScale.isFinite && displayScale > 0
-            ? displayScale
-            : 1
-        let maximumPointDimension = floor(
-            CGFloat(max(1, maximumTextureDimension)) / safeDisplayScale)
-        let downscale = min(
-            1,
-            maximumPointDimension / frameSize.width,
-            maximumPointDimension / frameSize.height)
-
-        guard downscale < 1 else { return frameSize }
-        return CGSize(
-            width: max(1, floor(frameSize.width * downscale)),
-            height: max(1, floor(frameSize.height * downscale)))
+        renderer.view.frame = layout.videoRect
+        let visible = renderer.view.convert(viewport ?? bounds, from: self).intersection(renderer.view.bounds)
+        renderer.configure(mode: layout.contentMode == .scaleAspectFit ? .aspectFit : .fill, viewport: visible)
+        renderer.view.setNeedsLayout()
+        renderer.view.layoutIfNeeded()
     }
 }
 

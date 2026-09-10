@@ -188,8 +188,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
         let display = DisplayInfo(w: 1728, h: 1117, scale: 2, fullDisplaySurface: true)
         let bounds = CGRect(x: 0, y: 0, width: 1024, height: 768)
         let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
-        let drawable = MetalVideoRenderSizing.rendererFrameSize(CGSize(width: 3456, height: 2234),
-            displayScale: 3, maximumTextureDimension: 8192)
+        let drawable = try XCTUnwrap(RemoteVideoDrawableSizing.size(bounds: layout.videoRect.size, scale: 3))
         XCTAssertNotEqual(drawable.width / drawable.height, CGFloat(display.w) / CGFloat(display.h),
                           "Integral drawable rounding is not an exact logical aspect ratio")
         XCTAssertEqual(layout.videoRect.width / layout.videoRect.height,
@@ -322,38 +321,21 @@ final class RemoteScreenInteractionTests: XCTestCase {
             .zero)
     }
 
-    func test_metalRendererSizing_capsRetinaFrameForTripleScaleViewer() {
-        let frameSize = CGSize(width: 3_456, height: 2_234)
-
-        let safe = MetalVideoRenderSizing.rendererFrameSize(
-            frameSize,
-            displayScale: 3,
-            maximumTextureDimension: 8_192)
-
-        XCTAssertEqual(safe.width, 2_730)
-        XCTAssertEqual(safe.height, 1_764)
-        XCTAssertLessThanOrEqual(safe.width * 3, 8_192)
-        XCTAssertLessThanOrEqual(safe.height * 3, 8_192)
-        XCTAssertEqual(
-            safe.width / safe.height,
-            frameSize.width / frameSize.height,
-            accuracy: 0.001)
+    func test_metalRendererSizing_capsRetinaFrameForTripleScaleViewer() throws {
+        let viewBounds = CGSize(width: 3456, height: 2234)
+        let pixels = try XCTUnwrap(RemoteVideoDrawableSizing.size(bounds: viewBounds, scale: 3))
+        XCTAssertLessThanOrEqual(pixels.width, 8192)
+        XCTAssertLessThanOrEqual(pixels.height, 8192)
+        XCTAssertLessThanOrEqual(pixels.width * pixels.height, 16_777_216)
+        XCTAssertGreaterThan(pixels.width, viewBounds.width, "The result is physical pixels, not an RTC point-size workaround")
+        XCTAssertEqual(pixels.width / pixels.height, viewBounds.width / viewBounds.height, accuracy: 0.001)
     }
 
     func test_metalRendererSizing_keepsCompliantFramesAndHandlesPortrait() {
-        XCTAssertEqual(
-            MetalVideoRenderSizing.rendererFrameSize(
-                CGSize(width: 1_920, height: 1_080),
-                displayScale: 3,
-                maximumTextureDimension: 8_192),
-            CGSize(width: 1_920, height: 1_080))
-
-        let portrait = MetalVideoRenderSizing.rendererFrameSize(
-            CGSize(width: 2_160, height: 3_840),
-            displayScale: 3,
-            maximumTextureDimension: 8_192)
-        XCTAssertEqual(portrait, CGSize(width: 1_535, height: 2_730))
-        XCTAssertLessThanOrEqual(portrait.height * 3, 8_192)
+        XCTAssertEqual(RemoteVideoDrawableSizing.size(bounds: CGSize(width: 640, height: 360), scale: 3),
+                       CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(RemoteVideoDrawableSizing.size(bounds: CGSize(width: 720, height: 1280), scale: 3),
+                       CGSize(width: 2160, height: 3840))
     }
 
     func test_remoteTouchRoutingPolicy_separatesMoveScreenFromComputerControl() {

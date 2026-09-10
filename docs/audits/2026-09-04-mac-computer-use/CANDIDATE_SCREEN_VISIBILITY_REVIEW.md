@@ -1,5 +1,7 @@
 # Candidate screen visibility and input readiness
 
+Follow-up: [native surface integration](PRESENTATION_SURFACE_INTEGRATION_REVIEW.md) now connects the producer in client source. This document records the earlier checkpoint; native execution and product qualification remain pending.
+
 Source repair, 2026-09-10. This continues the visibility prerequisite in the [presentation producer review](PRESENTATION_PRODUCER_REVIEW.md) and the [screen privacy/input review](SCREEN_PRIVACY_INPUT_REVIEW.md). This change is in the iOS client that displays and controls the Mac. No builds, typechecks, assertion execution, app launches, native rendering, browser actions or model inference ran. The Metal producer remains uninstantiated, and input readiness still uses the existing renderer-submission contract.
 
 ## First-principles defect

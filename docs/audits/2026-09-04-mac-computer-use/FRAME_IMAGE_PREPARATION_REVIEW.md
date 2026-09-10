@@ -1,5 +1,7 @@
 # Decoded frame image preparation
 
+Follow-up: [native surface integration](PRESENTATION_SURFACE_INTEGRATION_REVIEW.md) now connects the producer in client source. This document records the earlier checkpoint; native execution and product qualification remain pending.
+
 Source preparation, 2026-09-10. This follows [candidate screen visibility](CANDIDATE_SCREEN_VISIBILITY_REVIEW.md) and addresses the software-frame gap in the [presentation producer](PRESENTATION_PRODUCER_REVIEW.md). No builds, typechecks, assertions, native image/GPU operations, app launches, browser actions or model inference ran. The candidate producer now calls this preparation code, but the app still uses its existing RTC view. Drawable acquisition, the bounded frame mailbox and transport receipt integration remain unfinished.
 
 ## First-principles requirement

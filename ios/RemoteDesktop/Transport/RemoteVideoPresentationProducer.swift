@@ -5,9 +5,8 @@ import LiveKitWebRTC
 import Metal
 import QuartzCore
 
-/// Qualification candidate: not yet installed by RemoteVideoSurfaceView.
 /// Owns encoding and presentation of an exact supplied drawable, using public
-/// Core Image/Metal APIs. The caller must own visibility, layout and retirement.
+/// Core Image/Metal APIs. Native output remains pending qualification.
 @MainActor
 final class RemoteVideoPresentationProducer {
     enum ContentMode: Equatable { case fill, aspectFit }
@@ -47,6 +46,8 @@ final class RemoteVideoPresentationProducer {
         layer.framebufferOnly = false
         layer.colorspace = colorSpace
         layer.presentsWithTransaction = false
+        layer.maximumDrawableCount = 2
+        layer.allowsNextDrawableTimeout = true
     }
 
     /// Call on layout, activity, visibility or input-presentation changes.
@@ -146,7 +147,7 @@ final class RemoteVideoPresentationProducer {
         return .submitted(ticket)
     }
 
-    static func validDestination(width: Int, height: Int) -> Bool {
+    nonisolated static func validDestination(width: Int, height: Int) -> Bool {
         // Bounded drawable allocation is the caller's responsibility too.
         // This preflight rejects unexpected supplied destinations before CI.
         width > 0 && height > 0 && width <= 8_192 && height <= 8_192 &&

@@ -1,5 +1,7 @@
 # Native presentation producer candidate
 
+Follow-up: [native surface integration](PRESENTATION_SURFACE_INTEGRATION_REVIEW.md) now connects the producer in client source. This document records the earlier checkpoint; native execution and product qualification remain pending.
+
 Source preparation, 2026-09-10. This continues [native surface isolation](NATIVE_SURFACE_LIFETIME_REVIEW.md). No builds, typechecks, assertions, native image/GPU operations, app launches, browser actions or model inference were executed. The producer is **not instantiated by the app**. Existing renderer selection and submission-based readiness are unchanged; this component does not close the presentation or natural-language acceptance gates.
 
 ## First-principles boundary

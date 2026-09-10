@@ -483,24 +483,37 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 attachment?.retire()
                 continue
             }
-            guard let attachment else {
+            guard let attachment, let presentation = attachment.presentation, presentation.state != .retired else {
+                attachment?.retire()
+                guard !isClosing, self.renderer === renderer, remoteVideoTrack === track,
+                      currentDisplay == display, inputPresentation.acceptsFrame(lease), directInputState.isReady else { continue }
                 // A failed native surface cannot produce trustworthy readiness.
                 // For Computer Use this ends only the optional video sidecar.
                 finishDisconnect(reason: "The remote screen renderer could not be prepared. Reconnect to try again.")
                 return
             }
-            let subscription = RemoteVideoRenderSubscription(renderer: attachment.renderer) { [weak self, weak track] in
-                Task { @MainActor [weak self, weak track] in
-                    guard let self, let track, !self.isClosing,
-                          self.remoteVideoTrack === track,
-                          self.rendererRegistration?.lease == lease,
-                          self.inputPresentation.acceptsFrame(lease),
-                          self.directInputState.isReady else { return }
+            // Forwarding a decoded frame is no longer the readiness receipt.
+            let subscription = RemoteVideoRenderSubscription(renderer: attachment.renderer, onFirstForwardedFrame: {})
+            rendererRegistration = .init(track: track, subscription: subscription, attachment: attachment, lease: lease)
+            presentation.observe { [weak self, weak track, weak attachment] state in
+                guard let self, let track, let attachment, !self.isClosing,
+                      self.remoteVideoTrack === track, self.rendererRegistration?.attachment === attachment,
+                      self.rendererRegistration?.lease == lease, self.inputPresentation.acceptsFrame(lease),
+                      self.directInputState.isReady, attachment.presentation?.state == state else { return }
+                switch state {
+                case .presented:
+                    guard !self.hasReportedRendererFrame else { return }
                     self.hasReportedRendererFrame = true
                     self.onFirstVideoFrame?()
+                case .waiting, .retired:
+                    let reported = self.hasReportedRendererFrame
+                    self.hasReportedRendererFrame = false
+                    if reported { self.onVideoFrameUnavailable?() }
+                case .failed(_, let message):
+                    self.finishDisconnect(reason: message)
                 }
             }
-            rendererRegistration = .init(track: track, subscription: subscription, attachment: attachment, lease: lease)
+            guard rendererRegistration?.attachment === attachment else { continue }
             track.add(subscription)
         }
     }

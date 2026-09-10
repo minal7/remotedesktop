@@ -11,10 +11,12 @@ protocol RemoteVideoSurface: AnyObject {
 @MainActor
 final class RemoteVideoSurfaceAttachment {
     let renderer: RTCVideoRenderer
+    let presentation: RemoteVideoSurfacePresentation?
     private var cleanup: (@MainActor () -> Void)?
 
-    init(renderer: RTCVideoRenderer, cleanup: @escaping @MainActor () -> Void) {
+    init(renderer: RTCVideoRenderer, presentation: RemoteVideoSurfacePresentation? = nil, cleanup: @escaping @MainActor () -> Void) {
         self.renderer = renderer
+        self.presentation = presentation
         self.cleanup = cleanup
     }
 
@@ -23,6 +25,7 @@ final class RemoteVideoSurfaceAttachment {
     func retire() {
         let cleanup = self.cleanup
         self.cleanup = nil
+        presentation?.retire()
         cleanup?()
     }
 }
@@ -39,15 +42,18 @@ final class RemoteVideoSurfaceLifetime<Renderer: RTCVideoRenderer> {
     private let make: @MainActor () -> Renderer?
     private let install: @MainActor (Renderer, DisplayInfo) -> Void
     private let remove: @MainActor (Renderer) -> Void
+    private let presentation: @MainActor (Renderer) -> RemoteVideoSurfacePresentation?
     private var reservation: Reservation?
     private(set) var renderer: Renderer?
     var display: DisplayInfo? { reservation?.display }
 
     init(make: @escaping @MainActor () -> Renderer?, install: @escaping @MainActor (Renderer, DisplayInfo) -> Void,
-         remove: @escaping @MainActor (Renderer) -> Void) {
+         remove: @escaping @MainActor (Renderer) -> Void,
+         presentation: @escaping @MainActor (Renderer) -> RemoteVideoSurfacePresentation? = { _ in nil }) {
         self.make = make
         self.install = install
         self.remove = remove
+        self.presentation = presentation
     }
 
     func prepare(display: DisplayInfo) -> RemoteVideoSurfaceAttachment? {
@@ -67,7 +73,9 @@ final class RemoteVideoSurfaceLifetime<Renderer: RTCVideoRenderer> {
             remove(created)
             return nil
         }
-        return RemoteVideoSurfaceAttachment(renderer: created) { [weak self, remove] in
+        let channel = presentation(created)
+        guard reservation?.id == id, renderer === created else { remove(created); return nil }
+        return RemoteVideoSurfaceAttachment(renderer: created, presentation: channel) { [weak self, remove] in
             if let self { self.retire(id: id) }
             else { remove(created) }
         }
