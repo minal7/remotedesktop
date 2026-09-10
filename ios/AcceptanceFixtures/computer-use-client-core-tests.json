@@ -1,6 +1,10 @@
 {
   "selectors": [
-    "RemoteDesktopTests/ComputerUseClarificationClientTests"
+    "RemoteDesktopTests/ComputerUseClarificationClientTests",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding",
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope"
   ],
   "expectedTests": [
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
@@ -37,6 +41,10 @@
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testUnavailableBrowserQuestionReplayEndsRecoveryWithoutOpeningAnAnswerComposer",
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testUnknownExtendedAnswerFormatKeepsTheQuestionReadableWithoutNegotiatingFormatSupport",
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testUnreadableStartupCannotSendOrChooseANewSessionBeforeReconnect",
-    "RemoteDesktopTests/ComputerUseClarificationClientTests/testWholePartyQuestionRetainsAnIncompleteDraftAndSendsBothCountsUnderTheOriginalReference"
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testWholePartyQuestionRetainsAnIncompleteDraftAndSendsBothCountsUnderTheOriginalReference",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding",
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios",
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope"
   ]
 }

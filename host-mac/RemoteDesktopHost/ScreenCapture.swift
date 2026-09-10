@@ -219,9 +219,71 @@ struct CaptureVideoFrameMetadata: Equatable {
     }
 }
 
+/// ScreenCaptureKit reports contentRect in surface points. scaleFactor
+/// converts those points to pixels; contentScale describes source scaling
+/// and must not be multiplied into that already placed rectangle again.
+struct CaptureVideoPlacement: Equatable {
+    let contentRect: CGRect
+    let scaleFactor: Double
+    let contentScale: Double
+    let presenterOverlayRect: CGRect?
+
+    private init(contentRect: CGRect, scaleFactor: Double, contentScale: Double, presenterOverlayRect: CGRect?) {
+        self.contentRect = contentRect; self.scaleFactor = scaleFactor
+        self.contentScale = contentScale; self.presenterOverlayRect = presenterOverlayRect
+    }
+
+    static func read(_ attachments: [SCStreamFrameInfo: Any]) -> Self? {
+        guard let rect = rectangle(attachments[.contentRect]), rect.size.width > 0, rect.size.height > 0,
+              let scale = number(attachments[.scaleFactor]), (1...4).contains(scale),
+              let contentScale = number(attachments[.contentScale]), contentScale > 0 else { return nil }
+        var overlay: CGRect?
+        if #available(macOS 14.2, *), let raw = attachments[.presenterOverlayContentRect] {
+            guard let value = rectangle(raw), value.size.width >= 0, value.size.height >= 0 else { return nil }
+            overlay = value
+        }
+        return Self(contentRect: rect, scaleFactor: scale, contentScale: contentScale, presenterOverlayRect: overlay)
+    }
+
+    /// Full-display input currently supports a full output surface. Reject
+    /// padding, crop/overlay placement and mismatched source density before
+    /// such a frame can authorize input or reach the encoder.
+    func coversFullDisplaySurface(width: Int, height: Int, displayScale: Double) -> Bool {
+        guard width > 0, height > 0, displayScale.isFinite,
+              abs(scaleFactor - displayScale) <= 0.000001,
+              presenterOverlayRect == nil || presenterOverlayRect == .zero else { return false }
+        let pixels = [Double(contentRect.origin.x) * scaleFactor,
+                      Double(contentRect.origin.y) * scaleFactor,
+                      Double(contentRect.width) * scaleFactor,
+                      Double(contentRect.height) * scaleFactor]
+        let expected = [0.0, 0.0, Double(width), Double(height)]
+        // Allow subpixel floating-point serialization error, not a pixel of
+        // hidden padding. Native metadata behavior still needs qualification.
+        return zip(pixels, expected).allSatisfy { actual, wanted in
+            actual.isFinite && abs(actual - wanted) <= 0.001
+        }
+    }
+
+    private static func number(_ raw: Any?) -> Double? {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              value.doubleValue.isFinite else { return nil }
+        return value.doubleValue
+    }
+
+    private static func rectangle(_ raw: Any?) -> CGRect? {
+        guard let dictionary = raw as? [String: Any], !dictionary.isEmpty,
+              dictionary.values.allSatisfy({ number($0) != nil }),
+              let rect = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+              rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite else { return nil }
+        return rect
+    }
+}
+
 struct CapturedVideoFrame {
     let imageBuffer: CVPixelBuffer
     let metadata: CaptureVideoFrameMetadata
+    let placement: CaptureVideoPlacement
 
     init?(sampleBuffer: CMSampleBuffer, observedAtHostTime: UInt64) {
         guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer),
@@ -238,9 +300,11 @@ struct CapturedVideoFrame {
                 status: status, displayTimeHostTicks: displayTime,
                 presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
                 width: CVPixelBufferGetWidth(imageBuffer), height: CVPixelBufferGetHeight(imageBuffer),
-                observedAtHostTime: observedAtHostTime) else { return nil }
+                observedAtHostTime: observedAtHostTime),
+              let placement = CaptureVideoPlacement.read(attachments) else { return nil }
         self.imageBuffer = imageBuffer
         self.metadata = metadata
+        self.placement = placement
     }
 }
 
@@ -905,7 +969,11 @@ extension ScreenCapture {
         config.width = width
         config.height = height
         config.scalesToFit = true
-        config.preservesAspectRatio = true
+        // Even codec sizes can differ slightly from the logical display's
+        // aspect ratio. Fill the surface; the phone restores the logical
+        // aspect ratio inside its shared video/input rectangle.
+        config.preservesAspectRatio = false
+        config.destinationRect = CGRect(x: 0, y: 0, width: width, height: height)
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         config.minimumFrameInterval = CMTime(
             value: 1,
@@ -957,7 +1025,9 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                 }
                 guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt),
                       frame.metadata.width == native.configuration.width,
-                      frame.metadata.height == native.configuration.height else {
+                      frame.metadata.height == native.configuration.height,
+                      frame.placement.coversFullDisplaySurface(width: frame.metadata.width,
+                        height: frame.metadata.height, displayScale: native.display.backingScale) else {
                     reportVideoUnavailable(attempt, observedAtHostTime: observedAt, callbacks: callbacks)
                     return
                 }

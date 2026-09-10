@@ -4,7 +4,7 @@ import LiveKitWebRTC
 import Metal
 
 /// The capture surface for the remote session: renders incoming video
-/// (placeholder for now) and routes every input channel back to the
+/// and routes every input channel back to the
 /// session's transport.
 ///
 /// Three input modes share this view:
@@ -229,7 +229,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     override func layoutSubviews() {
         super.layoutSubviews()
         contentView.bounds = CGRect(origin: .zero, size: bounds.size)
-        videoView.frame = contentView.bounds
+        applyVideoSurfaceLayout()
         cursorLayer.frame = contentView.bounds
         clampZoomOffset()
         applyZoomTransform()
@@ -238,7 +238,15 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     func applyDisplay(_ d: DisplayInfo?) {
         remoteDisplay = d
+        applyVideoSurfaceLayout()
+        setNeedsLayout()
         cursorLayer.clamp(to: geometry.interactiveRect)
+    }
+
+    private func applyVideoSurfaceLayout() {
+        let layout = RemoteScreenRenderingLayout(bounds: contentView.bounds, display: remoteDisplay)
+        videoView.videoContentMode = layout.contentMode
+        videoView.frame = layout.videoRect
     }
 
     override func didMoveToWindow() {
@@ -773,7 +781,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private var geometry: RemoteScreenGeometry {
-        RemoteScreenGeometry(bounds: bounds, display: remoteDisplay)
+        RemoteScreenGeometry(bounds: contentView.bounds, display: remoteDisplay)
     }
 }
 
@@ -784,9 +792,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 /// 8192-pixel Metal limit exposed by Simulator.
 ///
 /// Keep decoding the negotiated frame at full quality, but bound only the
-/// renderer's drawable request. The aspect ratio is retained, so LiveKit's
-/// aspect-fit layout and the separately signaled remote input geometry remain
-/// unchanged.
+/// renderer's drawable request. Full-display surfaces use the logical
+/// display's shared video/input rectangle independently of this drawable
+/// rounding. Older hosts retain their existing aspect-fit presentation.
 private final class MetalSafeRTCVideoView: RTCMTLVideoView {
     /// WebRTC invokes `setSize(_:)` on its renderer queue, so that callback
     /// must not consult `UIView.window`, `UIWindow.screen`, or trait state.
@@ -909,6 +917,21 @@ struct RemoteScreenInteractionState: Equatable {
     let remoteIndirectInputEnabled: Bool
     let viewportPinchEnabled: Bool
     let viewportPanEnabled: Bool
+}
+
+struct RemoteScreenRenderingLayout {
+    let videoRect: CGRect
+    let contentMode: UIView.ContentMode
+
+    init(bounds: CGRect, display: DisplayInfo?) {
+        if display?.fullDisplaySurface == true {
+            videoRect = RemoteScreenGeometry(bounds: bounds, display: display).interactiveRect
+            contentMode = .scaleToFill
+        } else {
+            videoRect = bounds
+            contentMode = .scaleAspectFit
+        }
+    }
 }
 
 struct RemoteScreenGeometry {

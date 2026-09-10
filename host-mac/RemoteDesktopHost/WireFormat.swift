@@ -157,7 +157,8 @@ enum HostMessageEncoder {
     static func display(_ geometry: CaptureDisplayGeometry, seq: UInt32, ts: UInt64,
                         inputSession: DirectInputAcknowledgement? = nil) -> Data {
         display(width: geometry.state.width, height: geometry.state.height,
-                scale: geometry.backingScale, seq: seq, ts: ts, inputSession: inputSession)
+                scale: geometry.backingScale, seq: seq, ts: ts, inputSession: inputSession,
+                fullDisplaySurface: true)
     }
 
     static func display(
@@ -166,7 +167,8 @@ enum HostMessageEncoder {
         scale: Double,
         seq: UInt32,
         ts: UInt64,
-        inputSession: DirectInputAcknowledgement? = nil
+        inputSession: DirectInputAcknowledgement? = nil,
+        fullDisplaySurface: Bool = false
     ) -> Data {
         var obj: [String: Any] = [
             "t": "display",
@@ -177,6 +179,7 @@ enum HostMessageEncoder {
             "scale": scale,
         ]
         if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
+        if fullDisplaySurface { obj["fullDisplaySurface"] = 1 }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 }

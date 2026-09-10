@@ -4,6 +4,43 @@ import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
+    func test_fullDisplaySurfaceSharesItsVideoAndInputRectangleAcrossAspectRatios() {
+        for viewport in [CGRect(x: 0, y: 0, width: 1024, height: 768),
+                         CGRect(x: 10, y: 20, width: 400, height: 900)] {
+            for size in [(1920, 1080), (1200, 1920), (1728, 1117)] {
+                let display = DisplayInfo(w: size.0, h: size.1, scale: 2, fullDisplaySurface: true)
+                let layout = RemoteScreenRenderingLayout(bounds: viewport, display: display)
+                let input = RemoteScreenGeometry(bounds: viewport, display: display)
+                XCTAssertEqual(layout.contentMode, .scaleToFill)
+                XCTAssertEqual(layout.videoRect, input.interactiveRect)
+                let first = input.localToRemote(CGPoint(x: layout.videoRect.minX, y: layout.videoRect.minY))
+                let last = input.localToRemote(CGPoint(x: layout.videoRect.maxX, y: layout.videoRect.maxY))
+                XCTAssertEqual(first.x, 0); XCTAssertEqual(first.y, 0)
+                XCTAssertEqual(last.x, size.0 - 1); XCTAssertEqual(last.y, size.1 - 1)
+            }
+        }
+        let bounds = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        let legacy = RemoteScreenRenderingLayout(bounds: bounds, display: DisplayInfo(w: 1728, h: 1117, scale: 2))
+        XCTAssertEqual(legacy.videoRect, bounds); XCTAssertEqual(legacy.contentMode, .scaleAspectFit)
+    }
+
+    func test_fullDisplaySurfaceRestoresLogicalAspectIndependentlyOfDrawableRounding() {
+        let display = DisplayInfo(w: 1728, h: 1117, scale: 2, fullDisplaySurface: true)
+        let bounds = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
+        let drawable = MetalVideoRenderSizing.rendererFrameSize(CGSize(width: 3456, height: 2234),
+            displayScale: 3, maximumTextureDimension: 8192)
+        XCTAssertNotEqual(drawable.width / drawable.height, CGFloat(display.w) / CGFloat(display.h),
+                          "Integral drawable rounding is not an exact logical aspect ratio")
+        XCTAssertEqual(layout.videoRect.width / layout.videoRect.height,
+                       CGFloat(display.w) / CGFloat(display.h), accuracy: 0.000000001)
+        XCTAssertEqual(layout.contentMode, .scaleToFill,
+                       "Fit the full surface to the logical rectangle, not another aspect-fit inside it")
+        let input = RemoteScreenGeometry(bounds: bounds, display: display)
+        let center = input.localToRemote(CGPoint(x: layout.videoRect.midX, y: layout.videoRect.midY))
+        XCTAssertEqual(center.x, 864); XCTAssertEqual(center.y, 558)
+    }
+
     func test_sessionChromePolicy_staysVisibleWhileConnectingThenAutoHides() {
         XCTAssertFalse(SessionChromePolicy.autoHides(after: .connecting))
         XCTAssertTrue(SessionChromePolicy.autoHides(after: .connected))

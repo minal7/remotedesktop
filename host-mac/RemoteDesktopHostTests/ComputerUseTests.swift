@@ -6547,6 +6547,7 @@ final class ComputerUseTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
         XCTAssertEqual(object["w"] as? Int, 1600); XCTAssertEqual(object["h"] as? Int, 900)
         XCTAssertEqual(object["scale"] as? Double, 2)
+        XCTAssertEqual(object["fullDisplaySurface"] as? Int, 1)
         XCTAssertEqual(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputAcknowledgement.self), ready.wire)
         XCTAssertEqual(authority.captureChanged(available: true, display: display), .unchanged)
         XCTAssertEqual(authority.readyAcknowledgement(for: id)?.wire, ready.wire)

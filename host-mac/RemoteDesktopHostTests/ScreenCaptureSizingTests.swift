@@ -5,6 +5,92 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_capturePlacementConvertsSurfacePointsWithoutApplyingContentScaleTwice() throws {
+        let placement = try XCTUnwrap(CaptureVideoPlacement.read(placementAttachments(
+            rect: CGRect(x: 0, y: 0, width: 960, height: 540), scale: 2, contentScale: 0.5)))
+        XCTAssertEqual(placement.contentRect, CGRect(x: 0, y: 0, width: 960, height: 540))
+        XCTAssertEqual(placement.contentScale, 0.5)
+        XCTAssertTrue(placement.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 2))
+        XCTAssertFalse(placement.coversFullDisplaySurface(width: 960, height: 540, displayScale: 2))
+        let floating = try XCTUnwrap(CaptureVideoPlacement.read(placementAttachments(
+            rect: CGRect(x: 0, y: 0, width: 960.0001, height: 539.9999), scale: 2)))
+        XCTAssertTrue(floating.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 2))
+    }
+
+    func test_capturePlacementRejectsMissingMalformedAndNonfiniteMetadata() {
+        let valid = placementAttachments()
+        for key: SCStreamFrameInfo in [.contentRect, .scaleFactor, .contentScale] {
+            var missing = valid; missing.removeValue(forKey: key)
+            XCTAssertNil(CaptureVideoPlacement.read(missing))
+            for raw: Any in [NSNull(), true, "1", [1, 2], NSNumber(value: Double.nan), NSNumber(value: Double.infinity)] {
+                var malformed = valid; malformed[key] = raw
+                XCTAssertNil(CaptureVideoPlacement.read(malformed))
+            }
+        }
+        for scale in [0.0, 0.5, 4.1] {
+            XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(scale: scale)))
+        }
+        XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(contentScale: 0)))
+        XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(contentScale: -1)))
+        for rect in [CGRect.zero, CGRect(x: 0, y: 0, width: -1, height: 2),
+                     CGRect(x: .infinity, y: 0, width: 2, height: 2)] {
+            XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(rect: rect)))
+        }
+        var booleanRect = valid
+        booleanRect[.contentRect] = ["X": false, "Y": 0, "Width": 1, "Height": 1] as [String: Any]
+        XCTAssertNil(CaptureVideoPlacement.read(booleanRect))
+    }
+
+    func test_capturePlacementRejectsPaddingCroppingDensityAndPresenterOverlay() throws {
+        for rect in [CGRect(x: 1, y: 0, width: 959, height: 540),
+                     CGRect(x: 0, y: 0.5, width: 960, height: 539.5),
+                     CGRect(x: 0, y: 0, width: 961, height: 540),
+                     CGRect(x: -1, y: 0, width: 960, height: 540)] {
+            let placement = try XCTUnwrap(CaptureVideoPlacement.read(placementAttachments(rect: rect, scale: 2)))
+            XCTAssertFalse(placement.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 2))
+        }
+        let placement = try XCTUnwrap(CaptureVideoPlacement.read(placementAttachments(
+            rect: CGRect(x: 0, y: 0, width: 960, height: 540), scale: 2)))
+        XCTAssertFalse(placement.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 1))
+        if #available(macOS 14.2, *) {
+            var attachments = placementAttachments()
+            attachments[.presenterOverlayContentRect] = CGRect.zero.dictionaryRepresentation
+            XCTAssertTrue(try XCTUnwrap(CaptureVideoPlacement.read(attachments))
+                .coversFullDisplaySurface(width: 2, height: 2, displayScale: 2))
+            attachments[.presenterOverlayContentRect] = CGRect(x: 0, y: 0, width: 1, height: 1).dictionaryRepresentation
+            XCTAssertFalse(try XCTUnwrap(CaptureVideoPlacement.read(attachments))
+                .coversFullDisplaySurface(width: 2, height: 2, displayScale: 2))
+            attachments[.presenterOverlayContentRect] = "unknown"
+            XCTAssertNil(CaptureVideoPlacement.read(attachments))
+        }
+    }
+
+    func test_capturedFrameRequiresAndRetainsItsOwnPlacementAttachments() throws {
+        let sample = try captureSample()
+        let frame = try XCTUnwrap(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 43)))
+        XCTAssertTrue(frame.placement.coversFullDisplaySurface(width: 2, height: 2, displayScale: 2))
+        let rows = try XCTUnwrap(CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [NSMutableDictionary])
+        let row = try XCTUnwrap(rows.first)
+        row.removeObject(forKey: SCStreamFrameInfo.contentRect.rawValue)
+        XCTAssertNil(CapturedVideoFrame(sampleBuffer: sample, observedAtHostTime: displayTicks(seconds: 43)))
+        XCTAssertTrue(frame.placement.coversFullDisplaySurface(width: 2, height: 2, displayScale: 2),
+                      "The already constructed frame retains its own immutable placement")
+    }
+
+    func test_fullDisplayConfigurationFillsCodecSurfaceWithoutAspectPadding() {
+        let configuration = ScreenCapture.streamConfiguration(width: 1920, height: 1240, audioEnabled: false)
+        XCTAssertFalse(configuration.preservesAspectRatio)
+        XCTAssertEqual(configuration.destinationRect, CGRect(x: 0, y: 0, width: 1920, height: 1240))
+        XCTAssertEqual(configuration.sourceRect, .zero, "The native default captures the entire selected display")
+        XCTAssertEqual(configuration.width, 1920); XCTAssertEqual(configuration.height, 1240)
+    }
+
+    private func placementAttachments(rect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
+                                      scale: Double = 2, contentScale: Double = 1) -> [SCStreamFrameInfo: Any] {
+        [.contentRect: rect.dictionaryRepresentation, .scaleFactor: NSNumber(value: scale),
+         .contentScale: NSNumber(value: contentScale)]
+    }
+
     func test_captureDisplayFenceRequiresOneSuccessfulRegistration() throws {
         let fence = CaptureDisplayChangeFence()
         XCTAssertNil(fence.current)
@@ -1002,6 +1088,7 @@ final class ScreenCaptureSizingTests: XCTestCase {
         if let displayTime {
             row[SCStreamFrameInfo.displayTime.rawValue] = displayTime
         }
+        for (key, value) in placementAttachments() { row[key.rawValue] = value }
         return result
     }
 

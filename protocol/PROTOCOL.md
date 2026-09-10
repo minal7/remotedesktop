@@ -211,11 +211,33 @@ scale, monitor switch).
 { "t": "display", "s": …, "ts": …,
   "w": 2560, "h": 1440,                 // logical size of the captured display
   "scale": 2.0,                         // HiDPI backing scale
+  "fullDisplaySurface": 1,              // optional: the full video surface represents this display
   "monitors": [
     { "id": 0, "w": 2560, "h": 1440, "x": 0, "y": 0, "primary": true }
   ],
   "active": 0 }
 ```
+
+`w` and `h` are positive JSON integers representable as signed 32-bit values;
+`scale` is a finite JSON number in `[1, 4]` (an omitted legacy scale defaults
+to `1`). Strings, booleans, fractional dimensions and out-of-range numbers
+are invalid geometry.
+
+`fullDisplaySurface: 1` means the host captures the entire selected logical
+display into the entire video surface, without letterboxing or a content
+crop. The host validates native per-frame placement before forwarding video
+or declaring capture available. The client aspect-fits the logical `w:h`
+rectangle inside its viewport and fills that exact rectangle with the whole
+decoded surface. Input uses the same rectangle. This restores the logical
+aspect ratio after even codec sizing or drawable rounding; the client must
+not introduce another aspect-fit based on encoded pixel dimensions inside
+that rectangle. Absent metadata retains legacy presentation. A present
+value other than numeric `1` is unsupported and closes the session.
+
+This field belongs to the same input scope as its `display` message. It is
+a placement contract, not proof of frame freshness, delivery or actual
+renderer presentation. Older clients that ignore it retain their earlier
+mapping behavior and require separate compatibility qualification.
 
 ### `pointer` (client → host)
 

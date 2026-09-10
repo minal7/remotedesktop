@@ -108,9 +108,12 @@ struct DisplayInfo: Equatable {
     let h: Int
     let scale: Double
     let inputSession: DirectInputAcknowledgement?
+    let fullDisplaySurface: Bool
 
-    init(w: Int, h: Int, scale: Double, inputSession: DirectInputAcknowledgement? = nil) {
+    init(w: Int, h: Int, scale: Double, inputSession: DirectInputAcknowledgement? = nil,
+         fullDisplaySurface: Bool = false) {
         self.w = w; self.h = h; self.scale = scale; self.inputSession = inputSession
+        self.fullDisplaySurface = fullDisplaySurface
     }
 }
 
@@ -172,16 +175,37 @@ enum HostMessage: Equatable {
                 guard let value = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), value.isValid else { return nil }
                 inputSession = value
             }
+            var fullDisplaySurface = false
+            if let raw = obj["fullDisplaySurface"] {
+                guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+                      value == NSNumber(value: 1) else { return .bye("unsupported display surface mapping") }
+                fullDisplaySurface = true
+            }
+            guard let width = displayDimension(obj["w"]), let height = displayDimension(obj["h"]),
+                  let scale = displayScale(obj["scale"] ?? NSNumber(value: 1)) else {
+                return .bye("invalid display geometry")
+            }
             return .display(DisplayInfo(
-                w: int(obj["w"]),
-                h: int(obj["h"]),
-                scale: double(obj["scale"], default: 1.0),
-                inputSession: inputSession))
+                w: width, h: height, scale: scale,
+                inputSession: inputSession, fullDisplaySurface: fullDisplaySurface))
         case "bye":
             return .bye(obj["reason"] as? String ?? "user")
         default:
             return nil
         }
+    }
+
+    private static func displayDimension(_ raw: Any?) -> Int? {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              let exact = Int32(exactly: value.doubleValue), exact > 0,
+              value == NSNumber(value: exact) else { return nil }
+        return Int(exact)
+    }
+
+    private static func displayScale(_ raw: Any?) -> Double? {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              value.doubleValue.isFinite, (1...4).contains(value.doubleValue) else { return nil }
+        return value.doubleValue
     }
 
     private static func int(_ v: Any?, default d: Int = 0) -> Int {
@@ -191,10 +215,4 @@ enum HostMessage: Equatable {
         return d
     }
 
-    private static func double(_ v: Any?, default d: Double = 0) -> Double {
-        if let v = v as? Double { return v }
-        if let v = v as? Int { return Double(v) }
-        if let s = v as? String, let v = Double(s) { return v }
-        return d
-    }
 }

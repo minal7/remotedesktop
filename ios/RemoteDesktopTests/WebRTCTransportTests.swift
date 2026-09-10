@@ -829,6 +829,46 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertNil(legacy.inputSession)
     }
 
+    func test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry() throws {
+        let base: [String: Any] = ["t": "display", "w": 1728, "h": 1117, "scale": 2, "fullDisplaySurface": 1]
+        for invalid: Any in [true, false, NSNull(), "1", 0, 2, 1.5, [1]] {
+            var object = base; object["fullDisplaySurface"] = invalid
+            guard case .bye = HostMessage.decode(try JSONSerialization.data(withJSONObject: object)) else {
+                XCTFail("Unknown mapping must not fall back to legacy presentation"); continue
+            }
+        }
+        for key in ["w", "h"] {
+            for invalid: Any in [true, NSNull(), "1728", 0, -1, 1.5, Int64(Int32.max) + 1, 1e100] {
+                var object = base; object[key] = invalid
+                guard case .bye = HostMessage.decode(try JSONSerialization.data(withJSONObject: object)) else {
+                    XCTFail("Reject unrepresentable geometry before any integer conversion"); continue
+                }
+            }
+        }
+        for invalid: Any in [true, NSNull(), "2", 0, -1, 0.5, 5, 1e100] {
+            var object = base; object["scale"] = invalid
+            guard case .bye = HostMessage.decode(try JSONSerialization.data(withJSONObject: object)) else {
+                XCTFail("Reject invalid display density"); continue
+            }
+        }
+    }
+
+    func test_displayDecoderRetainsSurfaceMappingUnderItsInputScope() throws {
+        let ack = DirectInputAcknowledgement(hello: .init(clientID: UUID(), revision: 2), hostID: UUID(), generation: 3)
+        let bytes = try JSONSerialization.data(withJSONObject: ["t": "display", "w": 1728, "h": 1117, "scale": 2,
+            "fullDisplaySurface": 1, "inputSession": try XCTUnwrap(DirectInputWire.object(ack))])
+        guard case .display(let display) = HostMessage.decode(bytes) else { return XCTFail("Expected mapped display") }
+        XCTAssertEqual(display, DisplayInfo(w: 1728, h: 1117, scale: 2, inputSession: ack, fullDisplaySurface: true))
+        let legacyBytes = Data(#"{"t":"display","w":800,"h":600}"#.utf8)
+        guard case .display(let legacy) = HostMessage.decode(legacyBytes) else { return XCTFail("Expected earlier layout") }
+        XCTAssertFalse(legacy.fullDisplaySurface); XCTAssertEqual(legacy.scale, 1)
+        var presentation = RemoteInputPresentationState()
+        presentation.begin(ack)
+        XCTAssertTrue(presentation.matches(display.inputSession))
+        presentation.invalidate()
+        XCTAssertFalse(presentation.matches(display.inputSession), "A retired layout cannot carry its mapping into a new scope")
+    }
+
     func test_replacedRemoteTransportCannotChangeTheNewScreenReadiness() async {
         let firstConnected = expectation(description: "first"), secondConnected = expectation(description: "second")
         let first = RecordingTargetTransport(connected: firstConnected), second = RecordingTargetTransport(connected: secondConnected)
