@@ -171,6 +171,7 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertTrue(prompt.sendPrompt("Find movie tickets."))
         prompt.takeControl()
         XCTAssertTrue(session.allowsRemoteKeyboardInput)
+        XCTAssertFalse(prompt.hasHostPauseAcknowledgement, "Direct takeover remains available before TLS confirmation")
         let generation = session.remoteInputGeneration, initial = session.remoteKeyboardCaptureIdentity
         let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
         session.send(.pointer(x: 20, y: 30, buttons: 1), from: pointer)
@@ -278,7 +279,7 @@ final class WebRTCTransportTests: XCTestCase {
         prompt.resumeAI()
         XCTAssertEqual(releases, 1)
         XCTAssertEqual(prompt.state, .paused)
-        XCTAssertEqual(prompt.statusText, "AI paused — you're in control")
+        XCTAssertEqual(prompt.statusText, "Take Control requested — waiting for your Mac…")
         XCTAssertTrue(session.allowsRemoteKeyboardInput)
         XCTAssertNotEqual(session.remoteKeyboardCaptureIdentity, before)
         XCTAssertFalse(session.isRemoteInputSourceCurrent(source))

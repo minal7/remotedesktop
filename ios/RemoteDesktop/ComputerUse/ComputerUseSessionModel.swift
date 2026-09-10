@@ -109,6 +109,18 @@ final class ComputerUseSessionModel: ObservableObject {
         activePromptID != nil && lastControlKind == .cancel
     }
     var interventionGuidance: String? { userInterventionGuidance }
+    /// A received acknowledgement for the current task/control clocks. This
+    /// is a protocol fact, not proof that all native in-flight work has joined.
+    var hasHostPauseAcknowledgement: Bool {
+        guard !isStopped, isConnected, !requiresRecoveryReconnect, transportNotice == nil,
+              unpersistedHostControlEpoch == nil, case .paused = state,
+              let acknowledgement = pauseAcknowledgement else { return false }
+        return acknowledgement.taskID == activePromptID && acknowledgement.hostEpoch == hostControlEpoch
+            && acknowledgement.appliedRevision >= requiredControlRevision && lastControlKind != .cancel
+    }
+    var pauseAcknowledgementLabel: String {
+        hasHostPauseAcknowledgement ? "Mac acknowledged pause" : "Pause not yet confirmed"
+    }
     var isAnsweringClarification: Bool {
         if case .answer = composerMode { return true }
         return composerMode == .legacyAnswer
@@ -168,6 +180,14 @@ final class ComputerUseSessionModel: ObservableObject {
     private var hostControlEpoch: UInt64 = 0
     private var lastControlHostEpoch: UInt64 = 0
     private var hostControlPaused: Bool?
+    private struct PauseAcknowledgement {
+        let taskID: String
+        let hostEpoch: UInt64
+        let appliedRevision: UInt64
+    }
+    // Deliberately absent from recovery storage: restored intent/state is not
+    // a received acknowledgement on this session's channel.
+    @Published private var pauseAcknowledgement: PauseAcknowledgement?
     private var unpersistedHostControlEpoch: UInt64?
     private var pendingControlIntent: PendingControlIntent?
     private var approvalSubmission: ComputerUsePendingApprovalDecision?
@@ -273,7 +293,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     latestTerminalOutcome = .userInterventionRequired
                 }
                 state = .paused
-                statusText = guidance ?? "AI paused — you're in control"
+                statusText = "Confirming your previous Take Control request…"
             case .cancel:
                 state = .working
                 statusText = "Confirming your previous Stop…"
@@ -282,7 +302,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 if restored.hostControlPaused == true {
                     userInterventionGuidance = Self.boundedInterventionGuidance(restored.interventionGuidance)
                     latestTerminalOutcome = .userInterventionRequired
-                    statusText = userInterventionGuidance ?? "AI paused — you're in control"
+                    statusText = "Checking whether your Mac is still paused…"
                 } else if let decision = restored.approvalDecision {
                     statusText = decision.approved
                         ? "Restoring your approval…"
@@ -707,13 +727,15 @@ final class ComputerUseSessionModel: ObservableObject {
               let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        pauseAcknowledgement = nil
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         state = .paused
         guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
-        statusText = "AI paused — you're in control"
+        statusText = "Take Control requested — waiting for your Mac…"
         sendControl(.pause, generation: operationGeneration)
     }
 
@@ -722,6 +744,8 @@ final class ComputerUseSessionModel: ObservableObject {
               let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        pauseAcknowledgement = nil
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
@@ -740,6 +764,8 @@ final class ComputerUseSessionModel: ObservableObject {
               let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
+        pauseAcknowledgement = nil
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         latestTerminalOutcome = nil
         userInterventionGuidance = nil
         responseTimeoutTask?.cancel()
@@ -1224,7 +1250,11 @@ final class ComputerUseSessionModel: ObservableObject {
                     retryPrompt = nil
                     retryMessageID = nil
                     retryWireBody = nil
+                    let acceptedGeneration = stateGeneration
                     recordTaskProgress(update.text, outcome: update.outcome)
+                    guard isCurrentOperation(acceptedGeneration, promptID: update.taskID) else { continue }
+                    recordPauseAcknowledgement(update, from: envelope)
+                    guard isCurrentOperation(acceptedGeneration, promptID: update.taskID) else { continue }
                     applyHostStatus(update.text, outcome: update.outcome)
                     if let report = update.researchProgress, hasHostControlScope(envelope) {
                         // Accepted only after the current task and both control
@@ -1327,6 +1357,18 @@ final class ComputerUseSessionModel: ObservableObject {
 
     private func hasHostControlScope(_ envelope: ComputerUseEnvelope) -> Bool {
         envelope.senderID == hostID && envelope.pairingCode == pairingCode && envelope.sessionID == sessionID
+    }
+
+    private func recordPauseAcknowledgement(_ update: ComputerUseTaskUpdate, from envelope: ComputerUseEnvelope) {
+        // Called only after task identity, host epoch, durable revision and
+        // semantic acknowledgement checks have accepted this status.
+        let reportsPause = update.text == "paused" || update.outcome == .userInterventionRequired
+            || ComputerUseStatusSignal.userInterventionMessage(from: update.text) != nil
+        guard reportsPause, hasHostControlScope(envelope), let taskID = activePromptID,
+              update.taskID == taskID, (update.hostControlEpoch ?? 0) == hostControlEpoch,
+              (update.appliedControlRevision ?? 0) >= requiredControlRevision else { return }
+        pauseAcknowledgement = .init(taskID: taskID, hostEpoch: hostControlEpoch,
+            appliedRevision: update.appliedControlRevision ?? 0)
     }
 
     private func recordTaskProgress(
@@ -1505,6 +1547,7 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     func applyHostStatus(_ status: String) {
+        pauseAcknowledgement = nil // This unscoped helper cannot establish receipt identity.
         applyHostStatus(status, outcome: nil)
     }
 
@@ -1536,6 +1579,7 @@ final class ComputerUseSessionModel: ObservableObject {
         }
         switch status {
         case "working":
+            pauseAcknowledgement = nil
             latestTerminalOutcome = nil
             userInterventionGuidance = nil
             hostControlPaused = false
@@ -1562,6 +1606,7 @@ final class ComputerUseSessionModel: ObservableObject {
                 ?? "AI paused — you're in control"
             stabilizeAuthoritativePause()
         case "ready":
+            pauseAcknowledgement = nil
             userInterventionGuidance = nil
             hostControlPaused = false
             _ = persistActivePrompt()
@@ -1830,6 +1875,7 @@ final class ComputerUseSessionModel: ObservableObject {
         hostControlEpoch = 0
         lastControlHostEpoch = 0
         hostControlPaused = nil
+        pauseAcknowledgement = nil
         unpersistedHostControlEpoch = nil
         pendingControlIntent = nil
         approvalSubmission = nil
@@ -1915,6 +1961,7 @@ final class ComputerUseSessionModel: ObservableObject {
         hostControlEpoch = 0
         lastControlHostEpoch = 0
         hostControlPaused = nil
+        pauseAcknowledgement = nil
         unpersistedHostControlEpoch = nil
         pendingControlIntent = nil
         approvalSubmission = nil
@@ -2011,8 +2058,9 @@ final class ComputerUseSessionModel: ObservableObject {
             }
         case .working: statusText = "Your Mac is working on it…"
         case .paused:
-            statusText = userInterventionGuidance
-                ?? "AI paused — you're in control"
+            statusText = hasHostPauseAcknowledgement
+                ? (userInterventionGuidance ?? "AI paused — you're in control")
+                : "Waiting for your Mac to confirm control…"
         case .approvalRequired: statusText = "Your approval is needed"
         case .error(let message): statusText = message
         }

@@ -95,11 +95,11 @@ final class OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests: XCTestCase {
             "The safe browser handoff did not expose its typed user-intervention outcome. Status value: \(String(describing: status.value))")
         let resume = app.buttons["Let AI continue"]
         XCTAssertTrue(resume.exists && resume.isHittable)
+        let acknowledgement = app.descendants(matching: .any).matching(
+            identifier: "computer-use-pause-acknowledgement").firstMatch
         XCTAssertTrue(
-            app.descendants(matching: .any).matching(
-                NSPredicate(format: "label CONTAINS %@", "You’re controlling the Mac"))
-                .firstMatch.exists,
-            "The live screen did not enter the person-controlled state.")
+            waitUntil(timeout: 10) { acknowledgement.exists && (acknowledgement.value as? String) == "Acknowledged" },
+            "The host did not acknowledge the current handoff; local manual mode alone is insufficient evidence.")
         XCTAssertFalse(
             app.buttons["Approve once"].exists,
             "Authentication must be manual takeover, never one-click AI approval.")

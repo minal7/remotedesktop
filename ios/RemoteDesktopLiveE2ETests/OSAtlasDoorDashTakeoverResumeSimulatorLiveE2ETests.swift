@@ -910,13 +910,11 @@ final class OSAtlasDoorDashTakeoverResumeSimulatorLiveE2ETests: XCTestCase {
                 XCTAssertTrue(
                     app.buttons["Stop task"].exists,
                     "The macOS consent handoff omitted the user-controlled stop action.")
+                let acknowledgement = app.descendants(matching: .any).matching(
+                    identifier: "computer-use-pause-acknowledgement").firstMatch
                 XCTAssertTrue(
-                    app.descendants(matching: .any).matching(
-                        NSPredicate(
-                            format: "label CONTAINS %@",
-                            "You’re controlling the Mac"))
-                        .firstMatch.exists,
-                    "The macOS consent handoff did not enter person-controlled mode.")
+                    waitUntil(timeout: 10) { acknowledgement.exists && (acknowledgement.value as? String) == "Acknowledged" },
+                    "The macOS consent handoff lacks a current host acknowledgement.")
 
                 XCTContext.runActivity(
                     named: "Manual step: choose Allow in the macOS RemoteDesktopHost prompt, then tap Let AI continue"

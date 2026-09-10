@@ -441,9 +441,11 @@ struct ComputerUseView: View {
     private var takeoverInputStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                Label("You’re controlling the Mac", systemImage: "hand.point.up.left.fill")
+                Label(model.pauseAcknowledgementLabel, systemImage: "hand.point.up.left.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
+                    .accessibilityIdentifier("computer-use-pause-acknowledgement")
+                    .accessibilityValue(model.hasHostPauseAcknowledgement ? "Acknowledged" : "Unconfirmed")
 
                 if !accessories.hasHardwareKeyboard || remoteKeyboardOpen {
                     ModifierBar()
@@ -525,7 +527,7 @@ struct ComputerUseView: View {
     private var statusLabel: some View {
         HStack(spacing: 7) {
             statusIcon
-            Text(model.interventionGuidance == nil
+            Text(model.interventionGuidance == nil || !model.hasHostPauseAcknowledgement
                 ? model.statusText
                 : "Waiting for you")
                 .foregroundStyle(.secondary)
