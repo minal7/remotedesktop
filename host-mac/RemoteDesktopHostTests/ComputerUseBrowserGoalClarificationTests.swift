@@ -48,10 +48,47 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages.last?["content"]).utf8)) as? [String: Any])
         let turns = try XCTUnwrap(context["clarifications"] as? [[String: Any]])
-        XCTAssertEqual(context["request"] as? String, fixture.input.prompt)
-        XCTAssertEqual(turns.compactMap { $0["answer"] as? String }, Array(fixture.input.userTurns.dropFirst()))
+        XCTAssertTrue(try browserGoalSourceText(context["request"]).utf8.elementsEqual(fixture.input.prompt.utf8))
+        for (turn, source) in zip(turns, fixture.input.userTurns.dropFirst()) {
+            XCTAssertTrue(try browserGoalSourceText(turn["answer"]).utf8.elementsEqual(source.utf8))
+        }
         XCTAssertEqual(turns.compactMap { $0["turn"] as? Int }, Array(1...6))
         XCTAssertEqual(body["max_tokens"] as? Int, 1_024)
+    }
+
+    func testReferencedConversationRetainsEveryClauseClockAndAcceptedQuestionPrefix() throws {
+        let fixture = try extendedTravelConversation(), catalogue = ComputerUseBrowserGoalSourceCatalogue(fixture.input)
+        var offsets = Array(repeating: 0, count: fixture.input.userTurns.count)
+        let rows = try fixture.rows.map { literal -> [String: Any] in
+            let turn = try XCTUnwrap(literal["turn"] as? Int), source = try XCTUnwrap(literal["source"] as? String)
+            offsets[turn] += source.utf8.count
+            var end = 0
+            let through = try XCTUnwrap(catalogue.turns[turn].indices.first { index in
+                end += catalogue.turns[turn][index].utf8.count; return end == offsets[turn]
+            })
+            var row = literal; row.removeValue(forKey: "source"); row["through"] = through
+            return row
+        }
+        func decode(_ items: [[String: Any]]) throws -> ComputerUseBrowserGoalProposal {
+            let data = try JSONSerialization.data(withJSONObject: ["disposition":"research", "requirements":items,
+                "question":["topic":"none", "requirements":[]]], options: [.sortedKeys])
+            return try .decodeReferences(content: String(decoding: data, as: UTF8.self), catalogue: catalogue)
+        }
+        let referenced = try decode(rows), literal = try proposal(fixture.input, rows: fixture.rows, disposition: "research")
+        XCTAssertEqual(referenced.requirements, literal.requirements)
+        XCTAssertEqual(referenced.input, fixture.input)
+        for index in fixture.input.clarifications.indices {
+            XCTAssertEqual(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: index, in: referenced.input)?.input, fixture.prefixes[index])
+            XCTAssertEqual(referenced.input.dateContext(forTurn: index + 1), fixture.input.clarifications[index].dateContext)
+        }
+        var missing = rows; missing.removeAll { ($0["turn"] as? Int) == 3 }
+        var reordered = rows; reordered.swapAt(rows.count - 2, rows.count - 1)
+        var repeated = rows; repeated.append(try XCTUnwrap(rows.last))
+        for invalid in [missing, reordered, repeated, Array(rows.dropLast())] {
+            XCTAssertThrowsError(try decode(invalid)) {
+                XCTAssertEqual($0 as? ComputerUseBrowserGoalPlanError, .invalidResponse)
+            }
+        }
     }
 
     func testLongerRetentionKeepsIndependentUTF8AndPerAnswerBounds() throws {
@@ -542,7 +579,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let text = try XCTUnwrap(messages[1]["content"])
         let modelContext = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
-        XCTAssertEqual(modelContext["version"] as? Int, 4)
+        XCTAssertEqual(modelContext["version"] as? Int, 5)
         XCTAssertEqual((modelContext["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, original.referenceMilliseconds)
         let turns = try XCTUnwrap(modelContext["clarifications"] as? [[String: Any]])
         let answerClock = try XCTUnwrap(turns[0]["dateContext"] as? [String: Any])
@@ -1813,11 +1850,11 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(planner.makeRequest(continued).httpBody)) as? [String: Any])
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages[1]["content"]).utf8)) as? [String: Any])
-        XCTAssertEqual(context["request"] as? String, original.prompt)
+        XCTAssertTrue(try browserGoalSourceText(context["request"]).utf8.elementsEqual(original.prompt.utf8))
         XCTAssertEqual((context["referenceUnixMilliseconds"] as? NSNumber)?.int64Value, original.referenceMilliseconds)
         let turns = try XCTUnwrap(context["clarifications"] as? [[String: Any]])
         XCTAssertEqual(turns.count, 1); XCTAssertEqual(turns[0]["turn"] as? Int, 1)
-        XCTAssertEqual(turns[0]["answer"] as? String, continued.userTurns[1])
+        XCTAssertTrue(try browserGoalSourceText(turns[0]["answer"]).utf8.elementsEqual(continued.userTurns[1].utf8))
         XCTAssertEqual(turns[0]["question"] as? String, ComputerUseBrowserClarificationTopic.location.question)
         let scope = try XCTUnwrap(turns[0]["scope"] as? [[String: Any]])
         XCTAssertEqual(scope[0]["source"] as? String, original.prompt); XCTAssertEqual(scope[0]["sourceByteOffset"] as? Int, 0)
@@ -1827,7 +1864,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         }
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         let contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
-        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v4")
+        XCTAssertEqual(contract["name"] as? String, "browser_goal_proposal_v5")
     }
 
     func testClarifiedScalarCompilationKeepsEarlierConstraintsAndUsesOriginalDateAnchor() throws {

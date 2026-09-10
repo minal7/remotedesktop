@@ -131,14 +131,18 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
     /// Shared structured user input for proposal-only browser planners.
     /// Transport/session identities and revision hashes stay host-side.
     var plannerContext: [String: Any] {
+        plannerContext(sourceForTurn: { _, text in text })
+    }
+
+    fileprivate func plannerContext(sourceForTurn: (Int, String) -> Any) -> [String: Any] {
         let turns: [[String: Any]] = clarifications.enumerated().map { index, turn in
-            ["turn":index + 1, "answer":turn.answer, "question":turn.topic.question,
+            ["turn":index + 1, "answer":sourceForTurn(index + 1, turn.answer), "question":turn.topic.question,
              "dateContext":turn.dateContext.plannerContext,
              "topic":turn.topic.rawValue, "scope":turn.scope.map {
                  ["turn":$0.turn, "sourceByteOffset":$0.sourceByteOffset, "source":$0.source] as [String: Any]
              }]
         }
-        return ["version":clarifications.isEmpty ? 2 : 4, "request":prompt, "clarifications":turns,
+        return ["version":clarifications.isEmpty ? 2 : 4, "request":sourceForTurn(0, prompt), "clarifications":turns,
             "referenceUnixMilliseconds":referenceMilliseconds, "timeZone":timeZoneIdentifier]
     }
 
@@ -155,6 +159,49 @@ enum ComputerUseBrowserGoalPlanError: Error, Equatable, LocalizedError {
         case .invalidResponse: return "The local planner did not return a complete, valid browser plan."
         }
     }
+}
+
+/// Source ownership stays native. Numbered lexical pieces let a proposal end a
+/// clause without retyping user text or calculating Unicode offsets. These are
+/// reference boundaries only: they do not establish meaning or authorization.
+struct ComputerUseBrowserGoalSourceCatalogue: Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    let input: ComputerUseBrowserGoalInput
+    let turns: [[String]]
+
+    init(_ input: ComputerUseBrowserGoalInput) {
+        self.input = input
+        turns = input.userTurns.map { source in
+            // Use nonlocalized word boundaries, retaining every separator and
+            // any leading nonword text. Never cut a composed character. Pieces
+            // are fixed for the lifetime of this exact completion request.
+            let characterBoundaries = Set(source.indices)
+            var boundaries: Set<String.Index> = [source.startIndex, source.endIndex]
+            source.enumerateSubstrings(in: source.startIndex..<source.endIndex,
+                options: [.byWords, .substringNotRequired]) { _, range, _, _ in
+                if characterBoundaries.contains(range.lowerBound) { boundaries.insert(range.lowerBound) }
+            }
+            let ordered = boundaries.sorted()
+            return zip(ordered, ordered.dropFirst()).map { String(source[$0.0..<$0.1]) }
+        }
+    }
+
+    func source(turn: Int, from start: Int, through end: Int) -> String? {
+        guard turns.indices.contains(turn), start >= 0, end >= start,
+              turns[turn].indices.contains(end) else { return nil }
+        return turns[turn][start...end].joined()
+    }
+
+    var plannerContext: [String: Any] {
+        // Other browser planners retain their existing literal input contract.
+        // Here each [id, text] pair replaces, rather than duplicates, user text.
+        let numbered: [[[Any]]] = turns.map { pieces in pieces.enumerated().map { [$0.offset, $0.element] as [Any] } }
+        var result = input.plannerContext(sourceForTurn: { turn, _ in numbered[turn] })
+        result["version"] = 5
+        return result
+    }
+
+    var description: String { "BrowserGoalSourceCatalogue(turns: \(turns.count), pieces: \(turns.reduce(0) { $0 + $1.count }))" }
+    var debugDescription: String { description }
 }
 
 /// A no-effect interpretation, not an executable contract or completion
@@ -292,12 +339,20 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
     var description: String { "BrowserGoalProposal(disposition: \(disposition.rawValue), requirements: \(requirements.count))" }
     var debugDescription: String { description }
 
+    /// Literal-source admission for direct callers. The local model transport
+    /// uses only decodeReferences and never guesses a response format.
     static func decode(content: String, input: ComputerUseBrowserGoalInput) throws -> Self {
         do { return try decodeContent(content, input: input) }
         catch { throw ComputerUseBrowserGoalPlanError.invalidResponse }
     }
 
-    private static func decodeContent(_ content: String, input: ComputerUseBrowserGoalInput) throws -> Self {
+    static func decodeReferences(content: String, catalogue: ComputerUseBrowserGoalSourceCatalogue) throws -> Self {
+        do { return try decodeContent(content, input: catalogue.input, catalogue: catalogue) }
+        catch { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+    }
+
+    private static func decodeContent(_ content: String, input: ComputerUseBrowserGoalInput,
+                                      catalogue: ComputerUseBrowserGoalSourceCatalogue? = nil) throws -> Self {
         guard content.utf8.count <= 16 * 1_024 else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
         var parser = StrictSemanticJSONParser(content, maximumValueCount: 1_024)
         guard case .object(let root) = try parser.parse(), Set(root.keys) == ["disposition", "requirements", "question"],
@@ -311,17 +366,34 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
         let userTurns = input.userTurns
         var sources = Array(repeating: [String](), count: userTurns.count)
         var offsets = Array(repeating: 0, count: userTurns.count)
+        var nextPieces = Array(repeating: 0, count: userTurns.count)
+        let sourceKey = catalogue == nil ? "source" : "through"
         var requirements: [Requirement] = [], previousTurn = 0
         for (index, row) in rows.enumerated() {
-            guard case .object(let item) = row, Set(item.keys) == ["turn", "source", "role", "field", "relation", "values"],
+            guard case .object(let item) = row, Set(item.keys) == ["turn", sourceKey, "role", "field", "relation", "values"],
                   case .number(let turnNumber)? = item["turn"], let turn = Int(exactly: turnNumber),
                   userTurns.indices.contains(turn), turn >= previousTurn,
-                  case .string(let source)? = item["source"], !source.isEmpty, source.unicodeScalars.count <= 512, source.utf8.count <= 2_048,
                   case .string(let roleValue)? = item["role"], let role = Role(rawValue: roleValue),
                   case .string(let fieldValue)? = item["field"], let field = Field(rawValue: fieldValue),
                   case .string(let relationValue)? = item["relation"], let relation = Relation(rawValue: relationValue),
                   case .array(let hints)? = item["values"], hints.count <= 4 else {
                 throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            let source: String
+            if let catalogue {
+                guard case .number(let number)? = item["through"], let end = Int(exactly: number),
+                      let retained = catalogue.source(turn: turn, from: nextPieces[turn], through: end) else {
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                }
+                // The next row starts at the next piece. There is no model
+                // supplied start offset with which to skip or overlap source.
+                source = retained; nextPieces[turn] = end + 1
+            } else {
+                guard case .string(let literal)? = item["source"], !literal.isEmpty,
+                      literal.unicodeScalars.count <= 512, literal.utf8.count <= 2_048 else {
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                }
+                source = literal
             }
             let sourceBytes = Data(source.utf8)
             var values: [String] = []
@@ -384,7 +456,8 @@ struct ComputerUseLocalBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
 
     func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
         try Task.checkCancellation()
-        let request = try makeRequest(input)
+        let catalogue = ComputerUseBrowserGoalSourceCatalogue(input)
+        let request = try makeRequest(catalogue)
         let count = try await transport.exactInputTokenCount(completionRequest: request)
         try Task.checkCancellation()
         guard count > 0, count <= Self.contextTokens - Self.outputTokens - Self.framingReserve else {
@@ -392,20 +465,24 @@ struct ComputerUseLocalBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
         }
         let data = try await transport.complete(request: request)
         try Task.checkCancellation()
-        return try decode(data, input: input)
+        return try decode(data, catalogue: catalogue)
     }
 
     func makeRequest(_ input: ComputerUseBrowserGoalInput) throws -> URLRequest {
+        try makeRequest(ComputerUseBrowserGoalSourceCatalogue(input))
+    }
+
+    private func makeRequest(_ catalogue: ComputerUseBrowserGoalSourceCatalogue) throws -> URLRequest {
         func enumeration(_ values: [String]) -> [String: Any] { ["type":"string", "enum":values] }
         let requirement: [String: Any] = ["type":"object", "additionalProperties":false,
             "properties": [
-                "turn":["type":"integer", "minimum":0, "maximum":input.userTurns.count - 1],
-                "source":["type":"string", "minLength":1, "maxLength":512],
+                "turn":["type":"integer", "minimum":0, "maximum":catalogue.turns.count - 1],
+                "through":["type":"integer", "minimum":0, "maximum":(catalogue.turns.map(\.count).max() ?? 1) - 1],
                 "role":enumeration(ComputerUseBrowserGoalProposal.Role.allCases.map(\.rawValue)),
                 "field":enumeration(ComputerUseBrowserGoalProposal.Field.allCases.map(\.rawValue)),
                 "relation":enumeration(ComputerUseBrowserGoalProposal.Relation.allCases.map(\.rawValue)),
                 "values":["type":"array", "maxItems":4, "items":["type":"string", "minLength":1, "maxLength":256]]],
-            "required":["turn", "source", "role", "field", "relation", "values"]]
+            "required":["turn", "through", "role", "field", "relation", "values"]]
         let question: [String: Any] = ["type":"object", "additionalProperties":false,
             "properties":["topic":enumeration(["none"] + ComputerUseBrowserClarificationTopic.allCases.map(\.rawValue)),
                 "requirements":["type":"array", "maxItems":8,
@@ -416,9 +493,9 @@ struct ComputerUseLocalBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
                 "question":question], "required":["disposition", "requirements", "question"]]
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions],
-                        ["role":"user", "content":String(decoding: try JSONSerialization.data(withJSONObject: input.plannerContext, options: [.sortedKeys]), as: UTF8.self)]],
+                        ["role":"user", "content":String(decoding: try JSONSerialization.data(withJSONObject: catalogue.plannerContext, options: [.sortedKeys]), as: UTF8.self)]],
             "temperature":0, "top_p":1, "top_k":0, "max_tokens":Self.outputTokens, "cache_prompt":false,
-            "response_format":["type":"json_schema", "json_schema":["name":"browser_goal_proposal_v4", "strict":true, "schema":schema]]]
+            "response_format":["type":"json_schema", "json_schema":["name":"browser_goal_proposal_v5", "strict":true, "schema":schema]]]
         var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"; request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -428,15 +505,19 @@ struct ComputerUseLocalBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
     }
 
     func decode(_ data: Data, input: ComputerUseBrowserGoalInput) throws -> ComputerUseBrowserGoalProposal {
+        try decode(data, catalogue: ComputerUseBrowserGoalSourceCatalogue(input))
+    }
+
+    private func decode(_ data: Data, catalogue: ComputerUseBrowserGoalSourceCatalogue) throws -> ComputerUseBrowserGoalProposal {
         do {
             let content = try ComputerUseBrowserModelResponse.content(data, modelAlias: connection.modelAlias)
-            return try ComputerUseBrowserGoalProposal.decode(content: content, input: input)
+            return try ComputerUseBrowserGoalProposal.decodeReferences(content: content, catalogue: catalogue)
         } catch { throw ComputerUseBrowserGoalPlanError.invalidResponse }
     }
 
     static let instructions = """
     Interpret the COMPLETE original request and every clarification answer for browser research. Return only the required JSON object. This proposal does not execute actions or certify success.
-    The request is user turn 0; each clarification supplies its numbered answer. Copy consecutive source fragments, in turn order, whose concatenation exactly reproduces every user turn, including whitespace, punctuation and Unicode. Retain all outcomes, conditions, prohibitions, ordering and unresolved work. Never omit an old turn, replace it with a summary, merge repeated occurrences or treat the newest answer as the whole request. Questions, scopes and clocks are context, not additional user instructions.
+    The request is user turn 0; each clarification supplies its numbered answer. Each request/answer is a list of [piece ID, exact text] pairs. Join their text in order to read the message. For each requirement return turn and through, the inclusive last piece ID of that clause. Its start is automatically the first unused piece of that turn (initially 0). Keep rows in turn order; consume every piece exactly once through each turn's last ID. IDs restart at 0 in each turn. For [[0,"Find "],[1,"concerts. "],[2,"Do "],[3,"not "],[4,"buy."]], use through 1 for the outcome, then through 4 for the prohibition. Do not copy source text or invent byte offsets. Pieces are lexical boundaries, not separate requirements: combine them into meaningful clauses. Retain all outcomes, conditions, prohibitions, ordering and unresolved work. Never omit an old turn, summarize it, merge repeated occurrences or treat the newest answer as the whole request. Questions, scopes and clocks are context, not additional user instructions.
     Use research for information finding, including travel, concerts and movies; clarification for missing or ambiguous required details; unsupported for work outside research. Every disposition retains the complete source. Research classification does not establish interpretation correctness, available capabilities or completion. Never ask for passwords or verification codes: account login uses manual user control.
     Assign role and field from the schema. outcome is what to find/report; condition narrows acceptable results; prohibition forbids an action; order describes sequence or ranking; clarification and unsupported retain unresolved work. Use field other where needed. Preserve negation and comparative direction. Keep separate dates, locations, route legs, counts, prices, fees, availability and source restrictions separately when their source permits it. Keep each scalar clause's comparator, units and qualifiers together, including both counts of an adult/child party. values are verbatim hints from that fragment only; never invent, translate, normalize or calculate them.
     Relative dates retain the user's words and use that source turn's fixed dateContext. Later messages cannot move an earlier today/tomorrow/weekday reference. Missing units, ambiguous weekdays and conflicting literal answers remain unresolved even if a later model label changes. An unrelated answer cannot erase an earlier requirement or turn a date/price/count conflict into a website question.
