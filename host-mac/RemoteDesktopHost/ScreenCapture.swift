@@ -177,7 +177,7 @@ fileprivate final class CaptureOwnerRetirement: @unchecked Sendable {
         return task ?? Task {}
     }
 }
-struct CaptureAttemptLease: Equatable, Sendable { fileprivate let id = UUID() }
+struct CaptureAttemptLease: Equatable, Sendable { fileprivate let id = UUID(); init() {} }
 struct CaptureStopReceipt: Equatable, Sendable {
     fileprivate let owner: CaptureOwnerLease
     fileprivate let attempt: CaptureAttemptLease
@@ -283,14 +283,14 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 
     func isRunning(for owner: CaptureOwnerLease) -> Bool {
-        withRunningOwner(owner) {}
+        withRunningOwner(owner) { _ in }
     }
 
     @discardableResult
-    func withRunningOwner(_ owner: CaptureOwnerLease, _ body: () -> Void) -> Bool {
+    func withRunningOwner(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease) -> Void) -> Bool {
         locked {
-            guard self.owner == owner, active?.running == true else { return false }
-            body()
+            guard self.owner == owner, let active, active.running else { return false }
+            body(active.id)
             return true
         }
     }
@@ -384,6 +384,56 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 }
 
+/// One recovery episode spans failed starts and starts that produce no usable
+/// video. A native await does not extend the deadline or reset the attempt cap.
+struct CaptureRecoveryEpisode {
+    static let maximumAttempts = 5
+    static let timeoutSeconds = 30
+    static let timeout: Duration = .seconds(timeoutSeconds)
+    private static let retryDelays: [Duration] = [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)]
+
+    let id = UUID()
+    let deadline: ContinuousClock.Instant
+    private(set) var attempts = 0
+
+    init(now: ContinuousClock.Instant) { deadline = now.advanced(by: Self.timeout) }
+
+    enum Failure: Equatable {
+        case timedOut, attemptsExhausted
+        var message: String {
+            switch self {
+            case .timedOut:
+                return "Screen capture did not recover within \(CaptureRecoveryEpisode.timeoutSeconds) seconds. Reconnect to try again."
+            case .attemptsExhausted:
+                return "Screen capture could not recover after \(CaptureRecoveryEpisode.maximumAttempts) attempts. Reconnect to try again."
+            }
+        }
+    }
+
+    func permitsRecovery(at now: ContinuousClock.Instant) -> Bool { now < deadline }
+
+    func failure(at now: ContinuousClock.Instant) -> Failure? {
+        if !permitsRecovery(at: now) { return .timedOut }
+        return attempts >= Self.maximumAttempts ? .attemptsExhausted : nil
+    }
+
+    func acceptsFrame(lastOutput: CaptureAttemptLease?, running: CaptureAttemptLease,
+                      at now: ContinuousClock.Instant) -> Bool {
+        attempts > 0 && permitsRecovery(at: now) && lastOutput == running
+    }
+
+    mutating func reserveAttempt(at now: ContinuousClock.Instant) -> Bool {
+        guard permitsRecovery(at: now), attempts < Self.maximumAttempts else { return false }
+        attempts += 1
+        return true
+    }
+
+    func retryDelay(at now: ContinuousClock.Instant) -> Duration? {
+        guard permitsRecovery(at: now), attempts > 0, attempts < Self.maximumAttempts else { return nil }
+        return min(Self.retryDelays[attempts - 1], now.duration(to: deadline))
+    }
+}
+
 /// Captures the main display as validated video frames and, when opted in,
 /// system audio as sample buffers. Consumers handle their own encoder
 /// marshalling on the capture queues.
@@ -404,7 +454,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
     struct Callbacks: Sendable {
         /// Synchronous consumers run inside the stream ownership gate.
-        let onVideoFrame: @Sendable (CapturedVideoFrame) -> Void
+        let onVideoFrame: @Sendable (CapturedVideoFrame, CaptureAttemptLease) -> Void
         let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
         let onStopped: @Sendable (CaptureStopReceipt, Error) -> Void
     }
@@ -433,7 +483,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func withRunningSession(_ owner: CaptureOwnerLease, _ body: () -> Void) -> Bool {
+    func withRunningSession(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease) -> Void) -> Bool {
         lifecycle.withRunningOwner(owner, body)
     }
 
@@ -548,7 +598,7 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                     log.info(
                         "received first video sample effective=\(frame.metadata.width, privacy: .public)x\(frame.metadata.height, privacy: .public) macroblocks=\(macroblocks, privacy: .public) pixelFormat=\(pixelFormat, privacy: .public)")
                 }
-                callbacks.onVideoFrame(frame)
+                callbacks.onVideoFrame(frame, attempt)
             case .audio:
                 if loggedFirstAudioAttempt != attempt,
                    let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) {

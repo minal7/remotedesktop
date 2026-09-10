@@ -222,17 +222,13 @@ final class HostPeerSession: NSObject {
     private var ended = false
     private var captureRestartTask: Task<Void, Never>?
     private var captureRestartID: UUID?
+    private var captureRecovery: CaptureRecoveryEpisode?
+    private var captureRecoveryDeadlineTask: Task<Void, Never>?
+    private var lastVideoAttempt: CaptureAttemptLease?
     private var captureTeardownTask: Task<Void, Never>?
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
-    private let captureRestartBackoff: [Duration] = [
-        .milliseconds(250),
-        .seconds(1),
-        .seconds(2),
-        .seconds(5),
-        .seconds(10),
-    ]
 
     /// Message-kind/protocol classification only. Dispatch also requires the
     /// current channel's exact connected input session, rechecked by the injector.
@@ -359,6 +355,9 @@ final class HostPeerSession: NSObject {
         captureRestartTask?.cancel()
         captureRestartTask = nil
         captureRestartID = nil
+        captureRecovery = nil
+        captureRecoveryDeadlineTask?.cancel()
+        captureRecoveryDeadlineTask = nil
         let owner = captureOwner
         closeStateLock.unlock()
         inputAuthorization.close()
@@ -380,6 +379,7 @@ final class HostPeerSession: NSObject {
         videoSender = nil
         adaptedVideoWidth = nil
         adaptedVideoHeight = nil
+        lastVideoAttempt = nil
         if audioEnabled {
             audioBridge.detach(from: factory.audioDeviceModule)
         }
@@ -475,7 +475,10 @@ final class HostPeerSession: NSObject {
 
     private func configureCaptureCallbacks() {
         captureOwner = capture.beginSession(callbacks: ScreenCapture.Callbacks(
-            onVideoFrame: { [weak self] frame in self?.pushVideoFrame(frame) },
+            onVideoFrame: { [weak self] frame, attempt in
+                self?.pushVideoFrame(frame)
+                self?.recordRecoveryFrame(from: attempt)
+            },
             onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
             onStopped: { [weak self] receipt, error in
                 // Do not acquire the peer lock inside the capture gate. The
@@ -544,86 +547,176 @@ final class HostPeerSession: NSObject {
 
     private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
         // All composed transitions acquire capture admission before the peer
-        // lock. Validation and the restart decision share that same admission.
+        // lock. Validation and the recovery decision share that same admission.
+        var terminalReason: String?
         capture.consumeStop(receipt) {
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
             guard !ended else { return }
             guard ScreenCapture.isSystemStopped(error) else {
                 log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
-                onEnded("Screen capture stopped.")
+                ended = true
+                terminalReason = "Screen capture stopped. Reconnect to try again."
                 return
             }
-            guard captureRestartTask == nil else { return }
-            log.warning("screen capture was stopped by the system; attempting in-place restart: \(String(describing: error), privacy: .public)")
-            let id = UUID()
-            captureRestartID = id
+            if captureRecovery == nil {
+                let episode = CaptureRecoveryEpisode(now: ContinuousClock.now)
+                captureRecovery = episode
+                captureRecoveryDeadlineTask = Task { [weak self] in
+                    do { try await ContinuousClock().sleep(until: episode.deadline) }
+                    catch { return }
+                    self?.endCaptureRecovery(episode.id,
+                        reason: CaptureRecoveryEpisode.Failure.timedOut.message)
+                }
+            }
+            guard captureRestartTask == nil, let episode = captureRecovery else { return }
+            let worker = UUID()
+            captureRestartID = worker
             captureRestartTask = Task { [weak self] in
-                await self?.restartCaptureLoop(id: id)
+                await self?.restartCaptureLoop(worker: worker, episode: episode.id)
             }
         }
+        if let terminalReason {
+            close(reason: terminalReason)
+            onEnded(terminalReason)
+        }
     }
 
-    private func ownsCaptureRestart(_ id: UUID) -> Bool {
+    private func ownsCaptureRestart(_ worker: UUID, episode: UUID) -> Bool {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
-        return !ended && captureRestartID == id
+        return !ended && captureRestartID == worker && captureRecovery?.id == episode
     }
 
-    /// A second stop may arrive after native start returns but before this
-    /// worker retires. Keep retrying if it consumed that stop while we existed;
-    /// otherwise the queued stop callback will create the next worker.
-    private func finishCaptureRestartIfRunning(_ id: UUID) -> Bool {
-        guard let (owner, _) = try? captureStartParameters() else { return false }
-        var finished = false
-        capture.withRunningSession(owner) {
+    private func reserveCaptureRestart(_ worker: UUID, episode: UUID) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureRestartID == worker, captureRecovery?.id == episode else { return false }
+        return captureRecovery?.reserveAttempt(at: ContinuousClock.now) == true
+    }
+
+    private func captureRestartDelay(_ worker: UUID, episode: UUID) -> Duration? {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureRestartID == worker, captureRecovery?.id == episode else { return nil }
+        return captureRecovery?.retryDelay(at: ContinuousClock.now)
+    }
+
+    /// Called within the media admission gate after forwarding a validated
+    /// frame. This records source output, not remote decode or presentation.
+    private func recordRecoveryFrame(from attempt: CaptureAttemptLease) {
+        closeStateLock.lock()
+        guard !ended else { closeStateLock.unlock(); return }
+        lastVideoAttempt = attempt
+        let owner = captureOwner
+        closeStateLock.unlock()
+        guard let owner else { return }
+        capture.withRunningSession(owner) { runningAttempt in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
-            guard !ended, captureRestartID == id else { return }
-            captureRestartID = nil
-            captureRestartTask = nil
-            finished = true
+            guard !ended, let episode = captureRecovery,
+                  episode.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                       at: ContinuousClock.now) else { return }
+            completeCaptureRecoveryLocked()
         }
-        return finished
     }
 
-    private func retireCaptureRestart(_ id: UUID) {
+    private enum CaptureStartDisposition { case restored, awaitingFrame, retry, retired }
+
+    /// Startup success alone cannot clear the watchdog. Early output can be
+    /// counted once this exact attempt is running; later output completes the
+    /// same episode through recordRecoveryFrame. Clearing the worker while the
+    /// stream gate is held prevents a simultaneous stop from being lost.
+    private func settleCaptureRestart(_ worker: UUID, episode: UUID) -> CaptureStartDisposition {
+        guard let (owner, _) = try? captureStartParameters() else { return .retired }
+        var result = CaptureStartDisposition.retry
+        capture.withRunningSession(owner) { runningAttempt in
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
+            guard !ended, captureRestartID == worker, let recovery = captureRecovery,
+                  recovery.id == episode else { result = .retired; return }
+            guard recovery.permitsRecovery(at: ContinuousClock.now) else { return }
+            if recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                     at: ContinuousClock.now) {
+                completeCaptureRecoveryLocked()
+                result = .restored
+            } else {
+                captureRestartID = nil
+                captureRestartTask = nil
+                result = .awaitingFrame
+            }
+        }
+        return result
+    }
+
+    /// Called with the peer lock held under capture admission.
+    private func completeCaptureRecoveryLocked() {
+        captureRecovery = nil
+        captureRecoveryDeadlineTask?.cancel()
+        captureRecoveryDeadlineTask = nil
+        captureRestartID = nil
+        captureRestartTask = nil
+        log.info("screen capture recovery produced a complete frame from its current stream")
+    }
+
+    private func retireCaptureRestart(_ worker: UUID) {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
-        guard captureRestartID == id else { return }
+        guard captureRestartID == worker else { return }
         captureRestartID = nil
         captureRestartTask = nil
     }
 
-    private func endAfterCaptureTeardownFailure(_ id: UUID) {
+    /// Claim termination before leaving the lock. Close revokes direct input
+    /// and media synchronously, while its returned barrier continues to join
+    /// any native operation that has not returned. The watchdog never claims
+    /// to have forcibly terminated ScreenCaptureKit.
+    private func endCaptureRecovery(_ episode: UUID, worker: UUID? = nil, reason: String) {
         closeStateLock.lock()
-        defer { closeStateLock.unlock() }
-        guard !ended, captureRestartID == id else { return }
-        captureRestartID = nil
-        captureRestartTask = nil
-        onEnded("Screen capture cleanup failed. Restart the Mac host app before reconnecting.")
+        guard !ended, captureRecovery?.id == episode,
+              worker == nil || captureRestartID == worker else { closeStateLock.unlock(); return }
+        ended = true
+        captureRecovery = nil
+        closeStateLock.unlock()
+        close(reason: reason)
+        onEnded(reason)
     }
 
-    private func restartCaptureLoop(id: UUID) async {
-        defer { retireCaptureRestart(id) }
-        var attempt = 0
-        while !Task.isCancelled && ownsCaptureRestart(id) {
+    private func endAfterCaptureBudget(_ episode: UUID, worker: UUID) {
+        closeStateLock.lock()
+        let failure = captureRecovery?.id == episode
+            ? captureRecovery?.failure(at: ContinuousClock.now) : nil
+        closeStateLock.unlock()
+        guard let failure else { return }
+        endCaptureRecovery(episode, worker: worker, reason: failure.message)
+    }
+
+    private func restartCaptureLoop(worker: UUID, episode: UUID) async {
+        defer { retireCaptureRestart(worker) }
+        while !Task.isCancelled && ownsCaptureRestart(worker, episode: episode) {
+            guard reserveCaptureRestart(worker, episode: episode) else {
+                endAfterCaptureBudget(episode, worker: worker)
+                return
+            }
             do {
                 try await startCapture()
-                if finishCaptureRestartIfRunning(id) {
-                    log.info("screen capture restarted after system stop")
-                    return
+                switch settleCaptureRestart(worker, episode: episode) {
+                case .restored, .awaitingFrame, .retired: return
+                case .retry: break
                 }
             } catch {
-                guard !Task.isCancelled, ownsCaptureRestart(id) else { return }
+                guard !Task.isCancelled, ownsCaptureRestart(worker, episode: episode) else { return }
                 if error is CaptureStreamTeardownFailure {
-                    endAfterCaptureTeardownFailure(id)
+                    endCaptureRecovery(episode, worker: worker,
+                        reason: "Screen capture cleanup failed. Restart the Mac host app before reconnecting.")
                     return
                 }
                 log.error("screen capture restart failed: \(String(describing: error), privacy: .public)")
             }
-            let delay = captureRestartBackoff[min(attempt, captureRestartBackoff.count - 1)]
-            attempt = min(attempt + 1, captureRestartBackoff.count - 1)
+            guard let delay = captureRestartDelay(worker, episode: episode) else {
+                endAfterCaptureBudget(episode, worker: worker)
+                return
+            }
             do { try await Task.sleep(for: delay) }
             catch { return }
         }

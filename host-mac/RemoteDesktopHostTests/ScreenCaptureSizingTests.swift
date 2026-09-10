@@ -5,6 +5,115 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureRecoveryCapsAttemptsWithoutResettingItsOriginalDeadline() {
+        let start = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: start)
+        let id = episode.id, deadline = episode.deadline
+        let expectedDelays: [Duration] = [.milliseconds(250), .seconds(1), .seconds(2), .seconds(5)]
+        for index in 0..<5 {
+            let now = start.advanced(by: .seconds(index))
+            XCTAssertTrue(episode.reserveAttempt(at: now))
+            XCTAssertEqual(episode.attempts, index + 1)
+            XCTAssertEqual(episode.id, id)
+            XCTAssertEqual(episode.deadline, deadline)
+            XCTAssertEqual(episode.retryDelay(at: now), index < 4 ? expectedDelays[index] : nil)
+        }
+        XCTAssertFalse(episode.reserveAttempt(at: start.advanced(by: .seconds(6))))
+        XCTAssertEqual(episode.attempts, 5)
+        XCTAssertEqual(episode.failure(at: start.advanced(by: .seconds(6))), .attemptsExhausted)
+    }
+
+    func test_captureRecoveryDeadlineRejectsNewAttemptsAndLateSuccessAtItsExactBoundary() {
+        let start = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: start)
+        let stream = CaptureAttemptLease()
+        XCTAssertTrue(episode.reserveAttempt(at: start))
+        XCTAssertTrue(episode.acceptsFrame(lastOutput: stream, running: stream,
+            at: episode.deadline.advanced(by: .nanoseconds(-1))))
+        for now in [episode.deadline, episode.deadline.advanced(by: .seconds(1))] {
+            XCTAssertFalse(episode.reserveAttempt(at: now))
+            XCTAssertNil(episode.retryDelay(at: now))
+            XCTAssertFalse(episode.acceptsFrame(lastOutput: stream, running: stream, at: now))
+            XCTAssertEqual(episode.failure(at: now), .timedOut)
+        }
+        XCTAssertEqual(episode.attempts, 1, "Time exhaustion must not be reported as five failed starts")
+    }
+
+    func test_captureRecoveryRetryWaitCannotExtendTheDeadline() {
+        let start = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: start)
+        XCTAssertNil(episode.retryDelay(at: start), "No delay before the first attempt")
+        XCTAssertTrue(episode.reserveAttempt(at: start))
+        let nearDeadline = episode.deadline.advanced(by: .milliseconds(-20))
+        XCTAssertEqual(episode.retryDelay(at: nearDeadline), .milliseconds(20))
+        XCTAssertTrue(episode.reserveAttempt(at: nearDeadline))
+        XCTAssertEqual(episode.retryDelay(at: nearDeadline), .milliseconds(20))
+        XCTAssertEqual(episode.deadline, start.advanced(by: .seconds(30)))
+    }
+
+    func test_captureRecoveryNeedsOutputFromTheCurrentRunningAttempt() {
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        let old = CaptureAttemptLease(), current = CaptureAttemptLease()
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: current, running: current, at: now), "No recovery attempt has started")
+        XCTAssertTrue(episode.reserveAttempt(at: now))
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: nil, running: current, at: now), "Native startup alone is insufficient")
+        XCTAssertFalse(episode.acceptsFrame(lastOutput: old, running: current, at: now), "Old output cannot satisfy a replacement")
+        XCTAssertTrue(episode.acceptsFrame(lastOutput: current, running: current, at: now))
+        XCTAssertNil(episode.failure(at: now))
+    }
+
+    func test_captureRecoveryLastAttemptCanDeliverAFrameButCannotStartAnotherAttempt() {
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        for _ in 0..<5 { XCTAssertTrue(episode.reserveAttempt(at: now)) }
+        let current = CaptureAttemptLease()
+        XCTAssertTrue(episode.acceptsFrame(lastOutput: current, running: current, at: now),
+                      "The fifth admitted start may still produce its first frame before the deadline")
+        XCTAssertFalse(episode.reserveAttempt(at: now))
+        XCTAssertNil(episode.retryDelay(at: now))
+    }
+
+    func test_captureRecoveryNewEpisodeDoesNotReuseAnEarlierDeadlineOrIdentity() {
+        let start = ContinuousClock.now
+        var old = CaptureRecoveryEpisode(now: start)
+        for _ in 0..<5 { XCTAssertTrue(old.reserveAttempt(at: start)) }
+        let next = CaptureRecoveryEpisode(now: start.advanced(by: .seconds(40)))
+        XCTAssertNotEqual(next.id, old.id)
+        XCTAssertGreaterThan(next.deadline, old.deadline)
+        XCTAssertEqual(next.attempts, 0)
+        XCTAssertEqual(old.attempts, 5)
+    }
+
+    func test_captureRecoveryRunningIdentityMatchesEarlyOutputAndChangesWithReplacement() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let early = expectation(description: "early output recorded")
+        let release = CaptureLifecycleTestLatch()
+        let owner = lifecycle.beginOwner(context: "peer")
+        let start = try lifecycle.start(for: owner, prepare: { old }, startStream: { _ in
+            early.fulfill(); await release.wait()
+        })
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        await fulfillment(of: [early], timeout: 2)
+        var output: CaptureAttemptLease?
+        lifecycle.withStream(old) { _, attempt in output = attempt }
+        XCTAssertFalse(lifecycle.withRunningOwner(owner) { _ in XCTFail("Still starting") })
+        await release.open(); try await start.value
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        XCTAssertTrue(episode.reserveAttempt(at: now))
+        XCTAssertTrue(lifecycle.withRunningOwner(owner) { running in
+            XCTAssertTrue(episode.acceptsFrame(lastOutput: output, running: running, at: now))
+        })
+        let successor = lifecycle.beginOwner(context: "replacement")
+        try await lifecycle.start(for: successor, prepare: { next }, startStream: { _ in }).value
+        XCTAssertTrue(lifecycle.withRunningOwner(successor) { running in
+            XCTAssertFalse(episode.acceptsFrame(lastOutput: output, running: running, at: now))
+        })
+        await lifecycle.endAll().value
+    }
+
     func test_captureLifecycleJoinsPreparationAndAdmitsEarlyNativeFrames() async throws {
         let trace = CaptureLifecycleTrace()
         let stream = CaptureLifecycleTestStream()
