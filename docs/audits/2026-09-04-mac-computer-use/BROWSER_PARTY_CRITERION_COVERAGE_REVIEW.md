@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [party source-group repair](BROWSER_PARTY_SOURCE_GROUP_REVIEW.md). No model, browser, app or GPU workload ran for this repair.
 
+Follow-up: the [derived party-total repair](BROWSER_PARTY_TOTAL_FORM_REVIEW.md) adds a people value for aggregate number fields while keeping the two category records separate. Form context advances to version 22; a verified total does not complete either category.
+
 ## First-principles defect
 
 For “2 adults and 1 child,” three different facts must remain separate: the user's requested composition, the website field a planner proposes for each component, and the native observation or input receipt proving that field's value. An adult field containing `2` establishes neither a child field containing `1` nor the provider's interpretation of either category.

@@ -73,8 +73,7 @@ struct ComputerUseBrowserFormPartyCriterion: Equatable, Sendable, CustomStringCo
     let unit: String
     let value: String
     init?(_ normalized: ComputerUseBrowserResearchFormInput.Normalization) {
-        guard normalized.kind == .partySize, let source = normalized.partySourceID,
-              ["adults", "children"].contains(normalized.unit) else { return nil }
+        guard normalized.isPartyComponent, let source = normalized.partySourceID else { return nil }
         partySourceID = source; unit = normalized.unit; value = normalized.value
     }
     var identity: [String] { [partySourceID, unit, value] }
@@ -113,8 +112,8 @@ struct ComputerUseBrowserFormPartyCoverage: Equatable, Sendable {
                         records: [String: ComputerUseBrowserFormPartyCriterion], values: [String: String], changedTargets: Set<String> = []) -> [Self] {
         var seen: Set<String> = []
         return normalizations.compactMap { first in
-            guard let sourceID = first.partySourceID, seen.insert(sourceID).inserted else { return nil }
-            let required = normalizations.filter { $0.partySourceID == sourceID }
+            guard first.isPartyComponent, let sourceID = first.partySourceID, seen.insert(sourceID).inserted else { return nil }
+            let required = normalizations.filter { $0.partySourceID == sourceID && $0.isPartyComponent }
             let components = required.map { value -> Component in
                 let targets = records.keys.filter { records[$0]?.partySourceID == sourceID && records[$0]?.unit == value.unit }.sorted()
                 let state: State
@@ -162,6 +161,10 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         let kind: Kind
         let value: String
         let unit: String
+        /// A derived total shares the party source but never substitutes for
+        /// either category in native criterion accounting.
+        var isPartyComponent: Bool { kind == .partySize && partySourceID != nil && ["adults", "children"].contains(unit) }
+        var isPartyTotal: Bool { kind == .partySize && partySourceID != nil && unit == "people" }
         init(id: String, requirementIndex: Int, kind: Kind, value: String, unit: String, requirementIndices: [Int]? = nil, partySourceID: String? = nil) {
             self.id = id; self.requirementIndex = requirementIndex; self.kind = kind; self.value = value; self.unit = unit
             self.requirementIndices = requirementIndices ?? [requirementIndex]
@@ -175,6 +178,8 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// Only exact dates and explicit party/ticket counts have a scalar
     /// representation for these native input kinds. Ranges, maxima and counts
     /// of desired results cannot silently become an exact day or booking size.
+    /// One exact party also supplies its people total, sourced from the whole
+    /// group. That total does not replace either category's criterion.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
         var parties: Set<[String]> = [], dates: Set<[String]> = []
@@ -190,7 +195,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                     unit: "civilDay", requirementIndices: indices)]
             case .party(let party):
                 guard parties.insert(condition.sourceRequirementIDs).inserted else { return [] }
-                return [(ComputerUseBrowserScalarRequirements.QuantityUnit.adults, party.adults), (.children, party.children)].compactMap { unit, count in
+                return [(ComputerUseBrowserScalarRequirements.QuantityUnit.adults, party.adults), (.children, party.children), (.people, party.total)].compactMap { unit, count in
                     let indices = ledger.partyRequirementIndices(for: condition, unit: unit)
                     guard let primary = indices.first else { return nil }
                     return .init(id: "value\(index + 1)-\(unit.rawValue)", requirementIndex: primary, kind: .partySize, value: String(count), unit: unit.rawValue,
@@ -426,6 +431,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             context["version"] = 21
             context["date_terms"] = dates
         }
+        if normalized.contains(where: \.isPartyTotal) { context["version"] = 22 }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

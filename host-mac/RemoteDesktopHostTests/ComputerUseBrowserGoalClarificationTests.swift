@@ -618,9 +618,9 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             let sources = ComputerUseBrowserSourceRequirements(proposal: current)
             XCTAssertTrue(sources.unresolved.isEmpty); XCTAssertFalse(sources.requiresNavigationHistory)
             let currentValues = ComputerUseBrowserResearchFormInput.normalizations(for: current)
-            XCTAssertEqual(currentValues.map(\.value), ["2", "1"])
+            XCTAssertEqual(currentValues.map(\.value), ["2", "1", "3"])
             XCTAssertEqual(currentValues.map(\.partySourceID), originalValues.map(\.partySourceID))
-            let records = try Dictionary(uniqueKeysWithValues: originalValues.map { ($0.unit, try XCTUnwrap(ComputerUseBrowserFormPartyCriterion($0))) })
+            let records = try Dictionary(uniqueKeysWithValues: originalValues.filter(\.isPartyComponent).map { ($0.unit, try XCTUnwrap(ComputerUseBrowserFormPartyCriterion($0))) })
             let coverage = ComputerUseBrowserFormPartyCoverage.collect(normalizations: currentValues, records: records, values: ["adults":"2", "children":"1"])
             XCTAssertEqual(coverage.first?.allComponentsRecorded, true)
             XCTAssertEqual(coverage.first?.requirementIndices, Array(1...currentParts.count))
@@ -669,7 +669,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             XCTAssertFalse(condition.hasHistoricalSource)
         }
         XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: current).unresolved.isEmpty)
-        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.requirementIndices), [[1, 2], [3, 4]])
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: current).map(\.requirementIndices), [[1, 2], [3, 4], [1, 2, 3, 4]])
     }
 
     func testMixedPartyAnswersRefineCompatibleTotalsOrComponentsWithoutDiscardingTheirCounts() throws {
@@ -681,7 +681,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             XCTAssertEqual(count.predicate, .party(party)); XCTAssertTrue(count.hasHistoricalSource)
             XCTAssertEqual(answer.targetRequirementIDs, [count.requirementID])
             XCTAssertTrue(ComputerUseBrowserSourceRequirements(proposal: ledger.proposal).unresolved.isEmpty)
-            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal).map(\.value), ["2", "1"])
+            XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal).map(\.value), ["2", "1", "3"])
         }
     }
 

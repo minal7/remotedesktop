@@ -19,9 +19,9 @@ final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
                 XCTAssertTrue(ledger.nativeScalarSourceIDs.contains(bound.requirementID))
             }
             let normalized = ComputerUseBrowserResearchFormInput.normalizations(for: ledger.proposal)
-            XCTAssertEqual(normalized.map(\.value), ["2", "1"])
-            XCTAssertEqual(normalized.map(\.unit), ["adults", "children"])
-            XCTAssertEqual(normalized.map(\.requirementIndices), expectedSources)
+            XCTAssertEqual(normalized.map(\.value), ["2", "1", "3"])
+            XCTAssertEqual(normalized.map(\.unit), ["adults", "children", "people"])
+            XCTAssertEqual(normalized.map(\.requirementIndices), expectedSources + [Array(1...parts.count)])
         }
     }
 

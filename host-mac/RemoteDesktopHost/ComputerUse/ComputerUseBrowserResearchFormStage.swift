@@ -285,7 +285,7 @@ struct ComputerUseBrowserFormPartyHistory: Equatable, Sendable, CustomStringConv
         guard interpretation.input.continues(goal) else { throw ComputerUseBrowserResearchFormError.inputChanged }
         let values: [[String: Any]] = try parties.map { party in
             guard let alias = aliases[party.sourceID] else { throw ComputerUseBrowserResearchFormError.invalidInput }
-            let current = normalizations.filter { $0.partySourceID == party.sourceID }
+            let current = normalizations.filter { $0.partySourceID == party.sourceID && $0.isPartyComponent }
             let sameCounts = current.count == party.components.count && party.components.allSatisfy { old in
                 current.contains { $0.unit == old.unit && $0.value.utf8.elementsEqual(old.value.utf8) }
             }

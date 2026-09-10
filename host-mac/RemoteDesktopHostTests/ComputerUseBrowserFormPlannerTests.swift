@@ -4,6 +4,104 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testPartyTotalsUseWholeSourceGroupsWithoutCombiningSeparateParties() throws {
+        let outcome = row("Find concerts in Montréal. ", role: "outcome", field: "category")
+        for (parts, expected) in [(["2", " adults and ", "1", " child."], "3"),
+                                  (["0 children and 2 adults."], "2"), (["999 adults and 999 children."], "1998")] {
+            let goal = try proposal(rows: [outcome] + parts.map { row($0, field: "quantity") })
+            let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
+            let total = try XCTUnwrap(values.first(where: \.isPartyTotal))
+            XCTAssertEqual(total.value, expected); XCTAssertEqual(total.unit, "people")
+            XCTAssertEqual(total.requirementIndices, Array(1...parts.count))
+            XCTAssertEqual(Set(values.compactMap(\.partySourceID)).count, 1)
+            XCTAssertEqual(values.filter(\.isPartyComponent).count, 2)
+            XCTAssertNil(ComputerUseBrowserFormPartyCriterion(total))
+            let coverage = ComputerUseBrowserFormPartyCoverage.collect(normalizations: values, records: [:], values: ["total":expected])
+            XCTAssertEqual(coverage.first?.components.map(\.state), [.missing, .missing])
+            XCTAssertEqual(coverage.first?.allComponentsRecorded, false)
+        }
+        let separate = try proposal(rows: [outcome, row("2 adults and 1 child. ", field: "quantity"), row("1 adult and 3 children.", field: "quantity")])
+        let totals = ComputerUseBrowserResearchFormInput.normalizations(for: separate).filter(\.isPartyTotal)
+        XCTAssertEqual(totals.map(\.value), ["3", "4"])
+        XCTAssertEqual(totals.map(\.requirementIndices), [[1], [2]])
+        XCTAssertEqual(Set(totals.compactMap(\.partySourceID)).count, 2)
+        for parts in [["2 adults. ", "1 child."], ["at most 2 adults and 1 child."], ["2 adults and 1 child and 3 adults."]] {
+            let goal = try proposal(rows: [outcome] + parts.map { row($0, field: "quantity") })
+            XCTAssertFalse(ComputerUseBrowserResearchFormInput.normalizations(for: goal).contains(where: \.isPartyTotal))
+        }
+    }
+
+    func testAggregatePartySearchKeepsBothCategoryObligationsAfterNavigation() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category")]
+            + ["2", " adults and ", "1", " child. "].map { row($0, field: "quantity") }
+            + [row("on 2026-10-17.", field: "date")])
+        for initial in [1, 3] {
+            var edits = 0
+            let body = "<form action='/results'><label>People<input type='number' name='people' min='1' max='8' value='\(initial)'></label><button>Search</button></form>"
+            let fixture = try await FormPlannerFixture(goal: goal, body: body,
+                additionalRoutes: ["/results?people=3":.init(body: "<p>Preliminary search</p>")],
+                domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let owner = fixture.owner(journalDirectory: directory)
+            defer { owner.retire() }
+            _ = try await owner.interpretGoal()
+            let input = try await owner.prepareFormInput()
+            let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-people"]]), input: input)
+            let sources = try proposed.sources(for: XCTUnwrap(proposed.edits.first))
+            XCTAssertEqual(try sources.flatMap { try $0.indices(in: goal) }, [1, 2, 3, 4])
+            let context = try object(Data(input.contextJSON.utf8))
+            XCTAssertEqual(context["version"] as? Int, 22); XCTAssertNotNil(context["date_terms"])
+            let total = try XCTUnwrap((context["normalized_values"] as? [[String: Any]])?.first { $0["unit"] as? String == "people" })
+            XCTAssertEqual(total["requirements"] as? [Int], [1, 2, 3, 4]); XCTAssertEqual(total["party"] as? String, "party1")
+            let receipt = try await owner.executeForm(proposed, input: input)
+            let next = try await owner.prepareFormInput(), continuation = try XCTUnwrap(next.previous)
+            XCTAssertEqual(receipt.editCount, initial == 3 ? 0 : 1)
+            XCTAssertEqual(receipt.verifiedWithoutInputCount, initial == 3 ? 1 : 0)
+            XCTAssertEqual(edits, receipt.editCount); XCTAssertEqual(Array(continuation.finalValues.values), ["3"])
+            XCTAssertTrue(continuation.partyCriteria.isEmpty)
+            XCTAssertEqual(continuation.partyCoverage.first?.components.map(\.state), [.missing, .missing])
+            XCTAssertEqual(continuation.partyCoverage.first?.allComponentsRecorded, false)
+            let control = try XCTUnwrap(next.evidence.page.page.controls.first { $0.kind == "submit" })
+            _ = try await owner.openFormQuery(after: receipt, controlID: control.id, evidence: next.evidence.page)
+            XCTAssertEqual(fixture.server.count("/results?people=3"), 1)
+            XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, goal.input)
+            let action = try await owner.planNextAction(using: PartyCoverageActionFixture())
+            let historyContext = try object(Data(action.input.contextJSON.utf8))
+            let history = try XCTUnwrap(historyContext["form_history"] as? [[String: Any]])
+            let snapshot = try XCTUnwrap(history.first?["party_criteria_at_stage"] as? [String: Any])
+            XCTAssertEqual(snapshot["current_field_verification"] as? Bool, false)
+            let party = try XCTUnwrap((snapshot["parties"] as? [[String: Any]])?.first)
+            XCTAssertEqual(party["current_native_requirement"] as? String, "same_counts")
+            XCTAssertEqual((party["components_at_stage"] as? [[String: Any]])?.compactMap { $0["state"] as? String }, ["missing", "missing"])
+        }
+    }
+
+    func testDerivedTotalCannotRetainAnEarlierCategoryRecordWithTheSameNumber() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 0 children.", field: "quantity")])
+        // Authored decisions deliberately change the proposed meaning of one
+        // field. Exact numeric equality cannot retain the earlier category.
+        let fixture = try await FormPlannerFixture(goal: goal, body: "<form action='/results'><label>Count<input type='number' name='count' value='1'></label><button>Search</button></form>")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let first = try await owner.prepareFormInput()
+        let adult = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-adults"]]), input: first)
+        _ = try await owner.executeForm(adult, input: first)
+        let second = try await owner.prepareFormInput()
+        XCTAssertEqual(second.previous?.partyCoverage.first?.components.map(\.state), [.recorded, .missing])
+        let total = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-people"]]), input: second)
+        let receipt = try await owner.executeForm(total, input: second)
+        XCTAssertEqual(receipt.editCount, 0); XCTAssertEqual(receipt.verifiedWithoutInputCount, 1)
+        let third = try await owner.prepareFormInput(), continuation = try XCTUnwrap(third.previous)
+        XCTAssertTrue(continuation.partyCriteria.isEmpty)
+        XCTAssertEqual(continuation.partyCoverage.first?.components.map(\.state), [.missing, .missing])
+        XCTAssertEqual(continuation.inputOperationIDs.count, 1); XCTAssertEqual(continuation.stateProofsByTarget.count, 1)
+        XCTAssertNotEqual(continuation.digest, second.previous?.digest)
+    }
+
     func testEveryQuestionDecoderRequiresTheWholeIntroducedDateAnswer() async throws {
         for parts in [["on 2026-", "10-16."], ["from 2026-10-16 ", "through 2026-10-18"], ["Fri", "day."]] {
             let (goal, rows) = try introducedScalarGoal(parts: parts)
@@ -261,7 +359,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             let repartitioned = try decodeGoal([row("Find concerts. ", role: "outcome", field: "category")]
                 + parts.map { row($0, field: "quantity") }, input: goal.input)
             let current = ComputerUseBrowserResearchFormInput.normalizations(for: repartitioned)
-            XCTAssertEqual(current.map(\.partySourceID), [identity, identity])
+            XCTAssertEqual(current.map(\.partySourceID), [identity, identity, identity])
             XCTAssertEqual(current.map(\.value), original.map(\.value))
         }
         let foreignInput = try ComputerUseBrowserGoalInput(taskID: "another-party-task", prompt: goal.input.userTurns[0],
@@ -307,11 +405,11 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         _ = try await owner.interpretGoal()
         let first = try await owner.prepareFormInput()
         let initialContext = try object(Data(first.contextJSON.utf8))
-        XCTAssertEqual(initialContext["version"] as? Int, 19)
+        XCTAssertEqual(initialContext["version"] as? Int, 22)
         let initialCoverage = try XCTUnwrap(initialContext["party_criteria"] as? [[String: Any]])
         XCTAssertEqual(initialCoverage.first?["party"] as? String, "party1")
         let normalizedContext = try XCTUnwrap(initialContext["normalized_values"] as? [[String: Any]])
-        XCTAssertEqual(normalizedContext.compactMap { $0["party"] as? String }, ["party1", "party1"])
+        XCTAssertEqual(normalizedContext.compactMap { $0["party"] as? String }, ["party1", "party1", "party1"])
         XCTAssertEqual((initialCoverage.first?["components"] as? [[String: Any]])?.compactMap { $0["state"] as? String }, ["missing", "missing"])
         let adultPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2-adults"]]), input: first)
         let adultReceipt = try await owner.executeForm(adultPlan, input: first)
@@ -546,11 +644,11 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category")]
             + ["2", " adults and ", "1", " child."].map { row($0, field: "quantity") })
         let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
-        XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children"])
-        XCTAssertEqual(values.map(\.requirementIndex), [1, 3])
-        XCTAssertEqual(values.map(\.requirementIndices), [[1, 2], [3, 4]])
-        XCTAssertEqual(values.map(\.value), ["2", "1"])
-        XCTAssertEqual(values.map(\.unit), ["adults", "children"])
+        XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children", "value2-people"])
+        XCTAssertEqual(values.map(\.requirementIndex), [1, 3, 1])
+        XCTAssertEqual(values.map(\.requirementIndices), [[1, 2], [3, 4], [1, 2, 3, 4]])
+        XCTAssertEqual(values.map(\.value), ["2", "1", "3"])
+        XCTAssertEqual(values.map(\.unit), ["adults", "children", "people"])
     }
 
     func testSplitPartySourcesReachNativeFormProvenanceAndOneQuery() async throws {
@@ -573,9 +671,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let content = try plan([["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"]])
         let proposed = try await owner.planForm(input, using: local(FormPlannerTransport(content: content)))
         let context = try object(Data(input.contextJSON.utf8))
-        XCTAssertEqual(context["version"] as? Int, 19)
+        XCTAssertEqual(context["version"] as? Int, 22)
         let normalized = try XCTUnwrap(context["normalized_values"] as? [[String: Any]])
-        XCTAssertEqual(normalized.map { $0["requirements"] as? [Int] }, [[1, 2], [3, 4]])
+        XCTAssertEqual(normalized.map { $0["requirements"] as? [Int] }, [[1, 2], [3, 4], [1, 2, 3, 4]])
         for (index, expected) in [[1, 2], [3, 4]].enumerated() {
             let sources = try proposed.sources(for: proposed.edits[index])
             XCTAssertEqual(try sources.flatMap { try $0.indices(in: goal) }, expected)
@@ -593,11 +691,11 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"),
                 row(source, field: "quantity"), row("3 options.", field: "quantity")])
             let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
-            XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children"])
-            XCTAssertEqual(values.map(\.requirementIndex), [1, 1])
-            XCTAssertEqual(values.map(\.kind), [.partySize, .partySize])
-            XCTAssertEqual(values.map(\.unit), ["adults", "children"])
-            XCTAssertEqual(values.map(\.value), ["2", "1"])
+            XCTAssertEqual(values.map(\.id), ["value2-adults", "value2-children", "value2-people"])
+            XCTAssertEqual(values.map(\.requirementIndex), [1, 1, 1])
+            XCTAssertEqual(values.map(\.kind), [.partySize, .partySize, .partySize])
+            XCTAssertEqual(values.map(\.unit), ["adults", "children", "people"])
+            XCTAssertEqual(values.map(\.value), ["2", "1", "3"])
         }
     }
 
@@ -620,8 +718,8 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let input = try await owner.prepareFormInput()
         let content = try plan([["field":"field1", "normalized":"value2-adults"], ["field":"field2", "normalized":"value2-children"]])
         let proposed = try await owner.planForm(input, using: local(FormPlannerTransport(content: content)))
-        XCTAssertEqual(input.normalizations.map(\.requirementIndex), [1, 1])
-        XCTAssertEqual(input.normalizations.map(\.value), ["2", "1"])
+        XCTAssertEqual(input.normalizations.map(\.requirementIndex), [1, 1, 1])
+        XCTAssertEqual(input.normalizations.map(\.value), ["2", "1", "3"])
         XCTAssertEqual(edits, 0)
         let receipt = try await owner.executeForm(proposed, input: input)
         let page = try await owner.observeFormResultPage(after: receipt), control = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
