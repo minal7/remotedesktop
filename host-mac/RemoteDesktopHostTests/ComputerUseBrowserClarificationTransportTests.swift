@@ -4,6 +4,137 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
+    func testRetryWireNegotiatesOnlyExplicitAnswerSupportAndKeepsTheCompleteQuestion() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "root", expiresAt: Date().addingTimeInterval(600))
+        for negotiated in [false, true] {
+            let body = try ComputerUsePromptRequest.answering(reference, text: "  ", supportsClarificationRetry: negotiated).encodedBody()
+            let decoded = try ComputerUseExecutionPromptDecoder.decode(body)
+            XCTAssertEqual(decoded.supportsClarificationRetry, negotiated)
+            let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+            XCTAssertEqual(fields["supportsClarificationRetry"] != nil, negotiated)
+        }
+        let oldPolicy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 8, requiresNonblank: true)
+        let oldData = try JSONEncoder().encode(oldPolicy)
+        XCTAssertFalse(try JSONDecoder().decode(ComputerUseClarificationAnswerPolicy.self, from: oldData).supportsRetry)
+        XCTAssertFalse(String(decoding: oldData, as: UTF8.self).contains("supportsRetry"))
+        XCTAssertThrowsError(try ComputerUseClarificationRetry(reference: reference, reason: .blank, answerPolicy: oldPolicy))
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 8, requiresNonblank: true, supportsRetry: true)
+        let retry = try ComputerUseClarificationRetry(reference: reference, reason: .tooLong, answerPolicy: policy)
+        let question = String(repeating: "é", count: ComputerUseClarificationText.maximumUTF8Bytes / 2)
+        let update = ComputerUseTaskUpdate(taskID: "attempt", text: question, outcome: .userInterventionRequired, clarificationRetry: retry)
+        let body = try update.encodedBody(), decoded = try ComputerUseTaskUpdate.decodeBody(body)
+        XCTAssertTrue(decoded.text.utf8.elementsEqual(question.utf8)); XCTAssertEqual(decoded.clarificationRetry, retry)
+        let ownQuestion = try ComputerUseClarificationReference(taskID: "attempt", expiresAt: reference.expiresAt)
+        for invalid in [
+            ComputerUseTaskUpdate(taskID: "root", text: "Question", outcome: .userInterventionRequired, clarificationRetry: retry),
+            .init(taskID: "attempt", text: "Question", outcome: .unableToComplete, clarificationRetry: retry),
+            .init(taskID: "attempt", text: "Question", outcome: .userInterventionRequired, clarification: ownQuestion, clarificationRetry: retry),
+            .init(taskID: "attempt", text: "Question", outcome: .userInterventionRequired, clarificationAnswerPolicy: policy, clarificationRetry: retry),
+            .init(taskID: "attempt", text: "Question", outcome: .userInterventionRequired, clarificationRetry: retry, isApprovedActionEvidenceOnly: true),
+            .init(taskID: "attempt", text: question + "é", outcome: .userInterventionRequired, clarificationRetry: retry),
+        ] { XCTAssertThrowsError(try invalid.encodedBody()) }
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        var retryFields = try XCTUnwrap(fields["clarificationRetry"] as? [String: Any])
+        retryFields["reason"] = "tryAgain"; fields["clarificationRetry"] = retryFields
+        XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(String(decoding: JSONSerialization.data(withJSONObject: fields), as: UTF8.self)))
+    }
+
+    func testRejectedAnswerRetryRequiresTheSameInvalidBodyOwnerControllerAndLiveQuestion() async throws {
+        for retirement in ["expiry", "pause", "retire", "invalidate"] {
+            var now = Date(timeIntervalSince1970: 1_800_000_000)
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
+            defer { browser.close() }
+            let owner = try makeOwner(browser, planner: planner, now: { now }), original = owner.input
+            let proposal = try await owner.interpretGoal().proposal, bridge = ComputerUseBrowserClarificationTransport()
+            let issued = try bridge.issue(.init(taskID: original.taskID, inputDigest: original.digest, topic: .location,
+                requirementIDs: [proposal.requirements[0].id]), owner: owner, for: request(original.taskID))
+            let body = try ComputerUsePromptRequest.answering(issued.reference, text: " \n ", supportsClarificationRetry: true).encodedBody()
+            let envelope = request("attempt", body: body)
+            let rejection: ComputerUseBrowserClarificationTransport.RejectedAnswer
+            do {
+                _ = try bridge.consume(issued.reference, answer: " \n ", for: envelope, retainedOwner: { _ in owner })
+                return XCTFail("A blank answer must be rejected before appending")
+            } catch let error as ComputerUseBrowserClarificationTransport.RejectedAnswer { rejection = error }
+            XCTAssertEqual(rejection.text, issued.text); XCTAssertEqual(rejection.retry.reference, issued.reference)
+            XCTAssertEqual(rejection.retry.reason, .blank); XCTAssertEqual(owner.input, original)
+            XCTAssertEqual(owner.executionTaskID, original.taskID)
+            XCTAssertTrue(bridge.retainsRetry(rejection.retry, for: envelope, retainedOwner: { _ in owner }))
+            XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: envelope, retainedOwner: { _ in nil }))
+            let replacement = try makeOwner(browser, planner: planner)
+            XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: envelope, retainedOwner: { _ in replacement }))
+            for foreign in [request("attempt", sender: "other", body: body), request("attempt", session: "other", body: body),
+                            request(original.taskID, body: body), request("attempt", body: "") ] {
+                XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: foreign, retainedOwner: { _ in owner }))
+            }
+            for (text, negotiated) in [("Paris", true), (" \n ", false)] {
+                let changed = request("attempt", body: try ComputerUsePromptRequest.answering(issued.reference, text: text,
+                    supportsClarificationRetry: negotiated).encodedBody())
+                XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: changed, retainedOwner: { _ in owner }))
+            }
+            switch retirement {
+            case "expiry": now = issued.reference.expiresAt
+            case "pause": owner.pause()
+            case "retire": owner.retire()
+            default: bridge.invalidate()
+            }
+            XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: envelope, retainedOwner: { _ in owner }), retirement)
+            XCTAssertEqual(owner.input, original)
+        }
+    }
+
+    func testRetryLedgerRequiresAnAuthenticatedQuestionAndRetainsCancellationAssociation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
+        let reference = try ComputerUseClarificationReference(taskID: "root", expiresAt: Date().addingTimeInterval(600))
+        let retry = try ComputerUseClarificationRetry(reference: reference, reason: .blank,
+            answerPolicy: .init(maximumUTF8Bytes: 8_192, requiresNonblank: true, supportsRetry: true))
+        _ = try ledger.claim(taskID: "root", senderID: "phone", sessionID: "session", promptBody: "Find tickets.")
+        _ = try ledger.complete(taskID: "root", response: "Which location?", outcome: .userInterventionRequired, clarification: reference)
+        for (id, sender, session) in [("foreign-sender", "other", "session"), ("foreign-session", "phone", "other")] {
+            _ = try ledger.claim(taskID: id, senderID: sender, sessionID: session, promptBody: "invalid")
+            XCTAssertThrowsError(try ledger.complete(taskID: id, response: "Which location?", outcome: .userInterventionRequired, clarificationRetry: retry))
+            XCTAssertNil(ledger.terminalClarificationRetry(taskID: id))
+        }
+        let body = try ComputerUsePromptRequest.answering(reference, text: " \n ", supportsClarificationRetry: true).encodedBody()
+        _ = try ledger.claim(taskID: "attempt", senderID: "phone", sessionID: "session", promptBody: body)
+        let result = try ledger.complete(taskID: "attempt", response: "Which location?", outcome: .userInterventionRequired, clarificationRetry: retry)
+        XCTAssertEqual(result.clarificationRetry, retry)
+        let reopened = ComputerUseTaskLedger(fileURL: url)
+        XCTAssertEqual(reopened.terminalClarificationRetry(taskID: "attempt"), retry)
+        let stored = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        for corruption in ["outcome", "response", "self-reference"] {
+            var records = stored, row = try XCTUnwrap(stored["attempt"] as? [String: Any])
+            if corruption == "outcome" { row["outcome"] = ComputerUseTerminalOutcome.taskCompleted.rawValue }
+            else if corruption == "response" { row["response"] = " " }
+            else {
+                var metadata = try XCTUnwrap(row["clarificationRetry"] as? [String: Any])
+                var corruptedReference = try XCTUnwrap(metadata["reference"] as? [String: Any])
+                corruptedReference["taskID"] = "attempt"; metadata["reference"] = corruptedReference
+                row["clarificationRetry"] = metadata
+            }
+            records["attempt"] = row
+            let corruptedURL = directory.appendingPathComponent("corrupt-" + corruption + ".json")
+            try JSONSerialization.data(withJSONObject: records).write(to: corruptedURL)
+            XCTAssertThrowsError(try ComputerUseTaskLedger(fileURL: corruptedURL).claim(taskID: "another",
+                senderID: "phone", sessionID: "session", promptBody: "New request"))
+        }
+        XCTAssertEqual(try reopened.claim(taskID: "attempt", senderID: "phone", sessionID: "session", promptBody: body), .completed("Which location?"))
+        XCTAssertEqual(try reopened.claim(taskID: "attempt", senderID: "phone", sessionID: "session", promptBody: body + " "), .identityMismatch)
+        XCTAssertEqual(try reopened.complete(taskID: "attempt", response: "Late completion", outcome: .taskCompleted).clarificationRetry, retry)
+        _ = try reopened.cancelLocally(taskID: "attempt", senderID: "phone", sessionID: "session")
+        XCTAssertNil(reopened.terminalClarificationRetry(taskID: "attempt"))
+        XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).rejectedAnswerReference(taskID: "attempt"), reference)
+        _ = try reopened.cancelLocally(taskID: "root", senderID: "phone", sessionID: "session")
+        _ = try reopened.claim(taskID: "late-attempt", senderID: "phone", sessionID: "session", promptBody: body)
+        XCTAssertThrowsError(try reopened.complete(taskID: "late-attempt", response: "Question", outcome: .userInterventionRequired, clarificationRetry: retry))
+        XCTAssertNil(reopened.terminalClarification(taskID: "root"))
+        let missing = try ComputerUseClarificationRetry(reference: .init(taskID: "missing", expiresAt: reference.expiresAt),
+            reason: .blank, answerPolicy: retry.answerPolicy)
+        XCTAssertThrowsError(try reopened.complete(taskID: "late-attempt", response: "Question",
+            outcome: .userInterventionRequired, clarificationRetry: missing))
+    }
+
     func testAnswerPolicyUsesRemainingNativeBytesAndOnlyTheLiveQuestion() async throws {
         let beginning = "Find concert tickets. "
         for remaining in [ComputerUseBrowserGoalInput.maximumAnswerBytes, 7] {
@@ -178,8 +309,8 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
             referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
         return .init(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(), mayAct: { true }, now: now)
     }
-    private func request(_ id: String, sender: String = "phone", session: String = "session") -> ComputerUseEnvelope {
-        .init(id: id, senderID: sender, targetID: "host", pairingCode: "842193", sessionID: session, kind: .prompt, body: "")
+    private func request(_ id: String, sender: String = "phone", session: String = "session", body: String = "") -> ComputerUseEnvelope {
+        .init(id: id, senderID: sender, targetID: "host", pairingCode: "842193", sessionID: session, kind: .prompt, body: body)
     }
 }
 

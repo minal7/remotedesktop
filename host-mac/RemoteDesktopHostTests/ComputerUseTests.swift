@@ -741,6 +741,120 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerRetriesRejectedBrowserAnswersWithoutAcceptingThemAndRetiresStaleRetryReplays() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let root = makeEnvelope(id: "retry-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find concert tickets.").encodedBody())
+        fixture.manager.authorizePeer(senderID: root.senderID)
+        XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+        let question = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+        let reference = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
+        XCTAssertEqual(question.clarificationAnswerPolicy?.supportsRetry, true)
+        var attempts: [ComputerUseEnvelope] = []
+        for (index, invalid) in [" \n ", String(repeating: "😀", count: 2_050)].enumerated() {
+            let attempt = makeEnvelope(id: "rejected-\(index)", kind: .prompt, body: try ComputerUsePromptRequest.answering(reference,
+                text: invalid, supportsClarificationRetry: true).encodedBody())
+            attempts.append(attempt)
+            XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+            let reply = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel)
+            let retry = try XCTUnwrap(reply.clarificationRetry)
+            XCTAssertEqual(reply.outcome, .userInterventionRequired); XCTAssertNil(reply.clarification)
+            XCTAssertEqual(retry.reference, reference); XCTAssertEqual(retry.reason, index == 0 ? .blank : .tooLong)
+            XCTAssertTrue(reply.text.contains(question.text))
+            XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.executionTaskID, root.id)
+            XCTAssertTrue(executor.continued.isEmpty); XCTAssertEqual(executor.planner.inputs.count, 1)
+            let reopened = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(reopened.terminalClarificationRetry(taskID: attempt.id), retry)
+            let before = await fixture.channel.sentMessages().count
+            XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+            let replay = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel, afterCount: before)
+            XCTAssertEqual(replay.text, reply.text); XCTAssertEqual(replay.clarificationRetry, retry)
+        }
+        let correction = makeEnvelope(id: "corrected-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Paris", supportsClarificationRetry: true).encodedBody())
+        XCTAssertTrue(fixture.manager.handle(correction, channel: fixture.channel))
+        let next = try await clarificationUpdate(taskID: correction.id, channel: fixture.channel)
+        XCTAssertNotNil(next.clarification); XCTAssertNil(next.clarificationRetry)
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, "Paris"])
+        XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
+        XCTAssertEqual(executor.continued.map(\.taskID), [correction.id]); XCTAssertEqual(executor.planner.inputs.count, 2)
+        let before = await fixture.channel.sentMessages().count
+        XCTAssertTrue(fixture.manager.handle(attempts[0], channel: fixture.channel))
+        let stale = try await clarificationUpdate(taskID: attempts[0].id, channel: fixture.channel, afterCount: before)
+        XCTAssertEqual(stale.outcome, .unableToComplete); XCTAssertNil(stale.clarificationRetry)
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, "Paris"])
+        XCTAssertNotNil(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: attempts[0].id, revision: 1), channel: fixture.channel))
+        XCTAssertNotNil(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+        XCTAssertEqual(owner.executionTaskID, correction.id)
+        XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: correction.id), next.clarification)
+    }
+
+    func test_managerCancelBeforeOrAfterAnswerRejectionCannotRestoreItsOriginalQuestion() async throws {
+        for cancelFirst in [true, false] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "cancel-retry-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find tickets.").encodedBody())
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let question = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+            let reference = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
+            let attempt = makeEnvelope(id: "cancel-rejected-answer", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: " \n ", supportsClarificationRetry: true).encodedBody())
+            if !cancelFirst {
+                XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+                let retry = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel)
+                XCTAssertNotNil(retry.clarificationRetry)
+            }
+            let cancel = try makeControlEnvelope(kind: .cancel, taskID: attempt.id, revision: 1)
+            XCTAssertTrue(fixture.manager.handle(cancel, channel: fixture.channel))
+            let before = await fixture.channel.sentMessages().count
+            XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+            let replay = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel, afterCount: before)
+            XCTAssertNil(replay.clarificationRetry); XCTAssertNil(replay.clarification)
+            XCTAssertTrue(ComputerUseTaskLedger(fileURL: url).isCancelled(taskID: attempt.id))
+            XCTAssertTrue(ComputerUseTaskLedger(fileURL: url).isCancelled(taskID: reference.taskID))
+            XCTAssertNil(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: reference.taskID))
+            XCTAssertEqual(owner.input, original); XCTAssertTrue(executor.continued.isEmpty)
+            XCTAssertThrowsError(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+        }
+    }
+
+    func test_managerDoesNotSendRetryMetadataToUnnegotiatedOrForeignAnswers() async throws {
+        for foreign in [true, false] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "retry-scope-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find tickets.").encodedBody())
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let question = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+            let actual = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
+            let reference = foreign ? try ComputerUseClarificationReference(taskID: actual.taskID, expiresAt: actual.expiresAt) : actual
+            let attempt = makeEnvelope(id: "unsupported-retry-answer", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: " \n ", supportsClarificationRetry: foreign).encodedBody())
+            XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+            let reply = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel)
+            XCTAssertEqual(reply.outcome, .unableToComplete); XCTAssertNil(reply.clarificationRetry)
+            XCTAssertEqual(owner.input, original); XCTAssertTrue(executor.continued.isEmpty)
+            XCTAssertNotNil(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+            if foreign {
+                XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel, taskID: attempt.id, revision: 1), channel: fixture.channel))
+                let before = await fixture.channel.sentMessages().count
+                XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+                _ = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel, afterCount: before)
+                XCTAssertFalse(ComputerUseTaskLedger(fileURL: url).isCancelled(taskID: root.id))
+                XCTAssertEqual(ComputerUseTaskLedger(fileURL: url).terminalClarification(taskID: root.id), actual)
+                XCTAssertNotNil(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+            }
+        }
+    }
+
     func test_managerDeliversFullQuestionForMaximumLengthPhoneRequestAndContinuesItsOwner() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         executor.planner.useSourceReferences = true
@@ -4877,12 +4991,12 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(executor.normalPrompts.count, 1)
     }
 
-    private func clarificationUpdate(taskID: String, channel: FakeHostComputerUseChannel) async throws -> ComputerUseTaskUpdate {
-        await waitUntil { await channel.sentMessages().contains {
+    private func clarificationUpdate(taskID: String, channel: FakeHostComputerUseChannel, afterCount: Int = 0) async throws -> ComputerUseTaskUpdate {
+        await waitUntil { await channel.sentMessages().dropFirst(afterCount).contains {
             $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == taskID
         } }
         let messages = await channel.sentMessages()
-        return try XCTUnwrap(messages.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
+        return try XCTUnwrap(messages.dropFirst(afterCount).filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
             .first { $0.taskID == taskID })
     }
 

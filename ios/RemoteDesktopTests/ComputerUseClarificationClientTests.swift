@@ -3,6 +3,124 @@ import XCTest
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testRejectedAnswerRestoresExactDraftQuestionAndOriginalDeadlineBeforeCorrection() async throws {
+        var now = Date()
+        let fixture = ClarificationClientFixture(now: { now })
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        // The wider advertised policy lets this controlled fixture reach the
+        // host rejection boundary. A current native hint prevents it normally.
+        let reference = try await fixture.question(for: root, lifetime: 1_800,
+            answerPolicy: .init(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true))
+        guard case .answer(_, let deadline) = fixture.model.composerMode else { return XCTFail("Expected question") }
+        let draft = "  Paris e\u{301} 😀\n  "
+        XCTAssertTrue(fixture.model.sendPrompt(draft))
+        let attempt = try await fixture.channel.prompt(at: 1)
+        XCTAssertTrue(try ComputerUsePromptRequest.decodeBody(attempt.body).supportsClarificationRetry)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.clarificationValidUntil, deadline)
+        now = now.addingTimeInterval(30)
+        let retry = try ComputerUseClarificationRetry(reference: reference, reason: .tooLong,
+            answerPolicy: .init(maximumUTF8Bytes: 7, requiresNonblank: true, supportsRetry: true))
+        let response = try ComputerUseTaskUpdate(taskID: attempt.id, text: "Which location?", outcome: .userInterventionRequired,
+            clarificationRetry: retry).encodedBody()
+        await fixture.channel.deliver(response); try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .answer(reference, validUntil: deadline))
+        XCTAssertTrue(try XCTUnwrap(fixture.model.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
+        XCTAssertFalse(fixture.model.hasActivePrompt); XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertEqual(fixture.model.statusText, retry.reason.message)
+        XCTAssertFalse(fixture.model.sendPrompt(draft)); XCTAssertEqual(fixture.model.restoredClarificationDraft, draft)
+        XCTAssertTrue(fixture.model.sendPrompt("Paris"))
+        let corrected = try await fixture.channel.prompt(at: 2), answer = try ComputerUsePromptRequest.decodeBody(corrected.body)
+        XCTAssertNotEqual(corrected.id, attempt.id); XCTAssertEqual(answer.clarification, reference)
+        XCTAssertEqual(answer.prompt, "Paris"); XCTAssertTrue(answer.conversation.isEmpty)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.clarificationValidUntil, deadline)
+        XCTAssertNil(fixture.model.restoredClarificationDraft)
+        let messages = fixture.model.messages.count, mode = fixture.model.composerMode
+        await fixture.channel.deliver(response); try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.messages.count, messages); XCTAssertEqual(fixture.model.composerMode, mode)
+        XCTAssertTrue(fixture.model.hasActivePrompt); XCTAssertNil(fixture.model.restoredClarificationDraft)
+    }
+
+    func testRetryCannotRestoreForeignUnnegotiatedStatusOrPausedAndCancelledAnswers() async throws {
+        for reason in ["foreign-reference", "wrong-reason", "unnegotiated", "status", "pause", "cancel", "foreign-sender", "foreign-session", "foreign-pairing"] {
+            let fixture = ClarificationClientFixture()
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+            let root = try await fixture.channel.prompt(at: 0)
+            let reference = try await fixture.question(for: root,
+                answerPolicy: .init(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: reason != "unnegotiated"))
+            XCTAssertTrue(fixture.model.sendPrompt("Paris tomorrow"))
+            let attempt = try await fixture.channel.prompt(at: 1)
+            XCTAssertEqual(try ComputerUsePromptRequest.decodeBody(attempt.body).supportsClarificationRetry, reason != "unnegotiated")
+            if reason == "pause" { fixture.model.takeControl() }
+            if reason == "cancel" { fixture.model.stopCurrentTask() }
+            let state = fixture.model.state, mode = fixture.model.composerMode, messageCount = fixture.model.messages.count
+            let retry = try ComputerUseClarificationRetry(reference: reason == "foreign-reference"
+                ? .init(taskID: reference.taskID, expiresAt: reference.expiresAt) : reference,
+                reason: reason == "wrong-reason" ? .blank : .tooLong,
+                answerPolicy: .init(maximumUTF8Bytes: 7, requiresNonblank: true, supportsRetry: true))
+            await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: attempt.id, text: "Which location?",
+                outcome: .userInterventionRequired, clarificationRetry: retry).encodedBody(),
+                kind: reason == "status" ? .status : .assistant, senderID: reason == "foreign-sender" ? "OTHER-HOST" : "HOST-ID",
+                pairingCode: reason == "foreign-pairing" ? "654321" : "123456", sessionID: reason == "foreign-session" ? "other" : "session-1")
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(fixture.model.state, state, reason); XCTAssertEqual(fixture.model.composerMode, mode, reason)
+            XCTAssertEqual(fixture.model.messages.count, messageCount, reason)
+            XCTAssertTrue(fixture.model.hasActivePrompt, reason); XCTAssertNil(fixture.model.restoredClarificationDraft, reason)
+        }
+    }
+
+    func testRetryRecoveryKeepsPersistedDeadlineAcrossRelaunchAndDoesNotRenewExpiredOrMissingDeadlines() async throws {
+        for condition in ["valid", "expired", "missing", "extended"] {
+            var now = Date()
+            let fixture = ClarificationClientFixture(now: { now })
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+            let root = try await fixture.channel.prompt(at: 0)
+            let reference = try await fixture.question(for: root, lifetime: 1_800,
+                answerPolicy: .init(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true))
+            guard case .answer(_, let deadline) = fixture.model.composerMode else { return XCTFail("Expected question") }
+            XCTAssertTrue(fixture.model.sendPrompt("Paris tomorrow"))
+            let attempt = try await fixture.channel.prompt(at: 1)
+            fixture.model.stop()
+            let pending = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+            XCTAssertEqual(pending.rebindingPairingCode("654321").clarificationValidUntil, deadline)
+            XCTAssertEqual(try JSONDecoder().decode(ComputerUsePendingPrompt.self, from: JSONEncoder().encode(pending)).clarificationValidUntil, deadline)
+            if condition == "missing" || condition == "extended" {
+                var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(pending)) as? [String: Any])
+                if condition == "missing" { fields.removeValue(forKey: "clarificationValidUntil") }
+                else { fields["clarificationValidUntil"] = reference.expiresAt.timeIntervalSinceReferenceDate }
+                XCTAssertTrue(fixture.store.save(try JSONDecoder().decode(ComputerUsePendingPrompt.self,
+                    from: JSONSerialization.data(withJSONObject: fields))))
+            }
+            now = condition == "expired" ? deadline : now.addingTimeInterval(30)
+            let channel = ClarificationClientChannel()
+            let recovered = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+                pendingStore: fixture.store, channel: channel, now: { now })
+            defer { recovered.stop() }
+            recovered.start()
+            let replay = try await channel.prompt(at: 0)
+            XCTAssertEqual(replay.id, attempt.id); XCTAssertTrue(replay.body.utf8.elementsEqual(attempt.body.utf8))
+            let retry = try ComputerUseClarificationRetry(reference: reference, reason: .tooLong,
+                answerPolicy: .init(maximumUTF8Bytes: 7, requiresNonblank: true, supportsRetry: true))
+            await channel.deliver(try ComputerUseTaskUpdate(taskID: replay.id, text: "Which location?",
+                outcome: .userInterventionRequired, clarificationRetry: retry).encodedBody())
+            try await channel.waitForDelivery()
+            switch condition {
+            case "valid":
+                XCTAssertEqual(recovered.composerMode, .answer(reference, validUntil: deadline))
+                XCTAssertEqual(recovered.restoredClarificationDraft, "Paris tomorrow"); XCTAssertFalse(recovered.hasActivePrompt)
+            case "expired":
+                XCTAssertEqual(recovered.composerMode, .expiredAnswer); XCTAssertNil(recovered.restoredClarificationDraft)
+                XCTAssertFalse(recovered.hasActivePrompt); XCTAssertFalse(recovered.sendPrompt("Paris"))
+            default:
+                XCTAssertTrue(recovered.hasActivePrompt); XCTAssertNil(recovered.restoredClarificationDraft)
+                XCTAssertNotEqual(recovered.composerMode, .answer(reference, validUntil: deadline))
+            }
+        }
+    }
+
     func testQuestionPolicyRejectsByteOverflowAndBlankAnswersWithoutLosingTheQuestion() async throws {
         let fixture = ClarificationClientFixture()
         defer { fixture.model.stop() }

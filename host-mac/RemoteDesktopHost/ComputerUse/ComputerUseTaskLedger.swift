@@ -57,6 +57,11 @@ final class ComputerUseTaskLedger {
         let response: String
         let outcome: ComputerUseTerminalOutcome?
         let clarification: ComputerUseClarificationReference?
+        let clarificationRetry: ComputerUseClarificationRetry?
+        init(response: String, outcome: ComputerUseTerminalOutcome?, clarification: ComputerUseClarificationReference?,
+             clarificationRetry: ComputerUseClarificationRetry? = nil) {
+            self.response = response; self.outcome = outcome; self.clarification = clarification; self.clarificationRetry = clarificationRetry
+        }
     }
 
     /// Independent of the task's first terminal result. Stop can remain the
@@ -164,6 +169,7 @@ final class ComputerUseTaskLedger {
         var response: String?
         var outcome: ComputerUseTerminalOutcome?
         var clarification: ComputerUseClarificationReference?
+        var clarificationRetry: ComputerUseClarificationRetry? = nil
         var control: ControlSnapshot?
         var hostControlEpoch: UInt64 = 0
         var localControlState: ControlState?
@@ -217,6 +223,7 @@ final class ComputerUseTaskLedger {
             case response
             case outcome
             case clarification
+            case clarificationRetry
             case control
             case hostControlEpoch
             case localControlState
@@ -239,6 +246,7 @@ final class ComputerUseTaskLedger {
                 outcome = nil
             }
             clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
+            clarificationRetry = try values.decodeIfPresent(ComputerUseClarificationRetry.self, forKey: .clarificationRetry)
             control = try values.decodeIfPresent(
                 ControlSnapshot.self,
                 forKey: .control)
@@ -268,6 +276,13 @@ final class ComputerUseTaskLedger {
             approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
             approvedActionPlan = try values.decodeIfPresent(ApprovedActionPlan.self, forKey: .approvedActionPlan)
             approvedActionSteps = try values.decodeIfPresent([ApprovedActionRecord].self, forKey: .approvedActionSteps)
+            if clarificationRetry != nil {
+                guard outcome == .userInterventionRequired, clarification == nil,
+                      let response, ComputerUseClarificationText.isValid(response),
+                      promptClaimed, promptDigest != nil,
+                      approvedAction == nil, approvedActionPlan == nil,
+                      approvedActionSteps?.isEmpty ?? true else { throw LedgerError.unavailable }
+            }
             if approvedAction != nil, !promptClaimed || !executionStarted || senderID == nil || sessionID == nil {
                 throw LedgerError.unavailable
             }
@@ -316,7 +331,10 @@ final class ComputerUseTaskLedger {
             let decoded = try JSONDecoder().decode(
                 [String: Record].self,
                 from: data)
-            guard decoded.allSatisfy({ key, record in record.approvedActionPlan.map { $0.taskID == key } ?? true }) else {
+            guard decoded.allSatisfy({ key, record in
+                (record.approvedActionPlan.map { $0.taskID == key } ?? true)
+                    && (record.clarificationRetry.map { $0.reference.taskID != key } ?? true)
+            }) else {
                 throw LedgerError.unavailable
             }
             records = decoded
@@ -541,6 +559,9 @@ final class ComputerUseTaskLedger {
             revision: revision,
             state: reducedState)
         record.localControlState = nil
+        // Keep a retry's historical question association so a retried Cancel
+        // can finish cancelling that question after a partial storage failure.
+        // terminalClarificationRetry never exposes it once cancelled.
         if reducedState == .cancelled { record.clarification = nil }
         if reducedState == .cancelled, record.response == nil {
             // Persist the terminal result before the manager cancels any
@@ -563,7 +584,8 @@ final class ComputerUseTaskLedger {
         taskID: String,
         response: String,
         outcome: ComputerUseTerminalOutcome? = nil,
-        clarification: ComputerUseClarificationReference? = nil
+        clarification: ComputerUseClarificationReference? = nil,
+        clarificationRetry: ComputerUseClarificationRetry? = nil
     ) throws -> TerminalResult {
         try ensureAvailable()
         guard var record = records[taskID] else {
@@ -574,19 +596,34 @@ final class ComputerUseTaskLedger {
         if let existingResponse = record.response {
             return TerminalResult(
                 response: existingResponse,
-                outcome: record.outcome, clarification: record.clarification)
+                outcome: record.outcome, clarification: record.clarification, clarificationRetry: record.clarificationRetry)
         }
         let retainedQuestion = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
-        if retainedQuestion != nil {
+        if let retry = clarificationRetry {
+            guard outcome == .userInterventionRequired, clarification == nil, retry.reference.taskID != taskID,
+                  record.promptClaimed, record.promptDigest != nil,
+                  record.approvedAction == nil, record.approvedActionPlan == nil,
+                  record.approvedActionSteps?.isEmpty ?? true,
+                  let sender = record.senderID, let session = record.sessionID,
+                  let question = records[retry.reference.taskID], question.response != nil,
+                  question.outcome == .userInterventionRequired, question.clarification == retry.reference,
+                  question.senderID == sender, question.sessionID == session,
+                  question.effectiveControlState != .cancelled else { throw LedgerError.invalidClarification }
+            // executionStarted is the existing admission/idempotency fence,
+            // set by claim before decoding or invoking an executor. Keep it
+            // intact; native rejection, not this flag, proves no answer ran.
+        }
+        if retainedQuestion != nil || clarificationRetry != nil {
             guard ComputerUseClarificationText.isValid(response) else { throw LedgerError.invalidClarification }
         }
-        record.response = retainedQuestion == nil ? String(response.prefix(4_000)) : response
+        record.response = retainedQuestion == nil && clarificationRetry == nil ? String(response.prefix(4_000)) : response
         record.outcome = outcome
         record.clarification = retainedQuestion
+        record.clarificationRetry = clarificationRetry
         try commit(record, for: taskID)
         return TerminalResult(
             response: record.response ?? "",
-            outcome: record.outcome, clarification: record.clarification)
+            outcome: record.outcome, clarification: record.clarification, clarificationRetry: record.clarificationRetry)
     }
 
     func terminalOutcome(taskID: String) -> ComputerUseTerminalOutcome? {
@@ -712,6 +749,22 @@ final class ComputerUseTaskLedger {
               record.outcome == .userInterventionRequired, record.control?.state != .cancelled,
               record.clarification?.taskID == taskID else { return nil }
         return record.clarification
+    }
+
+    func terminalClarificationRetry(taskID: String) -> ComputerUseClarificationRetry? {
+        guard initializationError == nil, let record = records[taskID], record.response != nil,
+              record.outcome == .userInterventionRequired, record.effectiveControlState != .cancelled,
+              record.clarificationRetry?.reference.taskID != taskID else { return nil }
+        return record.clarificationRetry
+    }
+
+    func isCancelled(taskID: String) -> Bool {
+        initializationError == nil && records[taskID]?.effectiveControlState == .cancelled
+    }
+
+    func rejectedAnswerReference(taskID: String) -> ComputerUseClarificationReference? {
+        guard initializationError == nil else { return nil }
+        return records[taskID]?.clarificationRetry?.reference
     }
 
     func appliedControlRevision(taskID: String) -> UInt64? {

@@ -73,6 +73,7 @@ final class ComputerUseSessionModel: ObservableObject {
     @Published private(set) var taskProgressHistory: [String] = []
     @Published private(set) var retryPrompt: String?
     @Published private(set) var composerMode: ComposerMode = .request
+    @Published private(set) var restoredClarificationDraft: String?
     /// The newest machine-readable result received for the active or most
     /// recently finished request. Legacy hosts leave this `nil`.
     @Published private(set) var latestTerminalOutcome: ComputerUseTerminalOutcome?
@@ -126,6 +127,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var activePromptText: String?
     private var activePromptBody: String?
     private var activePromptCreatedAt: Date?
+    private var activeClarificationValidUntil: Date?
     private var controlRevision: UInt64 = 0
     private var acknowledgedControlRevision: UInt64 = 0
     private var lastControlKind: ComputerUseEnvelope.Kind?
@@ -182,6 +184,7 @@ final class ComputerUseSessionModel: ObservableObject {
             activePromptText = restored.prompt
             activePromptBody = restored.exactWireBody
             activePromptCreatedAt = restored.createdAt
+            activeClarificationValidUntil = restored.clarificationValidUntil
             controlRevision = restored.controlRevision ?? 0
             acknowledgedControlRevision = restored.acknowledgedControlRevision ?? 0
             lastControlKind = restored.lastControlKind
@@ -306,7 +309,8 @@ final class ComputerUseSessionModel: ObservableObject {
         do {
             switch composerMode {
             case .answer(let reference, _):
-                request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true)
+                request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true,
+                    supportsClarificationRetry: clarificationAnswerPolicy?.supportsRetry == true)
             case .legacyAnswer:
                 request = .init(prompt: rawPrompt, conversation: recentConversation(), supportsApprovedActionEvidence: true)
             case .request:
@@ -341,11 +345,14 @@ final class ComputerUseSessionModel: ObservableObject {
             text: prompt,
             createdAt: now())
         messages.append(message)
+        let answerDeadline: Date?
+        if request.supportsClarificationRetry, case .answer(_, let deadline) = composerMode { answerDeadline = deadline }
+        else { answerDeadline = nil }
         guard rememberActivePrompt(
             prompt,
             wireBody: wireBody,
             messageID: messageID,
-            createdAt: message.createdAt) else {
+            createdAt: message.createdAt, clarificationValidUntil: answerDeadline) else {
             messages.removeAll { $0.id == messageID }
             state = .error("Couldn’t securely save this request, so it was not sent.")
             statusText = "Request not sent — secure recovery storage is unavailable"
@@ -404,10 +411,7 @@ final class ComputerUseSessionModel: ObservableObject {
             return "This text is too long. Shorten it before sending."
         }
         if case .answer = composerMode, let rejection = clarificationAnswerPolicy?.rejection(of: value) {
-            switch rejection {
-            case .blank: return "Enter an answer with some text for this question."
-            case .tooLong: return "This answer is too long for this question. Shorten it before sending."
-            }
+            return rejection.message
         }
         return nil
     }
@@ -427,6 +431,7 @@ final class ComputerUseSessionModel: ObservableObject {
         clarificationExpiryTask?.cancel()
         clarificationExpiryTask = nil
         clarificationAnswerPolicy = nil
+        restoredClarificationDraft = nil
         composerMode = .request
     }
 
@@ -436,9 +441,10 @@ final class ComputerUseSessionModel: ObservableObject {
         statusText = "This question is no longer active. Start a new request."
     }
 
-    private func awaitClarification(_ reference: ComputerUseClarificationReference, answerPolicy: ComputerUseClarificationAnswerPolicy?) {
+    private func awaitClarification(_ reference: ComputerUseClarificationReference, answerPolicy: ComputerUseClarificationAnswerPolicy?,
+                                    originalDeadline: Date? = nil) {
         resetComposerMode()
-        let current = now(), deadline = min(reference.expiresAt, current.addingTimeInterval(600))
+        let current = now(), deadline = min(reference.expiresAt, originalDeadline ?? current.addingTimeInterval(600))
         guard deadline > current else { expireClarification(); return }
         composerMode = .answer(reference, validUntil: deadline)
         clarificationAnswerPolicy = answerPolicy
@@ -871,6 +877,8 @@ final class ComputerUseSessionModel: ObservableObject {
                 let taskID = update?.taskID ?? activePromptID
                 guard let activePromptID,
                       taskID == activePromptID else { continue }
+                let recovery = update?.clarificationRetry.flatMap { clarificationRecovery($0) }
+                if update?.clarificationRetry != nil && (recovery == nil || !hasHostControlScope(envelope)) { continue }
                 if update?.hostControlEpoch != nil, !hasHostControlScope(envelope) { continue }
                 guard acceptHostControlEpoch(update?.hostControlEpoch) else { continue }
                 if case .approvalRequired = state {
@@ -900,10 +908,21 @@ final class ComputerUseSessionModel: ObservableObject {
                     author: .assistant,
                     text: assistantText,
                     createdAt: envelope.createdAt))
-                applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification,
-                    answerPolicy: update?.clarificationAnswerPolicy)
+                if let retry = update?.clarificationRetry, let recovery {
+                    resetComposerMode()
+                    latestTerminalOutcome = .userInterventionRequired; userInterventionGuidance = nil; state = .ready
+                    clearActivePrompt()
+                    awaitClarification(retry.reference, answerPolicy: retry.answerPolicy, originalDeadline: recovery.deadline)
+                    if case .answer = composerMode {
+                        restoredClarificationDraft = recovery.text; statusText = retry.reason.message
+                    }
+                } else {
+                    applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification,
+                        answerPolicy: update?.clarificationAnswerPolicy)
+                }
             case .status:
                 if let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body) {
+                    if update.clarificationRetry != nil { continue }
                     consumeActionEvidence(update, from: envelope)
                     if update.isApprovedActionEvidenceOnly { continue }
                     guard update.taskID == activePromptID else { continue }
@@ -1291,6 +1310,18 @@ final class ComputerUseSessionModel: ObservableObject {
         }
     }
 
+    private func clarificationRecovery(_ retry: ComputerUseClarificationRetry) -> (text: String, deadline: Date)? {
+        guard lastControlKind != .cancel, lastControlKind != .pause,
+              pendingControlIntent?.kind != .cancel, pendingControlIntent?.kind != .pause,
+              hostControlPaused != true, let body = activePromptBody,
+              let submitted = try? ComputerUsePromptRequest.decodeBody(body), submitted.supportsClarificationRetry,
+              submitted.clarification == retry.reference, retry.answerPolicy.rejection(of: submitted.prompt) == retry.reason,
+              let deadline = activeClarificationValidUntil, deadline.timeIntervalSince1970.isFinite,
+              deadline <= retry.reference.expiresAt, let createdAt = activePromptCreatedAt,
+              deadline <= createdAt.addingTimeInterval(600) else { return nil }
+        return (submitted.prompt, deadline)
+    }
+
     private func applyAssistantOutcome(
         _ outcome: ComputerUseTerminalOutcome?,
         text: String,
@@ -1470,7 +1501,8 @@ final class ComputerUseSessionModel: ObservableObject {
         _ prompt: String,
         wireBody: String,
         messageID: String,
-        createdAt: Date
+        createdAt: Date,
+        clarificationValidUntil: Date? = nil
     ) -> Bool {
         guard pendingStore.save(ComputerUsePendingPrompt(
             hostID: hostID,
@@ -1483,13 +1515,14 @@ final class ComputerUseSessionModel: ObservableObject {
             localAccountBinding: localAccountBinding,
             controlRevision: nil,
             lastControlKind: nil,
-            approvalDecision: nil)) else {
+            approvalDecision: nil, clarificationValidUntil: clarificationValidUntil)) else {
             return false
         }
         activePromptID = messageID
         activePromptText = prompt
         activePromptBody = wireBody
         activePromptCreatedAt = createdAt
+        activeClarificationValidUntil = clarificationValidUntil
         controlRevision = 0
         acknowledgedControlRevision = 0
         lastControlKind = nil
@@ -1529,7 +1562,7 @@ final class ComputerUseSessionModel: ObservableObject {
             lastControlHostEpoch: lastControlHostEpoch,
             hostControlPaused: hostControlPaused,
             approvalDecision: approvalSubmission,
-            interventionGuidance: userInterventionGuidance))
+            interventionGuidance: userInterventionGuidance, clarificationValidUntil: activeClarificationValidUntil))
     }
 
     private func clearActivePrompt() {
@@ -1537,6 +1570,7 @@ final class ComputerUseSessionModel: ObservableObject {
         activePromptText = nil
         activePromptBody = nil
         activePromptCreatedAt = nil
+        activeClarificationValidUntil = nil
         controlRevision = 0
         acknowledgedControlRevision = 0
         lastControlKind = nil

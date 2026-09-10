@@ -54,6 +54,9 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     /// also durable proof that the active paused task's typed outcome is
     /// `userInterventionRequired`; older recovery records decode it as `nil`.
     let interventionGuidance: String?
+    /// Original local deadline of a question whose answer negotiated retry.
+    /// Replays/relaunches must not restart the client's question lifetime.
+    let clarificationValidUntil: Date?
 
     init(
         hostID: String,
@@ -72,7 +75,8 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         lastControlHostEpoch: UInt64? = nil,
         hostControlPaused: Bool? = nil,
         approvalDecision: ComputerUsePendingApprovalDecision? = nil,
-        interventionGuidance: String? = nil
+        interventionGuidance: String? = nil,
+        clarificationValidUntil: Date? = nil
     ) {
         self.hostID = hostID
         self.pairingCode = pairingCode
@@ -90,6 +94,7 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         self.lastControlHostEpoch = lastControlHostEpoch
         self.hostControlPaused = hostControlPaused
         self.approvalDecision = approvalDecision
+        self.clarificationValidUntil = clarificationValidUntil
         self.interventionGuidance = interventionGuidance.map {
             String($0
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -129,7 +134,8 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
             lastControlHostEpoch: lastControlHostEpoch,
             hostControlPaused: hostControlPaused,
             approvalDecision: approvalDecision,
-            interventionGuidance: interventionGuidance)
+            interventionGuidance: interventionGuidance,
+            clarificationValidUntil: clarificationValidUntil)
     }
 }
 

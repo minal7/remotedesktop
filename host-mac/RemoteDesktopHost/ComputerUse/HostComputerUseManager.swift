@@ -4791,6 +4791,7 @@ final class HostComputerUseManager: ObservableObject {
             matching: envelope)
 
         let resolution: ComputerUseTaskLedger.ControlResolution
+        let rejectedQuestion = taskLedger.rejectedAnswerReference(taskID: request.taskID)
         do {
             resolution = try taskLedger.applyControl(
                 control,
@@ -4819,6 +4820,14 @@ final class HostComputerUseManager: ObservableObject {
         let replyChannel = context?.channel ?? channel
 
         if resolution.state == .cancelled {
+            if let rejectedQuestion {
+                browserClarifications.invalidateAnswerQuestion(rejectedQuestion, for: replyEnvelope)
+                if taskLedger.terminalClarification(taskID: rejectedQuestion.taskID) == rejectedQuestion {
+                    do { _ = try taskLedger.cancelLocally(taskID: rejectedQuestion.taskID,
+                        senderID: envelope.senderID, sessionID: envelope.sessionID) }
+                    catch { return false }
+                }
+            }
             browserClarifications.invalidate(for: replyEnvelope)
             textClarifications.invalidate(for: replyEnvelope)
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: request.taskID)
@@ -6015,13 +6024,22 @@ final class HostComputerUseManager: ObservableObject {
                     channel: channel)
                 return
             case .completed(let response):
+                if taskLedger.isCancelled(taskID: envelope.id),
+                   let reference = (try? ComputerUseExecutionPromptDecoder.decode(envelope.body))?.clarification {
+                    browserClarifications.invalidateAnswerQuestion(reference, for: envelope)
+                    if taskLedger.terminalClarification(taskID: reference.taskID) == reference {
+                        _ = try taskLedger.cancelLocally(taskID: reference.taskID,
+                            senderID: envelope.senderID, sessionID: envelope.sessionID)
+                    }
+                }
                 send(
                     kind: .assistant,
                     body: response,
                     replyingTo: envelope,
                     channel: channel,
                     outcome: taskLedger.terminalOutcome(taskID: envelope.id),
-                    clarification: taskLedger.terminalClarification(taskID: envelope.id))
+                    clarification: taskLedger.terminalClarification(taskID: envelope.id),
+                    clarificationRetry: taskLedger.terminalClarificationRetry(taskID: envelope.id))
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             case .accepted:
@@ -6147,6 +6165,10 @@ final class HostComputerUseManager: ObservableObject {
                 continuation = nil
                 browserContinuation = nil
             }
+        } catch let rejection as ComputerUseBrowserClarificationTransport.RejectedAnswer where request.supportsClarificationRetry {
+            sendClarificationRetry(rejection, replyingTo: envelope, channel: channel)
+            sendStatus("ready", replyingTo: envelope, channel: channel)
+            return
         } catch {
             sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
                 outcome: .unableToComplete, replyingTo: envelope, channel: channel)
@@ -6978,6 +7000,27 @@ final class HostComputerUseManager: ObservableObject {
     /// ledger record reaches durable storage. If that write fails, never emit
     /// the requested result (especially success); report the storage failure
     /// directly and leave the poisoned ledger to reject future retries.
+    private func sendClarificationRetry(_ rejection: ComputerUseBrowserClarificationTransport.RejectedAnswer,
+                                        replyingTo envelope: ComputerUseEnvelope, channel: any HostComputerUseChannel) {
+        guard browserClarifications.retainsRetry(rejection.retry, for: envelope,
+            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) else {
+            sendDurableTerminal("The original question is no longer active. Start a new request with the complete instruction.",
+                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+            return
+        }
+        do {
+            let terminal = try taskLedger.complete(taskID: envelope.id, response: rejection.text,
+                outcome: .userInterventionRequired, clarificationRetry: rejection.retry)
+            send(kind: .assistant, body: terminal.response, replyingTo: envelope, channel: channel,
+                outcome: terminal.outcome, clarification: terminal.clarification, clarificationRetry: terminal.clarificationRetry)
+        } catch {
+            // No answer was accepted and no executor ran. Persistence failure
+            // cannot publish an unrecorded retry or consume the original scope.
+            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse, replyingTo: envelope,
+                channel: channel, outcome: .unableToComplete)
+        }
+    }
+
     private func sendDurableTerminal(
         _ response: String,
         outcome: ComputerUseTerminalOutcome,
@@ -7062,6 +7105,7 @@ final class HostComputerUseManager: ObservableObject {
         channel: any HostComputerUseChannel,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
+        clarificationRetry: ComputerUseClarificationRetry? = nil,
         researchProgress: ComputerUseResearchProgress? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
         evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
@@ -7072,7 +7116,13 @@ final class HostComputerUseManager: ObservableObject {
         let needsIdentityRecovery = taskLedger.requiresPromptIdentityRecovery(taskID: envelope.id)
         let evidence = needsIdentityRecovery ? nil : actionEvidence(for: envelope)
         if isApprovedActionEvidenceOnly && evidence == nil { return }
-        let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse : body
+        let liveRetry = clarificationRetry.flatMap { retry in
+            !needsIdentityRecovery && !taskLedger.isCancelled(taskID: envelope.id) && browserClarifications.retainsRetry(retry, for: envelope,
+                retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) ? retry : nil
+        }
+        let unavailableRetry = clarificationRetry != nil && liveRetry == nil
+        let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse
+            : unavailableRetry ? "The original question is no longer active. Start a new request with the complete instruction." : body
         let wireBody: String
         switch kind {
         case .assistant, .status:
@@ -7082,9 +7132,10 @@ final class HostComputerUseManager: ObservableObject {
                 appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
                 hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
-                outcome: needsIdentityRecovery && kind == .assistant ? .unableToComplete : outcome,
+                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableRetry ? .unableToComplete : outcome,
                 clarification: needsIdentityRecovery ? nil : clarification,
                 clarificationAnswerPolicy: needsIdentityRecovery ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
+                clarificationRetry: liveRetry,
                 approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody

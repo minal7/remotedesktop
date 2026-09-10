@@ -46,6 +46,17 @@ final class ComputerUseBrowserClarificationTransport {
             self.owner = owner; self.answerTaskID = answerTaskID; inputDigest = owner.input.digest
         }
     }
+    struct RejectedAnswer: Error, CustomStringConvertible, CustomDebugStringConvertible {
+        let retry: ComputerUseClarificationRetry
+        let text: String
+        fileprivate init(retry: ComputerUseClarificationRetry, question: String) {
+            // Keep a maximum-sized question intact. The typed reason has its
+            // own client presentation and must not push this text over its cap.
+            self.retry = retry; text = question
+        }
+        var description: String { "BrowserAnswerRejected(\(retry.reason.rawValue))" }
+        var debugDescription: String { description }
+    }
     private struct Pending {
         let reference: ComputerUseClarificationReference
         let owner: ComputerUseBrowserResearchTask
@@ -78,20 +89,56 @@ final class ComputerUseBrowserClarificationTransport {
     /// The opaque answer reference is unchanged for older controller versions.
     func answerPolicy(for reference: ComputerUseClarificationReference?, envelope: ComputerUseEnvelope) -> ComputerUseClarificationAnswerPolicy? {
         guard retains(reference, for: envelope), let pending else { return nil }
-        return try? ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit, requiresNonblank: true)
+        return try? ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit,
+            requiresNonblank: true, supportsRetry: true)
     }
 
     func consume(_ reference: ComputerUseClarificationReference, answer: String, for envelope: ComputerUseEnvelope,
                  retainedOwner: (String) -> ComputerUseBrowserResearchTask?) throws -> Continuation {
+        let pending = try validatedAnswerQuestion(reference, envelope: envelope, retainedOwner: retainedOwner)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit,
+            requiresNonblank: true, supportsRetry: true)
+        if let reason = policy.rejection(of: answer) {
+            throw RejectedAnswer(retry: try .init(reference: reference, reason: reason, answerPolicy: policy), question: pending.question.text)
+        }
+        _ = try pending.owner.answerQuestion(questionID: pending.question.id, answerTaskID: envelope.id, answer: answer,
+            controllerID: envelope.senderID, controllerSessionID: envelope.sessionID)
+        self.pending = nil
+        return Continuation(owner: pending.owner, answerTaskID: envelope.id)
+    }
+
+    private func validatedAnswerQuestion(_ reference: ComputerUseClarificationReference, envelope: ComputerUseEnvelope,
+                                        retainedOwner: (String) -> ComputerUseBrowserResearchTask?) throws -> Pending {
         guard envelope.kind == .prompt, let pending, pending.reference == reference, pending.belongs(to: envelope),
               envelope.id != reference.taskID else { throw Failure.invalidReference }
         guard retainedOwner(pending.owner.taskID) === pending.owner,
               pending.owner.input.digest == pending.question.inputDigest,
               pending.owner.executionTaskID == reference.taskID else { throw Failure.invalidOwner }
-        _ = try pending.owner.answerQuestion(questionID: pending.question.id, answerTaskID: envelope.id, answer: answer,
-            controllerID: envelope.senderID, controllerSessionID: envelope.sessionID)
-        self.pending = nil
-        return Continuation(owner: pending.owner, answerTaskID: envelope.id)
+        guard try pending.owner.pendingQuestion(controllerID: envelope.senderID, controllerSessionID: envelope.sessionID) == pending.question else {
+            throw Failure.invalidReference
+        }
+        return pending
+    }
+
+    /// A replay must still match the submitted invalid answer and the exact
+    /// live question. A ledger record alone cannot recreate a retired owner.
+    func retainsRetry(_ retry: ComputerUseClarificationRetry, for envelope: ComputerUseEnvelope,
+                      retainedOwner: (String) -> ComputerUseBrowserResearchTask?) -> Bool {
+        guard let pending = try? validatedAnswerQuestion(retry.reference, envelope: envelope, retainedOwner: retainedOwner),
+              let submitted = try? ComputerUseExecutionPromptDecoder.decode(envelope.body),
+              submitted.supportsClarificationRetry, submitted.clarification == retry.reference,
+              retry.answerPolicy.rejection(of: submitted.prompt) == retry.reason,
+              retry.answerPolicy.maximumUTF8Bytes == pending.owner.input.nextAnswerByteLimit,
+              retry.answerPolicy.requiresNonblank else { return false }
+        return true
+    }
+
+    /// The caller has durably accepted Cancel for an answer attempt, or a
+    /// verified cancellation already preceded that exact submitted answer.
+    func invalidateAnswerQuestion(_ reference: ComputerUseClarificationReference, for envelope: ComputerUseEnvelope) {
+        guard let pending, pending.reference == reference, pending.belongs(to: envelope),
+              envelope.id != reference.taskID, pending.owner.executionTaskID == reference.taskID else { return }
+        invalidate()
     }
 
     /// Only the exact live question can keep its owner through a transport

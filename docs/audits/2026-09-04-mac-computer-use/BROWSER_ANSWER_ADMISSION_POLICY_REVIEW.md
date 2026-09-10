@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [complete-question delivery repair](BROWSER_COMPLETE_QUESTION_DELIVERY_REVIEW.md). No build, typecheck, assertion, app, browser, model, login or SSH execution occurred.
 
+Follow-up: the [rejected-answer recovery repair](BROWSER_REJECTED_ANSWER_RECOVERY_REVIEW.md) now implements the negotiated post-transmission path in source. The findings and verification below describe the earlier admission-only change; runtime and older-client qualification remain pending.
+
 ## First-principles findings
 
 Input rules must agree where the user composes an answer and where the host admits it. The phone's generic answer bound was 8,000 characters / 32 KiB. Browser retention allows only 8 KiB per answer, or less when the complete retained conversation approaches 32 KiB. The phone could therefore accept a draft that the browser owner necessarily rejected. Browser answers must also be nonblank; literal text-editing questions can legitimately accept whitespace alone.

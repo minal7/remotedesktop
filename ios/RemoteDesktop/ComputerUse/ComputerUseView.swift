@@ -183,6 +183,11 @@ struct ComputerUseView: View {
             }
             composerFocused = false
         }
+        .onChange(of: model.restoredClarificationDraft, initial: true) { _, restored in
+            guard let restored, draft.isEmpty else { return }
+            draft = restored
+            composerFocused = true
+        }
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             if connected { remoteKeyboardOpen = false }
         }
