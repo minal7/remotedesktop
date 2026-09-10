@@ -59,16 +59,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var dataChannel: RTCDataChannel?
     private var remoteVideoTrack: RTCVideoTrack?
     private var remoteAudioTrack: RTCAudioTrack?
-    private var renderer: RTCVideoRenderer?
+    private var renderer: (any RemoteVideoSurface)?
     private struct RendererRegistration {
         let track: RTCVideoTrack
         let subscription: RemoteVideoRenderSubscription
+        let attachment: RemoteVideoSurfaceAttachment
         let lease: RemoteInputPresentationState.FrameLease
     }
     private var rendererRegistration: RendererRegistration?
     private var currentDisplay: DisplayInfo?
     private var hasReportedRendererFrame = false
     private var rendererUpdateDepth = 0
+    private var isInstallingRenderer = false
     private var inputPresentation = RemoteInputPresentationState()
     private var pollTask: Task<Void, Never>?
     private var iceDeadlineTask: Task<Void, Never>?
@@ -261,7 +263,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         loggedPendingRemoteICE = false
     }
 
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         guard self.renderer !== renderer else { return }
         updateVideoRendering {
             self.renderer = renderer
@@ -269,7 +271,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
     }
 
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         guard self.renderer === renderer else { return }
         updateVideoRendering {
             self.renderer = nil
@@ -458,29 +460,49 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         // Revoke admission before native removal, using the retained exact
         // registration track rather than whichever track is current now.
         previous?.subscription.retire()
+        previous?.attachment.retire()
         if let previous { previous.track.remove(previous.subscription) }
         if notify && didReport { onVideoFrameUnavailable?() }
     }
 
     private func installVideoRendererIfReady() {
-        guard rendererUpdateDepth == 0, rendererRegistration == nil, !isClosing,
+        guard rendererUpdateDepth == 0, !isInstallingRenderer else { return }
+        isInstallingRenderer = true
+        defer { isInstallingRenderer = false }
+        // Surface creation/removal may reenter UIKit and change the desired
+        // target or input scope. Drain that preparation before trying again.
+        while rendererRegistration == nil, !isClosing,
               directInputState.isReady, let display = currentDisplay,
               inputPresentation.matches(display.inputSession),
               let renderer, let track = remoteVideoTrack,
-              let lease = inputPresentation.armProbe() else { return }
-        let subscription = RemoteVideoRenderSubscription(renderer: renderer) { [weak self, weak track] in
-            Task { @MainActor [weak self, weak track] in
-                guard let self, let track, !self.isClosing,
-                      self.remoteVideoTrack === track,
-                      self.rendererRegistration?.lease == lease,
-                      self.inputPresentation.acceptsFrame(lease),
-                      self.directInputState.isReady else { return }
-                self.hasReportedRendererFrame = true
-                self.onFirstVideoFrame?()
+              let lease = inputPresentation.armProbe() {
+            let attachment = renderer.makeVideoAttachment(display: display)
+            guard !isClosing, self.renderer === renderer, remoteVideoTrack === track,
+                  currentDisplay == display, inputPresentation.acceptsFrame(lease),
+                  directInputState.isReady else {
+                attachment?.retire()
+                continue
             }
+            guard let attachment else {
+                // A failed native surface cannot produce trustworthy readiness.
+                // For Computer Use this ends only the optional video sidecar.
+                finishDisconnect(reason: "The remote screen renderer could not be prepared. Reconnect to try again.")
+                return
+            }
+            let subscription = RemoteVideoRenderSubscription(renderer: attachment.renderer) { [weak self, weak track] in
+                Task { @MainActor [weak self, weak track] in
+                    guard let self, let track, !self.isClosing,
+                          self.remoteVideoTrack === track,
+                          self.rendererRegistration?.lease == lease,
+                          self.inputPresentation.acceptsFrame(lease),
+                          self.directInputState.isReady else { return }
+                    self.hasReportedRendererFrame = true
+                    self.onFirstVideoFrame?()
+                }
+            }
+            rendererRegistration = .init(track: track, subscription: subscription, attachment: attachment, lease: lease)
+            track.add(subscription)
         }
-        rendererRegistration = .init(track: track, subscription: subscription, lease: lease)
-        track.add(subscription)
     }
 
     private func scheduleConnectionRecoveryTimeout() {

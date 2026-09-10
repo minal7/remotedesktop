@@ -99,9 +99,13 @@ The screen stays prepared behind an opaque waiting overlay so its replacement
 can receive a frame without requiring input readiness first. The optional video
 sidecar retains its current hello/display and leaves the TLS AI task connected.
 A forwarded frame is not a GPU presentation acknowledgement or proof of capture
-after the handshake. Deferred renderer work, capture freshness and foreground
-return still need repair and native qualification. See the
-[renderer ownership review](../docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md). These display
+after the handshake. Each renderer attachment now owns a newly created native
+video view and immutable display metadata. Retirement removes that exact view;
+queued internal work can finish on the removed object without sharing its frame
+cache or drawable size with a successor. Native presentation timing, capture
+freshness and foreground return still need repair and qualification. See the
+[renderer ownership review](../docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md)
+and [native surface review](../docs/audits/2026-09-04-mac-computer-use/NATIVE_SURFACE_LIFETIME_REVIEW.md). These display
 requirements are part of the unreleased `inputSessions: 1` extension and require
 the matching host and phone implementation. See the
 [presentation recovery review](../docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).

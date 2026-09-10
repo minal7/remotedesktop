@@ -73,8 +73,8 @@ extension Transport {
 
 @MainActor
 protocol VideoRendererTarget: AnyObject {
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer)
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer)
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface)
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface)
 }
 
 @MainActor

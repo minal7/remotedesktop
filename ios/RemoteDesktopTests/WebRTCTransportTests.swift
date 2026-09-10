@@ -15,7 +15,7 @@ final class WebRTCTransportTests: XCTestCase {
         let transport = RecordingTargetTransport(connected: connected)
         let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
                                  transportFactory: { transport })
-        let renderer = RecordingVideoRenderer()
+        let renderer = RecordingVideoSurface()
         model.attachVideoRenderer(renderer)
         XCTAssertFalse(model.shouldPrepareRemoteScreenRenderer)
         model.connect(code: "123456")
@@ -51,7 +51,7 @@ final class WebRTCTransportTests: XCTestCase {
         let first = RecordingTargetTransport(connected: firstConnected), next = RecordingTargetTransport(connected: nextConnected)
         var candidates = [first, next]
         let sidecar = ComputerUseVisualSidecar(transportFactory: { candidates.removeFirst() })
-        let renderer = RecordingVideoRenderer(), replacement = RecordingVideoRenderer()
+        let renderer = RecordingVideoSurface(), replacement = RecordingVideoSurface()
         sidecar.attachVideoRenderer(renderer)
         sidecar.start(pairingCode: "123456", expectedHostID: "HOST-B")
         await fulfillment(of: [firstConnected], timeout: 1)
@@ -109,7 +109,7 @@ final class WebRTCTransportTests: XCTestCase {
         await fulfillment(of: [connected], timeout: 1)
         let promptSession = try XCTUnwrap(model.computerUseSession)
         XCTAssertTrue(model.shouldPrepareRemoteScreenRenderer); XCTAssertFalse(model.hasInteractiveRemoteScreen)
-        let renderer = RecordingVideoRenderer()
+        let renderer = RecordingVideoSurface()
         model.attachVideoRenderer(renderer)
         visual.onHostHello?(compatibleComputerUseHello())
         let display = DisplayInfo(w: 800, h: 600, scale: 1)
@@ -1140,10 +1140,10 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
-    private(set) var attachedRenderers: [RTCVideoRenderer] = []
-    private(set) var detachedRenderers: [RTCVideoRenderer] = []
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer) { attachedRenderers.append(renderer) }
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer) { detachedRenderers.append(renderer) }
+    private(set) var attachedRenderers: [any RemoteVideoSurface] = []
+    private(set) var detachedRenderers: [any RemoteVideoSurface] = []
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface) { attachedRenderers.append(renderer) }
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) { detachedRenderers.append(renderer) }
 
     private let connected: XCTestExpectation
     private let disconnected: XCTestExpectation?

@@ -1,13 +1,13 @@
 import Foundation
 import LiveKitWebRTC
 
-/// The view keeps its desired sink even while a connection is being replaced.
+/// The view keeps its desired surface owner while a connection is being replaced.
 /// Cleanup belongs to the exact target on which that sink was installed.
 @MainActor
 final class RemoteVideoRendererBinding {
     private var target: (any VideoRendererTarget)?
-    private var renderer: RTCVideoRenderer?
-    private var installed: (target: any VideoRendererTarget, renderer: RTCVideoRenderer)?
+    private var renderer: (any RemoteVideoSurface)?
+    private var installed: (target: any VideoRendererTarget, renderer: any RemoteVideoSurface)?
     private var isReconciling = false
 
     func bind(_ target: (any VideoRendererTarget)?) {
@@ -15,12 +15,12 @@ final class RemoteVideoRendererBinding {
         reconcile()
     }
 
-    func attach(_ renderer: RTCVideoRenderer) {
+    func attach(_ renderer: any RemoteVideoSurface) {
         self.renderer = renderer
         reconcile()
     }
 
-    func detach(_ renderer: RTCVideoRenderer) {
+    func detach(_ renderer: any RemoteVideoSurface) {
         guard self.renderer === renderer else { return }
         self.renderer = nil
         reconcile()

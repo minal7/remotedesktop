@@ -522,11 +522,11 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         videoRendererBinding.attach(renderer)
     }
 
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         videoRendererBinding.detach(renderer)
     }
 
@@ -994,11 +994,11 @@ final class ComputerUseVisualSidecar: VideoRendererTarget {
         return true
     }
 
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         videoRendererBinding.attach(renderer)
     }
 
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer) {
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface) {
         videoRendererBinding.detach(renderer)
     }
 

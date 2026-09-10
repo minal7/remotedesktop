@@ -140,7 +140,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     weak var accessories: AccessoryMonitor?
 
     private let contentView = UIView(frame: .zero)
-    private let videoView = MetalSafeRTCVideoView(frame: .zero)
+    private let videoView = RemoteVideoSurfaceView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
     private var remoteDisplay: DisplayInfo?
     private weak var boundSession: SessionModel?
@@ -178,7 +178,6 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         backgroundColor = .black
         clipsToBounds = true
 
-        videoView.videoContentMode = .scaleAspectFit
         videoView.backgroundColor = UIColor(white: 0.05, alpha: 1)
         contentView.addSubview(videoView)
         contentView.layer.addSublayer(cursorLayer)
@@ -248,9 +247,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private func applyVideoSurfaceLayout() {
-        let layout = RemoteScreenRenderingLayout(bounds: contentView.bounds, display: remoteDisplay)
-        videoView.videoContentMode = layout.contentMode
-        videoView.frame = layout.videoRect
+        videoView.frame = contentView.bounds
+        videoView.setNeedsLayout()
+        videoView.layoutIfNeeded()
     }
 
     override func didMoveToWindow() {
@@ -812,6 +811,58 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     private var geometry: RemoteScreenGeometry {
         RemoteScreenGeometry(bounds: contentView.bounds, display: remoteDisplay)
+    }
+}
+
+/// The container survives transport recovery; each native child belongs to
+/// just one attachment. Deferred work inside an old RTC view can only touch
+/// that removed child, never the replacement's cached frame or drawable size.
+private final class RemoteVideoSurfaceView: UIView, RemoteVideoSurface {
+    private lazy var lifetime = RemoteVideoSurfaceLifetime<MetalSafeRTCVideoView>(
+        make: {
+            guard RTCMTLVideoView.isMetalAvailable() else { return nil }
+            return MetalSafeRTCVideoView(frame: .zero)
+        },
+        install: { [weak self] renderer, display in
+            guard let self else { return }
+            renderer.backgroundColor = UIColor(white: 0.05, alpha: 1)
+            renderer.isUserInteractionEnabled = false
+            self.addSubview(renderer)
+            self.layout(renderer, display: display)
+        },
+        remove: { renderer in
+            renderer.isHidden = true
+            renderer.isEnabled = false
+            renderer.removeFromSuperview()
+        })
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        clipsToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("Created programmatically") }
+
+    func makeVideoAttachment(display: DisplayInfo) -> RemoteVideoSurfaceAttachment? {
+        lifetime.prepare(display: display)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let renderer = lifetime.renderer, let display = lifetime.display {
+            layout(renderer, display: display)
+        }
+    }
+
+    private func layout(_ renderer: MetalSafeRTCVideoView, display: DisplayInfo) {
+        // Use the attachment's immutable display, not a delayed SwiftUI
+        // publication that could belong to another input scope.
+        let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
+        renderer.videoContentMode = layout.contentMode
+        renderer.frame = layout.videoRect
+        renderer.setNeedsLayout()
+        renderer.layoutIfNeeded()
     }
 }
 
