@@ -4,6 +4,33 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
+    func testQuestionRecoveryProbeWireIsDistinctBoundedAndOnlyAdvertisedForScopedQuestions() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(300))
+        let probe = ComputerUseClarificationProbe(reference: reference)
+        XCTAssertEqual(try ComputerUseClarificationProbe.decodeBody(probe.encodedBody()), probe)
+        XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(probe.encodedBody()))
+        XCTAssertThrowsError(try ComputerUseClarificationProbe.decodeBody(ComputerUseTaskUpdate(taskID: "question", text: "ready").encodedBody()))
+        XCTAssertThrowsError(try ComputerUseClarificationProbe.decodeBody(String(repeating: " ", count: 2_049)))
+        let full = String(repeating: "é", count: 64 * 1_024)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 8_192, requiresNonblank: true, supportsRetry: true)
+        let result = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: full, answerPolicy: policy)
+        XCTAssertEqual(try ComputerUseClarificationProbeResult.decodeBody(result.encodedBody()), result)
+        XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(result.encodedBody()))
+        XCTAssertThrowsError(try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: " "))
+        XCTAssertThrowsError(try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: full + "é"))
+        XCTAssertThrowsError(try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: nil, answerPolicy: policy))
+        let unavailable = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: nil)
+        XCTAssertNil(try ComputerUseClarificationProbeResult.decodeBody(unavailable.encodedBody()).question)
+        let question = ComputerUseTaskUpdate(taskID: reference.taskID, text: "Which city?", outcome: .userInterventionRequired,
+            clarification: reference, supportsClarificationRecovery: true)
+        XCTAssertTrue(try ComputerUseTaskUpdate.decodeBody(question.encodedBody()).supportsClarificationRecovery)
+        XCTAssertThrowsError(try ComputerUseTaskUpdate(taskID: reference.taskID, text: "ready", supportsClarificationRecovery: true).encodedBody())
+        let legacy = try ComputerUseTaskUpdate(taskID: reference.taskID, text: "Which city?", outcome: .userInterventionRequired,
+            clarification: reference).encodedBody()
+        XCTAssertFalse(legacy.contains("supportsClarificationRecovery"))
+        XCTAssertFalse(try ComputerUseTaskUpdate.decodeBody(legacy).supportsClarificationRecovery)
+    }
+
     func testQuestionDeliveryRequiresRegisteredOwnerAndUnchangedLiveScope() async throws {
         var now = Date(timeIntervalSince1970: 1_800_000_000)
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()

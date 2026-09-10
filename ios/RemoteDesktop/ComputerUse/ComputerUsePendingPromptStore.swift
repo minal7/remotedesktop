@@ -9,6 +9,38 @@ struct ComputerUsePendingApprovalDecision: Codable, Equatable, Sendable {
     let responseBody: String
 }
 
+struct ComputerUsePendingQuestion: Codable, Equatable, Sendable {
+    let reference: ComputerUseClarificationReference
+    let text: String
+    let answerPolicy: ComputerUseClarificationAnswerPolicy?
+    let receivedAt: Date
+    let validUntil: Date
+    let draft: String?
+    enum Failure: Error { case invalid }
+    init(reference: ComputerUseClarificationReference, text: String, answerPolicy: ComputerUseClarificationAnswerPolicy?,
+         receivedAt: Date, validUntil: Date, draft: String? = nil) throws {
+        guard ComputerUseClarificationText.isValid(text), receivedAt.timeIntervalSince1970.isFinite,
+              validUntil.timeIntervalSince1970.isFinite, validUntil > receivedAt,
+              validUntil <= reference.expiresAt, validUntil <= receivedAt.addingTimeInterval(600),
+              draft.map({ $0.count <= ComputerUsePromptRequest.maximumPromptLength && $0.utf8.count <= 32 * 1_024 }) ?? true else {
+            throw Failure.invalid
+        }
+        self.reference = reference; self.text = text; self.answerPolicy = answerPolicy
+        self.receivedAt = receivedAt; self.validUntil = validUntil; self.draft = draft
+    }
+    private enum CodingKeys: String, CodingKey { case reference, text, answerPolicy, receivedAt, validUntil, draft }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(reference: values.decode(ComputerUseClarificationReference.self, forKey: .reference),
+            text: values.decode(String.self, forKey: .text), answerPolicy: values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .answerPolicy),
+            receivedAt: values.decode(Date.self, forKey: .receivedAt), validUntil: values.decode(Date.self, forKey: .validUntil),
+            draft: values.decodeIfPresent(String.self, forKey: .draft))
+    }
+    func withDraft(_ draft: String?) throws -> Self {
+        try .init(reference: reference, text: text, answerPolicy: answerPolicy, receivedAt: receivedAt, validUntil: validUntil, draft: draft)
+    }
+}
+
 /// Write-ahead recovery record for one in-flight privileged prompt. Prompt
 /// text stays in the device Keychain rather than UserDefaults, and the same
 /// message/session IDs are reused after an app restart so the host's durable
@@ -57,6 +89,9 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     /// Original local deadline of a question whose answer negotiated retry.
     /// Replays/relaunches must not restart the client's question lifetime.
     let clarificationValidUntil: Date?
+    /// A terminal question awaiting the person. Recovery probes its native
+    /// owner; it must never retransmit this record as an executable prompt.
+    let question: ComputerUsePendingQuestion?
 
     init(
         hostID: String,
@@ -76,7 +111,8 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         hostControlPaused: Bool? = nil,
         approvalDecision: ComputerUsePendingApprovalDecision? = nil,
         interventionGuidance: String? = nil,
-        clarificationValidUntil: Date? = nil
+        clarificationValidUntil: Date? = nil,
+        question: ComputerUsePendingQuestion? = nil
     ) {
         self.hostID = hostID
         self.pairingCode = pairingCode
@@ -95,6 +131,7 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
         self.hostControlPaused = hostControlPaused
         self.approvalDecision = approvalDecision
         self.clarificationValidUntil = clarificationValidUntil
+        self.question = question
         self.interventionGuidance = interventionGuidance.map {
             String($0
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -110,6 +147,22 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
 
     var hasCanonicalLocalAccountBinding: Bool {
         localAccountBindingRawValue == nil || localAccountBinding != nil
+    }
+
+    var hasValidQuestionRecovery: Bool {
+        guard let question else { return true }
+        guard controlRevision == nil, acknowledgedControlRevision == nil, lastControlKind == nil,
+              lastControlRevision == nil, hostControlEpoch == nil, lastControlHostEpoch == nil,
+              hostControlPaused == nil, approvalDecision == nil, interventionGuidance == nil,
+              let wireBody, let request = try? ComputerUsePromptRequest.decodeBody(wireBody),
+              request.prompt.utf8.elementsEqual(prompt.utf8) else { return false }
+        return question.reference.taskID == messageID || request.clarification == question.reference
+    }
+
+    func retainingQuestion(_ question: ComputerUsePendingQuestion) -> Self {
+        .init(hostID: hostID, pairingCode: pairingCode, sessionID: sessionID, messageID: messageID,
+            prompt: prompt, wireBody: wireBody, createdAt: createdAt, localAccountBinding: localAccountBinding,
+            clarificationValidUntil: clarificationValidUntil, question: question)
     }
 
     /// Rebinds only the ephemeral discovery code after the same Mac has been
@@ -135,7 +188,7 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
             hostControlPaused: hostControlPaused,
             approvalDecision: approvalDecision,
             interventionGuidance: interventionGuidance,
-            clarificationValidUntil: clarificationValidUntil)
+            clarificationValidUntil: clarificationValidUntil, question: question)
     }
 }
 
@@ -179,6 +232,7 @@ extension ComputerUsePendingPromptStoring {
                 hostID: hostID,
                 pairingCode: pairingCode),
               pending.hasCanonicalLocalAccountBinding,
+              pending.hasValidQuestionRecovery,
               pending.localAccountBinding == localAccountBinding else {
             return nil
         }
@@ -264,8 +318,9 @@ final class ComputerUsePendingPromptStore:
                 from: data),
               pending.hostID == hostID,
               pending.hasCanonicalLocalAccountBinding,
+              pending.hasValidQuestionRecovery,
               pending.localAccountBinding == localAccountBinding,
-              Date().timeIntervalSince(pending.createdAt) <= maximumAge else {
+              Date().timeIntervalSince(pending.question?.receivedAt ?? pending.createdAt) <= maximumAge else {
             remove(
                 hostID: hostID,
                 localAccountBinding: localAccountBinding)
@@ -276,7 +331,7 @@ final class ComputerUsePendingPromptStore:
 
     @discardableResult
     func save(_ pending: ComputerUsePendingPrompt) -> Bool {
-        guard pending.hasCanonicalLocalAccountBinding else { return false }
+        guard pending.hasCanonicalLocalAccountBinding, pending.hasValidQuestionRecovery else { return false }
         guard let data = try? JSONEncoder().encode(pending) else { return false }
         let query = baseQuery(
             hostID: pending.hostID,

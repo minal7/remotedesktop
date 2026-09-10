@@ -4668,7 +4668,13 @@ final class HostComputerUseManager: ObservableObject {
                 return true
             }
             return handleControl(envelope, channel: channel)
-        case .assistant, .status:
+        case .status:
+            guard let probe = try? ComputerUseClarificationProbe.decodeBody(envelope.body) else { return true }
+            guard let authorizedPeerID else { return false }
+            guard authorizedPeerID == envelope.senderID, authorizedPeerSupportsOrderedComputerUseControls else { return true }
+            sendClarificationProbeResult(probe, replyingTo: envelope, channel: channel)
+            return true
+        case .assistant:
             return true
         }
     }
@@ -7142,6 +7148,7 @@ final class HostComputerUseManager: ObservableObject {
                 clarification: needsIdentityRecovery ? nil : clarification,
                 clarificationAnswerPolicy: needsIdentityRecovery ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
                 clarificationRetry: liveRetry,
+                supportsClarificationRecovery: !needsIdentityRecovery && (clarification != nil || liveRetry != nil),
                 approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
@@ -7204,6 +7211,30 @@ final class HostComputerUseManager: ObservableObject {
         guard kind != .browser, textClarifications.matches(reference),
               let native = try? (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) else { return false }
         return textClarifications.retains(reference, native: native, for: envelope)
+    }
+
+    private func sendClarificationProbeResult(_ probe: ComputerUseClarificationProbe, replyingTo envelope: ComputerUseEnvelope,
+                                              channel: any HostComputerUseChannel) {
+        let previousDelivery = outboundDeliveryTask
+        let generation = (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration)
+        let delivery = Task { [weak self] in
+            if let previousDelivery { await previousDelivery.value }
+            guard let self, self.transportGeneration == generation.transport,
+                  self.actionEvidenceAuthorizationGeneration == generation.authorization,
+                  self.authorizedPeerID == envelope.senderID else { return }
+            // This is a read-only lookup. Never claim a new prompt, change
+            // controls, interpret a goal or reconstruct a missing owner.
+            let original = self.controlReplyEnvelope(taskID: probe.reference.taskID, basedOn: envelope)
+            let available = !self.taskLedger.requiresPromptIdentityRecovery(taskID: probe.reference.taskID)
+                && self.taskLedger.terminalClarification(taskID: probe.reference.taskID) == probe.reference
+                && self.retainsNativeQuestion(probe.reference, for: original)
+            guard let result = try? ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: probe.reference,
+                question: available ? self.taskLedger.terminalClarificationText(taskID: probe.reference.taskID) : nil,
+                answerPolicy: available ? self.browserClarifications.answerPolicy(for: probe.reference, envelope: original) : nil),
+                let body = try? result.encodedBody() else { return }
+            _ = try? await channel.send(kind: .status, body: body, to: envelope.senderID, sessionID: envelope.sessionID, messageID: nil)
+        }
+        outboundDeliveryTask = delivery
     }
 
     private var modelStateDetail: String {

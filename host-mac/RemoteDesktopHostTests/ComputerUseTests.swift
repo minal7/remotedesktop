@@ -741,6 +741,84 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerQuestionProbesReadOnlyLiveBrowserAndTextQuestionsWithoutClaimingOrExecutingRequests() async throws {
+        for useBrowser in [false, true] {
+            let url = temporaryLedgerURL(), browserExecutor = BrowserQuestionLifecycleExecutor(), textExecutor = ScopedClarificationTestExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let executor: any ComputerUseExecuting = useBrowser ? browserExecutor.capabilityExecutor() : textExecutor
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "probe-question", kind: .prompt, body: useBrowser ? "Find tickets." : "Put blue in a field.")
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let first = try await clarificationUpdate(taskID: root.id, channel: fixture.channel), reference = try XCTUnwrap(first.clarification)
+            XCTAssertTrue(first.supportsClarificationRecovery)
+            let stored = try Data(contentsOf: url)
+            for scope in ["live", "foreign-reference", "foreign-session"] {
+                let probe = ComputerUseClarificationProbe(reference: scope == "foreign-reference"
+                    ? try .init(taskID: reference.taskID, expiresAt: reference.expiresAt) : reference)
+                let packet = ComputerUseEnvelope(id: probe.probeID.uuidString, senderID: root.senderID, targetID: root.targetID,
+                    pairingCode: root.pairingCode, sessionID: scope == "foreign-session" ? "other" : root.sessionID,
+                    kind: .status, body: try probe.encodedBody())
+                XCTAssertTrue(fixture.manager.handle(packet, channel: fixture.channel))
+                let reply = try await clarificationProbeResult(probeID: probe.probeID, channel: fixture.channel)
+                XCTAssertEqual(reply.reference, probe.reference)
+                if scope == "live" {
+                    XCTAssertEqual(reply.question, first.text)
+                    XCTAssertEqual(reply.answerPolicy, first.clarificationAnswerPolicy)
+                } else { XCTAssertNil(reply.question); XCTAssertNil(reply.answerPolicy) }
+                XCTAssertEqual(try Data(contentsOf: url), stored, "A probe must not claim a task or update controls")
+            }
+            if useBrowser { try XCTUnwrap(browserExecutor.owner).retire() } else { textExecutor.pending = nil }
+            let retired = ComputerUseClarificationProbe(reference: reference)
+            XCTAssertTrue(fixture.manager.handle(makeEnvelope(id: retired.probeID.uuidString, kind: .status,
+                body: try retired.encodedBody()), channel: fixture.channel))
+            let unavailable = try await clarificationProbeResult(probeID: retired.probeID, channel: fixture.channel)
+            XCTAssertNil(unavailable.question)
+            XCTAssertEqual(try Data(contentsOf: url), stored)
+            XCTAssertEqual(browserExecutor.planner.inputs.count, useBrowser ? 1 : 0)
+            XCTAssertEqual(textExecutor.normalPrompts.count, useBrowser ? 0 : 1)
+            XCTAssertTrue(browserExecutor.continued.isEmpty); XCTAssertTrue(textExecutor.answers.isEmpty); XCTAssertEqual(textExecutor.effects, 0)
+        }
+    }
+
+    func test_managerQuestionProbeChecksOwnershipAfterQueuedSendsAndCannotCrossRenewedAuthorization() async throws {
+        for revoke in [false, true] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "queued-probe-question", kind: .prompt, body: "Find tickets.")
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let first = try await clarificationUpdate(taskID: root.id, channel: fixture.channel), reference = try XCTUnwrap(first.clarification)
+            await waitUntil { await fixture.channel.sentMessages().contains {
+                $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body).text) == "ready"
+            } }
+            let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "Probe queue held"), returned: expectation(description: "Probe queue released"))
+            defer { gate.finish(true) }
+            await fixture.channel.holdNextStatusSend(gate)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            await fulfillment(of: [gate.started], timeout: 1)
+            let probe = ComputerUseClarificationProbe(reference: reference)
+            XCTAssertTrue(fixture.manager.handle(makeEnvelope(id: probe.probeID.uuidString, kind: .status,
+                body: try probe.encodedBody()), channel: fixture.channel))
+            if revoke { fixture.manager.revokePeerAuthorization(); fixture.manager.authorizePeer(senderID: root.senderID) }
+            else { try XCTUnwrap(executor.owner).retire() }
+            let fresh = ComputerUseClarificationProbe(reference: reference)
+            XCTAssertTrue(fixture.manager.handle(makeEnvelope(id: fresh.probeID.uuidString, kind: .status,
+                body: try fresh.encodedBody()), channel: fixture.channel))
+            gate.finish(true); await fulfillment(of: [gate.returned], timeout: 1)
+            let result = try await clarificationProbeResult(probeID: fresh.probeID, channel: fixture.channel)
+            XCTAssertNil(result.question)
+            let delivered = await fixture.channel.sentMessages().compactMap { try? ComputerUseClarificationProbeResult.decodeBody($0.body) }
+            let old = delivered.filter { $0.probeID == probe.probeID }
+            if revoke { XCTAssertTrue(old.isEmpty) }
+            else { XCTAssertNil(try XCTUnwrap(old.first).question) }
+            XCTAssertEqual(executor.planner.inputs.count, 1); XCTAssertTrue(executor.continued.isEmpty)
+        }
+    }
+
     func test_managerReplaysTextAndUnclassifiedQuestionsOnlyWithTheirLiveNativeScope() async throws {
         for change in ["missing", "scope", "legacy-restart"] {
             let url = temporaryLedgerURL(), executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
@@ -5152,6 +5230,15 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         await waitUntil { await channel.sentMessages().filter { $0.kind == .assistant }.count == 2 }
         XCTAssertEqual(executor.normalPrompts.count, 1)
+    }
+
+    private func clarificationProbeResult(probeID: UUID, channel: FakeHostComputerUseChannel) async throws -> ComputerUseClarificationProbeResult {
+        await waitUntil { await channel.sentMessages().contains {
+            $0.kind == .status && (try? ComputerUseClarificationProbeResult.decodeBody($0.body).probeID) == probeID
+        } }
+        let messages = await channel.sentMessages()
+        return try XCTUnwrap(messages.filter { $0.kind == .status }.compactMap { try? ComputerUseClarificationProbeResult.decodeBody($0.body) }
+            .first { $0.probeID == probeID })
     }
 
     private func clarificationUpdate(taskID: String, channel: FakeHostComputerUseChannel, afterCount: Int = 0) async throws -> ComputerUseTaskUpdate {

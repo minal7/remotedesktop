@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This follows the [rejected browser-answer recovery repair](BROWSER_REJECTED_ANSWER_RECOVERY_REVIEW.md). No build, typecheck, test/assertion run, model invocation, app/browser launch, account login or SSH attempt occurred.
 
+Follow-up: [phone question recovery](PHONE_QUESTION_RECOVERY_REVIEW.md) now persists opted-in questions and bounded drafts, then requires a fresh read-only native probe after session restart. Native process/browser/account reconstruction and execution qualification remain open.
+
 ## First-principles findings
 
 A ledger proves what the host previously said. It does not prove that the form, browser session or unresolved task needed to accept the next answer still exists. The host previously replayed a normal clarification reference directly from its terminal record. A browser question could therefore be offered after its native owner was retired, replaced or lost in a host restart. Native text questions had the same gap. Their answer admission would eventually refuse the stale reference, but the phone had already invited the user to answer it.

@@ -3,6 +3,189 @@ import XCTest
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testSavedQuestionRestoresOnlyAfterFreshScopedProbeAndAnswerReplacesItsDraftRecord() async throws {
+        var now = Date()
+        let fixture = ClarificationClientFixture(now: { now })
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 8_192, requiresNonblank: true, supportsRetry: true)
+        let reference = try await fixture.question(for: root, lifetime: 1_800, answerPolicy: policy, supportsRecovery: true)
+        let draft = "  Paris e\u{301} 😀\n  "
+        fixture.model.updateQuestionDraft(draft.precomposedStringWithCanonicalMapping)
+        try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft != nil }
+        fixture.model.updateQuestionDraft(draft); fixture.model.stop()
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")), question = try XCTUnwrap(saved.question)
+        XCTAssertTrue(saved.hasValidQuestionRecovery); XCTAssertEqual(question.reference, reference)
+        XCTAssertTrue(try XCTUnwrap(question.draft).utf8.elementsEqual(draft.utf8))
+        XCTAssertEqual(try JSONDecoder().decode(ComputerUsePendingPrompt.self, from: JSONEncoder().encode(saved)), saved)
+        XCTAssertEqual(saved.rebindingPairingCode("654321").question, question)
+        now = now.addingTimeInterval(30)
+        let channel = ClarificationClientChannel()
+        let recovered = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+            pendingStore: fixture.store, channel: channel, now: { now })
+        defer { recovered.stop() }
+        recovered.start()
+        let probe = try await channel.probe(at: 0)
+        XCTAssertEqual(probe.reference, reference); XCTAssertEqual(recovered.composerMode, .recoveringAnswer)
+        XCTAssertFalse(recovered.hasActivePrompt); XCTAssertFalse(recovered.sendPrompt("Paris"))
+        let promptCount = await channel.promptCount(); XCTAssertEqual(promptCount, 0)
+        // An old normal reply and replies to a different probe or controller
+        // are not fresh proof for this recovery attempt.
+        await channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: question.text, outcome: .userInterventionRequired,
+            clarification: reference, supportsClarificationRecovery: true).encodedBody())
+        let wrong = try ComputerUseClarificationProbeResult(probeID: UUID(), reference: reference, question: question.text, answerPolicy: policy)
+        await channel.deliver(try wrong.encodedBody(), kind: .status)
+        let valid = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: question.text, answerPolicy: policy)
+        for (sender, pairing, session) in [("OTHER", "123456", "session-1"), ("HOST-ID", "654321", "session-1"), ("HOST-ID", "123456", "other")] {
+            await channel.deliver(try valid.encodedBody(), kind: .status, senderID: sender, pairingCode: pairing, sessionID: session)
+        }
+        try await channel.waitForDelivery()
+        XCTAssertEqual(recovered.composerMode, .recoveringAnswer)
+        await channel.deliver(try valid.encodedBody(), kind: .status); try await channel.waitForDelivery()
+        XCTAssertEqual(recovered.composerMode, .answer(reference, validUntil: question.validUntil))
+        XCTAssertTrue(try XCTUnwrap(recovered.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
+        recovered.updateQuestionDraft("Paris")
+        XCTAssertTrue(recovered.sendPrompt("Paris"))
+        let answer = try await channel.prompt(at: 0), decoded = try ComputerUsePromptRequest.decodeBody(answer.body)
+        XCTAssertNotEqual(answer.id, root.id); XCTAssertEqual(decoded.clarification, reference)
+        XCTAssertEqual(decoded.prompt, "Paris"); XCTAssertTrue(decoded.conversation.isEmpty)
+        recovered.stop()
+        let active = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertNil(active.question); XCTAssertEqual(active.messageID, answer.id)
+        XCTAssertEqual(active.clarificationValidUntil, question.validUntil)
+        fixture.model.stop(); fixture.model.start()
+        XCTAssertEqual(fixture.model.composerMode, .expiredAnswer)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), active,
+            "An older question model must not overwrite or remove a newer answer record")
+    }
+
+    func testSavedQuestionTimeoutRetryExpiryAndUnavailabilityNeverRenewOrReviveItsScope() async throws {
+        for expire in [false, true] {
+            var now = Date()
+            let fixture = ClarificationClientFixture(now: { now }, questionRecoveryTimeout: .milliseconds(20))
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+            let root = try await fixture.channel.prompt(at: 0)
+            let reference = try await fixture.question(for: root, supportsRecovery: true)
+            let question = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+            fixture.model.stop(); fixture.model.start()
+            let first = try await fixture.channel.probe(at: 0)
+            try await fixture.wait { fixture.model.canRetryQuestionRecovery }
+            fixture.model.retryQuestionRecovery()
+            let second = try await fixture.channel.probe(at: 1)
+            XCTAssertNotEqual(first.probeID, second.probeID)
+            await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: first.probeID, reference: reference,
+                question: question.text).encodedBody(), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(fixture.model.composerMode, .recoveringAnswer)
+            if expire { now = question.validUntil }
+            await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: second.probeID, reference: reference,
+                question: expire ? question.text : nil).encodedBody(), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            XCTAssertEqual(fixture.model.composerMode, .expiredAnswer); XCTAssertFalse(fixture.model.sendPrompt("Paris"))
+            XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+            XCTAssertTrue(fixture.model.startNewRequest()); XCTAssertTrue(fixture.model.sendPrompt("Find movies in Paris."))
+            let next = try await fixture.channel.prompt(at: 1)
+            await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: second.probeID, reference: reference,
+                question: question.text).encodedBody(), kind: .status)
+            try await fixture.channel.waitForDelivery()
+            XCTAssertTrue(fixture.model.hasActivePrompt); XCTAssertEqual(fixture.model.composerMode, .request)
+            XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.messageID, next.id)
+        }
+    }
+
+    func testQuestionAndAnswerStorageFailuresPreserveThePreviousRecoverableState() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let reference = try ComputerUseClarificationReference(taskID: root.id, expiresAt: Date().addingTimeInterval(300))
+        let body = try ComputerUseTaskUpdate(taskID: root.id, text: "Which city?", outcome: .userInterventionRequired,
+            clarification: reference, supportsClarificationRecovery: true).encodedBody()
+        fixture.store.permitsSave = false
+        await fixture.channel.deliver(body); try await fixture.channel.waitForDelivery()
+        XCTAssertTrue(fixture.model.hasActivePrompt); XCTAssertEqual(fixture.model.composerMode, .request)
+        XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        fixture.store.permitsSave = true
+        await fixture.channel.deliver(body); try await fixture.channel.waitForDelivery()
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        guard case .answer = fixture.model.composerMode else { return XCTFail("Expected a securely saved question") }
+        fixture.store.permitsSave = false
+        XCTAssertFalse(fixture.model.sendPrompt("Paris"))
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        fixture.model.stop(); fixture.model.start()
+        let probe = try await fixture.channel.probe(at: 0)
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference,
+            question: "Which city?").encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .recoveringAnswer); XCTAssertTrue(fixture.model.canRetryQuestionRecovery)
+        fixture.store.permitsSave = true; fixture.model.retryQuestionRecovery()
+        let retry = try await fixture.channel.probe(at: 1)
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: retry.probeID, reference: reference,
+            question: "Which city?").encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertTrue(fixture.model.sendPrompt("Paris"))
+        let answer = try await fixture.channel.prompt(at: 1)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.messageID, answer.id)
+        XCTAssertNil(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+    }
+
+    func testRejectedAnswerQuestionRecoveryProbesTheOriginalReferenceWithoutResendingTheRejectedAttempt() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let reference = try await fixture.question(for: root,
+            answerPolicy: .init(maximumUTF8Bytes: 256, requiresNonblank: false, supportsRetry: true), supportsRecovery: true)
+        let draft = " \n "
+        XCTAssertTrue(fixture.model.sendPrompt(draft))
+        let attempt = try await fixture.channel.prompt(at: 1)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 7, requiresNonblank: true, supportsRetry: true)
+        let retry = try ComputerUseClarificationRetry(reference: reference, reason: .blank, answerPolicy: policy)
+        await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: attempt.id, text: "Which field?", outcome: .userInterventionRequired,
+            clarificationRetry: retry, supportsClarificationRecovery: true).encodedBody())
+        try await fixture.channel.waitForDelivery()
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        XCTAssertEqual(saved.messageID, attempt.id); XCTAssertEqual(saved.question?.reference, reference)
+        XCTAssertEqual(saved.question?.draft, draft); XCTAssertTrue(saved.hasValidQuestionRecovery)
+        fixture.model.stop(); fixture.model.start()
+        let probe = try await fixture.channel.probe(at: 0)
+        XCTAssertEqual(probe.reference, reference)
+        let count = await fixture.channel.promptCount(); XCTAssertEqual(count, 2)
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference,
+            question: "Which field?", answerPolicy: policy).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.restoredClarificationDraft, draft); XCTAssertFalse(fixture.model.sendPrompt(draft))
+        XCTAssertTrue(fixture.model.sendPrompt("Paris"))
+        let correction = try ComputerUsePromptRequest.decodeBody(await fixture.channel.prompt(at: 2).body)
+        XCTAssertEqual(correction.clarification, reference); XCTAssertEqual(correction.prompt, "Paris")
+        XCTAssertTrue(correction.conversation.isEmpty)
+    }
+
+    func testSavedQuestionBoundsAndControlStateCannotBecomeAnExecutableRecoveryRecord() throws {
+        let now = Date(), reference = try ComputerUseClarificationReference(taskID: "root", expiresAt: Date().addingTimeInterval(600))
+        let deadline = now.addingTimeInterval(300)
+        let question = try ComputerUsePendingQuestion(reference: reference, text: "Which field?", answerPolicy: nil,
+            receivedAt: now, validUntil: deadline, draft: "  Paris  ")
+        for invalid in [now, reference.expiresAt.addingTimeInterval(1), now.addingTimeInterval(601)] {
+            XCTAssertThrowsError(try ComputerUsePendingQuestion(reference: reference, text: question.text, answerPolicy: nil,
+                receivedAt: now, validUntil: invalid))
+        }
+        XCTAssertThrowsError(try question.withDraft(String(repeating: "😀", count: 8_193)))
+        let body = try ComputerUsePromptRequest(prompt: "Find tickets.").encodedBody()
+        let base = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "session-1", messageID: "root",
+            prompt: "Find tickets.", wireBody: body, createdAt: now)
+        XCTAssertNil(try JSONDecoder().decode(ComputerUsePendingPrompt.self, from: JSONEncoder().encode(base)).question)
+        XCTAssertTrue(base.retainingQuestion(question).hasValidQuestionRecovery)
+        let cancelled = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "session-1", messageID: "root",
+            prompt: "Find tickets.", wireBody: body, createdAt: now, lastControlKind: .cancel, question: question)
+        XCTAssertFalse(cancelled.hasValidQuestionRecovery)
+        let foreign = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "session-1", messageID: "other",
+            prompt: "Find tickets.", wireBody: body, createdAt: now, question: question)
+        XCTAssertFalse(foreign.hasValidQuestionRecovery)
+    }
+
     func testUnavailableBrowserQuestionReplayEndsRecoveryWithoutOpeningAnAnswerComposer() async throws {
         let fixture = ClarificationClientFixture()
         defer { fixture.model.stop() }
@@ -590,15 +773,15 @@ private final class ClarificationClientFixture {
     let channel = ClarificationClientChannel()
     let store = ClarificationClientStore()
     let model: ComputerUseSessionModel
-    init(now: @escaping () -> Date = Date.init) {
+    init(now: @escaping () -> Date = Date.init, questionRecoveryTimeout: Duration = .seconds(10)) {
         model = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID", sessionID: "session-1",
-            pendingStore: store, channel: channel, now: now)
+            pendingStore: store, channel: channel, questionRecoveryTimeout: questionRecoveryTimeout, now: now)
     }
     func question(for request: ComputerUseEnvelope, text: String = "Which field?", lifetime: TimeInterval = 300,
-                  answerPolicy: ComputerUseClarificationAnswerPolicy? = nil) async throws -> ComputerUseClarificationReference {
+                  answerPolicy: ComputerUseClarificationAnswerPolicy? = nil, supportsRecovery: Bool = false) async throws -> ComputerUseClarificationReference {
         let reference = try ComputerUseClarificationReference(taskID: request.id, expiresAt: Date().addingTimeInterval(lifetime))
         await channel.deliver(try ComputerUseTaskUpdate(taskID: request.id, text: text, outcome: .userInterventionRequired,
-            clarification: reference, clarificationAnswerPolicy: answerPolicy).encodedBody())
+            clarification: reference, clarificationAnswerPolicy: answerPolicy, supportsClarificationRecovery: supportsRecovery).encodedBody())
         try await wait {
             guard case .answer(let received, _) = self.model.composerMode else { return false }
             return received == reference
@@ -617,6 +800,7 @@ private final class ClarificationClientFixture {
 private actor ClarificationClientChannel: ComputerUseSessionChannel {
     enum Failure: Error { case timeout, requested }
     private var prompts: [ComputerUseEnvelope] = []
+    private var probes: [ComputerUseClarificationProbe] = []
     private var incoming: [ComputerUseEnvelope] = []
     private var deliveredCount = 0
     private var acknowledgedCount = 0
@@ -628,6 +812,7 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
             prompts.append(envelope)
             if failPrompt { failPrompt = false; throw Failure.requested }
         }
+        if kind == .status, let probe = try? ComputerUseClarificationProbe.decodeBody(body) { probes.append(probe) }
         return envelope
     }
     func poll() async throws -> [ComputerUseEnvelope] {
@@ -641,6 +826,14 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
         incoming.append(.init(senderID: senderID, targetID: "IOS-ID", pairingCode: pairingCode, sessionID: sessionID, kind: kind, body: body))
     }
     func promptCount() -> Int { prompts.count }
+    func probe(at index: Int) async throws -> ComputerUseClarificationProbe {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while probes.count <= index {
+            guard ContinuousClock.now < deadline else { throw Failure.timeout }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return probes[index]
+    }
     func failNextPrompt() { failPrompt = true }
     func prompt(at index: Int) async throws -> ComputerUseEnvelope {
         let deadline = ContinuousClock.now + .seconds(3)

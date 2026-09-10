@@ -188,6 +188,7 @@ struct ComputerUseView: View {
             draft = restored
             composerFocused = true
         }
+        .onChange(of: draft) { _, value in model.updateQuestionDraft(value) }
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             if connected { remoteKeyboardOpen = false }
         }
@@ -801,9 +802,15 @@ struct ComputerUseView: View {
         VStack(spacing: 8) {
             if model.canStartNewRequest {
                 HStack {
-                    Text(model.composerMode == .expiredAnswer ? "Question expired" : "Replying to your Mac")
+                    Text(model.composerMode == .recoveringAnswer ? "Saved question"
+                        : model.composerMode == .expiredAnswer ? "Question unavailable" : "Replying to your Mac")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if model.canRetryQuestionRecovery {
+                        Button("Check again") { model.retryQuestionRecovery() }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("computer-use-check-question")
+                    }
                     Spacer()
                     Button("Start a new request") {
                         if model.startNewRequest() { draft = ""; composerFocused = true }
@@ -852,6 +859,8 @@ struct ComputerUseView: View {
                             ? "Answer your Mac's question"
                         : model.composerMode == .expiredAnswer
                             ? "Start a new request to continue"
+                        : model.composerMode == .recoveringAnswer
+                            ? "Checking your saved question"
                         : "Tell your Mac what to do",
                     text: $draft,
                     axis: .vertical)
@@ -865,6 +874,7 @@ struct ComputerUseView: View {
                             || isAwaitingApproval
                             || model.hasActivePrompt
                             || model.composerMode == .expiredAnswer
+                            || model.composerMode == .recoveringAnswer
                             || !model.isConnected
                             || !session.isComputerUsePromptTransportReady)
                     .padding(.horizontal, 14)

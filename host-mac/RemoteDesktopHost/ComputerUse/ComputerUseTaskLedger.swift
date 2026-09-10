@@ -770,6 +770,11 @@ final class ComputerUseTaskLedger {
         return record.clarification
     }
 
+    func terminalClarificationText(taskID: String) -> String? {
+        guard terminalClarification(taskID: taskID) != nil else { return nil }
+        return records[taskID]?.response
+    }
+
     func terminalClarificationRetry(taskID: String) -> ComputerUseClarificationRetry? {
         guard initializationError == nil, let record = records[taskID], record.response != nil,
               record.outcome == .userInterventionRequired, record.effectiveControlState != .cancelled,

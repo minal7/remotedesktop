@@ -12,6 +12,55 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testShippedClientRecoversSavedBrowserQuestionThroughSerializedProbeWithoutReexecutingOriginalPrompt() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let mailbox = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
+            sessionID: sessionID, pairingCode: pairingCode)
+        let executor = BrowserQuestionLifecycleExecutor()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor.capabilityExecutor(),
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct), journalDirectory: directory.appendingPathComponent("browser"))
+            }, allowsExternalServices: false, channelFactory: { _ in mailbox })
+        let store = CompositionPendingStore()
+        let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
+            pendingStore: store, channel: bridge, promptRefreshInterval: .seconds(600))
+        defer { client.stop(); manager.stop() }
+        manager.authorizePeer(senderID: clientID); client.start()
+        let original = "Find concert tickets. Do not purchase anything.", draft = "  Paris e\u{301} 😀\n  "
+        XCTAssertTrue(client.sendPrompt(original))
+        try await pumpHost(manager, mailbox: mailbox) { !client.hasActivePrompt }
+        guard case .answer(let reference, let deadline) = client.composerMode else { return XCTFail("Expected original question") }
+        let owner = try XCTUnwrap(executor.owner), root = owner.input
+        client.updateQuestionDraft(draft); client.stop()
+        XCTAssertEqual(store.load(hostID: hostID, pairingCode: pairingCode)?.question?.draft, draft)
+        let recovered = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID,
+            pendingStore: store, channel: bridge, promptRefreshInterval: .seconds(600))
+        defer { recovered.stop() }
+        recovered.start()
+        XCTAssertEqual(recovered.composerMode, .recoveringAnswer)
+        try await pumpHost(manager, mailbox: mailbox) {
+            if case .answer = recovered.composerMode { return true }; return false
+        }
+        XCTAssertEqual(recovered.composerMode, .answer(reference, validUntil: deadline))
+        XCTAssertTrue(try XCTUnwrap(recovered.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
+        let beforeAnswer = await bridge.prompts()
+        XCTAssertEqual(beforeAnswer.count, 1); XCTAssertEqual(executor.planner.inputs.count, 1)
+        XCTAssertEqual(owner.input, root); XCTAssertTrue(executor.continued.isEmpty)
+        XCTAssertTrue(recovered.sendPrompt(draft))
+        try await pumpHost(manager, mailbox: mailbox) { !recovered.hasActivePrompt }
+        let prompts = await bridge.prompts(), answer = try XCTUnwrap(prompts.last)
+        XCTAssertEqual(prompts.count, 2)
+        let decoded = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(answer.body)
+        XCTAssertEqual(decoded.clarification, reference); XCTAssertTrue(decoded.prompt.utf8.elementsEqual(draft.utf8))
+        XCTAssertTrue(decoded.conversation.isEmpty); XCTAssertEqual(owner.input.userTurns, [original, draft])
+        XCTAssertEqual(owner.input.rootDateContext, root.rootDateContext); XCTAssertTrue(executor.owner === owner)
+        XCTAssertEqual(executor.planner.inputs.count, 2); XCTAssertEqual(executor.continued.map(\.taskID), [answer.id])
+        XCTAssertEqual(store.load(hostID: hostID, pairingCode: pairingCode)?.question?.reference.taskID, answer.id)
+    }
+
     func testShippedClientAnswersBrowserQuestionsWithoutReplacingOriginalGoalOrClock() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -54,8 +103,9 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
                 guard case .answer(let next, _) = client.composerMode else { return XCTFail("A browser question must use the existing exact-answer composer") }
                 reference = next
                 XCTAssertEqual(next.taskID, sent.id)
-                XCTAssertEqual(client.messages.last(where: { $0.author == .assistant })?.text,
-                    index == 0 ? ComputerUseBrowserClarificationTopic.location.question : ComputerUseBrowserClarificationTopic.date.question)
+                let question = try XCTUnwrap(client.messages.last(where: { $0.author == .assistant })?.text)
+                XCTAssertTrue(question.hasPrefix(index == 0 ? ComputerUseBrowserClarificationTopic.location.question : ComputerUseBrowserClarificationTopic.date.question))
+                XCTAssertTrue(question.contains("⟦\(original)⟧"))
             } else {
                 XCTAssertEqual(client.latestTerminalOutcome, .unableToComplete)
                 XCTAssertEqual(client.composerMode, .request)

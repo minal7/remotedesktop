@@ -733,6 +733,63 @@ public struct ComputerUseClarificationRetry: Codable, Equatable, Sendable {
     }
 }
 
+/// Read-only question recovery, carried in a status envelope. The fresh probe
+/// ID distinguishes a current native-owner check from old mailbox replies.
+public struct ComputerUseClarificationProbe: Codable, Equatable, Sendable {
+    public let probeID: UUID
+    public let reference: ComputerUseClarificationReference
+    public init(probeID: UUID = UUID(), reference: ComputerUseClarificationReference) {
+        self.probeID = probeID; self.reference = reference
+    }
+    private enum CodingKeys: String, CodingKey { case type, probeID, reference }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        guard try values.decode(String.self, forKey: .type) == "clarificationProbe" else { throw ComputerUsePayloadError.invalidClarification }
+        probeID = try values.decode(UUID.self, forKey: .probeID)
+        reference = try values.decode(ComputerUseClarificationReference.self, forKey: .reference)
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode("clarificationProbe", forKey: .type)
+        try values.encode(probeID, forKey: .probeID); try values.encode(reference, forKey: .reference)
+    }
+    public func encodedBody() throws -> String { try encodeComputerUseBody(self) }
+    public static func decodeBody(_ body: String) throws -> Self {
+        guard body.utf8.count <= 2_048 else { throw ComputerUsePayloadError.payloadTooLarge }
+        return try decodeComputerUseBody(body, as: Self.self)
+    }
+}
+
+public struct ComputerUseClarificationProbeResult: Codable, Equatable, Sendable {
+    public let probeID: UUID
+    public let reference: ComputerUseClarificationReference
+    /// Nil means the original native question is unavailable, not completed.
+    public let question: String?
+    public let answerPolicy: ComputerUseClarificationAnswerPolicy?
+    public init(probeID: UUID, reference: ComputerUseClarificationReference, question: String?,
+                answerPolicy: ComputerUseClarificationAnswerPolicy? = nil) throws {
+        guard question.map(ComputerUseClarificationText.isValid) ?? (answerPolicy == nil) else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
+        self.probeID = probeID; self.reference = reference; self.question = question; self.answerPolicy = answerPolicy
+    }
+    private enum CodingKeys: String, CodingKey { case type, probeID, reference, question, answerPolicy }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        guard try values.decode(String.self, forKey: .type) == "clarificationProbeResult" else { throw ComputerUsePayloadError.invalidClarification }
+        try self.init(probeID: values.decode(UUID.self, forKey: .probeID), reference: values.decode(ComputerUseClarificationReference.self, forKey: .reference),
+            question: values.decodeIfPresent(String.self, forKey: .question), answerPolicy: values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .answerPolicy))
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode("clarificationProbeResult", forKey: .type)
+        try values.encode(probeID, forKey: .probeID); try values.encode(reference, forKey: .reference)
+        try values.encodeIfPresent(question, forKey: .question); try values.encodeIfPresent(answerPolicy, forKey: .answerPolicy)
+    }
+    public func encodedBody() throws -> String { try encodeComputerUseBody(self) }
+    public static func decodeBody(_ body: String) throws -> Self { try decodeComputerUseBody(body, as: Self.self) }
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
 /// A delayed lifecycle replay cannot replace a newer task, while optional
 /// action evidence can still annotate its original request.
@@ -754,6 +811,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     public let clarification: ComputerUseClarificationReference?
     public let clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy?
     public let clarificationRetry: ComputerUseClarificationRetry?
+    public let supportsClarificationRecovery: Bool
     public let approvedActionEvidence: ComputerUseApprovedActionEvidence?
     /// Carried in a status envelope. It updates historical evidence only and
     /// cannot acknowledge controls, finish a task or open an approval flow.
@@ -770,6 +828,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         clarification: ComputerUseClarificationReference? = nil,
         clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy? = nil,
         clarificationRetry: ComputerUseClarificationRetry? = nil,
+        supportsClarificationRecovery: Bool = false,
         approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
         researchProgress: ComputerUseResearchProgress? = nil
@@ -783,6 +842,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         self.clarification = question
         self.clarificationAnswerPolicy = clarificationAnswerPolicy
         self.clarificationRetry = clarificationRetry
+        self.supportsClarificationRecovery = supportsClarificationRecovery
         self.approvedActionEvidence = approvedActionEvidence
         self.isApprovedActionEvidenceOnly = isApprovedActionEvidenceOnly
         self.researchProgress = researchProgress
@@ -797,6 +857,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case clarification
         case clarificationAnswerPolicy
         case clarificationRetry
+        case supportsClarificationRecovery
         case approvedActionEvidence
         case isApprovedActionEvidenceOnly
         case researchProgress
@@ -825,6 +886,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
         clarificationAnswerPolicy = try values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .clarificationAnswerPolicy)
         clarificationRetry = try values.decodeIfPresent(ComputerUseClarificationRetry.self, forKey: .clarificationRetry)
+        supportsClarificationRecovery = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationRecovery) ?? false
         approvedActionEvidence = try values.decodeIfPresent(ComputerUseApprovedActionEvidence.self, forKey: .approvedActionEvidence)
         isApprovedActionEvidenceOnly = try values.decodeIfPresent(Bool.self, forKey: .isApprovedActionEvidenceOnly) ?? false
         researchProgress = try values.decodeIfPresent(ComputerUseResearchProgress.self, forKey: .researchProgress)
@@ -848,12 +910,18 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         try values.encodeIfPresent(clarification, forKey: .clarification)
         try values.encodeIfPresent(clarificationAnswerPolicy, forKey: .clarificationAnswerPolicy)
         try values.encodeIfPresent(clarificationRetry, forKey: .clarificationRetry)
+        if supportsClarificationRecovery { try values.encode(true, forKey: .supportsClarificationRecovery) }
         try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
         if isApprovedActionEvidenceOnly { try values.encode(true, forKey: .isApprovedActionEvidenceOnly) }
         try values.encodeIfPresent(researchProgress, forKey: .researchProgress)
     }
 
     private func validatePayloadUse() throws {
+        if supportsClarificationRecovery {
+            guard outcome == .userInterventionRequired, clarification != nil || clarificationRetry != nil else {
+                throw ComputerUsePayloadError.invalidClarification
+            }
+        }
         if let retry = clarificationRetry {
             guard outcome == .userInterventionRequired, clarification == nil, clarificationAnswerPolicy == nil,
                   retry.reference.taskID != taskID, approvedActionEvidence == nil, !isApprovedActionEvidenceOnly,
