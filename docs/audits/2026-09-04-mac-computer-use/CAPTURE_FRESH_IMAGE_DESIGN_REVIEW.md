@@ -1,5 +1,7 @@
 # Fresh capture needs one display identity, a bounded request and real media evidence
 
+Historical design checkpoint. Later source work added selected-display identity, [display-change retirement](CAPTURE_DISPLAY_CHANGE_REVIEW.md) and [full-surface placement](CAPTURE_CONTENT_PLACEMENT_REVIEW.md). The [stationary layout repair](STATIONARY_LAYOUT_REDRAW_REVIEW.md) now allows local redraw during continuous viewing; it does not implement fresh capture on reveal or supply end-to-end media evidence. The original defects and observations below describe the source at this earlier checkpoint.
+
 Evidence and implementation design; **no runtime repair is claimed in this review**. This follows [bounded initial startup](CAPTURE_STARTUP_REVIEW.md). Source and SDK review found a display-identity defect that must be repaired before adding a screenshot recovery path. No build, typecheck, test/assertion execution, native capture, app/device/browser operation, model run or SSH retry was performed. Public Apple documentation was retrieved read-only.
 
 ## Confirmed display-identity defect

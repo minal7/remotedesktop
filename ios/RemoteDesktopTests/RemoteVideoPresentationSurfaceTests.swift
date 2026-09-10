@@ -60,6 +60,125 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
         XCTAssertFalse(mailbox.hasPending(context: context))
     }
 
+    func test_frameMailboxRedrawRetainsDecodeIdentityWithoutRepeatingWork() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), context = UUID(), next = UUID()
+        mailbox.replaceContext(context); mailbox.offer(SurfaceMailboxFrame(1))
+        let decoded = try XCTUnwrap(mailbox.takeLatest(context: context))
+        XCTAssertNil(mailbox.takeLatest(context: context), "A retained image is not a perpetual render request")
+        mailbox.replaceContext(next, preservingLatestFrom: context)
+        let redraw = try XCTUnwrap(mailbox.takeLatest(context: next))
+        XCTAssertTrue(redraw.frame === decoded.frame)
+        XCTAssertEqual(redraw.id, decoded.id, "Local layout cannot invent a new decode identity")
+        XCTAssertEqual(redraw.context, next)
+        XCTAssertFalse(mailbox.hasPending(context: next)); XCTAssertNil(mailbox.takeLatest(context: next))
+        mailbox.offer(SurfaceMailboxFrame(2))
+        let newer = try XCTUnwrap(mailbox.takeLatest(context: next))
+        XCTAssertNotEqual(newer.id, redraw.id); XCTAssertEqual(newer.frame.value, 2)
+    }
+
+    func test_frameMailboxLayoutTransferKeepsPendingDecodeAndRetiresOldWake() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), log = SurfaceWakeLog(), old = UUID(), next = UUID()
+        mailbox.setWakeHandler { log.append($0) }; mailbox.replaceContext(old)
+        mailbox.offer(SurfaceMailboxFrame(1)); mailbox.offer(SurfaceMailboxFrame(2))
+        let wake = try XCTUnwrap(log.values.first)
+        mailbox.replaceContext(next, preservingLatestFrom: old)
+        XCTAssertFalse(mailbox.accepts(wake)); XCTAssertNil(mailbox.takeLatest(context: old))
+        XCTAssertTrue(mailbox.hasPending(context: next))
+        // A decode arriving during layout/acquisition replaces the transferred
+        // candidate. A queued wake from the old layout cannot consume it.
+        mailbox.offer(SurfaceMailboxFrame(3))
+        XCTAssertEqual(log.values.count, 2)
+        XCTAssertTrue(mailbox.accepts(try XCTUnwrap(log.values.last)))
+        XCTAssertEqual(mailbox.takeLatest(context: next)?.frame.value, 3)
+        XCTAssertFalse(mailbox.hasPending(context: next))
+    }
+
+    func test_frameMailboxClearsRetainedImageAtVisibilityAndContextBoundaries() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), old = UUID(), next = UUID()
+        mailbox.replaceContext(old)
+        weak var retained: SurfaceMailboxFrame?
+        autoreleasepool {
+            let frame = SurfaceMailboxFrame(1); retained = frame; mailbox.offer(frame)
+            _ = mailbox.takeLatest(context: old)
+        }
+        XCTAssertNotNil(retained, "The stationary image survives its first submission")
+        mailbox.replaceContext(nil, preservingLatestFrom: old)
+        XCTAssertNil(retained)
+        mailbox.offer(SurfaceMailboxFrame(2))
+        mailbox.replaceContext(next, preservingLatestFrom: old)
+        XCTAssertNil(mailbox.takeLatest(context: next), "Hidden output cannot be retained for reveal")
+        mailbox.offer(SurfaceMailboxFrame(3)); _ = mailbox.takeLatest(context: next)
+        let boundary = UUID()
+        mailbox.replaceContext(boundary)
+        XCTAssertNil(mailbox.takeLatest(context: boundary))
+        let replacement = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>()
+        replacement.replaceContext(next, preservingLatestFrom: next)
+        XCTAssertNil(replacement.takeLatest(context: next), "A new attachment has no predecessor image")
+    }
+
+    func test_frameMailboxRequiresExactPreviousContextForRedraw() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), first = UUID(), second = UUID(), third = UUID()
+        mailbox.replaceContext(first); mailbox.offer(SurfaceMailboxFrame(1))
+        let original = try XCTUnwrap(mailbox.takeLatest(context: first))
+        mailbox.replaceContext(second, preservingLatestFrom: first)
+        let redrawn = try XCTUnwrap(mailbox.takeLatest(context: second))
+        XCTAssertEqual(redrawn.id, original.id)
+        mailbox.replaceContext(third, preservingLatestFrom: first)
+        XCTAssertNil(mailbox.takeLatest(context: third), "An obsolete layout cannot transfer the current image")
+        mailbox.restoreUnlessNewer(original); mailbox.restoreUnlessNewer(redrawn)
+        XCTAssertNil(mailbox.takeLatest(context: third))
+        mailbox.offer(SurfaceMailboxFrame(2))
+        XCTAssertEqual(mailbox.takeLatest(context: third)?.frame.value, 2)
+    }
+
+    func test_frameMailboxFailedImageCannotReappearThroughLayoutAndPreservesNewerDecode() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), first = UUID(), second = UUID(), third = UUID()
+        mailbox.replaceContext(first); mailbox.offer(SurfaceMailboxFrame(1))
+        let failed = try XCTUnwrap(mailbox.takeLatest(context: first))
+        mailbox.discard(frame: failed.id, context: first)
+        mailbox.restoreUnlessNewer(failed)
+        mailbox.replaceContext(second, preservingLatestFrom: first)
+        XCTAssertNil(mailbox.takeLatest(context: second))
+        mailbox.offer(SurfaceMailboxFrame(2))
+        let older = try XCTUnwrap(mailbox.takeLatest(context: second))
+        mailbox.offer(SurfaceMailboxFrame(3))
+        mailbox.discard(frame: older.id, context: second)
+        let newer = try XCTUnwrap(mailbox.takeLatest(context: second))
+        XCTAssertEqual(newer.frame.value, 3)
+        mailbox.replaceContext(third, preservingLatestFrom: second)
+        mailbox.discard(frame: newer.id, context: second)
+        XCTAssertEqual(mailbox.takeLatest(context: third)?.id, newer.id,
+                       "An obsolete callback cannot discard the current context")
+        mailbox.discard(frame: newer.id, context: third)
+        let fourth = UUID()
+        mailbox.replaceContext(fourth, preservingLatestFrom: third)
+        XCTAssertNil(mailbox.takeLatest(context: fourth))
+    }
+
+    func test_frameMailboxLateUncommittedRestoreCannotRegressAConsumedNewerDecode() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), context = UUID(), next = UUID()
+        mailbox.replaceContext(context); mailbox.offer(SurfaceMailboxFrame(1))
+        let older = try XCTUnwrap(mailbox.takeLatest(context: context))
+        mailbox.offer(SurfaceMailboxFrame(2))
+        let newer = try XCTUnwrap(mailbox.takeLatest(context: context))
+        mailbox.restoreUnlessNewer(older)
+        XCTAssertNil(mailbox.takeLatest(context: context))
+        mailbox.replaceContext(next, preservingLatestFrom: context)
+        XCTAssertEqual(mailbox.takeLatest(context: next)?.id, newer.id)
+    }
+
+    func test_frameMailboxReleasesReplacedImagesOutsideItsGate() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), first = UUID(), second = UUID()
+        mailbox.replaceContext(first)
+        autoreleasepool {
+            mailbox.offer(SurfaceMailboxFrame(1, onRelease: { mailbox.offer(SurfaceMailboxFrame(2)) }))
+            _ = mailbox.takeLatest(context: first)
+        }
+        mailbox.replaceContext(second)
+        XCTAssertEqual(mailbox.takeLatest(context: second)?.frame.value, 2,
+                       "Release-time native cleanup may reenter after the new context commits")
+    }
+
     func test_surfacePresentationRejectsOldContextsAndRegressiveTimes() {
         let old = UUID(), current = UUID(), frame = UUID()
         let channel = RemoteVideoSurfacePresentation(context: old)
@@ -130,7 +249,9 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
 
 private final class SurfaceMailboxFrame: NSObject, @unchecked Sendable {
     let value: Int
-    init(_ value: Int) { self.value = value }
+    private let onRelease: (@Sendable () -> Void)?
+    init(_ value: Int, onRelease: (@Sendable () -> Void)? = nil) { self.value = value; self.onRelease = onRelease }
+    deinit { onRelease?() }
 }
 
 private final class SurfaceWakeLog: @unchecked Sendable {

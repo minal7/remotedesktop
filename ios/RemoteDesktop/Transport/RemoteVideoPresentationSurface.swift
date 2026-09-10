@@ -23,6 +23,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         let mode: RemoteVideoPresentationProducer.ContentMode
     }
     private var layout: Layout?
+    private weak var layoutWindow: UIWindow?
     private enum Phase: Equatable { case idle, acquiring(UUID), submitted(UUID) }
     private var phase = Phase.idle
     private var retry: Task<Void, Never>?
@@ -69,7 +70,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     func retire() {
         presentation.retire()
         guard active else { return }
-        active = false; layout = nil; phase = .idle
+        active = false; layout = nil; layoutWindow = nil; phase = .idle
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
         view.onGeometryChange = nil; view.isHidden = true
     }
@@ -77,17 +78,26 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private func refreshLayout() {
         guard active else { return }
         let next: Layout?
+        let nextWindow: UIWindow?
         if let window = view.window, !view.isHidden,
            viewport.intersection(view.bounds).width > 0, viewport.intersection(view.bounds).height > 0,
            let size = RemoteVideoDrawableSizing.size(bounds: view.bounds.size, scale: window.screen.scale) {
             next = Layout(window: ObjectIdentifier(window), rect: view.convert(view.bounds, to: window),
                           viewport: viewport, size: size, mode: contentMode)
-        } else { next = nil }
-        guard layout != next else { return }
-        layout = next; phase = .idle; failedAttempts = 0
-        cancelWaits(); producer.replaceContext()
+            nextWindow = window
+        } else { next = nil; nextWindow = nil }
+        guard layout != next || layoutWindow !== nextWindow else { return }
+        let previousContext = producer.contextID
+        let continuous = layout != nil && next != nil && layoutWindow === nextWindow
+        layout = next; layoutWindow = nextWindow; phase = .idle
+        // A pan/resize does not create another source image requirement or
+        // replenish a failing surface's time/attempt budget. Hidden/windowless
+        // or changed-window transitions cannot carry the retained image.
+        if !continuous { cancelWaits(); failedAttempts = 0 }
+        producer.replaceContext()
         let context = producer.contextID
-        mailbox.replaceContext(next == nil ? nil : context)
+        mailbox.replaceContext(next == nil ? nil : context,
+                               preservingLatestFrom: continuous ? previousContext : nil)
         presentation.begin(context: context)
         guard isCurrent(context), layout != nil else { return }
         ensureDeadline(context)
@@ -128,6 +138,16 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private func received(_ result: RemoteVideoPresentationLedger.Result, frame: UUID, context: UUID) {
         guard isCurrent(context), phase == .submitted(frame) else { return }
         phase = .idle
+        // Observe a current failure before refreshing geometry. Otherwise a
+        // layout discovered by this callback could transfer the failed image
+        // and suppress the failure as belonging to the replaced context.
+        switch result {
+        case .skipped, .failed: mailbox.discard(frame: frame, context: context)
+        case .expired:
+            fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.")
+            return
+        case .presented: break
+        }
         refreshLayout()
         guard isCurrent(context), layout != nil else { return }
         switch result {
@@ -136,11 +156,11 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             presentation.present(context: context, frame: frame, time: time)
             if isCurrent(context) { requestNext() }
         case .skipped, .failed:
-            // A committed drawable/frame is never submitted again. Only a
-            // newer mailbox entry may recover a failed presentation.
+            // A known failed image is not a layout redraw candidate. A newer
+            // decode may recover; committed drawables are never reused.
             retryLater(context)
         case .expired:
-            fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.")
+            break // Handled before layout refresh.
         }
     }
 
@@ -155,32 +175,43 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         ensureDeadline(context)
         guard retry == nil else { return }
         let id = UUID(); retryID = id
+        let retryAt = ContinuousClock.now.advanced(by: .milliseconds(100))
         retry = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
-            guard let self, self.isCurrent(context), self.retryID == id else { return }
+            do { try await Task.sleep(until: retryAt, clock: .continuous) } catch { return }
+            guard let self, self.active, self.layout != nil, self.retryID == id else { return }
             self.retry = nil; self.retryID = nil
             self.requestNext()
         }
     }
 
     private func ensureDeadline(_ context: UUID) {
-        guard deadline == nil else { return }
+        guard isCurrent(context), layout != nil, deadline == nil else { return }
         let id = UUID(); deadlineID = id
+        let expiresAt = ContinuousClock.now.advanced(by: .seconds(5))
         deadline = Task { @MainActor [weak self] in
-            do { try await Task.sleep(for: .seconds(5)) } catch { return }
-            guard let self, self.isCurrent(context), self.deadlineID == id else { return }
-            self.fail(context, message: "The remote screen could not be refreshed. Reconnect to try again.")
+            do { try await Task.sleep(until: expiresAt, clock: .continuous) } catch { return }
+            guard let self, self.active, self.layout != nil, self.deadlineID == id else { return }
+            // The same recovery episode spans continuous layout contexts.
+            // Its original timer must still fail the current context.
+            self.fail(self.producer.contextID, message: "The remote screen could not be refreshed. Reconnect to try again.")
         }
     }
 
     private func cancelWaits() {
+        cancelRetry(); cancelDeadline()
+    }
+
+    private func cancelRetry() {
         retry?.cancel(); retry = nil; retryID = nil
+    }
+
+    private func cancelDeadline() {
         deadline?.cancel(); deadline = nil; deadlineID = nil
     }
 
     private func fail(_ context: UUID, message: String) {
         guard isCurrent(context) else { return }
-        active = false; layout = nil; phase = .idle
+        active = false; layout = nil; layoutWindow = nil; phase = .idle
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
         view.onGeometryChange = nil; view.isHidden = true
         presentation.fail(context: context, message: message)

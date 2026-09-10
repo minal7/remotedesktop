@@ -1,5 +1,7 @@
 # Native presentation surface integration
 
+Follow-up: the [stationary layout redraw repair](STATIONARY_LAYOUT_REDRAW_REVIEW.md) supersedes the initial discard-on-every-layout behavior below. Continuous eligible layout changes may redraw the latest decoded image while preserving its identity; reveal and source-capture recovery remain separate unfinished work. The counts below describe the original integration checkpoint.
+
 Source integration, 2026-09-10. This follows [frame preparation](FRAME_IMAGE_PREPARATION_REVIEW.md) and [candidate visibility](CANDIDATE_SCREEN_VISIBILITY_REVIEW.md). The iOS client source now instantiates the Core Image/Metal producer for the Mac screen and uses its attachment's presentation channel for WebRTC readiness. The installed app was not replaced. No builds, typechecks, assertions, app launches, native rendering, computer-use actions or model inference ran. This is an unqualified implementation change, not proof of working native presentation or natural-language tasks.
 
 ## First-principles chain
