@@ -38,6 +38,11 @@ struct RemoteInputSceneLease: Equatable {
     fileprivate let id = UUID()
 }
 
+struct RemoteKeyboardCaptureIdentity: Hashable {
+    let input: UUID
+    let focus: UUID
+}
+
 /// Top-level state holder for the client. Owns the `Transport`, tracks
 /// lifecycle, and fans input events out as `ControlMessage`s.
 @MainActor
@@ -84,10 +89,11 @@ final class SessionModel: ObservableObject {
     @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
     @Published private(set) var remoteInputGeneration = UUID()
+    @Published private(set) var remoteKeyboardFocusGeneration = UUID()
     @Published private(set) var inputActivity: RemoteInputActivity
     @Published var error: String?
     @Published private(set) var experience: Experience = .remoteControl {
-        didSet { updateVideoRendererTarget() }
+        didSet { updateVideoRendererTarget(); updateRemoteScreenObscuration() }
     }
     @Published private(set) var computerUseSession: ComputerUseSessionModel? {
         didSet {
@@ -112,6 +118,36 @@ final class SessionModel: ObservableObject {
 
     var hasInteractiveRemoteScreen: Bool {
         isRemoteScreenSessionReady && !isRemoteScreenObscured
+    }
+
+    var allowsRemoteKeyboardInput: Bool {
+        hasInteractiveRemoteScreen && taskPermitsKeyboardInput
+    }
+
+    private var taskPermitsKeyboardInput: Bool {
+        if experience == .computerUse {
+            guard let model = computerUseSession, model.isConnected, !model.isRemoteScreenObscured,
+                  case .paused = model.state else { return false }
+        }
+        return true
+    }
+
+    var remoteKeyboardCaptureIdentity: RemoteKeyboardCaptureIdentity {
+        .init(input: remoteInputGeneration, focus: remoteKeyboardFocusGeneration)
+    }
+
+    func requestRemoteKeyboardFocus(expectedInputGeneration: UUID) {
+        guard allowsRemoteKeyboardInput, remoteInputGeneration == expectedInputGeneration else { return }
+        let next = UUID()
+        pendingKeyboardFocusRequest = .init(input: expectedInputGeneration, focus: next)
+        remoteKeyboardFocusGeneration = next
+    }
+
+    func consumeRemoteKeyboardFocusRequest(_ identity: RemoteKeyboardCaptureIdentity) -> Bool {
+        guard allowsRemoteKeyboardInput, identity == remoteKeyboardCaptureIdentity,
+              pendingKeyboardFocusRequest == identity else { return false }
+        pendingKeyboardFocusRequest = nil
+        return true
     }
 
     /// Current transport/submission readiness, independently of task privacy.
@@ -166,6 +202,8 @@ final class SessionModel: ObservableObject {
     private var isRetiringInputSources = false
     private var isUpdatingRemoteScreenObscuration = false
     private var inputSourceCleanupDepth = 0
+    private var pendingKeyboardFocusRequest: RemoteKeyboardCaptureIdentity?
+    private var keyboardTaskInputPermitted = true
     private let videoRendererBinding = RemoteVideoRendererBinding()
     private var transport: Transport? {
         didSet { updateVideoRendererTarget() }
@@ -555,6 +593,7 @@ final class SessionModel: ObservableObject {
     }
 
     private func updateRemoteScreenObscuration() {
+        if !taskPermitsKeyboardInput { pendingKeyboardFocusRequest = nil }
         // A policy edge during an existing key/button release must wait for
         // every release in that scope. New input already reads the model's
         // requested policy directly, so deferring this commit cannot admit it.
@@ -562,7 +601,8 @@ final class SessionModel: ObservableObject {
               inputSourceCleanupDepth == 0 else { return }
         isUpdatingRemoteScreenObscuration = true
         defer { isUpdatingRemoteScreenObscuration = false }
-        while isRemoteScreenObscured != (computerUseSession?.isRemoteScreenObscured ?? false) {
+        while isRemoteScreenObscured != (computerUseSession?.isRemoteScreenObscured ?? false)
+                || keyboardTaskInputPermitted != taskPermitsKeyboardInput {
             if computerUseSession?.isRemoteScreenObscured == true {
                 let owner = computerUseSession
                 let generation = remoteInputGeneration
@@ -572,10 +612,21 @@ final class SessionModel: ObservableObject {
                 if computerUseSession === owner, remoteInputGeneration == generation {
                     remoteInputGeneration = UUID()
                 }
+            } else if keyboardTaskInputPermitted, !taskPermitsKeyboardInput {
+                let owner = computerUseSession
+                let generation = remoteInputGeneration
+                // Chat/AI input and direct remote typing are different owners.
+                // Retire keyboard sources before a later paused interval can
+                // reopen capture; a pointer drag keeps its separate ownership.
+                releaseRemoteInputSources(includePointer: false)
+                if computerUseSession === owner, remoteInputGeneration == generation {
+                    remoteKeyboardFocusGeneration = UUID()
+                }
             }
             // Cleanup may reveal the screen, replace the session or disconnect.
             // Sample its current policy rather than restoring the old request.
             isRemoteScreenObscured = computerUseSession?.isRemoteScreenObscured ?? false
+            keyboardTaskInputPermitted = taskPermitsKeyboardInput
         }
     }
 
@@ -953,14 +1004,15 @@ final class SessionModel: ObservableObject {
         if let source { endRemoteInputSource(source) }
     }
 
-    private func releaseRemoteInputSources() {
+    private func releaseRemoteInputSources(includePointer: Bool = true) {
         guard !isRetiringInputSources else { return }
         isRetiringInputSources = true
         defer {
             isRetiringInputSources = false
             updateRemoteScreenObscuration()
         }
-        for kind: RemoteInputSourceKind in [.softKeyboard, .hardwareKeyboard, .pointer] {
+        let kinds: [RemoteInputSourceKind] = includePointer ? [.softKeyboard, .hardwareKeyboard, .pointer] : [.softKeyboard, .hardwareKeyboard]
+        for kind in kinds {
             if let source = inputSources[kind]?.lease { endRemoteInputSource(source) }
         }
         releaseSoftModifiers()

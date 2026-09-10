@@ -83,7 +83,9 @@ final class ComputerUseSessionModel: ObservableObject {
     /// Becomes true only when `SessionModel` receives the authenticated host
     /// hello and calls `start()`. CloudKit recovery and lifecycle traffic must
     /// never leave the phone while the WebRTC peer is still unauthenticated.
-    @Published private(set) var isConnected = false
+    @Published private(set) var isConnected = false {
+        didSet { onRemoteScreenObscurationChange?() }
+    }
     /// Embedded Mail MCP tasks can leave a small compose/result window above
     /// unrelated desktop content. Cover the remote pixels for the task's full
     /// lifecycle, starting before the request leaves the phone, until the
@@ -93,7 +95,8 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     /// Synchronous owner notification: input must close when pixels are
-    /// covered, without waiting for SwiftUI to remove keyboard responders.
+    /// covered or AI control resumes, without waiting for SwiftUI to remove
+    /// keyboard responders.
     var onRemoteScreenObscurationChange: (@MainActor () -> Void)?
     var isRemoteScreenObscured: Bool {
         if isLiveScreenPrivacyShielded { return true }
@@ -701,7 +704,7 @@ final class ComputerUseSessionModel: ObservableObject {
 
     func takeControl() {
         guard !isStopped,
-              activePromptID != nil,
+              let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
         latestTerminalOutcome = nil
@@ -709,13 +712,14 @@ final class ComputerUseSessionModel: ObservableObject {
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         state = .paused
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         statusText = "AI paused — you're in control"
         sendControl(.pause, generation: operationGeneration)
     }
 
     func resumeAI() {
         guard !isStopped,
-              activePromptID != nil,
+              let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
         latestTerminalOutcome = nil
@@ -723,6 +727,7 @@ final class ComputerUseSessionModel: ObservableObject {
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         state = .working
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         statusText = "Asking AI to continue…"
         startPromptRefresh(resendImmediately: true)
         scheduleResponseTimeout(
@@ -732,7 +737,7 @@ final class ComputerUseSessionModel: ObservableObject {
 
     func stopCurrentTask() {
         guard !isStopped,
-              activePromptID != nil,
+              let promptID = activePromptID,
               lastControlKind != .cancel else { return }
         let operationGeneration = advanceStateGeneration()
         latestTerminalOutcome = nil
@@ -744,6 +749,7 @@ final class ComputerUseSessionModel: ObservableObject {
         promptRefreshTask?.cancel()
         promptRefreshTask = nil
         state = .working
+        guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         statusText = "Stopping the task…"
         scheduleResponseTimeout(
             message: "The Mac hasn’t confirmed Stop yet. Use the Mac directly to keep AI paused.")

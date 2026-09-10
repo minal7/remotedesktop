@@ -164,14 +164,134 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertEqual(ordinary.sentMessages.count, count + 1)
     }
 
-    private func makePrivacyFixture(ordinaryTransport: RecordingTargetTransport? = nil) async throws
+    func test_remoteKeyboardFocusRequestIsScopedOneUseAndPreservesPointerOwnership() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture(localPendingStore: KeyboardHandoffPendingStore())
+        defer { session.reset() }
+        XCTAssertFalse(session.allowsRemoteKeyboardInput, "AI chat owns typing before Take control")
+        XCTAssertTrue(prompt.sendPrompt("Find movie tickets."))
+        prompt.takeControl()
+        XCTAssertTrue(session.allowsRemoteKeyboardInput)
+        let generation = session.remoteInputGeneration, initial = session.remoteKeyboardCaptureIdentity
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.pointer(x: 20, y: 30, buttons: 1), from: pointer)
+        let count = visual.sentMessages.count
+        session.requestRemoteKeyboardFocus(expectedInputGeneration: UUID())
+        XCTAssertEqual(session.remoteKeyboardCaptureIdentity, initial)
+        session.requestRemoteKeyboardFocus(expectedInputGeneration: generation)
+        let requested = session.remoteKeyboardCaptureIdentity
+        XCTAssertNotEqual(requested, initial)
+        XCTAssertEqual(session.remoteInputGeneration, generation)
+        XCTAssertFalse(session.consumeRemoteKeyboardFocusRequest(initial))
+        XCTAssertTrue(session.consumeRemoteKeyboardFocusRequest(requested))
+        XCTAssertFalse(session.consumeRemoteKeyboardFocusRequest(requested))
+        XCTAssertTrue(session.isRemoteInputSourceCurrent(pointer))
+        XCTAssertEqual(visual.sentMessages.count, count)
+
+        session.requestRemoteKeyboardFocus(expectedInputGeneration: generation)
+        let pending = session.remoteKeyboardCaptureIdentity
+        prompt.resumeAI()
+        XCTAssertFalse(session.allowsRemoteKeyboardInput)
+        XCTAssertFalse(session.consumeRemoteKeyboardFocusRequest(pending))
+        prompt.takeControl()
+        XCTAssertFalse(session.consumeRemoteKeyboardFocusRequest(pending), "A later pause cannot inherit an old focus request")
+        XCTAssertTrue(session.isRemoteInputSourceCurrent(pointer))
+        XCTAssertEqual(visual.sentMessages.count, count)
+    }
+
+    func test_resumeRetiresKeyboardImmediatelyAcrossAnotherPauseAndKeepsTLSAndPointer() async throws {
+        let (session, visual, prompt) = try await makePrivacyFixture(localPendingStore: KeyboardHandoffPendingStore())
+        defer { session.reset() }
+        XCTAssertTrue(prompt.sendPrompt("Find concert tickets.")); prompt.takeControl()
+        let generation = session.remoteInputGeneration, capture = session.remoteKeyboardCaptureIdentity
+        let hardware = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        let field = SoftKeyboardCapture.CaptureField()
+        field.bindSession(session)
+        XCTAssertTrue(field.canSendInput)
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: hardware)
+        session.toggleSoftModifier(.shift)
+        session.send(.pointer(x: 20, y: 30, buttons: 1), from: pointer)
+        let count = visual.sentMessages.count
+
+        prompt.resumeAI()
+        XCTAssertFalse(session.allowsRemoteKeyboardInput)
+        XCTAssertFalse(field.canSendInput)
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(hardware))
+        XCTAssertNotEqual(session.remoteKeyboardCaptureIdentity, capture)
+        XCTAssertEqual(session.remoteInputGeneration, generation)
+        XCTAssertEqual(session.softModifierMask, 0)
+        let released = visual.sentMessages.dropFirst(count).map(\.message)
+        XCTAssertEqual(released.count, 2)
+        XCTAssertEqual(released.compactMap { message -> Int? in
+            if case let .key(usage, down, _) = message, !down { return usage }; return nil
+        }.sorted(), [4, SoftModifier.shift.hidUsage].sorted())
+
+        // No actor suspension or SwiftUI update between the two transitions.
+        prompt.takeControl()
+        XCTAssertTrue(session.allowsRemoteKeyboardInput)
+        XCTAssertFalse(field.canSendInput)
+        field.bindSession(session); field.insertText("late login text")
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: hardware)
+        session.endRemoteInputSource(hardware)
+        XCTAssertEqual(visual.sentMessages.count, count + 2)
+        let replacement = SoftKeyboardCapture.CaptureField()
+        replacement.bindSession(session); replacement.insertText("new explicit input")
+        XCTAssertTrue(replacement.canSendInput)
+        XCTAssertEqual(visual.sentMessages.count, count + 3)
+        XCTAssertTrue(session.isRemoteInputSourceCurrent(pointer))
+        XCTAssertTrue(prompt.isConnected); XCTAssertTrue(session.computerUseSession === prompt)
+        XCTAssertTrue(session.isComputerUsePromptTransportReady)
+        XCTAssertEqual(session.computerUseVisualSidecarState, .live)
+        XCTAssertTrue(visual.disconnectReasons.isEmpty)
+
+        let current = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: current)
+        let beforeStop = visual.sentMessages.count
+        prompt.stop()
+        XCTAssertFalse(session.allowsRemoteKeyboardInput)
+        XCTAssertFalse(replacement.canSendInput)
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(current))
+        XCTAssertEqual(visual.sentMessages.count, beforeStop + 1)
+        XCTAssertTrue(session.isRemoteInputSourceCurrent(pointer))
+        field.stopCapture(); replacement.stopCapture()
+    }
+
+    func test_keyboardCleanupCannotOverwriteAReentrantTakeControlWithResume() async throws {
+        let store = KeyboardHandoffPendingStore()
+        let (session, visual, prompt) = try await makePrivacyFixture(localPendingStore: store)
+        defer { visual.onSend = nil; session.reset() }
+        XCTAssertTrue(prompt.sendPrompt("Find travel tickets.")); prompt.takeControl()
+        let source = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        let before = session.remoteKeyboardCaptureIdentity
+        var releases = 0
+        visual.onSend = { message in
+            guard case .key(usage: 4, down: false, modifiers: _) = message else { return }
+            releases += 1
+            prompt.takeControl()
+            XCTAssertNil(session.beginRemoteInputSource(.hardwareKeyboard,
+                expectedInputGeneration: session.remoteInputGeneration))
+        }
+        prompt.resumeAI()
+        XCTAssertEqual(releases, 1)
+        XCTAssertEqual(prompt.state, .paused)
+        XCTAssertEqual(prompt.statusText, "AI paused — you're in control")
+        XCTAssertTrue(session.allowsRemoteKeyboardInput)
+        XCTAssertNotEqual(session.remoteKeyboardCaptureIdentity, before)
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(source))
+        XCTAssertTrue(prompt.isConnected)
+    }
+
+    private func makePrivacyFixture(ordinaryTransport: RecordingTargetTransport? = nil,
+                                   localPendingStore: any ComputerUsePendingPromptStoring = EmptyComputerUsePendingPromptStore()) async throws
         -> (SessionModel, RecordingTargetTransport, ComputerUseSessionModel) {
         let connected = expectation(description: "privacy visual transport")
         let visual = RecordingTargetTransport(connected: connected), channel = IdleComputerUseSessionChannel()
         let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
             transportFactory: { ordinaryTransport ?? visual }, computerUseVisualTransportFactory: { visual },
             localAccountBindingValidator: { _ in }, localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
-            localPendingStore: EmptyComputerUsePendingPromptStore(), accountChangeNotificationCenter: NotificationCenter())
+            localPendingStore: localPendingStore, accountChangeNotificationCenter: NotificationCenter())
         session.connect(code: "123456", experience: .computerUse, computerUseHostID: "HOST-B", hostName: "Mac",
             localComputerUseEndpoint: LocalComputerUseEndpoint(host: "127.0.0.1", port: 443),
             localCredentialID: String(repeating: "b", count: 64), localCloudAccountBinding: accountBinding)
@@ -1423,6 +1543,25 @@ private actor IdleComputerUseSessionChannel: ComputerUseSessionChannel {
     }
 
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {}
+}
+
+/// A single retained record lets the actual client control-intent persistence
+/// compare against the preceding prompt. No Keychain or network access.
+private final class KeyboardHandoffPendingStore: ComputerUsePendingPromptStoring, @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: ComputerUsePendingPrompt?
+    func load(hostID: String, pairingCode: String) -> ComputerUsePendingPrompt? {
+        lock.lock(); defer { lock.unlock() }
+        guard current?.hostID == hostID, current?.pairingCode == pairingCode else { return nil }
+        return current
+    }
+    func save(_ pending: ComputerUsePendingPrompt) -> Bool {
+        lock.lock(); defer { lock.unlock() }; current = pending; return true
+    }
+    func remove(hostID: String) {
+        lock.lock(); defer { lock.unlock() }
+        if current?.hostID == hostID { current = nil }
+    }
 }
 
 private final class EmptyComputerUsePendingPromptStore:

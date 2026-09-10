@@ -783,9 +783,13 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private func sendPointer(at p: CGPoint?, buttons: UInt8, allowsNewButtons: Bool = true) {
-        guard synchronizeInputAvailability(), let inputSource,
-              let message = inputRouting.pointer(at: p, buttons: buttons, allowsNewButtons: allowsNewButtons,
+        guard synchronizeInputAvailability(), let inputSource else { return }
+        let previousButtons = inputRouting.pointerButtons
+        guard let message = inputRouting.pointer(at: p, buttons: buttons, allowsNewButtons: allowsNewButtons,
                 geometry: geometry, viewport: visibleContentRect) else { return }
+        if inputRouting.pointerButtons & ~previousButtons != 0, let session, let inputGeneration {
+            RemoteHardwareKeyboardCapture.requestFocus(in: session, expectedInputGeneration: inputGeneration)
+        }
         session?.send(message, from: inputSource)
     }
 
