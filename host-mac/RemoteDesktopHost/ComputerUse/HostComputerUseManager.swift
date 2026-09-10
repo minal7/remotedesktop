@@ -6798,6 +6798,10 @@ final class HostComputerUseManager: ObservableObject {
                   let owner = tools.ownedBrowserResearch(taskID: request.taskID), owner.executionTaskID == envelope.id else {
                 throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
             }
+            if let guidance = owner.input.clarificationLimitMessage {
+                pauseForLocalIntervention(context, guidance: guidance)
+                return
+            }
             textClarifications.invalidate()
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
             let question = try browserClarifications.issue(request, owner: owner, for: envelope)

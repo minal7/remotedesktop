@@ -220,8 +220,7 @@ final class ComputerUseBrowserGoalClarification {
         let current = try currentDate()
         if let pending, current >= pending.expiresAt { self.pending = nil }
         guard pending == nil else { throw Failure.questionPending }
-        guard input.userTurns.count < ComputerUseBrowserGoalInput.maximumUserTurns,
-              input.userTurns.reduce(0, { $0 + $1.utf8.count }) < ComputerUseBrowserGoalInput.maximumUserBytes else { throw Failure.inputLimit }
+        guard input.clarificationLimitMessage == nil else { throw Failure.inputLimit }
         guard proposal.input.digest == input.digest, proposal.disposition != .unsupported,
               (1...8).contains(requirementIDs.count), Set(requirementIDs).count == requirementIDs.count else { throw Failure.invalidProposal }
         let selected = proposal.requirements.filter { requirementIDs.contains($0.id) }

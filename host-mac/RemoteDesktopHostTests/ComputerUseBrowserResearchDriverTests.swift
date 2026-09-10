@@ -4,6 +4,54 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchDriverTests: XCTestCase {
+    func testDriverResearchStartsAfterSixAnswersWithoutReplacingTheRoot() async throws {
+        try await verifyLongQuestionConversation(answerCount: 6, finish: true)
+    }
+
+    func testDriverRetainsTheFullRequestWhenQuestionCapacityIsExhausted() async throws {
+        try await verifyLongQuestionConversation(answerCount: ComputerUseBrowserGoalInput.maximumUserTurns - 1, finish: false)
+    }
+
+    private func verifyLongQuestionConversation(answerCount: Int, finish: Bool) async throws {
+        let fixture = try await ResearchDriverFixture.make()
+        defer { fixture.close() }
+        fixture.goal.base.questionTopic = .location
+        let started = try await fixture.start()
+        var result = try XCTUnwrap(started)
+        let owner = try fixture.owner(), original = owner.input
+        var answers: [String] = []
+        for index in 1...answerCount {
+            guard case .browserClarificationRequired(let request) = result else { return XCTFail("A short answer should still fit the retained conversation") }
+            let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
+                controllerID: "phone", controllerSessionID: "session")
+            let text = "Paris \(index)", taskID = "extended-answer-\(index)"
+            let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: taskID, answer: text,
+                controllerID: "phone", controllerSessionID: "session")
+            answers.append(text)
+            XCTAssertEqual(updated.userTurns, [original.prompt] + answers)
+            XCTAssertTrue(updated.continues(original)); XCTAssertEqual(updated.rootDateContext, original.rootDateContext)
+            if finish && index == answerCount { fixture.goal.base.questionTopic = nil }
+            result = try await fixture.driver.continueBrowserResearch(taskID: taskID, research: owner, tools: fixture.tools, progress: { _ in })
+        }
+        XCTAssertEqual(owner.input.userTurns, [original.prompt] + answers)
+        if finish {
+            guard case .browserResearchProgress = result else { return XCTFail("The driver should reach research after collecting the details") }
+            XCTAssertEqual(fixture.search.inputs.map(\.input), [owner.input])
+            XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+        } else {
+            guard case .userInterventionRequired(let message) = result else { return XCTFail("Exhaustion is a nonterminal intervention, not a failed or new task") }
+            XCTAssertEqual(message, owner.input.clarificationLimitMessage)
+            XCTAssertEqual(owner.input.remainingAnswerCount, 0)
+            XCTAssertNil(try owner.pendingQuestion(controllerID: "phone", controllerSessionID: "session"))
+            XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
+            let resumed = try await fixture.resume()
+            guard case .userInterventionRequired(let repeated) = resumed else { return XCTFail("Resume must retain the exhausted conversation") }
+            XCTAssertEqual(repeated, message)
+            XCTAssertEqual(owner.input.userTurns, [original.prompt] + answers)
+            XCTAssertEqual(fixture.server.requestCount, 0)
+        }
+    }
+
     func testDriverRequestsManualSignInWithoutFollowingTheEntryAndResumesTheOriginalGoal() async throws {
         try await verifyManualLoginHandoff(navigationLimit: 8)
     }

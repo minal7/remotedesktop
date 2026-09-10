@@ -141,6 +141,7 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     private(set) var ordinaryPrompts: [String] = []
     private(set) var continued: [(taskID: String, goal: ComputerUseBrowserGoalInput)] = []
     var pauseFirstAnswer = false
+    var repeatLocationQuestions = false
     var beforeQuestion: (() throws -> Void)?
     var preparePage: ((String) async throws -> Void)?
 
@@ -179,9 +180,10 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
         return try await next(research)
     }
     private func next(_ research: ComputerUseBrowserResearchTask) async throws -> ComputerUseExecutionResult {
-        planner.questionTopic = research.input.userTurns.count < 3 ? (research.input.userTurns.count == 1 ? .location : .date) : nil
+        planner.questionTopic = repeatLocationQuestions ? .location
+            : research.input.userTurns.count < 3 ? (research.input.userTurns.count == 1 ? .location : .date) : nil
         _ = try await research.interpretGoal()
-        guard research.input.userTurns.count < 3 else { return .unableToComplete("Fixture received the complete retained goal; no website research was performed.") }
+        guard repeatLocationQuestions || research.input.userTurns.count < 3 else { return .unableToComplete("Fixture received the complete retained goal; no website research was performed.") }
         try beforeQuestion?()
         return .browserClarificationRequired(try XCTUnwrap(research.proposedQuestionRequest()))
     }

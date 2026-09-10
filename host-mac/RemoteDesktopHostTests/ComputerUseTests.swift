@@ -790,6 +790,46 @@ final class ComputerUseTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
     }
 
+    func test_managerKeepsExtendedBrowserAnswersWhenAnExecutorAsksBeyondTheLimit() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        executor.repeatLocationQuestions = true
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let prompt = makeEnvelope(id: "extended-browser-root", kind: .prompt,
+            body: try ComputerUsePromptRequest(prompt: "Find concerts. Do not buy.", supportsApprovedActionEvidence: true).encodedBody())
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        var update = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        let owner = try XCTUnwrap(executor.owner), original = owner.input
+        var answers: [String] = []
+        let maximumAnswers = ComputerUseBrowserGoalInput.maximumUserTurns - 1
+        for index in 1...maximumAnswers {
+            let answerText = "Paris \(index)", taskID = "extended-wire-answer-\(index)"
+            let answer = makeEnvelope(id: taskID, kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(XCTUnwrap(update.clarification), text: answerText, supportsApprovedActionEvidence: true).encodedBody())
+            XCTAssertTrue(fixture.manager.handle(answer, channel: fixture.channel))
+            answers.append(answerText)
+            if index < maximumAnswers { update = try await clarificationUpdate(taskID: taskID, channel: fixture.channel) }
+            else { await waitUntil { fixture.manager.activity == .paused } }
+            XCTAssertEqual(owner.input.userTurns, [original.prompt] + answers)
+        }
+        XCTAssertEqual(owner.input.remainingAnswerCount, 0)
+        XCTAssertEqual(executor.ordinaryPrompts, [original.prompt])
+        XCTAssertEqual(executor.continued.count, maximumAnswers)
+        XCTAssertEqual(owner.input.rootDigest, original.rootDigest)
+        XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
+        do { _ = try await owner.interpretGoal(); XCTFail("The retained owner should be paused") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        let controls = try XCTUnwrap(fixture.browser.taskControls)
+        XCTAssertEqual(controls.taskID, original.taskID)
+        fixture.browser.requestTaskControl(.resume, displayed: controls)
+        await waitUntil { fixture.manager.activity == .paused && executor.continued.count == maximumAnswers + 1 }
+        XCTAssertEqual(owner.input.userTurns, [original.prompt] + answers)
+        XCTAssertEqual(owner.input.remainingAnswerCount, 0)
+        XCTAssertEqual(executor.ordinaryPrompts, [original.prompt], "Resume cannot readmit the last answer as a new request")
+    }
+
     func test_managerBrowserQuestionRejectsForeignAnswersAndRetiresOnCancelDisconnectOrControllerChange() async throws {
         for retirement in ["cancel", "disconnect", "controller-change", "new-request"] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()

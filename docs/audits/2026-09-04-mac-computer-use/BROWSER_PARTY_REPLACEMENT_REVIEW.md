@@ -55,3 +55,5 @@ Thirteen changed Swift files pass parse-only checks. Active inventories select 1
 5. Continue the [repair checklist](../../../TODO.md), including progress detection and remaining model competence work. The 8 GB Mac and thermal requirements remain unqualified. Alternate models and RTX 3080 adaptation remain later options; no inference, distillation, pruning or SSH retry occurred here.
 
 Live tests remain deferred until explicit permission.
+
+The follow-up [extended-conversation repair](BROWSER_EXTENDED_CONVERSATION_REVIEW.md) replaces the earlier four-user-turn cap with 16 turns under the existing byte/model budgets, and preserves the task when another question would exceed native capacity. Its new methods remain unrun.

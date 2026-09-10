@@ -7,6 +7,90 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testTravelConversationRetainsSixDetailsOriginalBudgetAndEveryAcceptedPrefix() throws {
+        let fixture = try extendedTravelConversation(), current = try proposal(fixture.input, rows: fixture.rows, disposition: "research")
+        XCTAssertEqual(fixture.input.userTurns.count, 7)
+        XCTAssertEqual(fixture.input.remainingAnswerCount, ComputerUseBrowserGoalInput.maximumUserTurns - 7)
+        XCTAssertNil(fixture.input.clarificationLimitMessage)
+        XCTAssertEqual(current.requirements.compactMap { current.source(of: $0) }.joined(), fixture.input.userTurns.joined())
+        for (index, prefix) in fixture.prefixes.enumerated() {
+            XCTAssertTrue(fixture.input.continues(prefix))
+            XCTAssertEqual(fixture.input.inputBeforeAnswer(at: index), prefix)
+            XCTAssertEqual(fixture.input.rootDigest, prefix.rootDigest)
+            XCTAssertEqual(fixture.input.rootDateContext, prefix.rootDateContext)
+            XCTAssertEqual(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: index, in: fixture.input)?.input, prefix)
+        }
+        guard case .bound(let budget) = Scalars(proposal: current).entries[1].resolution else { return XCTFail("The original budget must remain bound") }
+        XCTAssertEqual(budget.compareLiteral(.price(try XCTUnwrap(Scalars.Amount(hundredths: 40_000, currency: .USD)), .total, .included)), .satisfied)
+        XCTAssertEqual(current.requirements[2].role, .prohibition)
+        let normalized = ComputerUseBrowserResearchFormInput.normalizations(for: current)
+        XCTAssertEqual(normalized.filter { $0.kind == .date }.map(\.value), ["2026-10-16"])
+        XCTAssertEqual(normalized.filter { $0.partySourceID != nil }.map(\.value), ["2", "1", "3"])
+    }
+
+    func testExtendedConversationCannotDropOrReorderEarlierAnswersToFitAProposal() throws {
+        let fixture = try extendedTravelConversation()
+        var omitted = fixture.rows; omitted.remove(at: 3)
+        XCTAssertThrowsError(try proposal(fixture.input, rows: omitted, disposition: "research"))
+        var reordered = fixture.rows; reordered.swapAt(3, 4)
+        XCTAssertThrowsError(try proposal(fixture.input, rows: reordered, disposition: "research"))
+        var changed = fixture.rows; changed[1]["source"] = "Under USD 600 total including fees. "
+        XCTAssertThrowsError(try proposal(fixture.input, rows: changed, disposition: "research"))
+    }
+
+    func testExtendedConversationStillCountsItsWholeModelRequestBeforeInference() async throws {
+        let fixture = try extendedTravelConversation(), transport = ClarifiedBrowserTransport()
+        do { _ = try await planner(transport: transport).propose(fixture.input); XCTFail("Longer native retention cannot override the exact model token limit") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .contextLimit) }
+        let requests = await transport.requests
+        XCTAssertEqual(requests.count, 1); let completions = await transport.completions; XCTAssertEqual(completions, 0)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages.last?["content"]).utf8)) as? [String: Any])
+        let turns = try XCTUnwrap(context["clarifications"] as? [[String: Any]])
+        XCTAssertEqual(context["request"] as? String, fixture.input.prompt)
+        XCTAssertEqual(turns.compactMap { $0["answer"] as? String }, Array(fixture.input.userTurns.dropFirst()))
+        XCTAssertEqual(turns.compactMap { $0["turn"] as? Int }, Array(1...6))
+        XCTAssertEqual(body["max_tokens"] as? Int, 1_024)
+    }
+
+    func testLongerRetentionKeepsIndependentUTF8AndPerAnswerBounds() throws {
+        let original = try input("Find tickets."), state = Clarification(input: original), owner = try context()
+        let initial = try proposal(original, rows: [row(original.prompt)])
+        let question = try state.issue(proposal: initial, topic: .location, requirementIDs: [initial.requirements[0].id], context: owner)
+        let exact = String(repeating: "🧭", count: ComputerUseBrowserGoalInput.maximumAnswerBytes / 4)
+        XCTAssertEqual(exact.utf8.count, ComputerUseBrowserGoalInput.maximumAnswerBytes)
+        XCTAssertThrowsError(try state.consume(questionID: question.id, answerTaskID: "too-large", answer: exact + "a", context: owner))
+        XCTAssertEqual(state.input, original); XCTAssertEqual(try state.pendingQuestion(context: owner)?.id, question.id)
+        let accepted = try state.consume(questionID: question.id, answerTaskID: "exact", answer: exact, context: owner)
+        XCTAssertEqual(accepted.userByteCount, original.prompt.utf8.count + exact.utf8.count)
+        XCTAssertEqual(accepted.nextAnswerByteLimit, ComputerUseBrowserGoalInput.maximumAnswerBytes)
+        XCTAssertEqual(accepted.remainingAnswerCount, ComputerUseBrowserGoalInput.maximumUserTurns - 2)
+        let full = try input(String(repeating: "🧭", count: ComputerUseBrowserGoalInput.maximumUserBytes / 4))
+        XCTAssertEqual(full.userByteCount, ComputerUseBrowserGoalInput.maximumUserBytes)
+        XCTAssertEqual(full.nextAnswerByteLimit, 0); XCTAssertGreaterThan(full.remainingAnswerCount, 0)
+        XCTAssertNotNil(full.clarificationLimitMessage)
+        XCTAssertThrowsError(try input(full.prompt + "a"))
+    }
+
+    private func extendedTravelConversation() throws -> (input: ComputerUseBrowserGoalInput, rows: [[String: Any]], prefixes: [ComputerUseBrowserGoalInput]) {
+        let original = try input("Find flights. Under USD 500 total including fees. Do not buy.")
+        let state = Clarification(input: original), owner = try context()
+        var rows = [row("Find flights. "), row("Under USD 500 total including fees. ", role: "condition", field: "price"), row("Do not buy.", role: "prohibition", field: "other")]
+        var prefixes: [ComputerUseBrowserGoalInput] = []
+        let details: [(ComputerUseBrowserClarificationTopic, String, String)] = [
+            (.origin, "San Francisco", "origin"), (.destination, "Los Angeles", "destination"), (.date, "2026-10-16", "date"),
+            (.quantity, "2 adults and 1 child", "quantity"), (.location, "Hollywood", "location"), (.time, "after 6 pm", "time")]
+        for (index, detail) in details.enumerated() {
+            let current = try proposal(state.input, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: current, topic: detail.0, requirementIDs: [current.requirements[0].id], context: owner)
+            prefixes.append(state.input)
+            _ = try state.consume(questionID: question.id, answerTaskID: "travel-detail-\(index)", answer: detail.1, context: owner)
+            rows.append(row(detail.1, turn: index + 1, role: "condition", field: detail.2))
+        }
+        return (state.input, rows, prefixes)
+    }
+
     func testExplicitPartyReplacementPreservesBudgetTicketCountAndHistoricalPartitions() throws {
         for split in [false, true] {
             let original = try input("Find concerts. 2 adults and 1 child. Under USD 50. 2 tickets."), state = Clarification(input: original)
@@ -1681,7 +1765,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         }
         _ = try state.consume(questionID: first.id, answerTaskID: "answer-1", answer: "tomorrow", context: owner)
         rows.append(row("tomorrow", turn: 1, role: "condition", field: "date"))
-        for index in 2...3 {
+        for index in 2..<ComputerUseBrowserGoalInput.maximumUserTurns {
             let current = try proposal(state.input, rows: rows)
             let question = try state.issue(proposal: current, topic: .date, requirementIDs: [current.requirements[0].id], context: owner)
             XCTAssertThrowsError(try state.consume(questionID: question.id, answerTaskID: "answer-1", answer: "today", context: owner),
@@ -1690,7 +1774,9 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             rows.append(row("tomorrow", turn: index, role: "condition", field: "date"))
         }
         let final = try proposal(state.input, rows: rows)
-        XCTAssertEqual(state.input.userTurns.count, 4)
+        XCTAssertEqual(state.input.userTurns.count, ComputerUseBrowserGoalInput.maximumUserTurns)
+        XCTAssertEqual(state.input.remainingAnswerCount, 0)
+        XCTAssertNotNil(state.input.clarificationLimitMessage)
         XCTAssertThrowsError(try state.issue(proposal: final, topic: .date, requirementIDs: [final.requirements[0].id], context: owner))
         let foreign = try input(original.prompt, taskID: "different-browser-root")
         XCTAssertThrowsError(try foreign.appending(state.input.clarifications[0]), "A genuine answer cannot be transplanted into another root")

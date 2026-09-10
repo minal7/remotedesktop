@@ -312,6 +312,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         try run.owner.validateDriverContinuation(run.input)
     }
 
+    private static func questionResult(_ question: ComputerUseBrowserQuestionRequest,
+                                       input: ComputerUseBrowserGoalInput) -> ComputerUseExecutionResult {
+        if let message = input.clarificationLimitMessage { return .userInterventionRequired(message) }
+        return .browserClarificationRequired(question)
+    }
+
     private func navigate(_ run: Run, tools: ComputerUseHostTools,
                           progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         let owner = run.owner
@@ -395,7 +401,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                         progress("Reviewing the pending form criteria…")
                         let interpretation = try await owner.interpretGoal()
                         try check()
-                        if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
+                        if let question = try owner.proposedQuestionRequest() { return Self.questionResult(question, input: owner.input) }
                         guard interpretation.proposal.disposition == .research else {
                             return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
                         }
@@ -408,7 +414,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                         try admitWork()
                         let reviewed = try await owner.reviewFormPreparation(using: actionPlanner)
                         try check()
-                        if let question = reviewed.questionRequest { return .browserClarificationRequired(question) }
+                        if let question = reviewed.questionRequest { return Self.questionResult(question, input: owner.input) }
                         guard case .editForm = reviewed.step else {
                             return .userInterventionRequired("I could not identify justified changes to this form. Your answer and the original task remain pending.")
                         }
@@ -427,7 +433,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     continue
                 }
                 try check()
-                if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
+                if let question = try proposal.questionRequest(for: input) { return Self.questionResult(question, input: owner.input) }
                 guard !proposal.isUnavailable else {
                     return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                 }
@@ -484,7 +490,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             }
             let interpretation = try await owner.interpretGoal()
             try check()
-            if let question = try owner.proposedQuestionRequest() { return .browserClarificationRequired(question) }
+            if let question = try owner.proposedQuestionRequest() { return Self.questionResult(question, input: owner.input) }
             guard interpretation.proposal.disposition == .research else {
                 return .userInterventionRequired("The complete request still has unresolved work. Review the original task before continuing.")
             }
@@ -558,7 +564,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                         continue
                     }
                     try check()
-                    if let question = try proposal.questionRequest(for: input) { return .browserClarificationRequired(question) }
+                    if let question = try proposal.questionRequest(for: input) { return Self.questionResult(question, input: owner.input) }
                     guard !proposal.isUnavailable else {
                         return .userInterventionRequired("I could not justify the requested form criteria. The original request remains pending.")
                     }
@@ -577,7 +583,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     continue
                 case .question:
                     guard let question = action.questionRequest else { throw Failure.invalidProposal }
-                    return .browserClarificationRequired(question)
+                    return Self.questionResult(question, input: owner.input)
                 case .loginHandoff:
                     return .userInterventionRequired(try await owner.requestLoginHandoff(for: action))
                 case .unavailable:
