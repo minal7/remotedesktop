@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This builds on [live question replay](CLARIFICATION_LIVE_REPLAY_REVIEW.md) and [rejected-answer recovery](BROWSER_REJECTED_ANSWER_RECOVERY_REVIEW.md). No build, typecheck, assertion/test run, browser/app launch, model invocation, account login or SSH attempt occurred.
 
+Follow-up: the [secure storage read review](PHONE_STORAGE_READ_RECOVERY_REVIEW.md) repairs failed Keychain reads being treated as absence/replacement, and stale recovery snapshots being saved after a reconnect handshake. The verification counts below describe this original checkpoint.
+
 ## First-principles findings
 
 The phone previously removed its recovery record when an explicit question arrived. The composer retained the reference only in memory, and stopping the session expired it. A user could therefore lose an otherwise live browser or text-editing conversation merely by leaving and reopening the phone session.

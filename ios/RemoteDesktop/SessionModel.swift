@@ -419,7 +419,7 @@ final class SessionModel: ObservableObject {
                 let pendingStore = self.localPendingStore
                 // Read recovery state only after the current Apple Account is
                 // validated, and only from that account's Keychain namespace.
-                let recoveryCandidate = pendingStore.loadForLocalRecovery(
+                let recoveryCandidate = try pendingStore.readForLocalRecovery(
                     hostID: hostID,
                     localAccountBinding: accountBinding)
                 let sessionID = recoveryCandidate?.sessionID
@@ -447,9 +447,19 @@ final class SessionModel: ObservableObject {
                       self.sessionAccountBinding == accountBinding else {
                     return
                 }
-                if let recoveryCandidate,
-                   recoveryCandidate.pairingCode != code {
-                    let rebound = recoveryCandidate.rebindingPairingCode(code)
+                // The handshake can suspend while another view updates a
+                // question, submits an answer, or retires the old request.
+                // Re-read instead of saving the pre-handshake snapshot over
+                // that newer record. A different session needs a new channel.
+                let currentRecovery = try pendingStore.readForLocalRecovery(
+                    hostID: hostID, localAccountBinding: accountBinding)
+                if let currentRecovery, currentRecovery.sessionID != sessionID {
+                    throw SignalingError.transport(
+                        "The saved AI request changed while connecting. Reconnect to recover the current request.")
+                }
+                if let currentRecovery,
+                   currentRecovery.pairingCode != code {
+                    let rebound = currentRecovery.rebindingPairingCode(code)
                     guard pendingStore.save(rebound) else {
                         throw SignalingError.transport(
                             "The recovered AI task could not be saved safely. No task was resent.")

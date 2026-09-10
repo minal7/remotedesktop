@@ -1,8 +1,169 @@
 import XCTest
+import Security
 @testable import RemoteDesktop
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testSecureStoreReadFailuresAndInvalidRecordsNeverDeleteRecoveryData() throws {
+        let keychain = ClarificationKeychainFixture()
+        let store = ComputerUsePendingPromptStore(service: "fixture", keychain: keychain)
+        let binding = try XCTUnwrap(CloudKitAccountBinding(rawValue: String(repeating: "a", count: 64)))
+        let request = ComputerUsePromptRequest(prompt: "Find tickets.")
+        let pending = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "original-session",
+            messageID: "original-task", prompt: request.prompt, wireBody: try request.encodedBody(), createdAt: Date(),
+            localAccountBinding: binding)
+        XCTAssertTrue(store.save(pending))
+        let original = keychain.snapshot, mutations = keychain.mutationCount
+        for status in [errSecInteractionNotAllowed, errSecNotAvailable, errSecAuthFailed, errSecDecode] {
+            keychain.readStatus = status
+            XCTAssertThrowsError(try store.read(hostID: "HOST-ID", pairingCode: "123456", localAccountBinding: binding)) {
+                guard case ComputerUsePendingPromptReadError.unavailable = $0 else { return XCTFail("Report unavailable storage") }
+            }
+            XCTAssertThrowsError(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+            XCTAssertNil(store.load(hostID: "HOST-ID", pairingCode: "123456", localAccountBinding: binding))
+            XCTAssertNil(store.loadForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+            XCTAssertEqual(keychain.snapshot, original); XCTAssertEqual(keychain.mutationCount, mutations)
+        }
+        keychain.readStatus = nil
+        XCTAssertEqual(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding), pending)
+        XCTAssertEqual(try store.read(hostID: "HOST-ID", pairingCode: "123456", localAccountBinding: binding), pending)
+        XCTAssertThrowsError(try store.read(hostID: "HOST-ID", pairingCode: "654321", localAccountBinding: binding)) {
+            guard case ComputerUsePendingPromptReadError.pairingChanged = $0 else { return XCTFail("Keep earlier connection state distinct from absence") }
+        }
+        XCTAssertNil(store.load(hostID: "HOST-ID", pairingCode: "654321", localAccountBinding: binding))
+        // Corrupt data, a successful lookup with no data, and the wrong
+        // namespace are not evidence that a prior task never existed.
+        for data in [Data("{broken".utf8), Data()] {
+            keychain.snapshot = data
+            XCTAssertThrowsError(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+            XCTAssertEqual(keychain.snapshot, data); XCTAssertEqual(keychain.mutationCount, mutations)
+        }
+        keychain.snapshot = nil; keychain.readStatus = errSecSuccess
+        XCTAssertThrowsError(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+        keychain.snapshot = original; keychain.readStatus = nil
+        XCTAssertThrowsError(try store.read(hostID: "OTHER-HOST", pairingCode: "123456", localAccountBinding: binding))
+        XCTAssertThrowsError(try store.read(hostID: "HOST-ID", pairingCode: "123456", localAccountBinding: nil))
+        let expired = ComputerUsePendingPrompt(hostID: pending.hostID, pairingCode: pending.pairingCode,
+            sessionID: pending.sessionID, messageID: pending.messageID, prompt: pending.prompt,
+            wireBody: pending.wireBody, createdAt: Date().addingTimeInterval(-90_000), localAccountBinding: binding)
+        let expiredBytes = try JSONEncoder().encode(expired)
+        keychain.snapshot = expiredBytes
+        XCTAssertNil(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+        XCTAssertEqual(keychain.snapshot, expiredBytes); XCTAssertEqual(keychain.mutationCount, mutations)
+        keychain.snapshot = nil
+        XCTAssertNil(try store.readForLocalRecovery(hostID: "HOST-ID", localAccountBinding: binding))
+        XCTAssertEqual(keychain.mutationCount, mutations)
+    }
+
+    func testUnreadableStartupCannotSendOrChooseANewSessionBeforeReconnect() async throws {
+        for isQuestion in [false, true] {
+            let keychain = ClarificationKeychainFixture()
+            let store = ComputerUsePendingPromptStore(service: "fixture", keychain: keychain)
+            let request = ComputerUsePromptRequest(prompt: "Find tickets.")
+            let reference = try ComputerUseClarificationReference(taskID: "original-task", expiresAt: Date().addingTimeInterval(300))
+            let question = try ComputerUsePendingQuestion(reference: reference, text: "Which city?", answerPolicy: nil,
+                receivedAt: Date(), validUntil: reference.expiresAt, draft: "  e\u{301} Paris\n")
+            let pending = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "original-session",
+                messageID: reference.taskID, prompt: request.prompt, wireBody: try request.encodedBody(), createdAt: Date(),
+                question: isQuestion ? question : nil)
+            XCTAssertTrue(store.save(pending))
+            let original = keychain.snapshot, mutations = keychain.mutationCount
+            keychain.readStatus = errSecInteractionNotAllowed
+            let channel = ClarificationClientChannel()
+            let blocked = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+                sessionID: "unrelated-session", pendingStore: store, channel: channel)
+            blocked.start()
+            XCTAssertTrue(blocked.isLiveScreenPrivacyShielded)
+            XCTAssertNotNil(blocked.promptValidationMessage("Another task"))
+            XCTAssertFalse(blocked.sendPrompt("Another task")); XCTAssertFalse(blocked.startNewRequest())
+            blocked.retryLastPrompt(); blocked.retryQuestionRecovery()
+            blocked.stop(); blocked.start()
+            keychain.readStatus = nil
+            XCTAssertFalse(blocked.sendPrompt("Another task"), "Restoring storage cannot authenticate a different session in place")
+            blocked.stop()
+            let count = await channel.sentCount(); XCTAssertEqual(count, 0)
+            XCTAssertEqual(keychain.snapshot, original); XCTAssertEqual(keychain.mutationCount, mutations)
+            let restored = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
+                pendingStore: store, channel: channel)
+            defer { restored.stop() }
+            restored.start()
+            if isQuestion {
+                let probe = try await channel.probe(at: 0)
+                XCTAssertEqual(probe.reference, reference); XCTAssertEqual(restored.composerMode, .recoveringAnswer)
+                let prompts = await channel.promptCount(); XCTAssertEqual(prompts, 0)
+            } else {
+                let prompt = try await channel.prompt(at: 0)
+                XCTAssertEqual(prompt.id, pending.messageID); XCTAssertEqual(prompt.sessionID, pending.sessionID)
+                XCTAssertTrue(prompt.body.utf8.elementsEqual(pending.exactWireBody.utf8))
+            }
+        }
+    }
+
+    func testQuestionReadOutageRetainsDraftAndRequiresANewProbeAfterStorageReturns() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let reference = try await fixture.question(for: root, supportsRecovery: true)
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
+        let question = try XCTUnwrap(saved.question), draft = "  e\u{301} Paris 😀\n"
+        fixture.model.updateQuestionDraft(draft)
+        fixture.store.permitsRead = false
+        fixture.model.stop() // Flush encounters unavailable storage.
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        fixture.model.start()
+        XCTAssertEqual(fixture.model.composerMode, .recoveringAnswer); XCTAssertTrue(fixture.model.canRetryQuestionRecovery)
+        XCTAssertFalse(fixture.model.startNewRequest()); XCTAssertFalse(fixture.model.sendPrompt("Paris"))
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        fixture.store.permitsRead = true
+        fixture.model.retryQuestionRecovery()
+        let first = try await fixture.channel.probe(at: 0)
+        fixture.store.permitsRead = false
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: first.probeID, reference: reference,
+            question: question.text, answerPolicy: nil).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .recoveringAnswer)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), saved)
+        fixture.store.permitsRead = true
+        fixture.model.retryQuestionRecovery()
+        let second = try await fixture.channel.probe(at: 1)
+        XCTAssertNotEqual(first.probeID, second.probeID)
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: first.probeID, reference: reference,
+            question: question.text, answerPolicy: nil).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .recoveringAnswer)
+        await fixture.channel.deliver(try ComputerUseClarificationProbeResult(probeID: second.probeID, reference: reference,
+            question: question.text, answerPolicy: nil).encodedBody(), kind: .status)
+        try await fixture.channel.waitForDelivery()
+        XCTAssertEqual(fixture.model.composerMode, .answer(reference, validUntil: question.validUntil))
+        XCTAssertTrue(try XCTUnwrap(fixture.model.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
+        let recovered = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        XCTAssertEqual(recovered.receivedAt, question.receivedAt); XCTAssertEqual(recovered.validUntil, question.validUntil)
+        XCTAssertTrue(try XCTUnwrap(recovered.draft).utf8.elementsEqual(draft.utf8))
+        let count = await fixture.channel.promptCount(); XCTAssertEqual(count, 1)
+        XCTAssertTrue(fixture.model.sendPrompt(draft))
+        let answer = try ComputerUsePromptRequest.decodeBody(await fixture.channel.prompt(at: 1).body)
+        XCTAssertEqual(answer.clarification, reference); XCTAssertTrue(answer.prompt.utf8.elementsEqual(draft.utf8))
+    }
+
+    func testIdleClientCannotOverwriteARequestHiddenByAReadFailureOrSavedByAnotherInstance() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start()
+        let pending = ComputerUsePendingPrompt(hostID: "HOST-ID", pairingCode: "123456", sessionID: "other-session",
+            messageID: "other-task", prompt: "Existing task", createdAt: Date())
+        XCTAssertTrue(fixture.store.save(pending))
+        fixture.store.permitsRead = false
+        XCTAssertFalse(fixture.model.sendPrompt("New task"))
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), pending)
+        fixture.store.permitsRead = true
+        XCTAssertFalse(fixture.model.sendPrompt("New task"))
+        XCTAssertFalse(fixture.model.startNewRequest())
+        XCTAssertTrue(fixture.model.statusText.contains("Reconnect"))
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"), pending)
+        let count = await fixture.channel.sentCount(); XCTAssertEqual(count, 0)
+    }
+
     func testSavedQuestionRestoresOnlyAfterFreshScopedProbeAndAnswerReplacesItsDraftRecord() async throws {
         var now = Date()
         let fixture = ClarificationClientFixture(now: { now })
@@ -805,7 +966,9 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
     private var deliveredCount = 0
     private var acknowledgedCount = 0
     private var failPrompt = false
+    private var allSentCount = 0
     func send(kind: ComputerUseEnvelope.Kind, body: String, to targetID: String?, sessionID: String?, messageID: String?) async throws -> ComputerUseEnvelope {
+        allSentCount += 1
         let envelope = ComputerUseEnvelope(id: messageID ?? UUID().uuidString, senderID: "IOS-ID", targetID: targetID ?? "HOST-ID",
             pairingCode: "123456", sessionID: sessionID ?? "session-1", kind: kind, body: body)
         if kind == .prompt {
@@ -826,6 +989,7 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
         incoming.append(.init(senderID: senderID, targetID: "IOS-ID", pairingCode: pairingCode, sessionID: sessionID, kind: kind, body: body))
     }
     func promptCount() -> Int { prompts.count }
+    func sentCount() -> Int { allSentCount }
     func probe(at index: Int) async throws -> ComputerUseClarificationProbe {
         let deadline = ContinuousClock.now + .seconds(3)
         while probes.count <= index {
@@ -856,6 +1020,11 @@ private final class ClarificationClientStore: ComputerUsePendingPromptStoring, @
     private let lock = NSLock()
     private var saved: ComputerUsePendingPrompt?
     private var allowsSave = true
+    private var allowsRead = true
+    var permitsRead: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return allowsRead }
+        set { lock.lock(); defer { lock.unlock() }; allowsRead = newValue }
+    }
     var permitsSave: Bool {
         get { lock.lock(); defer { lock.unlock() }; return allowsSave }
         set { lock.lock(); defer { lock.unlock() }; allowsSave = newValue }
@@ -865,6 +1034,10 @@ private final class ClarificationClientStore: ComputerUsePendingPromptStoring, @
         guard saved?.hostID == hostID, saved?.pairingCode == pairingCode else { return nil }
         return saved
     }
+    func read(hostID: String, pairingCode: String, localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt? {
+        guard permitsRead else { throw ComputerUsePendingPromptReadError.unavailable }
+        return load(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding)
+    }
     func save(_ pending: ComputerUsePendingPrompt) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard allowsSave else { return false }; saved = pending; return true
@@ -872,5 +1045,42 @@ private final class ClarificationClientStore: ComputerUsePendingPromptStoring, @
     func remove(hostID: String) {
         lock.lock(); defer { lock.unlock() }
         if saved?.hostID == hostID { saved = nil }
+    }
+}
+
+private final class ClarificationKeychainFixture: ComputerUsePendingPromptKeychain, @unchecked Sendable {
+    private let lock = NSLock()
+    private var data: Data?
+    private var status: OSStatus?
+    private var mutations = 0
+    var snapshot: Data? {
+        get { lock.lock(); defer { lock.unlock() }; return data }
+        set { lock.lock(); defer { lock.unlock() }; data = newValue }
+    }
+    var readStatus: OSStatus? {
+        get { lock.lock(); defer { lock.unlock() }; return status }
+        set { lock.lock(); defer { lock.unlock() }; status = newValue }
+    }
+    var mutationCount: Int { lock.lock(); defer { lock.unlock() }; return mutations }
+    func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
+        lock.lock(); defer { lock.unlock() }
+        return (status ?? (data == nil ? errSecItemNotFound : errSecSuccess), data)
+    }
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
+        lock.lock(); defer { lock.unlock() }
+        mutations += 1
+        guard data != nil else { return errSecItemNotFound }
+        data = attributes[kSecValueData as String] as? Data
+        return errSecSuccess
+    }
+    func add(_ attributes: [String: Any]) -> OSStatus {
+        lock.lock(); defer { lock.unlock() }
+        mutations += 1; data = attributes[kSecValueData as String] as? Data
+        return errSecSuccess
+    }
+    func delete(_ query: [String: Any]) -> OSStatus {
+        lock.lock(); defer { lock.unlock() }
+        mutations += 1; data = nil
+        return errSecSuccess
     }
 }

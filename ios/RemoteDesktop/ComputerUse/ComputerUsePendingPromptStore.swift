@@ -192,7 +192,31 @@ struct ComputerUsePendingPrompt: Codable, Equatable, Sendable {
     }
 }
 
+enum ComputerUsePendingPromptReadError: LocalizedError {
+    case unavailable
+    case invalidRecord
+    case pairingChanged
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable:
+            return "Secure recovery data could not be read. Unlock this device and reconnect; the saved request has been kept."
+        case .invalidRecord:
+            return "The saved AI request could not be decoded safely. Its recovery data has been kept and no new request was sent."
+        case .pairingChanged:
+            return "The saved AI request belongs to an earlier connection. Reconnect to recover it before sending another request."
+        }
+    }
+}
+
 protocol ComputerUsePendingPromptStoring: Sendable {
+    /// A nil result means a successful lookup found no usable record. Read
+    /// failures must remain distinguishable so callers cannot replace an
+    /// unseen task, approval, or question with a fresh request.
+    func read(hostID: String, pairingCode: String,
+              localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt?
+    func readForLocalRecovery(hostID: String,
+                              localAccountBinding: CloudKitAccountBinding) throws -> ComputerUsePendingPrompt?
     func load(hostID: String, pairingCode: String) -> ComputerUsePendingPrompt?
     func load(
         hostID: String,
@@ -213,6 +237,16 @@ protocol ComputerUsePendingPromptStoring: Sendable {
 }
 
 extension ComputerUsePendingPromptStoring {
+    func read(hostID: String, pairingCode: String,
+              localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt? {
+        load(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding)
+    }
+
+    func readForLocalRecovery(hostID: String,
+                              localAccountBinding: CloudKitAccountBinding) throws -> ComputerUsePendingPrompt? {
+        loadForLocalRecovery(hostID: hostID, localAccountBinding: localAccountBinding)
+    }
+
     func loadForLocalRecovery(
         hostID: String,
         localAccountBinding: CloudKitAccountBinding
@@ -250,6 +284,28 @@ extension ComputerUsePendingPromptStoring {
     }
 }
 
+/// The production adapter and deterministic fixtures share the same store
+/// decision logic. A failed read is never translated into a delete operation.
+protocol ComputerUsePendingPromptKeychain: Sendable {
+    func copy(_ query: [String: Any]) -> (OSStatus, Data?)
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus
+    func add(_ attributes: [String: Any]) -> OSStatus
+    func delete(_ query: [String: Any]) -> OSStatus
+}
+
+private struct SystemComputerUsePendingPromptKeychain: ComputerUsePendingPromptKeychain {
+    func copy(_ query: [String: Any]) -> (OSStatus, Data?) {
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        return (status, item as? Data)
+    }
+    func update(_ query: [String: Any], attributes: [String: Any]) -> OSStatus {
+        SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+    }
+    func add(_ attributes: [String: Any]) -> OSStatus { SecItemAdd(attributes as CFDictionary, nil) }
+    func delete(_ query: [String: Any]) -> OSStatus { SecItemDelete(query as CFDictionary) }
+}
+
 final class ComputerUsePendingPromptStore:
     ComputerUsePendingPromptStoring,
     @unchecked Sendable
@@ -257,21 +313,20 @@ final class ComputerUsePendingPromptStore:
     static let shared = ComputerUsePendingPromptStore()
 
     private let service: String
+    private let keychain: any ComputerUsePendingPromptKeychain
     private let maximumAge: TimeInterval = 24 * 60 * 60
 
     init(
         service: String =
-            "com.threadmark.remotedesktop.computer-use.pending-prompt"
+            "com.threadmark.remotedesktop.computer-use.pending-prompt",
+        keychain: any ComputerUsePendingPromptKeychain = SystemComputerUsePendingPromptKeychain()
     ) {
         self.service = service
+        self.keychain = keychain
     }
 
     func load(hostID: String, pairingCode: String) -> ComputerUsePendingPrompt? {
-        guard let pending = loadPending(
-                hostID: hostID,
-                localAccountBinding: nil),
-              pending.pairingCode == pairingCode else { return nil }
-        return pending
+        try? read(hostID: hostID, pairingCode: pairingCode, localAccountBinding: nil)
     }
 
     func load(
@@ -279,11 +334,7 @@ final class ComputerUsePendingPromptStore:
         pairingCode: String,
         localAccountBinding: CloudKitAccountBinding?
     ) -> ComputerUsePendingPrompt? {
-        guard let pending = loadPending(
-                hostID: hostID,
-                localAccountBinding: localAccountBinding),
-              pending.pairingCode == pairingCode else { return nil }
-        return pending
+        try? read(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding)
     }
 
     /// Loads by stable host identity without accepting the old pairing code as
@@ -294,38 +345,46 @@ final class ComputerUsePendingPromptStore:
         hostID: String,
         localAccountBinding: CloudKitAccountBinding
     ) -> ComputerUsePendingPrompt? {
-        loadPending(
-            hostID: hostID,
-            localAccountBinding: localAccountBinding)
+        try? readForLocalRecovery(hostID: hostID, localAccountBinding: localAccountBinding)
     }
 
-    private func loadPending(
+    func read(hostID: String, pairingCode: String,
+              localAccountBinding: CloudKitAccountBinding?) throws -> ComputerUsePendingPrompt? {
+        guard let pending = try readPending(hostID: hostID, localAccountBinding: localAccountBinding) else { return nil }
+        guard pending.pairingCode == pairingCode else { throw ComputerUsePendingPromptReadError.pairingChanged }
+        return pending
+    }
+
+    func readForLocalRecovery(hostID: String,
+                              localAccountBinding: CloudKitAccountBinding) throws -> ComputerUsePendingPrompt? {
+        try readPending(hostID: hostID, localAccountBinding: localAccountBinding)
+    }
+
+    private func readPending(
         hostID: String,
         localAccountBinding: CloudKitAccountBinding?
-    ) -> ComputerUsePendingPrompt? {
+    ) throws -> ComputerUsePendingPrompt? {
         var query = baseQuery(
             hostID: hostID,
             localAccountBinding: localAccountBinding)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let (status, data) = keychain.copy(query)
         if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess,
-              let data = item as? Data,
+        guard status == errSecSuccess else { throw ComputerUsePendingPromptReadError.unavailable }
+        guard let data,
               let pending = try? JSONDecoder().decode(
                 ComputerUsePendingPrompt.self,
                 from: data),
               pending.hostID == hostID,
               pending.hasCanonicalLocalAccountBinding,
               pending.hasValidQuestionRecovery,
-              pending.localAccountBinding == localAccountBinding,
-              Date().timeIntervalSince(pending.question?.receivedAt ?? pending.createdAt) <= maximumAge else {
-            remove(
-                hostID: hostID,
-                localAccountBinding: localAccountBinding)
-            return nil
+              pending.localAccountBinding == localAccountBinding else {
+            throw ComputerUsePendingPromptReadError.invalidRecord
         }
+        // Expired data is not actionable, but lookup remains read-only. A
+        // concurrent replacement must never be erased by this older read.
+        guard Date().timeIntervalSince(pending.question?.receivedAt ?? pending.createdAt) <= maximumAge else { return nil }
         return pending
     }
 
@@ -337,9 +396,7 @@ final class ComputerUsePendingPromptStore:
             hostID: pending.hostID,
             localAccountBinding: pending.localAccountBinding)
         let updates: [String: Any] = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(
-            query as CFDictionary,
-            updates as CFDictionary)
+        let updateStatus = keychain.update(query, attributes: updates)
         if updateStatus == errSecSuccess { return true }
         guard updateStatus == errSecItemNotFound else { return false }
 
@@ -347,7 +404,7 @@ final class ComputerUsePendingPromptStore:
         attributes[kSecValueData as String] = data
         attributes[kSecAttrAccessible as String] =
             kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+        return keychain.add(attributes) == errSecSuccess
     }
 
     func remove(hostID: String) {
@@ -358,9 +415,9 @@ final class ComputerUsePendingPromptStore:
         hostID: String,
         localAccountBinding: CloudKitAccountBinding?
     ) {
-        SecItemDelete(baseQuery(
+        _ = keychain.delete(baseQuery(
             hostID: hostID,
-            localAccountBinding: localAccountBinding) as CFDictionary)
+            localAccountBinding: localAccountBinding))
     }
 
     private func baseQuery(

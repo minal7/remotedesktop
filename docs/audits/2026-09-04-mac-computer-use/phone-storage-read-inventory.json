@@ -1,0 +1,20 @@
+{
+  "selectors": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testIdleClientCannotOverwriteARequestHiddenByAReadFailureOrSavedByAnotherInstance",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testQuestionReadOutageRetainsDraftAndRequiresANewProbeAfterStorageReturns",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testSecureStoreReadFailuresAndInvalidRecordsNeverDeleteRecoveryData",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testUnreadableStartupCannotSendOrChooseANewSessionBeforeReconnect",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryReadFailureStopsBeforeHandshakeOrVisualConnection",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryRebindsTheLatestQuestionDraftAndDoesNotReviveARemovedRecord",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryRechecksStorageAfterHandshakeWithoutOverwritingChangedOrUnreadableRecords"
+  ],
+  "expectedTests": [
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testIdleClientCannotOverwriteARequestHiddenByAReadFailureOrSavedByAnotherInstance",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testQuestionReadOutageRetainsDraftAndRequiresANewProbeAfterStorageReturns",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testSecureStoreReadFailuresAndInvalidRecordsNeverDeleteRecoveryData",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testUnreadableStartupCannotSendOrChooseANewSessionBeforeReconnect",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryReadFailureStopsBeforeHandshakeOrVisualConnection",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryRebindsTheLatestQuestionDraftAndDoesNotReviveARemovedRecord",
+    "RemoteDesktopTests/WebRTCTransportTests/test_localRecoveryRechecksStorageAfterHandshakeWithoutOverwritingChangedOrUnreadableRecords"
+  ]
+}

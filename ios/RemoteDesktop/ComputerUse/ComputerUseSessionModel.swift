@@ -97,7 +97,7 @@ final class ComputerUseSessionModel: ObservableObject {
         if case .answer = composerMode { return true }
         return composerMode == .legacyAnswer
     }
-    var canStartNewRequest: Bool { activePromptID == nil && composerMode != .request }
+    var canStartNewRequest: Bool { !requiresRecoveryReconnect && activePromptID == nil && composerMode != .request }
     var canRetryQuestionRecovery: Bool {
         guard isConnected, composerMode == .recoveringAnswer, waitingQuestionRecord != nil else { return false }
         if case .error = state { return true }
@@ -110,6 +110,9 @@ final class ComputerUseSessionModel: ObservableObject {
     private let pairingCode: String
     private let sessionID: String
     private let pendingStore: any ComputerUsePendingPromptStoring
+    /// An unreadable initial record may own a different session ID. Only a
+    /// newly authenticated connection may select that recovered session.
+    private var requiresRecoveryReconnect = false
     private let localAccountBinding: CloudKitAccountBinding?
     private var pollingTask: Task<Void, Never>?
     private var responseTimeoutTask: Task<Void, Never>?
@@ -175,10 +178,17 @@ final class ComputerUseSessionModel: ObservableObject {
         questionRecoveryTimeout: Duration = .seconds(10),
         now: @escaping () -> Date = Date.init
     ) {
-        let restored = pendingStore.load(
-            hostID: hostID,
-            pairingCode: pairingCode,
-            localAccountBinding: localAccountBinding)
+        let restored: ComputerUsePendingPrompt?
+        let recoveryReadFailure: String?
+        do {
+            restored = try pendingStore.read(hostID: hostID, pairingCode: pairingCode,
+                localAccountBinding: localAccountBinding)
+            recoveryReadFailure = nil
+        } catch {
+            restored = nil
+            recoveryReadFailure = (error as? LocalizedError)?.errorDescription
+                ?? "Secure recovery data could not be read. Unlock this device and reconnect before sending a request."
+        }
         let effectiveSessionID = restored?.sessionID
             ?? sessionID
             ?? UUID().uuidString
@@ -193,6 +203,13 @@ final class ComputerUseSessionModel: ObservableObject {
         self.questionRecoveryTimeout = questionRecoveryTimeout
         self.now = now
         self.channel = channel
+
+        if let recoveryReadFailure {
+            requiresRecoveryReconnect = true
+            isLiveScreenPrivacyShielded = true
+            state = .error(recoveryReadFailure)
+            statusText = recoveryReadFailure
+        }
 
         if let restored {
             activePromptID = restored.messageID
@@ -271,6 +288,7 @@ final class ComputerUseSessionModel: ObservableObject {
         guard pollingTask == nil else { return }
         isStopped = false
         isConnected = true
+        guard !requiresRecoveryReconnect else { return }
         pollingTask = Task { [weak self] in
             await self?.pollLoop()
         }
@@ -321,7 +339,26 @@ final class ComputerUseSessionModel: ObservableObject {
     @discardableResult
     func sendPrompt(_ rawPrompt: String) -> Bool {
         guard !isStopped, activePromptID == nil else { return false }
-        if waitingQuestionRecord != nil, !ownsWaitingQuestionRecord() { abandonReplacedQuestion(); return false }
+        guard !requiresRecoveryReconnect else { return false }
+        if waitingQuestionRecord != nil {
+            guard requireWaitingQuestionOwnership() else { return false }
+        } else {
+            // A successful save alone cannot prove that an earlier task was
+            // absent when storage was unreadable. Check before replacement.
+            do {
+                if try pendingStore.read(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding) != nil {
+                    requiresRecoveryReconnect = true
+                    isLiveScreenPrivacyShielded = true
+                    state = .error("A saved request needs to be recovered.")
+                    statusText = "A saved request needs to be recovered. Reconnect before sending a new request."
+                    return false
+                }
+            } catch {
+                state = .error("Secure recovery data could not be read.")
+                statusText = "Request not sent. Secure recovery data could not be read; unlock this device and try again."
+                return false
+            }
+        }
         switch state {
         case .ready, .error:
             break
@@ -430,6 +467,7 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     func promptValidationMessage(_ text: String) -> String? {
+        if requiresRecoveryReconnect { return "Unlock this device and reconnect so the previous request can be checked." }
         if composerMode == .recoveringAnswer { return "Wait for your Mac to check the saved question, or start a new request." }
         if composerMode == .expiredAnswer { return "This question is no longer active. Start a new request." }
         if case .answer(_, let deadline) = composerMode, now() >= deadline {
@@ -450,7 +488,8 @@ final class ComputerUseSessionModel: ObservableObject {
 
     @discardableResult
     func startNewRequest() -> Bool {
-        guard activePromptID == nil else { return false }
+        guard !requiresRecoveryReconnect, activePromptID == nil else { return false }
+        if waitingQuestionRecord != nil, !requireWaitingQuestionOwnership() { return false }
         advanceStateGeneration()
         clearQuestionRecovery(removingStoredRecord: true)
         resetComposerMode()
@@ -503,7 +542,7 @@ final class ComputerUseSessionModel: ObservableObject {
 
     private func persistQuestionDraft() {
         guard let record = waitingQuestionRecord, let question = record.question else { return }
-        guard ownsWaitingQuestionRecord() else { abandonReplacedQuestion(); return }
+        guard requireWaitingQuestionOwnership() else { return }
         guard !Self.sameTextBytes(question.draft, questionDraft) else { return }
         guard let updated = try? question.withDraft(questionDraft) else {
             statusText = "This draft is too long to save for recovery. Shorten it before leaving."
@@ -525,12 +564,33 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     private func ownsWaitingQuestionRecord() -> Bool {
+        (try? readWaitingQuestionOwnership()) == true
+    }
+
+    private func readWaitingQuestionOwnership() throws -> Bool {
         guard let record = waitingQuestionRecord else { return false }
-        guard let current = pendingStore.load(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding),
+        guard let current = try pendingStore.read(hostID: hostID, pairingCode: pairingCode, localAccountBinding: localAccountBinding),
               current == record else { return false }
         return Self.sameTextBytes(current.wireBody, record.wireBody) && Self.sameTextBytes(current.prompt, record.prompt)
             && Self.sameTextBytes(current.question?.text, record.question?.text)
             && Self.sameTextBytes(current.question?.draft, record.question?.draft)
+    }
+
+    private func requireWaitingQuestionOwnership() -> Bool {
+        do {
+            guard try readWaitingQuestionOwnership() else { abandonReplacedQuestion(); return false }
+            return true
+        } catch {
+            // Unavailable storage is not evidence that another task replaced
+            // this question. Keep its exact draft and original deadline, and
+            // require another fresh native probe after reads recover.
+            questionProbeID = nil
+            questionProbeSendTask?.cancel(); questionProbeTimeoutTask?.cancel(); questionDraftSaveTask?.cancel()
+            resetComposerMode(); composerMode = .recoveringAnswer
+            state = .error("Secure recovery data could not be read.")
+            statusText = "Your saved question could not be read. Unlock this device, then check again."
+            return false
+        }
     }
 
     private static func sameTextBytes(_ lhs: String?, _ rhs: String?) -> Bool {
@@ -549,7 +609,7 @@ final class ComputerUseSessionModel: ObservableObject {
 
     func retryQuestionRecovery() {
         guard !isStopped, activePromptID == nil, let question = waitingQuestionRecord?.question else { return }
-        guard ownsWaitingQuestionRecord() else { abandonReplacedQuestion(); return }
+        guard requireWaitingQuestionOwnership() else { return }
         guard now() < question.validUntil else { state = .ready; expireClarification(); return }
         questionProbeSendTask?.cancel(); questionProbeTimeoutTask?.cancel()
         let probe = ComputerUseClarificationProbe(reference: question.reference)
@@ -582,7 +642,7 @@ final class ComputerUseSessionModel: ObservableObject {
         guard !isStopped, activePromptID == nil, composerMode == .recoveringAnswer, hasHostControlScope(envelope),
               questionProbeID == result.probeID, let record = waitingQuestionRecord, let question = record.question,
               result.reference == question.reference else { return }
-        guard ownsWaitingQuestionRecord() else { abandonReplacedQuestion(); return }
+        guard requireWaitingQuestionOwnership() else { return }
         guard now() < question.validUntil, let text = result.question else {
             latestTerminalOutcome = .unableToComplete; state = .ready; expireClarification(); return
         }
