@@ -38,6 +38,10 @@ struct RemoteScreenView: UIViewRepresentable {
         uiView.accessories = accessories
         uiView.applyDisplay(session.display)
     }
+
+    static func dismantleUIView(_ uiView: RemoteScreenUIView, coordinator: ()) {
+        uiView.stopCapture()
+    }
 }
 
 @MainActor
@@ -57,6 +61,7 @@ final class RemoteScreenZoomController: ObservableObject {
     }
     fileprivate var commandHandler: ((Command) -> Void)?
     fileprivate var interactionModeHandler: ((Bool) -> Void)?
+    fileprivate weak var captureView: RemoteScreenUIView?
 
     var isZoomed: Bool { scale > 1.01 }
 
@@ -131,7 +136,7 @@ struct RemoteScreenZoomControls: View {
 }
 
 final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
-    weak var session: SessionModel?
+    private(set) weak var session: SessionModel?
     weak var accessories: AccessoryMonitor?
 
     private let contentView = UIView(frame: .zero)
@@ -152,6 +157,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var pinchAnchor: CGPoint = .zero
     private var panStartOffset: CGPoint = .zero
     private var inputGeneration: UUID?
+    private var inputSource: RemoteInputSourceLease?
+    private var detached = false
+    private var stopped = false
     private var inputAvailable = false
     private var scrollGenerations: [ObjectIdentifier: UUID] = [:]
 
@@ -235,19 +243,33 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        detached = window == nil
+        if detached { retireInputSource() }
+        synchronizeInputAvailability(allowSourceBinding: !detached)
         rebindRendererIfNeeded()
     }
 
     func bindSession(_ session: SessionModel?) {
+        guard !stopped else { return }
+        if self.session !== session { retireInputSource() }
         self.session = session
-        synchronizeInputAvailability()
+        synchronizeInputAvailability(allowSourceBinding: true)
         rebindRendererIfNeeded()
     }
 
     @discardableResult
-    private func synchronizeInputAvailability() -> Bool {
+    private func synchronizeInputAvailability(allowSourceBinding: Bool = false) -> Bool {
         let generation = session?.remoteInputGeneration
-        let available = session?.hasInteractiveRemoteScreen == true
+        if generation != inputGeneration { retireInputSource() }
+        // Event callbacks may discard old state, but only an explicit UI
+        // binding/window attachment can acquire the next registration.
+        if allowSourceBinding, !stopped, !detached, inputSource == nil,
+           let session, session.hasInteractiveRemoteScreen, let generation {
+            inputSource = session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation)
+        }
+        let available = !stopped && !detached && inputSource.map {
+            session?.isRemoteInputSourceCurrent($0) == true
+        } == true
         if generation != inputGeneration || available != inputAvailable {
             inputGeneration = generation
             inputAvailable = available
@@ -263,28 +285,55 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         return available
     }
 
+    private func retireInputSource() {
+        let source = inputSource
+        inputSource = nil
+        if let source { session?.endRemoteInputSource(source) }
+    }
+
+    func stopCapture() {
+        stopped = true
+        retireInputSource()
+        session = nil
+        synchronizeInputAvailability()
+        rebindRendererIfNeeded()
+        if zoomController?.captureView === self {
+            zoomController?.commandHandler = nil
+            zoomController?.interactionModeHandler = nil
+            zoomController?.captureView = nil
+        }
+        zoomController = nil
+        accessories = nil
+    }
+
     func bindZoomController(_ controller: RemoteScreenZoomController) {
-        guard zoomController !== controller else { return }
-        zoomController?.commandHandler = nil
-        zoomController?.interactionModeHandler = nil
+        guard !stopped, zoomController !== controller else { return }
+        if zoomController?.captureView === self {
+            zoomController?.commandHandler = nil
+            zoomController?.interactionModeHandler = nil
+            zoomController?.captureView = nil
+        }
         zoomController = controller
+        controller.captureView = self
         controller.commandHandler = { [weak self] command in
-            self?.handleZoomCommand(command)
+            guard let self, self.zoomController?.captureView === self, !self.stopped else { return }
+            self.handleZoomCommand(command)
         }
         controller.interactionModeHandler = { [weak self] enabled in
-            self?.applyInteractionMode(moveScreenEnabled: enabled)
+            guard let self, self.zoomController?.captureView === self, !self.stopped else { return }
+            self.applyInteractionMode(moveScreenEnabled: enabled)
         }
         controller.report(scale: zoomScale)
         applyInteractionMode(moveScreenEnabled: controller.moveScreenEnabled)
     }
 
     private func rebindRendererIfNeeded() {
-        if let previous = boundSession, previous !== session {
+        if let previous = boundSession, previous !== session || window == nil || stopped {
             previous.detachVideoRenderer(videoView)
             boundSession = nil
         }
 
-        guard window != nil, let session else { return }
+        guard !stopped, window != nil, let session else { return }
         if boundSession !== session {
             session.attachVideoRenderer(videoView)
             boundSession = session
@@ -684,7 +733,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         contentView.center = CGPoint(
             x: bounds.midX + zoomOffset.x,
             y: bounds.midY + zoomOffset.y)
-        zoomController?.report(scale: zoomScale)
+        if zoomController?.captureView === self { zoomController?.report(scale: zoomScale) }
     }
 
     private func contentPoint(from viewPoint: CGPoint) -> CGPoint {
@@ -706,21 +755,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var lastSentPointer: (Int, Int, UInt8)?
 
     private func sendPointer(at p: CGPoint, buttons: UInt8) {
-        guard synchronizeInputAvailability() else { return }
+        guard synchronizeInputAvailability(), let inputSource else { return }
         let remote = geometry.localToRemote(p)
         let key = (remote.x, remote.y, buttons)
         if let last = lastSentPointer, last == key { return }   // dedup
         lastSentPointer = key
-        session?.send(.pointer(x: remote.x, y: remote.y, buttons: buttons), expectedInputGeneration: inputGeneration)
+        session?.send(.pointer(x: remote.x, y: remote.y, buttons: buttons), from: inputSource)
     }
 
     private func sendScroll(at p: CGPoint, dx: CGFloat, dy: CGFloat, phase: InputScrollPhase) {
-        guard synchronizeInputAvailability() else { return }
+        guard synchronizeInputAvailability(), let inputSource else { return }
         let ix = Int(dx.rounded()), iy = Int(dy.rounded())
         if ix == 0 && iy == 0 && phase == .changed { return }   // skip sub-pixel noise
         let remote = geometry.localToRemote(p)
         session?.send(.scroll(x: remote.x, y: remote.y,
-                              dx: ix, dy: iy, phase: phase), expectedInputGeneration: inputGeneration)
+                              dx: ix, dy: iy, phase: phase), from: inputSource)
     }
 
     private var geometry: RemoteScreenGeometry {

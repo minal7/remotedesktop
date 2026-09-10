@@ -25,63 +25,90 @@ struct KeyboardCapture: UIViewRepresentable {
     final class Coordinator {
         private static weak var activeCoordinator: Coordinator?
         private weak var session: SessionModel?
+        private weak var keyboardDevice: GCKeyboard?
         private weak var keyboardInput: GCKeyboardInput?
         private var connectObs: NSObjectProtocol?
+        private var disconnectObs: NSObjectProtocol?
         private var inputGeneration: UUID?
+        private var inputSource: RemoteInputSourceLease?
         private var captureID = UUID()
         private var waitsForRelease = false
 
         func start(session: SessionModel) {
+            Self.activeCoordinator?.stop()
+            Self.activeCoordinator = self
             update(session: session)
             connectObs = NotificationCenter.default.addObserver(
                 forName: .GCKeyboardDidConnect, object: nil, queue: .main
             ) { [weak self] _ in
                 MainActor.assumeIsolated { self?.attach() }
             }
+            disconnectObs = NotificationCenter.default.addObserver(
+                forName: .GCKeyboardDidDisconnect, object: nil, queue: .main
+            ) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self, Self.activeCoordinator === self,
+                          let device = notification.object as? GCKeyboard,
+                          self.keyboardDevice === device else { return }
+                    self.detachCapture()
+                }
+            }
         }
 
         func update(session: SessionModel) {
+            guard Self.activeCoordinator === self else { return }
             let next = session.hasInteractiveRemoteScreen ? session.remoteInputGeneration : nil
             let changed = self.session !== session || inputGeneration != next
+            if changed { detachCapture() }
             self.session = session
             inputGeneration = next
             if changed { attach() }
         }
 
-        func stop() {
-            if Self.activeCoordinator === self {
-                keyboardInput?.keyChangedHandler = nil
-                Self.activeCoordinator = nil
-            }
-            if let connectObs { NotificationCenter.default.removeObserver(connectObs) }
-            connectObs = nil; keyboardInput = nil; session = nil; inputGeneration = nil
+        private func detachCapture() {
             captureID = UUID()
+            if Self.activeCoordinator === self { keyboardInput?.keyChangedHandler = nil }
+            keyboardDevice = nil; keyboardInput = nil; waitsForRelease = false
+            let source = inputSource
+            inputSource = nil
+            if let source { session?.endRemoteInputSource(source) }
+        }
+
+        func stop() {
+            detachCapture()
+            if Self.activeCoordinator === self { Self.activeCoordinator = nil }
+            if let connectObs { NotificationCenter.default.removeObserver(connectObs) }
+            if let disconnectObs { NotificationCenter.default.removeObserver(disconnectObs) }
+            connectObs = nil; disconnectObs = nil; session = nil; inputGeneration = nil
         }
 
         private func attach() {
-            guard let keyboard = GCKeyboard.coalesced, let input = keyboard.keyboardInput else { return }
+            guard Self.activeCoordinator === self else { return }
+            detachCapture()
+            guard let session, let generation = inputGeneration,
+                  let keyboard = GCKeyboard.coalesced, let input = keyboard.keyboardInput,
+                  let source = session.beginRemoteInputSource(.hardwareKeyboard,
+                      expectedInputGeneration: generation) else { return }
             // GCDevice.h defines this as the queue for value-change handlers.
             // Keep native ordering on main instead of introducing a Task per key.
             keyboard.handlerQueue = .main
-            Self.activeCoordinator = self
+            keyboardDevice = keyboard
             keyboardInput = input
+            inputSource = source
             waitsForRelease = input.isAnyKeyPressed
-            let generation = inputGeneration
             let captureID = UUID()
             self.captureID = captureID
             input.keyChangedHandler = { [weak self] keyboard, _, keyCode, pressed in
                 MainActor.assumeIsolated {
-                    guard let self, Self.activeCoordinator === self, let generation,
-                          self.captureID == captureID, self.inputGeneration == generation,
-                          let session = self.session, session.hasInteractiveRemoteScreen,
-                          session.remoteInputGeneration == generation else { return }
+                    guard let self, Self.activeCoordinator === self,
+                          self.captureID == captureID, self.inputSource == source,
+                          let session = self.session, session.isRemoteInputSourceCurrent(source) else { return }
                     if self.waitsForRelease {
                         self.waitsForRelease = keyboard.isAnyKeyPressed
                         return // The old hold and its final release stay local.
                     }
                     session.send(.key(usage: Int(keyCode.rawValue), down: pressed,
-                        modifiers: Self.modifierMask(input: keyboard)),
-                        expectedInputGeneration: generation)
+                        modifiers: Self.modifierMask(input: keyboard)), from: source)
                 }
             }
         }
@@ -99,6 +126,7 @@ struct KeyboardCapture: UIViewRepresentable {
 
         deinit {
             if let o = connectObs { NotificationCenter.default.removeObserver(o) }
+            if let o = disconnectObs { NotificationCenter.default.removeObserver(o) }
         }
     }
 }
@@ -145,7 +173,7 @@ struct SoftKeyboardCapture: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
-        (uiView as? CaptureField)?.resignFirstResponder()
+        (uiView as? CaptureField)?.stopCapture()
     }
 
     final class Coordinator {
@@ -162,34 +190,69 @@ struct SoftKeyboardCapture: UIViewRepresentable {
 
     final class CaptureField: UITextField, UITextFieldDelegate {
         weak var session: SessionModel? {
-            didSet { if oldValue !== session { synchronizeBinding() } }
+            didSet {
+                if oldValue !== session {
+                    let source = inputSource
+                    inputSource = nil; inputGeneration = nil
+                    if let source { oldValue?.endRemoteInputSource(source) }
+                    synchronizeBinding()
+                }
+            }
         }
         private var inputGeneration: UUID?
+        private var inputSource: RemoteInputSourceLease?
+        private var stopped = false
+        private var detached = false
         var onKeyboardDismiss: (() -> Void)?
 
         var canSendInput: Bool {
-            guard let session, let inputGeneration else { return false }
-            return session.hasInteractiveRemoteScreen && session.remoteInputGeneration == inputGeneration
+            guard !stopped, !detached, let session, let inputSource else { return false }
+            return session.isRemoteInputSourceCurrent(inputSource)
         }
 
         func bindSession(_ session: SessionModel) {
+            guard !stopped else { return }
             self.session = session
             synchronizeBinding()
         }
 
-        private func synchronizeBinding() {
-            let next = session?.hasInteractiveRemoteScreen == true ? session?.remoteInputGeneration : nil
-            guard next != inputGeneration else { return }
-            inputGeneration = nil
+        private func retireBinding() {
+            let source = inputSource
+            inputSource = nil; inputGeneration = nil
+            if let source { session?.endRemoteInputSource(source) }
             resignFirstResponder()
             unmarkText()
             text = " "
+        }
+
+        func stopCapture() {
+            stopped = true
+            retireBinding()
+            session = nil
+            onKeyboardDismiss = nil
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            detached = window == nil
+            if detached { retireBinding() }
+            else { synchronizeBinding() }
+        }
+
+        private func synchronizeBinding() {
+            guard !stopped, !detached else { return }
+            let next = session?.hasInteractiveRemoteScreen == true ? session?.remoteInputGeneration : nil
+            guard next != inputGeneration else { return }
+            retireBinding()
             inputGeneration = next
+            if let next {
+                inputSource = session?.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: next)
+            }
         }
 
         private func send(_ message: ControlMessage) {
-            guard canSendInput else { return }
-            session?.send(message, expectedInputGeneration: inputGeneration)
+            guard canSendInput, let inputSource else { return }
+            session?.send(message, from: inputSource)
         }
 
         override init(frame: CGRect) {
@@ -257,8 +320,10 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         }
 
         @objc private func dismissKeyboardFromAccessory() {
+            // A retiring field may still receive its old accessory action.
+            let ownsDismissal = !stopped && (session == nil || canSendInput)
             resignFirstResponder()
-            onKeyboardDismiss?()
+            if ownsDismissal { onKeyboardDismiss?() }
         }
     }
 }

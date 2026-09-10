@@ -210,6 +210,36 @@ final class RemoteScreenInteractionTests: XCTestCase {
     }
 
     @MainActor
+    func test_screenReplacementAndDismantlePreserveSuccessorControls() {
+        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeReady()
+        let zoom = RemoteScreenZoomController()
+        let old = RemoteScreenUIView(), next = RemoteScreenUIView()
+        old.bindSession(session); old.bindZoomController(zoom)
+        next.bindSession(session); next.bindZoomController(zoom)
+        old.bindSession(session)
+        XCTAssertFalse(old.interactionState.remoteIndirectInputEnabled)
+        XCTAssertTrue(next.interactionState.remoteIndirectInputEnabled)
+        transport.onInputUnavailable?(); transport.makeReady()
+        next.bindSession(session)
+        let count = transport.sentCount
+        XCTAssertFalse(old.gestureRecognizerShouldBegin(UIGestureRecognizer()), "A late event cannot acquire the recovered source")
+        XCTAssertTrue(next.gestureRecognizerShouldBegin(UIGestureRecognizer()))
+        XCTAssertEqual(transport.sentCount, count)
+        old.stopCapture()
+        old.bindSession(session); old.bindZoomController(zoom)
+        XCTAssertFalse(old.interactionState.remoteIndirectInputEnabled)
+        zoom.moveScreenEnabled = true
+        XCTAssertTrue(next.interactionState.viewportPanEnabled)
+        XCTAssertFalse(next.interactionState.remoteIndirectInputEnabled)
+        zoom.moveScreenEnabled = false
+        XCTAssertTrue(next.interactionState.remoteIndirectInputEnabled)
+        next.stopCapture()
+        XCTAssertFalse(next.interactionState.remoteIndirectInputEnabled)
+    }
+
+    @MainActor
     func test_moveScreenToggle_reconfiguresActualGestureRecognizers() {
         let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
         defer { session.reset() }

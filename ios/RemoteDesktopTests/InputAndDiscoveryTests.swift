@@ -1,4 +1,5 @@
 import Foundation
+import CloudKit
 import Security
 import UIKit
 import XCTest
@@ -763,6 +764,217 @@ final class InputAndDiscoveryTests: XCTestCase {
     }
 
     @MainActor
+    func test_replacingKeyboardSourceReleasesItsHoldsAndRejectsLateCleanup() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 0xE3, down: true, modifiers: 8), from: old)
+        session.send(.key(usage: 4, down: true, modifiers: 8), from: old)
+        let replacement = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:227:true:8", "key:4:true:8", "key:4:false:8", "key:227:false:0"])
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: replacement)
+        let count = transport.sentPayloads.count
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: old)
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: old)
+        session.endRemoteInputSource(old)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        XCTAssertTrue(session.isRemoteInputSourceCurrent(replacement))
+        session.endRemoteInputSource(replacement)
+        XCTAssertEqual(try inputSourceTrace(transport).suffix(2), ["key:4:true:0", "key:4:false:0"])
+    }
+
+    @MainActor
+    func test_inputSourceCleanupPreservesSharedModifiersAndOtherKeyOwners() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        session.toggleSoftModifier(.cmd)
+        let hardware = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 0xE3, down: true, modifiers: 8), from: hardware)
+        session.send(.key(usage: 4, down: true, modifiers: 8), from: hardware)
+        session.releaseSoftModifiers()
+        XCTAssertEqual(session.softModifierMask, 0)
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:227:true:8", "key:4:true:8"])
+        let soft = try XCTUnwrap(session.beginRemoteInputSource(.softKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: soft)
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: soft)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:5:true:8", "Hardware modifiers also apply to a soft key")
+        session.endRemoteInputSource(hardware)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:227:false:0", "The other source still owns A")
+        session.endRemoteInputSource(soft)
+        XCTAssertEqual(try inputSourceTrace(transport).suffix(2), ["key:4:false:0", "key:5:false:0"])
+        session.toggleSoftModifier(.shift)
+        let secondHardware = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 6, down: true, modifiers: 0), from: secondHardware)
+        session.endRemoteInputSource(secondHardware)
+        XCTAssertEqual(try inputSourceTrace(transport).suffix(2), ["key:6:true:1", "key:6:false:1"])
+        XCTAssertTrue(session.isSoftModifierLatched(.shift))
+        session.releaseSoftModifiers()
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:225:false:0")
+    }
+
+    @MainActor
+    func test_pointerSourceReplacementEndsDragAndScrollAtTheirOwnedCoordinates() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.pointer(x: 17, y: 29, buttons: 3), from: old)
+        session.send(.scroll(x: 31, y: 43, dx: 0, dy: 12, phase: .begin), from: old)
+        let next = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        XCTAssertEqual(try inputSourceTrace(transport), ["pointer:17:29:3", "scroll:31:43:0:12:begin", "pointer:17:29:0", "scroll:31:43:0:0:end"])
+        session.send(.pointer(x: 80, y: 90, buttons: 1), from: next)
+        let count = transport.sentPayloads.count
+        session.endRemoteInputSource(old)
+        session.send(.pointer(x: 17, y: 29, buttons: 0), from: old)
+        session.send(.scroll(x: 31, y: 43, dx: 0, dy: 12, phase: .changed), from: old)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        session.endRemoteInputSource(next)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "pointer:80:90:0")
+    }
+
+    @MainActor
+    func test_retiredInputSourceCannotReleaseOrAppendAcrossRecovery() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: old)
+        transport.onInputUnavailable?()
+        transport.makeScreenReady()
+        let next = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: next)
+        let count = transport.sentPayloads.count
+        XCTAssertNil(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.endRemoteInputSource(old)
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: old)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        session.endRemoteInputSource(next)
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:4:true:0", "key:4:true:0", "key:4:false:0"])
+    }
+
+    @MainActor
+    func test_inputSourceReplacementDoesNotAdmitAfterCleanupLosesTransport() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: old)
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: old)
+        transport.onSend = { [weak transport] in transport?.onInputUnavailable?() }
+        XCTAssertNil(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:4:true:0", "key:5:true:0", "key:4:false:0"])
+        XCTAssertFalse(session.isRemoteInputSourceCurrent(old))
+        transport.onSend = nil
+        transport.makeScreenReady()
+        let next = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard,
+            expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: next)
+        let count = transport.sentPayloads.count
+        session.endRemoteInputSource(old)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        session.endRemoteInputSource(next)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:5:false:0")
+    }
+
+    @MainActor
+    func test_accountFreezeReleasesAllInputSourcesBeforeClosingAdmission() throws {
+        let transport = RecordingSoftKeyboardTransport(), notifications = NotificationCenter()
+        let session = SessionModel(transportFactory: { transport }, localAccountBindingValidator: { _ in },
+            accountChangeNotificationCenter: notifications)
+        defer { session.reset() }
+        session.connect(code: "123456", localCloudAccountBinding: accountBinding)
+        transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let keyboard = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.toggleSoftModifier(.cmd)
+        session.send(.key(usage: 4, down: true, modifiers: 8), from: keyboard)
+        session.send(.pointer(x: 17, y: 29, buttons: 1), from: pointer)
+        notifications.post(name: NSNotification.Name.CKAccountChanged, object: nil)
+        XCTAssertTrue(session.isCloudAccountRevalidationPending)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertEqual(session.softModifierMask, 0)
+        XCTAssertEqual(try inputSourceTrace(transport).suffix(3), ["key:4:false:8", "pointer:17:29:0", "key:227:false:0"])
+        let count = transport.sentPayloads.count
+        session.endRemoteInputSource(keyboard); session.endRemoteInputSource(pointer)
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: keyboard)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+    }
+
+    @MainActor
+    func test_inputSourcesRejectUnmatchedReleasesAndForeignMessageKinds() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let keyboard = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: keyboard)
+        session.send(.pointer(x: 1, y: 2, buttons: 1), from: keyboard)
+        session.send(.text("foreign text"), from: keyboard)
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: pointer)
+        session.send(.bye(reason: "foreign control"), from: pointer)
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: keyboard)
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: keyboard)
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: keyboard)
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:4:true:0", "key:4:true:0", "key:4:false:0"])
+    }
+
+    @MainActor
+    func test_softKeyboardReplacementAndDismantleCannotTypeIntoSuccessor() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let old = SoftKeyboardCapture.CaptureField(frame: .zero)
+        old.bindSession(session)
+        let next = SoftKeyboardCapture.CaptureField(frame: .zero)
+        next.bindSession(session)
+        XCTAssertFalse(old.canSendInput); XCTAssertTrue(next.canSendInput)
+        old.bindSession(session)
+        old.deleteBackward()
+        XCTAssertFalse(old.textField(old, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "late"))
+        old.stopCapture()
+        old.bindSession(session)
+        XCTAssertFalse(old.canSendInput); XCTAssertTrue(next.canSendInput)
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        XCTAssertFalse(next.textField(next, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "current"))
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
+        next.stopCapture()
+        next.deleteBackward()
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
+    }
+
+    @MainActor
+    private func inputSourceTrace(_ transport: RecordingSoftKeyboardTransport) throws -> [String] {
+        try transport.sentPayloads.compactMap { payload in
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            let kind = try XCTUnwrap(object["t"] as? String)
+            switch kind {
+            case "qos": return nil
+            case "key":
+                return "key:\(try XCTUnwrap(object["usage"] as? Int)):\(try XCTUnwrap(object["down"] as? Bool)):\(try XCTUnwrap(object["modifiers"] as? Int))"
+            case "pointer":
+                return "pointer:\(try XCTUnwrap(object["x"] as? Int)):\(try XCTUnwrap(object["y"] as? Int)):\(try XCTUnwrap(object["buttons"] as? Int))"
+            case "scroll":
+                return "scroll:\(try XCTUnwrap(object["x"] as? Int)):\(try XCTUnwrap(object["y"] as? Int)):\(try XCTUnwrap(object["dx"] as? Int)):\(try XCTUnwrap(object["dy"] as? Int)):\(try XCTUnwrap(object["phase"] as? String))"
+            case "text": return "text:\(try XCTUnwrap(object["s2"] as? String))"
+            default: return kind
+            }
+        }
+    }
+
+    @MainActor
     func test_softKeyboardCapture_exposesHittableDismissAccessory() throws {
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
         var didDismiss = false
@@ -870,6 +1082,7 @@ private final class RecordingSoftKeyboardTransport: Transport {
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
     private(set) var sentPayloads: [Data] = []
+    var onSend: (@MainActor () -> Void)?
 
     func makeScreenReady() {
         onHostHello?(HostHello(app: "Fixture", version: "1", hostname: "Mac", os: "macOS", audio: false, monitors: 1))
@@ -881,6 +1094,7 @@ private final class RecordingSoftKeyboardTransport: Transport {
 
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) {
         sentPayloads.append(message.encoded(seq: seq, ts: ts))
+        onSend?()
     }
 
     func disconnect(reason: String) {}

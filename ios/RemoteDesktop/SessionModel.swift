@@ -15,6 +15,16 @@ enum ComputerUseVisualSidecarState: Equatable {
     case failed
 }
 
+enum RemoteInputSourceKind: Hashable {
+    case hardwareKeyboard, softKeyboard, softModifiers, pointer
+}
+
+struct RemoteInputSourceLease: Equatable {
+    fileprivate let kind: RemoteInputSourceKind
+    fileprivate let generation: UUID
+    fileprivate let id = UUID()
+}
+
 /// Top-level state holder for the client. Owns the `Transport`, tracks
 /// lifecycle, and fans input events out as `ControlMessage`s.
 @MainActor
@@ -107,6 +117,14 @@ final class SessionModel: ObservableObject {
     private var accountRevalidationGeneration: UInt64 = 0
     private var seq: UInt32 = 0
     private var inputHelloReceived = false
+    private struct InputSource {
+        let lease: RemoteInputSourceLease
+        var keys: Set<Int> = []
+        var pointer: (x: Int, y: Int, buttons: UInt8)?
+        var scroll: (x: Int, y: Int)?
+    }
+    private var inputSources: [RemoteInputSourceKind: InputSource] = [:]
+    private var softModifierSource: RemoteInputSourceLease?
 
     private func invalidateRemoteInput() {
         // Transport/host teardown owns release of the previous lifetime. Local
@@ -115,6 +133,8 @@ final class SessionModel: ObservableObject {
         hasReceivedVideoFrame = false
         display = nil
         softModifierMask = 0
+        inputSources.removeAll()
+        softModifierSource = nil
         remoteInputGeneration = UUID()
     }
 
@@ -267,6 +287,92 @@ final class SessionModel: ObservableObject {
         }
     }
 
+    func beginRemoteInputSource(_ kind: RemoteInputSourceKind,
+                                expectedInputGeneration: UUID) -> RemoteInputSourceLease? {
+        guard hasInteractiveRemoteScreen, remoteInputGeneration == expectedInputGeneration else { return nil }
+        if let previous = inputSources[kind]?.lease { endRemoteInputSource(previous) }
+        // Sending cleanup may synchronously invalidate a failed transport.
+        guard hasInteractiveRemoteScreen, remoteInputGeneration == expectedInputGeneration else { return nil }
+        let lease = RemoteInputSourceLease(kind: kind, generation: expectedInputGeneration)
+        inputSources[kind] = InputSource(lease: lease)
+        return lease
+    }
+
+    func isRemoteInputSourceCurrent(_ lease: RemoteInputSourceLease) -> Bool {
+        hasInteractiveRemoteScreen && lease.generation == remoteInputGeneration
+            && inputSources[lease.kind]?.lease == lease
+    }
+
+    private var heldSourceKeys: Set<Int> {
+        inputSources.values.reduce(into: Set<Int>()) { $0.formUnion($1.keys) }
+    }
+
+    private func modifierMask(for keys: Set<Int>) -> UInt16 {
+        let usages = [0xE1, 0xE0, 0xE2, 0xE3, 0xE5, 0xE4, 0xE6, 0xE7]
+        return usages.enumerated().reduce(UInt16(0)) { mask, entry in
+            keys.contains(entry.element) ? mask | UInt16(1 << entry.offset) : mask
+        }
+    }
+
+    func send(_ message: ControlMessage, from lease: RemoteInputSourceLease) {
+        guard isRemoteInputSourceCurrent(lease), var source = inputSources[lease.kind] else { return }
+        let output: ControlMessage
+        switch message {
+        case let .key(usage, down, modifiers):
+            guard lease.kind != .pointer else { return }
+            let alreadyHeld = heldSourceKeys.contains(usage)
+            let owned = source.keys.contains(usage)
+            if down { source.keys.insert(usage) }
+            else {
+                guard owned else { return } // An unmatched release owns nothing.
+                source.keys.remove(usage)
+            }
+            inputSources[lease.kind] = source
+            // Sharing a key never releases another source's hold. Repeats
+            // from its original source remain ordinary repeated key-downs.
+            guard down ? (!alreadyHeld || owned) : !heldSourceKeys.contains(usage) else { return }
+            output = .key(usage: usage, down: down,
+                          modifiers: modifiers | modifierMask(for: heldSourceKeys))
+        case let .pointer(x, y, buttons):
+            guard lease.kind == .pointer else { return }
+            source.pointer = (x, y, buttons)
+            inputSources[lease.kind] = source
+            output = message
+        case let .scroll(x, y, _, _, phase):
+            guard lease.kind == .pointer else { return }
+            source.scroll = phase == .end ? nil : (x, y)
+            inputSources[lease.kind] = source
+            output = message
+        case .text:
+            guard lease.kind == .softKeyboard else { return }
+            output = message
+        case .hello, .qos, .bye: return
+        }
+        send(output, expectedInputGeneration: lease.generation)
+    }
+
+    func endRemoteInputSource(_ lease: RemoteInputSourceLease) {
+        guard inputSources[lease.kind]?.lease == lease,
+              let source = inputSources.removeValue(forKey: lease.kind) else { return }
+        // Retire before posting. Late callbacks cannot append to this source,
+        // and every release is still fenced by the original wire lifetime.
+        var remaining = source.keys
+        for usage in source.keys.sorted() {
+            remaining.remove(usage)
+            let held = heldSourceKeys.union(remaining)
+            guard !held.contains(usage) else { continue }
+            send(.key(usage: usage, down: false, modifiers: modifierMask(for: held)),
+                 expectedInputGeneration: lease.generation)
+        }
+        if let pointer = source.pointer, pointer.buttons != 0 {
+            send(.pointer(x: pointer.x, y: pointer.y, buttons: 0), expectedInputGeneration: lease.generation)
+        }
+        if let scroll = source.scroll {
+            send(.scroll(x: scroll.x, y: scroll.y, dx: 0, dy: 0, phase: .end),
+                 expectedInputGeneration: lease.generation)
+        }
+    }
+
     func send(_ message: ControlMessage, expectedInputGeneration: UUID? = nil) {
         guard !isCloudAccountRevalidationPending else { return }
         switch message {
@@ -310,7 +416,7 @@ final class SessionModel: ObservableObject {
 
     func disconnect() {
         invalidateAccountRevalidation(clearBinding: true)
-        releaseSoftModifiers()
+        releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
         localConnectionTask?.cancel()
         localConnectionTask = nil
@@ -323,7 +429,7 @@ final class SessionModel: ObservableObject {
 
     func reset() {
         invalidateAccountRevalidation(clearBinding: true)
-        releaseSoftModifiers()
+        releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
         localConnectionTask?.cancel()
         localConnectionTask = nil
@@ -354,8 +460,11 @@ final class SessionModel: ObservableObject {
         }
 
         if !isCloudAccountRevalidationPending {
-            // Release any latched remote keys before freezing outbound input.
-            releaseSoftModifiers()
+            // Cleanup must precede the outbound gate: views disappearing
+            // during the freeze can no longer send their releases.
+            releaseRemoteInputSources()
+            isCloudAccountRevalidationPending = true
+            remoteInputGeneration = UUID()
         }
         isCloudAccountRevalidationPending = true
         computerUseSession?.stop()
@@ -567,13 +676,17 @@ final class SessionModel: ObservableObject {
     func toggleSoftModifier(_ modifier: SoftModifier, expectedInputGeneration: UUID? = nil) {
         guard hasInteractiveRemoteScreen,
               expectedInputGeneration == nil || expectedInputGeneration == remoteInputGeneration else { return }
+        if softModifierSource == nil {
+            softModifierSource = beginRemoteInputSource(.softModifiers, expectedInputGeneration: remoteInputGeneration)
+        }
+        guard let source = softModifierSource, isRemoteInputSourceCurrent(source) else { return }
         let wasLatched = isSoftModifierLatched(modifier)
         if wasLatched {
             softModifierMask &= ~modifier.mask
-            send(.key(usage: modifier.hidUsage, down: false, modifiers: softModifierMask))
+            send(.key(usage: modifier.hidUsage, down: false, modifiers: softModifierMask), from: source)
         } else {
             softModifierMask |= modifier.mask
-            send(.key(usage: modifier.hidUsage, down: true, modifiers: softModifierMask))
+            send(.key(usage: modifier.hidUsage, down: true, modifiers: softModifierMask), from: source)
         }
     }
 
@@ -636,13 +749,17 @@ final class SessionModel: ObservableObject {
     }
 
     func releaseSoftModifiers() {
-        guard softModifierMask != 0 else { return }
-        let latched = SoftModifier.allCases.filter(isSoftModifierLatched)
-        for modifier in latched.reversed() {
-            softModifierMask &= ~modifier.mask
-            send(.key(usage: modifier.hidUsage, down: false, modifiers: softModifierMask))
-        }
+        let source = softModifierSource
+        softModifierSource = nil
         softModifierMask = 0
+        if let source { endRemoteInputSource(source) }
+    }
+
+    private func releaseRemoteInputSources() {
+        for kind: RemoteInputSourceKind in [.softKeyboard, .hardwareKeyboard, .pointer] {
+            if let source = inputSources[kind]?.lease { endRemoteInputSource(source) }
+        }
+        releaseSoftModifiers()
     }
 }
 
