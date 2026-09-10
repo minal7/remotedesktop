@@ -2,6 +2,8 @@
 
 Source repair; execution pending. This extends [explicit scalar quantity corrections](BROWSER_QUANTITY_REPLACEMENT_REVIEW.md). No build, typecheck, assertion, browser, app, model, account-login or SSH execution occurred.
 
+Follow-up: [component correction](BROWSER_PARTY_COMPONENT_CORRECTION_REVIEW.md) now implements explicit adult-only and child-only questions for one currently bound party, retaining the other native count. Unresolved conflicts, broader phrasing and provider semantics remain open. Counts below describe this whole-party checkpoint.
+
 ## First-principles finding
 
 `2 adults and 1 child` and `3 adults and 0 children` both total three people, but they express different requirements. A useful correction flow must let the user change the breakdown. Checking only the total would hide insufficient adult capacity; retaining old browser fields solely because their numbers match would lose the connection to the corrected request.

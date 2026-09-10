@@ -3,9 +3,11 @@ import Foundation
 /// Host-authored task questions only. Account authentication continues to use
 /// visible manual takeover, not this answer channel or model-authored text.
 enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
-    case origin, destination, location, date, replaceDate, time, quantity, replaceQuantity, replaceParty, currency, priceBasis, fees, source
+    case origin, destination, location, date, replaceDate, time, quantity, replaceQuantity, replaceParty, replaceAdults, replaceChildren, currency, priceBasis, fees, source
     var isDateTopic: Bool { self == .date || self == .replaceDate }
-    var isQuantityReplacement: Bool { self == .replaceQuantity || self == .replaceParty }
+    var isPartyReplacement: Bool { self == .replaceParty || isPartyComponentReplacement }
+    var isPartyComponentReplacement: Bool { self == .replaceAdults || self == .replaceChildren }
+    var isQuantityReplacement: Bool { self == .replaceQuantity || isPartyReplacement }
     var isQuantityTopic: Bool { self == .quantity || isQuantityReplacement }
     var isReplacement: Bool { self == .replaceDate || isQuantityReplacement }
     var question: String {
@@ -19,6 +21,8 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .quantity: return "How many results, tickets or people do you mean? Please specify which, and adult/child counts when relevant."
         case .replaceQuantity: return "What count should replace the selected quantity requirement? Give the count and the same unit, for example three tickets. This replaces the whole selected count, including any at least or at most limit. Other requirements stay in place."
         case .replaceParty: return "What adult and child counts should replace the whole selected party? Please give both counts, including zero when needed, for example 3 adults and 0 children. This replaces both counts together. Other requirements stay in place."
+        case .replaceAdults: return "What adult count should replace the selected party's adult count? Give the exact count and adult label, for example 3 adults. The child count and all other requirements stay in place."
+        case .replaceChildren: return "What child count should replace the selected party's child count? Give the exact count and child label, including zero when needed, for example 0 children. The adult count and all other requirements stay in place."
         case .currency: return "Which currency do you mean? Please give its three-letter code."
         case .priceBasis: return "Is the budget a total, per person or per ticket?"
         case .fees: return "Should the price limit include fees?"
@@ -40,7 +44,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .location: return [.location]
         case .date, .replaceDate: return [.date]
         case .time: return [.time]
-        case .quantity, .replaceQuantity, .replaceParty: return [.quantity]
+        case .quantity, .replaceQuantity, .replaceParty, .replaceAdults, .replaceChildren: return [.quantity]
         case .currency, .priceBasis: return [.price]
         case .fees: return [.fees, .price]
         case .source: return [.source, .navigationSource, .answerSource]
@@ -136,14 +140,23 @@ final class ComputerUseBrowserGoalClarification {
             interpretationDigest = proposal.digest; requirements = proposal.requirements
             interpretationDisposition = proposal.disposition; interpretationQuestion = proposal.question
             self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.context = context
-            text = try Self.render(topic: topic, scope: scope, input: input)
+            var retainedCount = ""
+            if topic.isPartyComponentReplacement {
+                let ledger = ComputerUseBrowserScalarRequirements(proposal: .init(input: input, disposition: .research,
+                    requirements: proposal.requirements, question: nil))
+                guard let party = ledger.currentParty(requirementIDs: scope.map(\.requirementID)) else { throw Failure.invalidProposal }
+                retainedCount = topic == .replaceAdults ? "\n\nThe child count will remain \(party.children)."
+                    : "\n\nThe adult count will remain \(party.adults)."
+            }
+            text = try Self.render(topic: topic, scope: scope, input: input, retainedCount: retainedCount)
             guard text.count <= ComputerUseTaskLedger.maximumClarificationCharacters,
                   text.utf8.count <= ComputerUseTaskLedger.maximumClarificationUTF8Bytes else { throw Failure.inputLimit }
             id = ComputerUseTaskContract.digest(["browser-goal-question-v3", UUID().uuidString, input.digest, proposal.digest,
                 topic.rawValue, text, context.identity, String(expiresAt.timeIntervalSince1970)] + scope.map(\.requirementID))
         }
         private static func render(topic: ComputerUseBrowserClarificationTopic,
-                                   scope: [ComputerUseBrowserGoalClarificationTurn.Scope], input: ComputerUseBrowserGoalInput) throws -> String {
+                                   scope: [ComputerUseBrowserGoalClarificationTurn.Scope], input: ComputerUseBrowserGoalInput,
+                                   retainedCount: String) throws -> String {
             let excerpts = try scope.map { item -> String in
                 guard input.userTurns.indices.contains(item.turn) else { throw Failure.invalidProposal }
                 let bytes = Data(input.userTurns[item.turn].utf8), start = item.sourceByteOffset
@@ -166,7 +179,7 @@ final class ComputerUseBrowserGoalClarification {
             let answerClock = topic.isDateTopic
                 ? "\n\nFor words like today or tomorrow, your answer uses the date I receive it in \(input.timeZoneIdentifier). Earlier messages keep their original date references."
                 : ""
-            return topic.question + answerClock + "\n\nI'm asking about the part inside ⟦ ⟧.\n\n" + excerpts.joined(separator: "\n\n")
+            return topic.question + retainedCount + answerClock + "\n\nI'm asking about the part inside ⟦ ⟧.\n\n" + excerpts.joined(separator: "\n\n")
         }
         /// Nearby context distinguishes repeated clauses. Only context is
         /// shortened; every selected source scalar has a display representation.

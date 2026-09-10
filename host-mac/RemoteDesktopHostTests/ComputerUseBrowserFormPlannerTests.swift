@@ -292,8 +292,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         defer { fixture.close() }
         let actionInput = try ComputerUseBrowserActionInput(interpretation: goal, evidence: fixture.input.evidence.page,
             navigationHistory: [], formHistory: [], latestForm: nil, changedFormTargetIDs: [])
-        for indices in [[1], [2], [1, 2]] {
-            let question: [String: Any] = ["topic":"replaceParty", "requirements":indices]
+        for topic in ["replaceParty", "replaceAdults", "replaceChildren"] {
+          for indices in [[1], [2], [1, 2]] {
+            let question: [String: Any] = ["topic":topic, "requirements":indices]
             let content = try ResearchAnswerFixture.json(["question":question])
             let goalContent = try ResearchAnswerFixture.json(["disposition":"clarification", "requirements":rows, "question":question])
             if indices.count == 1 {
@@ -306,6 +307,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
                 XCTAssertEqual(try ComputerUseBrowserActionProposal.decode(content: content, input: actionInput).questionRequest?.requirementIDs, ids)
                 XCTAssertEqual(try ComputerUseBrowserFormProposal.decode(content: content, input: fixture.input).question?.requirementIDs, ids)
             }
+          }
         }
     }
 
@@ -319,6 +321,16 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
 
     func testExplicitPartyReplacementRepairsComponentsAndTotalBeforeQuerying() async throws {
         for (adults, children) in [(3, 0), (2, 2)] {
+            try await verifyPartyReplacementRepairsComponents(topic: .replaceParty, adults: adults, children: children)
+        }
+    }
+
+    func testPartyComponentCorrectionFreshlyVerifiesTheRetainedCategoryBeforeQuerying() async throws {
+        try await verifyPartyReplacementRepairsComponents(topic: .replaceAdults, adults: 3, children: 1)
+        try await verifyPartyReplacementRepairsComponents(topic: .replaceChildren, adults: 2, children: 0)
+    }
+
+    private func verifyPartyReplacementRepairsComponents(topic: ComputerUseBrowserClarificationTopic, adults: Int, children: Int) async throws {
             var rows = [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child. ", field: "quantity"), row("Leave Reference unchanged.")]
             let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)
             let total = adults + children, route = "/results?adults=\(adults)&children=\(children)&people=\(total)"
@@ -343,10 +355,12 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
                 ["field":"field3", "normalized":"value2-people"]], preserve: [["field":"field4", "requirement":2]]), input: first)
             let oldReceipt = try await owner.executeForm(firstPlan, input: first)
             XCTAssertEqual(edits, 3)
-            let question = try owner.issueQuestion(topic: .replaceParty, requirementIDs: [initial.requirements[1].id], controllerID: "phone", controllerSessionID: "session")
-            let answerText = "\(adults) adults and \(children) children"
+            let question = try owner.issueQuestion(topic: topic, requirementIDs: [initial.requirements[1].id], controllerID: "phone", controllerSessionID: "session")
+            let answerParts = topic == .replaceAdults ? [String(adults), " adults"]
+                : topic == .replaceChildren ? [String(children), " children"] : ["\(adults) adults and ", "\(children) children"]
+            let answerText = answerParts.joined()
             let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "party-correction", answer: answerText, controllerID: "phone", controllerSessionID: "session")
-            for part in ["\(adults) adults and ", "\(children) children"] { var answer = row(part, field: "quantity"); answer["turn"] = 1; rows.append(answer) }
+            for part in answerParts { var answer = row(part, field: "quantity"); answer["turn"] = 1; rows.append(answer) }
             let current = try decodeGoal(rows, input: updated); goals.value = current
             _ = try await owner.interpretGoal()
             let oldPage = try await owner.observeFormResultPage(after: oldReceipt)
@@ -354,7 +368,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             do { _ = try await owner.openFormQuery(after: oldReceipt, controlID: submit, evidence: oldPage); XCTFail("Old component or total receipts cannot authorize the new party") }
             catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
             XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 3)
-            let action = try await owner.planNextAction(using: ReplacementFormActionFixture(editing: ["Adults":[3], "Children":[4], "People":[3, 4]], preservation: 2))
+            let editSources = topic.isPartyComponentReplacement ? ["Adults":[3, 4], "Children":[3, 4], "People":[3, 4]]
+                : ["Adults":[3], "Children":[4], "People":[3, 4]]
+            let action = try await owner.planNextAction(using: ReplacementFormActionFixture(editing: editSources, preservation: 2))
             XCTAssertTrue(action.input.queryControlIDs.isEmpty)
             let actionContext = try object(Data(action.input.contextJSON.utf8))
             let history = try XCTUnwrap(actionContext["form_history"] as? [[String: Any]])
@@ -379,7 +395,6 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             XCTAssertEqual(fixture.server.count("/results?adults=2&children=1&people=3"), 0)
             XCTAssertEqual(fixture.server.count(route), 1)
             XCTAssertEqual(owner.input.userTurns, [initial.input.prompt, answerText])
-        }
     }
 
     func testNativeDateInputUsesTheAcceptedAnswerClockAfterMidnight() async throws {

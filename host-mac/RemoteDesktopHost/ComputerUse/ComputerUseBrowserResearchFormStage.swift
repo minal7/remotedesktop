@@ -292,7 +292,7 @@ struct ComputerUseBrowserFormPartyHistory: Equatable, Sendable, CustomStringConv
             }
             let sourceIndices = Set(try party.sources.flatMap { try $0.indices(in: interpretation) })
             let replacements = sourceIndices.compactMap { index -> [String]? in
-                guard case .superseded(let record) = scalars.entries[index].resolution, record.topic == .replaceParty else { return nil }
+                guard case .superseded(let record) = scalars.entries[index].resolution, record.topic.isPartyReplacement else { return nil }
                 return record.replacementRequirementIDs
             }
             let superseded = !sourceIndices.isEmpty && replacements.count == sourceIndices.count

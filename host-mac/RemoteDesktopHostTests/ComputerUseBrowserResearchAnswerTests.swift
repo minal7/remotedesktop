@@ -52,6 +52,49 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         try await verifyReplacementAnswerEligibility(splitOriginal: false, party: true)
     }
 
+    func testDriverChecksTheRetainedPartyCategoryAndBudgetAfterComponentCorrection() async throws {
+        for (topic, reply, good, bad) in [(ComputerUseBrowserClarificationTopic.replaceAdults, "3 adults", "3 adults and 1 child", "4 adults and 0 children"),
+                                        (.replaceChildren, "2 children", "2 adults and 2 children", "1 adult and 3 children")] {
+            for (capacity, price) in [(good, "USD 40"), (bad, "USD 40"), (good, "USD 60")] {
+                let fixture = try await ResearchAnswerFixture.make(price: price,
+                    extra: ("2 adults and 1 child. ", "condition", "quantity"), partyCapacity: capacity)
+                defer { fixture.source.close() }
+                let rows: [[String: Any]] = [
+                    ["turn":0, "source":"Find concerts. ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
+                    ["turn":0, "source":"Under USD 50. ", "role":"condition", "field":"price", "relation":"unspecified", "values":[String]()],
+                    ["turn":0, "source":"2 adults and 1 child. ", "role":"condition", "field":"quantity", "relation":"unspecified", "values":[String]()],
+                    ["turn":0, "source":"Do not buy.", "role":"prohibition", "field":"other", "relation":"unspecified", "values":[String]()]]
+                fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                    "disposition":"clarification", "requirements":rows, "question":["topic":topic.rawValue, "requirements":[2]]]) }
+                guard case .browserClarificationRequired(let requested)? = try await fixture.source.start() else { return XCTFail("Ask for the explicit component correction") }
+                XCTAssertEqual(requested.topic, topic); XCTAssertEqual(fixture.source.server.requestCount, 0)
+                let owner = try fixture.source.owner(), original = owner.input
+                let question = try owner.issueQuestion(topic: topic, requirementIDs: requested.requirementIDs,
+                    controllerID: "phone", controllerSessionID: "session")
+                let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "component-correction", answer: reply,
+                    controllerID: "phone", controllerSessionID: "session")
+                let finalRows = rows + [["turn":1, "source":reply, "role":"condition", "field":"quantity", "relation":"unspecified", "values":[String]()]]
+                fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
+                    "disposition":"research", "requirements":finalRows, "question":["topic":"none", "requirements":[]]]) }
+                let result = try await fixture.source.driver.continueBrowserResearch(taskID: "component-correction", research: owner, tools: fixture.source.tools, progress: { _ in })
+                let qualifies = capacity == good && price == "USD 40"
+                if qualifies { guard case .browserResearchAnswer = result else { return XCTFail("Check both categories under the corrected party") } }
+                else if case .browserResearchAnswer = result { return XCTFail("Keep the unchanged category and original budget active") }
+                let decision = try XCTUnwrap(fixture.inputs.first)
+                XCTAssertEqual(decision.answerCandidateIndices, qualifies ? [0] : [])
+                let context = try ResearchAnswerFixture.object(Data(decision.contextJSON.utf8))
+                let assessment = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
+                let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
+                let statuses = try XCTUnwrap(candidates.first?["requirements"] as? [String])
+                XCTAssertEqual(statuses[2], "quantityRequirementSuperseded")
+                XCTAssertEqual(statuses[4], capacity == good ? "quotedCapacitySufficient" : "quotedCapacityInsufficient")
+                XCTAssertEqual(statuses[1], price == "USD 40" ? "quotedValueMatches" : "quotedValueConflicts")
+                XCTAssertEqual(updated.userTurns, [original.prompt, reply]); XCTAssertTrue(updated.continues(original))
+                XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+            }
+        }
+    }
+
     private func verifyReplacementAnswerEligibility(splitOriginal: Bool, quantity: Bool = false, party: Bool = false) async throws {
         let isQuantity = quantity || party
         let field = isQuantity ? "quantity" : "date"

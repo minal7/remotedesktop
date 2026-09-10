@@ -34,7 +34,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             self.topic = topic
             self.answerTurns = answerTurns; replacementRequirementIDs = replacements
             let version = topic == .replaceDate ? "browser-date-supersession-v1"
-                : (topic == .replaceParty ? "browser-party-supersession-v1" : "browser-quantity-supersession-v1")
+                : (topic == .replaceParty ? "browser-party-supersession-v1"
+                    : topic.isPartyComponentReplacement ? "browser-party-component-\(topic.rawValue)-supersession-v1" : "browser-quantity-supersession-v1")
             id = ComputerUseTaskContract.digest([version, input.digest, requirementID]
                 + answerTurns.map(String.init) + replacements)
         }
@@ -253,7 +254,9 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let requirementID: String
         let predicate: Predicate
         let historicalRequirementIDs: [String]
-        /// Current source rows jointly expressing one native scalar clause.
+        /// Current source rows anchoring one native scalar clause. An explicit
+        /// party-component correction derives the retained count from its
+        /// known prior party and question scope, not from fabricated answer text.
         let sourceRequirementIDs: [String]
         var hasHistoricalSource: Bool { !historicalRequirementIDs.isEmpty }
         fileprivate init(inputDigest: String, requirementID: String, predicate: Predicate, historicalRequirementIDs: [String] = [], sourceRequirementIDs: [String]? = nil) {
@@ -406,7 +409,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             if case .superseded = $0.resolution { return $0.requirementID }; return nil
         }) else { return nil }
         let targetIDs = Set(targets)
-        guard topic == .replaceParty ? targetIDs.isSubset(of: partyOrigins) : targetIDs.isDisjoint(with: partyOrigins) else { return nil }
+        guard topic.isPartyReplacement ? targetIDs.isSubset(of: partyOrigins) : targetIDs.isDisjoint(with: partyOrigins) else { return nil }
+        if topic.isPartyComponentReplacement, currentParty(requirementIDs: targets) == nil { return nil }
         // Selecting one source fragment cannot discard another party component.
         guard selectedIDs.isDisjoint(with: targetIDs) || targetIDs.isSubset(of: selectedIDs) else { return nil }
         guard !entries.contains(where: {
@@ -417,8 +421,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             guard let entry = entries.first(where: { $0.requirementID == id }) else { return false }
             switch entry.resolution {
             case .bound(let condition):
-                switch condition.predicate { case .quantity: return topic == .replaceQuantity; case .party: return topic == .replaceParty; default: return false }
-            case .unresolved(.ambiguousClarification), .unresolved(.contradictoryClarification): return true
+                switch condition.predicate { case .quantity: return topic == .replaceQuantity; case .party: return topic.isPartyReplacement; default: return false }
+            case .unresolved(.ambiguousClarification), .unresolved(.contradictoryClarification): return !topic.isPartyComponentReplacement
             default: return false
             }
         }) else { return nil }
@@ -426,8 +430,30 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return requirements.count == targets.count ? requirements : nil
     }
     private let partyGroups: [PartyGroup]
+    func currentParty(requirementIDs: [String]) -> PartyComposition? {
+        guard !requirementIDs.isEmpty else { return nil }
+        let selected = entries.filter { requirementIDs.contains($0.requirementID) }
+        let parties = selected.compactMap { entry -> PartyComposition? in
+            guard case .bound(let condition) = entry.resolution, case .party(let party) = condition.predicate,
+                  Set(condition.sourceRequirementIDs) == Set(requirementIDs) else { return nil }
+            return party
+        }
+        guard selected.count == requirementIDs.count, parties.count == selected.count,
+              let party = parties.first, parties.allSatisfy({ $0 == party }) else { return nil }
+        return party
+    }
     func partySourceIdentity(for condition: Condition) -> String {
+        let rows = proposal.requirements.filter { condition.sourceRequirementIDs.contains($0.id) }
+        let componentSpan: ScalarSpan?
+        if let first = rows.first, first.sourceTurnIndex > 0, rows.count == condition.sourceRequirementIDs.count,
+           rows.allSatisfy({ $0.sourceTurnIndex == first.sourceTurnIndex }),
+           proposal.input.clarifications.indices.contains(first.sourceTurnIndex - 1),
+           proposal.input.clarifications[first.sourceTurnIndex - 1].topic.isPartyComponentReplacement,
+           Set(condition.sourceRequirementIDs) == Set(proposal.requirements.filter { $0.sourceTurnIndex == first.sourceTurnIndex }.map(\.id)) {
+            componentSpan = Self.answerSpan(proposal.input.userTurns[first.sourceTurnIndex], turn: first.sourceTurnIndex)
+        } else { componentSpan = nil }
         let span = partyGroups.first(where: { $0.requirementIDs == condition.sourceRequirementIDs })?.span
+            ?? componentSpan
             ?? proposal.requirements.first(where: { $0.id == condition.requirementID }).flatMap { Self.scalarSpan($0, input: proposal.input) }
         guard let span, proposal.input.userTurns.indices.contains(span.turn) else {
             return ComputerUseTaskContract.digest(["browser-party-source-fallback-v1", condition.id])
@@ -621,6 +647,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                 case .quantity: literal = Self.quantityAnswer(answer.answer) != nil
                 case .replaceQuantity: literal = Self.quantityReplacementAnswer(answer.answer) != nil
                 case .replaceParty: literal = Self.partyLiteral(Self.conditionSource(answer.answer)) != nil
+                case .replaceAdults, .replaceChildren: literal = Self.partyComponentReplacementAnswer(answer.answer, topic: answer.topic) != nil
                 default: literal = Self.parameter(answer.answer, topic: answer.topic) != nil
                 }
                 if literal {
@@ -935,8 +962,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             }
             if bound { continue }
             let supersessions = indices.compactMap { index -> [String]? in
-                guard case .superseded(let record) = entries[index].resolution, record.topic == .replaceParty else { return nil }
-                return record.answerTurns.map(String.init) + ["replacements"] + record.replacementRequirementIDs
+                guard case .superseded(let record) = entries[index].resolution, record.topic.isPartyReplacement else { return nil }
+                return [record.topic.rawValue] + record.answerTurns.map(String.init) + ["replacements"] + record.replacementRequirementIDs
             }
             if supersessions.count == indices.count, Set(supersessions).count == 1 { continue }
             if let first = indices.first, case .clarification = entries[first].resolution,
@@ -1335,9 +1362,24 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
                           let row = proposal.requirements[$0]; return row.sourceByteOffset..<(row.sourceByteOffset + row.sourceByteCount)
                       }, turn: turn, input: proposal.input) else { unresolved(.clarificationScope); continue }
                 let predicate: Predicate
-                if answer.topic == .replaceParty {
-                    guard let party = Self.partyLiteral(Self.conditionSource(answer.answer)),
-                          ordered.allSatisfy(partyOriginRows.contains) else { unresolved(.contradictoryClarification); continue }
+                if answer.topic.isPartyReplacement {
+                    guard ordered.allSatisfy(partyOriginRows.contains) else { unresolved(.contradictoryClarification); continue }
+                    let party: PartyComposition
+                    if answer.topic.isPartyComponentReplacement {
+                        guard let count = Self.partyComponentReplacementAnswer(answer.answer, topic: answer.topic),
+                              case .bound(let condition) = entries[first].resolution, case .party(let prior) = condition.predicate,
+                              ordered.allSatisfy({ row in
+                                  guard case .bound(let other) = entries[row].resolution else { return false }
+                                  return other.predicate == .party(prior) && Set(other.sourceRequirementIDs) == Set(ordered.map { entries[$0].requirementID })
+                              }), let revised = PartyComposition(adults: answer.topic == .replaceAdults ? count : prior.adults,
+                                  children: answer.topic == .replaceChildren ? count : prior.children) else {
+                            unresolved(.contradictoryClarification); continue
+                        }
+                        party = revised
+                    } else {
+                        guard let revised = Self.partyLiteral(Self.conditionSource(answer.answer)) else { unresolved(.contradictoryClarification); continue }
+                        party = revised
+                    }
                     predicate = .party(party)
                 } else {
                     guard let parts = Self.quantityReplacementAnswer(answer.answer), let unit = parts.unit,
@@ -1773,6 +1815,13 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
             && (count == nil || count == expectedCount) && (unit == nil || unit == expectedUnit)
     }
     private static let partyComponentPattern = #"([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(adults?|children|child)"#
+    private static func partyComponentReplacementAnswer(_ answer: String, topic: ComputerUseBrowserClarificationTopic) -> Int64? {
+        guard topic.isPartyComponentReplacement,
+              let parts = groups("^(?:exactly\\s+)?" + partyComponentPattern + "$", conditionSource(answer)),
+              let unit = QuantityUnit.literal(parts[1]), unit == (topic == .replaceAdults ? .adults : .children),
+              let count = Int64(parts[0]) ?? quantityWords[parts[0].lowercased()], (0...999).contains(count) else { return nil }
+        return count
+    }
     private static var partyPattern: String {
         let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
         return #"^(?:for\s+)?(?:exactly\s+)?"# + partyComponentPattern + separator + partyComponentPattern + "$"
