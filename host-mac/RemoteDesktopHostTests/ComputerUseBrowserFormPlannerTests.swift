@@ -1211,6 +1211,7 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating)
         planner.beforeReply = nil
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         try await owner.resumeAfterUserControl()
         let fresh = try await owner.prepareFormInput(), result = try await owner.planForm(fresh, using: planner)
         XCTAssertEqual(fresh.interpretation.input, input.interpretation.input)
@@ -1852,6 +1853,7 @@ private final class FormPlannerFixture {
     let browser: ComputerUseOwnedBrowser
     let target: ComputerUseBrowserTextTarget
     let input: ComputerUseBrowserResearchFormInput
+    let planningWorker = ComputerUsePlanningWorker()
     init(goal: ComputerUseBrowserGoalProposal, body: String? = nil, heldSignal: Bool = false,
          additionalRoutes: [String: OwnedBrowserHTTPFixture.Response] = [:],
          domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil) async throws {
@@ -1872,7 +1874,8 @@ private final class FormPlannerFixture {
     }
     func owner(journalDirectory: URL? = nil, makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) -> ComputerUseBrowserResearchTask {
         .init(input: goal.input, browser: browser, goalPlanner: FormGoalFixture(goal: goal),
-            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: journalDirectory, navigationStore: makeStore, mayAct: { true })
+            resultPlanner: BrowserResearchResultFixture(), navigationJournalDirectory: journalDirectory, navigationStore: makeStore,
+            planningWorker: planningWorker, mayAct: { true })
     }
     func close() { browser.close(); server.stop() }
     func wait(_ condition: () -> Bool) async throws {

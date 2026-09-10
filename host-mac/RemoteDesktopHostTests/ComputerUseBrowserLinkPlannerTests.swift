@@ -191,6 +191,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating); XCTAssertEqual(controlled.server.count("/details"), 0)
         suspendedReply.beforeReply = nil
+        try await waitForAvailablePlanningWorker(controlled.planningWorker)
         try await owner.resumeAfterUserControl()
         _ = try await controlled.resume()
         XCTAssertEqual(controlled.server.count("/search?q=concerts"), 1)
@@ -230,6 +231,7 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
                 }
                 XCTFail("Recall cannot restart the decision deadline")
             } catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+            try await waitForAvailablePlanningWorker(fixture.planningWorker)
             let calls = await transport.calls, cancelled = await transport.cancelled, waiting = await transport.waiting
             XCTAssertEqual(calls.counts.count, 2); XCTAssertEqual(calls.completions.count, phase == "count" ? 1 : 2)
             XCTAssertTrue(cancelled); XCTAssertFalse(waiting); XCTAssertFalse(owner.isOperating)
@@ -247,14 +249,15 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         }
     }
 
-    func testTimedOutLinkSelectorKeepsOwnerBusyUntilCancellationCleanupJoins() async throws {
+    func testTimedOutLinkSelectorReleasesOwnerWhileItsPlanningPermitRemainsBusy() async throws {
         let fixture = try await ResearchDriverFixture.make(), gate = BrowserResearchGate()
         defer { gate.release(); fixture.close() }
         _ = try await fixture.start()
         let owner = try fixture.owner(), original = owner.input
         var cancelled = false, finished = false
+        let delivered = expectation(description: "Selection deadline delivered before model cleanup")
         let work = Task {
-            defer { finished = true }
+            defer { finished = true; delivered.fulfill() }
             return try await owner.planCandidateNavigation(budget: .milliseconds(50)) { _, batch in
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch {
@@ -266,12 +269,14 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
             }
         }
         try await gate.waitUntilStarted()
-        XCTAssertTrue(cancelled); XCTAssertTrue(owner.isOperating); XCTAssertFalse(finished)
-        do { _ = try await owner.readCandidates(); XCTFail("A cancelled selector still owns the operation") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertTrue(cancelled); XCTAssertFalse(owner.isOperating); XCTAssertTrue(finished)
+        do { _ = try await owner.readCandidates(); XCTFail("A cancelled selector still holds the shared planning permit") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
         gate.release()
         do { _ = try await work.value; XCTFail("Late valid-looking choices cannot escape the deadline") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         XCTAssertFalse(owner.isOperating); XCTAssertTrue(finished); XCTAssertEqual(owner.input, original)
         XCTAssertEqual(fixture.server.count("/details"), 0)
     }

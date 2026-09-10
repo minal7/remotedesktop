@@ -320,20 +320,23 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(prepared.owner.isOperating); XCTAssertEqual(try observedNavigationJournal(in: prepared.directory), planned)
         prepared.reader.beforeReply = nil
+        try await waitForAvailablePlanningWorker(prepared.planningWorker)
         try await prepared.owner.resumeAfterUserControl()
         _ = try await replanResearchLink(prepared.owner)
         _ = try await prepared.owner.resumeCandidateNavigation()
         XCTAssertEqual(prepared.fixture.server.count("/alpha"), 1)
     }
 
-    func testResearchLinkReplanDeadlineKeepsOriginalJournalAndLeaseUntilSelectorJoins() async throws {
+    func testResearchLinkReplanDeadlineJoinsNativeCleanupWhileRetainingThePlannerPermit() async throws {
         let prepared = try await pendingResearchLinkFixture(), gate = BrowserResearchGate()
         defer { gate.release(); prepared.owner.retire(); prepared.fixture.close(); try? FileManager.default.removeItem(at: prepared.directory) }
         try await prepared.owner.resumeAfterUserControl()
         let original = prepared.owner.input, planned = try observedNavigationJournal(in: prepared.directory)
         var cancelled = false
+        let delivered = expectation(description: "Replan deadline delivered after native lease cleanup")
         let work = Task {
-            try await prepared.owner.replanPendingCandidateNavigation(budget: .milliseconds(50)) { _, candidates in
+            defer { delivered.fulfill() }
+            return try await prepared.owner.replanPendingCandidateNavigation(budget: .milliseconds(50)) { _, candidates in
                 do { try await Task.sleep(for: .seconds(60)) }
                 catch { cancelled = error is CancellationError; await gate.suspend() }
                 let candidate = try XCTUnwrap(candidates.candidates.first)
@@ -341,14 +344,18 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             }
         }
         try await gate.waitUntilStarted()
-        XCTAssertTrue(cancelled); XCTAssertTrue(prepared.owner.isOperating)
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertTrue(cancelled); XCTAssertFalse(prepared.owner.isOperating)
         let competing = try ComputerUseTaskJournalStore(directory: prepared.directory.appendingPathComponent("Observed Destinations"))
-        XCTAssertThrowsError(try competing.acquireExecution(taskID: planned.taskID, expected: planned)) {
-            XCTAssertEqual($0 as? ComputerUseTaskJournalStore.StoreError, .busy)
+        let lease = try competing.acquireExecution(taskID: planned.taskID, expected: planned)
+        lease.release() // Native cleanup joined; the untouched planned stage still exists.
+        XCTAssertThrowsError(try prepared.planningWorker.requireAvailable()) {
+            XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .busy)
         }
         gate.release()
         do { _ = try await work.value; XCTFail("No late replacement can escape a timed-out decision") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserLinkPlanError, .deadlineExceeded) }
+        try await waitForAvailablePlanningWorker(prepared.planningWorker)
         XCTAssertEqual(try observedNavigationJournal(in: prepared.directory), planned)
         XCTAssertTrue(prepared.owner.hasPendingNavigation); XCTAssertFalse(prepared.owner.isOperating)
         XCTAssertEqual(prepared.owner.input, original); XCTAssertEqual(prepared.fixture.server.count("/alpha"), 0)
@@ -642,10 +649,12 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         var mayAct = true
         let fixture = try await DOMFixture(body: "<article><h2>Concert Alpha</h2><p>USD 35</p></article>", mayAct: { mayAct })
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), reader = BrowserResearchResultFixture()
+        let worker = ComputerUsePlanningWorker()
         defer { gate.release(); fixture.close() }
         reader.beforeReply = { await gate.suspend() }
         let goal = try browserResultGoal()
-        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner, resultPlanner: reader, mayAct: { mayAct })
+        let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: planner, resultPlanner: reader,
+            planningWorker: worker, mayAct: { mayAct })
         _ = try await owner.interpretGoal()
         let running = Task { try await owner.readCandidates() }
         try await gate.waitUntilStarted()
@@ -660,6 +669,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
         mayAct = true
         reader.beforeReply = nil
+        try await waitForAvailablePlanningWorker(worker)
         try await owner.resumeAfterUserControl()
         do { _ = try await owner.revalidateCandidates(); XCTFail("Pause discarded speculative candidates") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .interpretationRequired) }
@@ -878,8 +888,9 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         body: String = "<article><h2>Concert Alpha</h2><a href='/alpha'>Alpha details</a></article>", heldSignal: Bool = false,
         additionalRoutes: [String: OwnedBrowserHTTPFixture.Response] = [:]
     ) async throws -> (fixture: DOMFixture, owner: ComputerUseBrowserResearchTask, reader: BrowserResearchResultFixture,
-                      state: ResearchNavigationTestState, directory: URL) {
+                      state: ResearchNavigationTestState, directory: URL, planningWorker: ComputerUsePlanningWorker) {
         let state = ResearchNavigationTestState(), directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let worker = ComputerUsePlanningWorker()
         let fixture = try await DOMFixture(body: body, heldSignal: heldSignal, additionalRoutes: additionalRoutes,
             domScriptDidDispatch: { state.didDispatch($0) })
         do {
@@ -888,7 +899,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             let owner = ComputerUseBrowserResearchTask(input: goal, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
                 resultPlanner: reader, navigationJournalDirectory: directory, navigationStore: { location in
                     try .init(directory: location, afterReplacement: { try MainActor.assumeIsolated { try state.didReplace() } })
-                }, mayAct: { true })
+                }, planningWorker: worker, mayAct: { true })
             state.owner = owner
             _ = try await owner.interpretGoal()
             let batch = try await owner.readCandidates(), candidate = try XCTUnwrap(batch.candidates.first)
@@ -899,7 +910,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
             try await fixture.browser.waitForDOMCompletion(document: fixture.document)
             XCTAssertTrue(owner.hasPendingNavigation)
             XCTAssertEqual(try observedNavigationJournal(in: directory).statuses, [.planned])
-            return (fixture, owner, reader, state, directory)
+            return (fixture, owner, reader, state, directory, worker)
         } catch { fixture.close(); try? FileManager.default.removeItem(at: directory); throw error }
     }
 

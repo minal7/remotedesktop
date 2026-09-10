@@ -166,20 +166,26 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
         let directory = temporaryDirectory(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         let coordinator = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture()
+        let worker = ComputerUsePlanningWorker()
         defer { gate.release(); coordinator.close(); try? FileManager.default.removeItem(at: directory) }
         planner.beforeReply = { await gate.suspend() }
-        let previous = try prepare(coordinator, taskID: "previous", planner: planner)
-        let running = Task { try await previous.interpretGoal() }
+        let previous = try prepare(coordinator, taskID: "previous", planner: planner, planningWorker: worker)
+        let delivered = expectation(description: "Retirement delivered before planner return")
+        let running = Task { defer { delivered.fulfill() }; return try await previous.interpretGoal() }
         try await gate.waitUntilStarted()
         previous.retire()
         XCTAssertThrowsError(try prepare(coordinator)) {
             XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .busy)
         }
         XCTAssertTrue(coordinator.researchTask(taskID: "previous") === previous)
+        await fulfillment(of: [delivered], timeout: 1)
+        let next = try prepare(coordinator, planningWorker: worker)
+        do { _ = try await next.interpretGoal(); XCTFail("Replacing a retired owner cannot bypass the shared model permit") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
         gate.release()
         do { _ = try await running.value; XCTFail("A retired owner's late proposal cannot publish") }
         catch { XCTAssertTrue(error is CancellationError) }
-        let next = try prepare(coordinator)
+        try await waitForAvailablePlanningWorker(worker)
         _ = try await next.interpretGoal()
         XCTAssertFalse(browser.hasSession, "Text-only planning still does not allocate a browser")
     }
@@ -312,10 +318,11 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
     }
 
     private func prepare(_ coordinator: ComputerUseBrowserNavigationTask, taskID: String = "root",
-                         planner: BrowserResearchGoalFixture? = nil, mayAct: @escaping @MainActor () -> Bool = { true }) throws -> ComputerUseBrowserResearchTask {
+                         planner: BrowserResearchGoalFixture? = nil, mayAct: @escaping @MainActor () -> Bool = { true },
+                         planningWorker: ComputerUsePlanningWorker = .init()) throws -> ComputerUseBrowserResearchTask {
         try coordinator.prepareResearchTask(taskID: taskID, prompt: "Find concerts.", goalPlanner: planner ?? BrowserResearchGoalFixture(),
             resultPlanner: BrowserResearchResultFixture(), mayAct: mayAct, referenceDate: Date(timeIntervalSince1970: 1_800_000_000),
-            timeZoneIdentifier: "America/Los_Angeles")
+            timeZoneIdentifier: "America/Los_Angeles", planningWorker: planningWorker)
     }
     private func query(_ proposal: ComputerUseBrowserGoalProposal) throws -> ComputerUseBrowserSearchQuery {
         try .decode(content: #"{"terms":[{"requirement":0,"text":"concerts"}]}"#, interpretation: proposal)

@@ -184,7 +184,8 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     /// it from a later wall clock or replaces the exact original request.
     func prepareResearchTask(taskID: String, prompt: String, goalPlanner: any ComputerUseBrowserGoalPlanning,
                              resultPlanner: any ComputerUseBrowserResultPlanning, mayAct: @escaping @MainActor () -> Bool,
-                             referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier) throws -> ComputerUseBrowserResearchTask {
+                             referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier,
+                             planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30) throws -> ComputerUseBrowserResearchTask {
         if let research, research.taskID == taskID {
             guard research.input.prompt.utf8.elementsEqual(prompt.utf8) else { throw ComputerUseBrowserResearchTask.Failure.goalChanged }
             return research
@@ -193,7 +194,8 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         guard research?.isOperating != true else { throw ComputerUseBrowserResearchTask.Failure.busy }
         let replacement = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: goalPlanner,
             resultPlanner: resultPlanner, navigationJournalDirectory: journalDirectory.appendingPathComponent("Research", isDirectory: true),
-            navigationStore: observedNavigationStore, browserAdmission: self, mayAct: mayAct)
+            navigationStore: observedNavigationStore, browserAdmission: self,
+            planningWorker: planningWorker, planningTimeout: planningTimeout, mayAct: mayAct)
         research?.retire()
         research = replacement
         return replacement

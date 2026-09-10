@@ -284,9 +284,10 @@ final class ComputerUseBrowserSearchPlannerTests: XCTestCase {
     func testOwnerSearchPlanningHoldsCancellationUntilUnwindAndRequiresExplicitHandback() async throws {
         for retires in [false, true] {
             let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = SearchOwnerFixture(), gate = BrowserResearchGate()
+            let worker = ComputerUsePlanningWorker()
             defer { gate.release(); browser.close() }
             let owner = ComputerUseBrowserResearchTask(input: try proposal(["Find tickets."]).input, browser: browser,
-                goalPlanner: BrowserResearchGoalFixture(), resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+                goalPlanner: BrowserResearchGoalFixture(), resultPlanner: BrowserResearchResultFixture(), planningWorker: worker, mayAct: { true })
             _ = try await owner.interpretGoal()
             planner.beforeReply = { await gate.suspend() }
             let running = Task { try await owner.planInitialSearch(using: planner) }
@@ -298,6 +299,7 @@ final class ComputerUseBrowserSearchPlannerTests: XCTestCase {
             gate.release()
             do { _ = try await running.value; XCTFail("A late query cannot escape cancellation") }
             catch { XCTAssertTrue(error is CancellationError) }
+            try await waitForAvailablePlanningWorker(worker)
             XCTAssertFalse(owner.isOperating)
             if !retires {
                 planner.beforeReply = nil

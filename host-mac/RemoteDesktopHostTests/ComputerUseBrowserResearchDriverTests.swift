@@ -163,7 +163,8 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         let fixture = try await ResearchDriverFixture.make(), gate = BrowserResearchGate()
         defer { gate.release(); fixture.close() }
         fixture.policy.beforeSelection = { await gate.suspend() }
-        let running = Task { try await fixture.start() }
+        let delivered = expectation(description: "Selection Pause delivered before planner return")
+        let running = Task { defer { delivered.fulfill() }; return try await fixture.start() }
         try await gate.waitUntilStarted()
         let owner = try fixture.owner()
         owner.pause()
@@ -174,12 +175,18 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             goalPlanner: fixture.goal, resultPlanner: fixture.results, mayAct: { true })) {
                 XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .busy)
             }
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertFalse(owner.isOperating)
+        try await owner.resumeAfterUserControl()
+        let busy = try await fixture.resume()
+        guard case .userInterventionRequired = busy else { gate.release(); return XCTFail("Handback cannot overlap a suspended selector") }
+        XCTAssertEqual(fixture.policy.goals.count, 1)
         gate.release()
         do { _ = try await running.value; XCTFail("A late selection cannot act after Pause") }
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating); XCTAssertEqual(fixture.server.count("/details"), 0)
         fixture.policy.beforeSelection = nil
-        try await owner.resumeAfterUserControl()
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         _ = try await fixture.resume()
         XCTAssertEqual(fixture.search.inputs.count, 1); XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
     }
@@ -490,7 +497,8 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         defer { gate.release(); fixture.close() }
         configureAutomaticFormQueries(fixture)
         fixture.forms.beforeReply = { await gate.suspend() }
-        let running = Task { try await fixture.start() }
+        let delivered = expectation(description: "Form Pause delivered before planner return")
+        let running = Task { defer { delivered.fulfill() }; return try await fixture.start() }
         try await gate.waitUntilStarted()
         let owner = try fixture.owner(), original = owner.input
         owner.pause()
@@ -498,11 +506,17 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         do { _ = try await fixture.resume(); XCTFail("The original form planner must unwind first") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchDriver.Failure, .busy) }
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 0)
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertFalse(owner.isOperating)
+        try await owner.resumeAfterUserControl()
+        let busy = try await fixture.resume()
+        guard case .userInterventionRequired = busy else { gate.release(); return XCTFail("Handback cannot overlap a suspended form planner") }
+        XCTAssertEqual(fixture.forms.inputs.count, 1)
         gate.release()
         do { _ = try await running.value; XCTFail("The late model reply cannot authorize input") }
         catch { XCTAssertTrue(error is CancellationError) }
         fixture.forms.beforeReply = nil
-        try await owner.resumeAfterUserControl()
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         _ = try await fixture.resume()
         XCTAssertEqual(fixture.forms.inputs.count, 2)
         XCTAssertTrue(fixture.forms.inputs.allSatisfy { $0.interpretation.input == original })
@@ -532,6 +546,97 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
+    }
+
+    func testAdmissionDeadlineDoesNotCreateAnOwnerAndRetryRetainsTheOriginalClock() async throws {
+        var date = ResearchDriverFixture.date, zone = "America/Los_Angeles"
+        let fixture = try await ResearchDriverFixture.make(planningTimeout: 0.15, now: { date }, timeZoneIdentifier: { zone })
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "admission started"), returned: expectation(description: "admission returned"))
+        defer { gate.finish(true); fixture.close() }
+        fixture.goal.base.beforeReply = { _ = await gate.wait() }
+        let delivered = expectation(description: "admission deadline delivered")
+        let call = Task { () -> Result<ComputerUseExecutionResult?, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await fixture.start()) } catch { return .failure(error) }
+        }
+        await fulfillment(of: [gate.started, delivered], timeout: 2, enforceOrder: true)
+        let original = try XCTUnwrap(fixture.goal.inputs.first)
+        XCTAssertNil(fixture.tools.ownedBrowserResearch(taskID: ResearchDriverFixture.root)); XCTAssertFalse(fixture.browser.hasSession)
+        date = date.addingTimeInterval(172_800); zone = "UTC"
+        do {
+            _ = try await fixture.driver.executeBrowserResearch(taskID: "competing-task", prompt: "Find movies.", tools: fixture.tools, progress: { _ in })
+            XCTFail("A busy competing task cannot discard the original retry clock")
+        } catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        do { _ = try await fixture.start(); XCTFail("Admission cannot queue another model call") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        do {
+            _ = try await fixture.driver.executeBrowserResearch(taskID: ResearchDriverFixture.root, prompt: fixture.request + " Changed.", tools: fixture.tools, progress: { _ in })
+            XCTFail("A retry cannot silently replace the original request")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserResearchDriver.Failure, .invalidContinuation) }
+        XCTAssertEqual(fixture.goal.inputs, [original]); XCTAssertTrue(fixture.search.inputs.isEmpty)
+        gate.finish(true)
+        switch await call.value {
+        case .failure(let error): XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut)
+        case .success: XCTFail("Timeout cannot become admission or an unsupported-route fallback")
+        }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
+        XCTAssertNil(fixture.tools.ownedBrowserResearch(taskID: ResearchDriverFixture.root)); XCTAssertFalse(fixture.browser.hasSession)
+        fixture.goal.base.beforeReply = nil
+        _ = try await fixture.start()
+        XCTAssertEqual(fixture.goal.inputs, [original, original]); XCTAssertEqual(try fixture.owner().input, original)
+        XCTAssertEqual(original.timeZoneIdentifier, "America/Los_Angeles")
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
+    }
+
+    func testActionDeadlineReturnsWithoutLettingTheLateProposalAct() async throws { try await verifyHeldProposalDeadline(.action) }
+    func testFormDeadlineReturnsWithoutLettingTheLateProposalEdit() async throws { try await verifyHeldProposalDeadline(.form) }
+    func testReadingDeadlineReturnsWithoutPublishingTheLateReading() async throws { try await verifyHeldProposalDeadline(.reading) }
+    func testSelectionDeadlineReturnsWithoutOpeningTheLateLink() async throws { try await verifyHeldProposalDeadline(.selection) }
+
+    private enum HeldProposalStage: Equatable { case action, form, reading, selection }
+    private func verifyHeldProposalDeadline(_ stage: HeldProposalStage) async throws {
+        let fixture = try await ResearchDriverFixture.make(searchForm: stage == .form, planningTimeout: 0.15)
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "\(stage) started"), returned: expectation(description: "\(stage) returned"))
+        defer { gate.finish(true); fixture.close() }
+        let hold: @MainActor () async -> Void = { _ = await gate.wait() }
+        switch stage {
+        case .action: fixture.actions.beforeReply = hold
+        case .form: configureAutomaticFormQueries(fixture); fixture.forms.beforeReply = hold
+        case .reading: fixture.results.beforeReply = hold
+        case .selection: fixture.policy.choices = [true]; fixture.policy.beforeSelection = hold
+        }
+        let delivered = expectation(description: "\(stage) deadline delivered")
+        let call = Task { () -> Result<ComputerUseExecutionResult?, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await fixture.start()) } catch { return .failure(error) }
+        }
+        await fulfillment(of: [gate.started], timeout: 5)
+        await fulfillment(of: [delivered], timeout: 1)
+        let owner = try fixture.owner(), original = owner.input
+        XCTAssertFalse(owner.isOperating)
+        XCTAssertThrowsError(try fixture.planningWorker.requireAvailable()) {
+            XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .busy)
+        }
+        let calls = [fixture.actions.inputs.count, fixture.forms.inputs.count, fixture.results.inputs.count, fixture.policy.goals.count]
+        let retry = try await fixture.resume()
+        guard case .userInterventionRequired = retry else { return XCTFail("Retry must respect the original planner's occupied permit") }
+        XCTAssertEqual([fixture.actions.inputs.count, fixture.forms.inputs.count, fixture.results.inputs.count, fixture.policy.goals.count], calls)
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
+        XCTAssertFalse(fixture.state.commands.contains(.edit)); XCTAssertTrue(owner.confirmedFormHistory.isEmpty)
+        let commands = fixture.state.commands, history = owner.confirmedNavigationHistory
+        gate.finish(true)
+        switch await call.value {
+        case .success(.some(.userInterventionRequired)): break
+        default: XCTFail("\(stage) deadline must keep the existing research task pending")
+        }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
+        XCTAssertEqual(fixture.state.commands, commands); XCTAssertEqual(owner.confirmedNavigationHistory, history)
+        XCTAssertEqual(owner.input, original)
+        fixture.actions.beforeReply = nil; fixture.forms.beforeReply = nil; fixture.results.beforeReply = nil; fixture.policy.beforeSelection = nil
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
     }
 
     private var formContent: String { #"{"edits":[{"field":"field1","terms":[{"requirement":0,"text":"concerts"}]}],"preserve":[]}"# }
@@ -568,6 +673,7 @@ struct ResearchDriverFixture {
     let policy: DriverPlanningFixture
     let state: DriverFixtureState
     let driver: ComputerUseBrowserResearchDriver
+    let planningWorker: ComputerUsePlanningWorker
     var searchDirectory: URL { directory.appendingPathComponent("Research/Initial Search") }
 
     static func make(seedPage: Bool = false, navigationLimit: Int = 8,
@@ -578,7 +684,9 @@ struct ResearchDriverFixture {
                      actionPlanner: (any ComputerUseBrowserActionPlanning)? = nil,
                      formPlanner: (any ComputerUseBrowserFormPlanning)? = nil, request: String = ResearchDriverFixture.prompt,
                      searchFormHTML: String? = nil, heldSignal: Bool = false, offersBodyHTML: String? = nil,
-                     searchBodyHTML: String? = nil, detailsBodyHTML: String? = nil, betaBodyHTML: String? = nil) async throws -> Self {
+                     searchBodyHTML: String? = nil, detailsBodyHTML: String? = nil, betaBodyHTML: String? = nil,
+                     planningWorker: ComputerUsePlanningWorker = .init(), planningTimeout: TimeInterval = 30,
+                     now: @escaping () -> Date = { ResearchDriverFixture.date }, timeZoneIdentifier: @escaping () -> String = { "America/Los_Angeles" }) async throws -> Self {
         func card(_ path: String) -> String { "<article><h2>Concert Alpha</h2><a href='\(linkDestinationOverride ?? path)'>Alpha details</a>\(candidateBodyHTML)</article>" + additionalCardHTML }
         let form = searchFormHTML ?? (searchForm ? "<form action='/filtered'><label>Query<input name='q' value='old'></label><button>Search</button></form>" : "")
         let server = try OwnedBrowserHTTPFixture(routes: ["/signal": .init(held: heldSignal), "/before": .init(body: card("/old")),
@@ -614,9 +722,10 @@ struct ResearchDriverFixture {
             if let linkPlanner { planning = ComputerUseModelBrowserResearchPlanning(sourcePlan: { try policy.sources(for: $0) }, linkPlanner: linkPlanner) }
             else { planning = policy }
             let driver = ComputerUseBrowserResearchDriver(goalPlanner: goal, resultPlanner: resultPlanner ?? results, searchPlanner: search, actionPlanner: actionPlanner ?? actions, formPlanner: formPlanner ?? forms,
-                planning: planning, navigationLimit: navigationLimit, now: { date }, timeZoneIdentifier: { "America/Los_Angeles" })
+                planning: planning, navigationLimit: navigationLimit, now: now, timeZoneIdentifier: timeZoneIdentifier,
+                planningWorker: planningWorker, planningTimeout: planningTimeout)
             return .init(request: request, server: server, base: base, directory: directory, browser: browser, coordinator: coordinator,
-                tools: tools, goal: goal, results: results, search: search, actions: actions, forms: forms, policy: policy, state: state, driver: driver)
+                tools: tools, goal: goal, results: results, search: search, actions: actions, forms: forms, policy: policy, state: state, driver: driver, planningWorker: planningWorker)
         } catch { browser.close(); server.stop(); try? FileManager.default.removeItem(at: directory); throw error }
     }
     func owner() throws -> ComputerUseBrowserResearchTask { try XCTUnwrap(tools.ownedBrowserResearch(taskID: Self.root)) }
@@ -650,7 +759,7 @@ struct ResearchDriverFixture {
         XCTAssertEqual(files.count, 1)
         return try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: XCTUnwrap(files.first)))
     }
-    func close() { state.onCommand = nil; state.onMayAct = nil; state.onWrite = nil; policy.beforeSelection = nil; actions.beforeReply = nil; forms.beforeReply = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
+    func close() { state.onCommand = nil; state.onMayAct = nil; state.onWrite = nil; goal.base.beforeReply = nil; search.beforeReply = nil; results.beforeReply = nil; policy.beforeSelection = nil; actions.beforeReply = nil; forms.beforeReply = nil; coordinator.close(); server.stop(); try? FileManager.default.removeItem(at: directory) }
 }
 
 @MainActor
@@ -687,8 +796,10 @@ final class DriverGoalFixture: ComputerUseBrowserGoalPlanning {
 final class DriverSearchFixture: ComputerUseBrowserSearchPlanning {
     var inputs: [ComputerUseBrowserGoalProposal] = []
     var empty = false
+    var beforeReply: (@MainActor () async -> Void)?
     func propose(_ interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
         inputs.append(interpretation)
+        if let beforeReply { await beforeReply() }
         return try .decode(content: empty ? #"{"terms":[]}"# : #"{"terms":[{"requirement":0,"text":"concerts"}]}"#, interpretation: interpretation)
     }
 }

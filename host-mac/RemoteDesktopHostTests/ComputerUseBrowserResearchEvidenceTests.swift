@@ -156,6 +156,7 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating)
         planner.beforeReply = nil
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         try await owner.resumeAfterUserControl()
         XCTAssertNotEqual(try owner.researchEvidence(for: original).digest, before.digest)
         XCTAssertEqual(try owner.researchEvidence(for: original).count, before.count)
@@ -184,6 +185,7 @@ final class ComputerUseBrowserResearchEvidenceTests: XCTestCase {
             do { _ = try await running.value; XCTFail("Late unvalidated reading cannot publish") }
             catch { XCTAssertTrue(error is CancellationError || error as? ComputerUseBrowserResearchTask.Failure == .retired) }
             fixture.results.beforeReply = nil
+            try await waitForAvailablePlanningWorker(fixture.planningWorker)
             if !retire {
                 try await owner.resumeAfterUserControl()
                 XCTAssertEqual(try owner.researchEvidence(for: original).count, 0)

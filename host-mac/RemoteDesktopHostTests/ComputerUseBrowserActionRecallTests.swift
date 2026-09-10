@@ -182,6 +182,7 @@ final class ComputerUseBrowserActionRecallTests: XCTestCase {
         do { _ = try await work.value; XCTFail("A paused recall cannot publish an action") }
         catch { XCTAssertTrue(error is CancellationError) }
         fixture.actions.beforeReply = nil
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         XCTAssertFalse(owner.isOperating)
         try await owner.resumeAfterUserControl()
         XCTAssertNotEqual(try owner.researchEvidence(for: original).digest, archive.digest)
@@ -213,6 +214,7 @@ final class ComputerUseBrowserActionRecallTests: XCTestCase {
         }
         do { _ = try await owner.planNextAction(using: fixture.actions, budget: .seconds(1)); XCTFail("Recall cannot reset the deadline") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .deadlineExceeded) }
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         XCTAssertEqual(calls, 2); XCTAssertTrue(cancelled); XCTAssertFalse(waiting); XCTAssertFalse(owner.isOperating)
         XCTAssertEqual(try owner.researchEvidence(for: owner.input).digest, archive.digest)
         XCTAssertEqual(fixture.server.count("/details"), 0)

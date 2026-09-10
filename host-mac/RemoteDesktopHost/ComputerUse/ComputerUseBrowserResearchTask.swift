@@ -69,6 +69,8 @@ final class ComputerUseBrowserResearchTask {
     private let browser: ComputerUseOwnedBrowser
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
     private let resultPlanner: any ComputerUseBrowserResultPlanning
+    private let planningWorker: ComputerUsePlanningWorker
+    private let planningTimeout: TimeInterval
     private let mayAct: @MainActor () -> Bool
     private let clarification: ComputerUseBrowserGoalClarification
     private let navigation: ComputerUseBrowserResearchNavigation?
@@ -228,8 +230,10 @@ final class ComputerUseBrowserResearchTask {
          navigationJournalDirectory: URL? = nil,
          navigationStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          browserAdmission: (any ComputerUseBrowserResearchAdmitting)? = nil,
+         planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30,
          mayAct: @escaping @MainActor () -> Bool, now: @escaping () -> Date = Date.init) {
         taskID = input.taskID; self.browser = browser; self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner
+        self.planningWorker = planningWorker; self.planningTimeout = planningTimeout
         retainedEvidence = .init(goal: input)
         self.mayAct = mayAct; clarification = .init(input: input, now: now)
         navigationDirectory = navigationJournalDirectory; self.navigationStore = navigationStore
@@ -248,7 +252,7 @@ final class ComputerUseBrowserResearchTask {
             // When this task already owns a page, discover login/control loss
             // before asking the model. No browser is created or claimed here.
             try await checkPageBeforePlanning(goal: captured)
-            let proposal = try await goalPlanner.propose(captured)
+            let proposal = try await performPlanning { [goalPlanner] in try await goalPlanner.propose(captured) }
             try checkCurrent(captured)
             guard proposal.input.digest == captured.digest else { throw Failure.goalChanged }
             return Interpretation(proposal: proposal, scalars: .init(proposal: proposal))
@@ -307,7 +311,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         return try await operate { [self] in
             try await checkPageBeforePlanning(goal: captured)
-            let query = try await planner.propose(interpretation.proposal)
+            let query = try await performPlanning { try await planner.propose(interpretation.proposal) }
             try checkCurrent(captured)
             guard query.goalDigest == captured.digest, query.interpretationDigest == interpretation.proposal.digest else {
                 throw Failure.goalChanged
@@ -514,7 +518,11 @@ final class ComputerUseBrowserResearchTask {
                 let releasedScope = readyScope?.queryControlID != nil && !optionReads.isEmpty ? nil : readyScope
                 let proposal: ComputerUseBrowserActionProposal
                 if let releasedScope { proposal = try .decode(content: releasedScope.actionContent, input: context) }
-                else { proposal = try await planner.propose(context) }
+                else {
+                    proposal = try await performPlanning(deadline: deadline, timeoutError: ComputerUseBrowserActionPlanError.deadlineExceeded) {
+                        try await planner.propose(context)
+                    }
+                }
                 try check()
                 try proposal.validate(for: context)
                 // Preserve accepted duties even if the next metadata check,
@@ -1042,8 +1050,8 @@ final class ComputerUseBrowserResearchTask {
         latestForm = retained
     }
 
-    /// Planning and native preflight share the owner's operation. Pause joins
-    /// the actual planner before releasing it; no edit is dispatched here.
+    /// Planning and native preflight share the owner's operation. A cancelled
+    /// proposal keeps its worker permit; native cleanup still joins the owner.
     func planForm(_ proposed: ComputerUseBrowserResearchFormInput, using planner: any ComputerUseBrowserFormPlanning) async throws -> ComputerUseBrowserFormProposal {
         try requireIdle()
         guard !hasPendingFormExecution else { throw Failure.formPending }
@@ -1060,7 +1068,7 @@ final class ComputerUseBrowserResearchTask {
         latestForm = nil; latestAction = nil
         let result = try await operate { [self] in
             try await validatePreparedForm(retained, goal: captured)
-            let proposal = try await planner.propose(proposed)
+            let proposal = try await performPlanning { try await planner.propose(proposed) }
             try checkCurrent(captured)
             try proposal.validate(for: proposed)
             try await validatePreparedForm(retained, goal: captured)
@@ -1451,8 +1459,8 @@ final class ComputerUseBrowserResearchTask {
     }
 
     /// Keep fresh reading and no-effect link selection inside the same owner
-    /// operation. Pause must cancel/join the selector before another owner can
-    /// take over. The selected link is still natively bound again when opened.
+    /// operation. Pause joins native cleanup; a stalled selector retains only
+    /// its planning permit. The selected link is natively bound again when opened.
     func planCandidateNavigation(budget: Duration = .seconds(30), select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
         let decision = try await planResearchDecision(budget: budget) { goal, candidates in
@@ -1490,7 +1498,8 @@ final class ComputerUseBrowserResearchTask {
     /// One deadline covers the entire no-effect decision, including recalled
     /// readings and final native validation. The preceding reading/review has
     /// its own admission; selecting another recall cannot restart this clock.
-    /// Structured cancellation joins the selector before releasing the owner.
+    /// Cancellation releases proposal delivery while its worker retains the
+    /// actual selector call. Structured native validation still joins the owner.
     private func selectCandidateLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
         budget: Duration, select: @escaping @MainActor @Sendable
         (ComputerUseBrowserGoalInput, ComputerUseBrowserResultCandidates) async throws -> LinkChoice?) async throws -> LinkChoice? {
@@ -1508,7 +1517,9 @@ final class ComputerUseBrowserResearchTask {
         return try await withThrowingTaskGroup(of: Decision.self) { group in
             group.addTask { @MainActor [self] in
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
-                let choice = try await select(goal, candidates)
+                let choice = try await performPlanning(deadline: deadline, timeoutError: ComputerUseBrowserLinkPlanError.deadlineExceeded) {
+                    try await select(goal, candidates)
+                }
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
                 try await browser.validateResultCandidates(candidates, goal: goal)
                 try checkCandidateLinkDecision(goal: goal, deadline: deadline)
@@ -1888,7 +1899,9 @@ final class ComputerUseBrowserResearchTask {
         }
         try requireOriginalPopupCriteria(in: evidence)
         let page = try ComputerUseBrowserResultPageInput(page: evidence.page)
-        let proposal = try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
+        let proposal = try await performPlanning(timeoutError: ComputerUseBrowserResultReviewError.deadlineExceeded) { [resultPlanner] in
+            try await resultPlanner.propose(interpretation: interpretation.proposal, page: page)
+        }
         try checkCurrent(goal)
         let answerPolicy = researchSources?.answerPolicy
         guard answerPolicy == nil || answerPolicy?.goalRevision == goal.digest else { throw Failure.goalChanged }
@@ -1901,6 +1914,27 @@ final class ComputerUseBrowserResearchTask {
         try validateVisitHistory(of: bound)
         try retainedEvidence.record(bound, goal: goal)
         return bound
+    }
+
+    /// Only immutable proposal inputs and planners cross this boundary. Native
+    /// observation, preparation, validation and effect calls stay outside it.
+    /// The shared worker retains capacity after an overdue/cancelled delivery
+    /// until the underlying planner actually returns, discarding its late value.
+    private func performPlanning<Value: Sendable>(deadline: ContinuousClock.Instant? = nil,
+        timeoutError: Error = ComputerUsePlanningWorker.Failure.timedOut,
+        _ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        guard planningTimeout.isFinite, planningTimeout > 0, planningTimeout <= ComputerUsePlanningWorker.maximumWait else {
+            throw ComputerUsePlanningWorker.Failure.invalidDeadline
+        }
+        var timeout = planningTimeout
+        if let deadline {
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero else { throw timeoutError }
+            timeout = min(timeout, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18)
+        }
+        do { return try await planningWorker.perform(timeout: timeout, operation) }
+        catch ComputerUsePlanningWorker.Failure.timedOut { throw timeoutError }
     }
 
     private func requireIdle(allowPendingPopup: Bool = false, allowPendingOptionSelection: Bool = false) throws {

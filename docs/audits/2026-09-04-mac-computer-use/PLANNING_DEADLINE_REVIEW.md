@@ -1,5 +1,7 @@
 # Bound asynchronous semantic planning without accepting late proposals
 
+Later source integration: the [browser planning-lifetime review](BROWSER_PLANNING_LIFETIME_REVIEW.md) extends this worker to browser proposal boundaries while retaining native cleanup in the owner. The original checkpoint and validation limits below remain historical.
+
 Parent source: `1faf48a`. Status: source implementation and fixture registration only. No build, XCTest execution, model inference, application launch or computer-use activity ran. Performance optimization and real-site acceptance remain deferred.
 
 Follow-up: [native and MCP planning deadlines](CAPABILITY_PLANNING_DEADLINE_REVIEW.md) extend this worker to the other proposal paths and join generation-scoped MCP cancellation. Counts and scope below describe this original visual checkpoint.

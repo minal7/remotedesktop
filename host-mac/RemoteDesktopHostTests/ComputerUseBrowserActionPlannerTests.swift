@@ -251,6 +251,7 @@ final class ComputerUseBrowserActionPlannerTests: XCTestCase {
         do { _ = try await running.value; XCTFail("A cancelled proposal cannot become an action") }
         catch { XCTAssertTrue(error is CancellationError) }
         fixture.actions.beforeReply = nil
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         try await owner.resumeAfterUserControl()
         do { _ = try await owner.prepareFormInput(for: previous); XCTFail("Old action references must be invalidated") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }

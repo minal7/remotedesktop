@@ -141,8 +141,10 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
-        let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner)
-        let running = Task { try await owner.interpretGoal() }
+        let worker = ComputerUsePlanningWorker()
+        let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner, worker: worker)
+        let delivered = expectation(description: "Pause delivered before planner return")
+        let running = Task { defer { delivered.fulfill() }; return try await owner.interpretGoal() }
         try await gate.waitUntilStarted()
         owner.pause()
         XCTAssertTrue(owner.isOperating)
@@ -150,12 +152,20 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
         do { _ = try await owner.interpretGoal(); XCTFail("Pause needs explicit handback") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertFalse(owner.isOperating, "Only native cleanup must join the owner; model lifetime belongs to the worker")
+        do { _ = try await owner.interpretGoal(); XCTFail("Unwinding the operation cannot hand control back") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
+        try await owner.resumeAfterUserControl()
+        do { _ = try await owner.interpretGoal(); XCTFail("Resume cannot overlap the suspended planner") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        XCTAssertEqual(planner.inputs, [input])
         gate.release()
         do { _ = try await running.value; XCTFail("A late model result cannot publish after Pause") }
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating)
         planner.beforeReply = nil
-        try await owner.resumeAfterUserControl()
+        try await waitForAvailablePlanningWorker(worker)
         _ = try await owner.interpretGoal()
         XCTAssertEqual(planner.inputs, [input, input])
     }
@@ -164,18 +174,102 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
-        let owner = makeOwner(try goal(), browser: browser, planner: planner)
-        let running = Task { try await owner.interpretGoal() }
+        let worker = ComputerUsePlanningWorker()
+        let owner = makeOwner(try goal(), browser: browser, planner: planner, worker: worker)
+        let delivered = expectation(description: "Parent cancellation delivered before planner return")
+        let running = Task { defer { delivered.fulfill() }; return try await owner.interpretGoal() }
         try await gate.waitUntilStarted()
         running.cancel()
         do { _ = try await owner.interpretGoal(); XCTFail("Cancellation alone does not release the child operation") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertFalse(owner.isOperating)
+        do { _ = try await owner.interpretGoal(); XCTFail("An unwound owner cannot bypass the outstanding model call") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        XCTAssertEqual(planner.inputs.count, 1)
         gate.release()
         do { _ = try await running.value; XCTFail("Cancelled parent must not receive a successful result") }
         catch { XCTAssertTrue(error is CancellationError) }
         planner.beforeReply = nil
+        try await waitForAvailablePlanningWorker(worker)
         _ = try await owner.interpretGoal()
         XCTAssertEqual(planner.inputs.count, 2)
+    }
+
+    func testGoalDeadlineReturnsBeforePlannerAndCannotPublishItsLateInterpretation() async throws {
+        let worker = ComputerUsePlanningWorker(), planner = BrowserResearchGoalFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "goal started"), returned: expectation(description: "goal returned"))
+        defer { gate.finish(true); browser.close() }
+        let input = try goal(), owner = makeOwner(input, browser: browser, planner: planner, worker: worker, timeout: 0.15)
+        planner.beforeReply = { _ = await gate.wait() }
+        let delivered = expectation(description: "goal deadline delivered")
+        let call = Task { () -> Result<ComputerUseBrowserResearchTask.Interpretation, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await owner.interpretGoal()) } catch { return .failure(error) }
+        }
+        await fulfillment(of: [gate.started, delivered], timeout: 2, enforceOrder: true)
+        XCTAssertFalse(owner.isOperating); XCTAssertNil(browser.taskID)
+        do { _ = try await owner.interpretGoal(); XCTFail("An overdue call retains planning capacity") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        XCTAssertEqual(planner.inputs, [input]); XCTAssertEqual(owner.input, input)
+        gate.finish(true)
+        switch await call.value {
+        case .failure(let error): XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut)
+        case .success: XCTFail("Deadline must win over a late interpretation")
+        }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(worker)
+        planner.beforeReply = nil
+        _ = try await owner.interpretGoal()
+        XCTAssertEqual(planner.inputs, [input, input], "The late interpretation was not cached")
+    }
+
+    func testSearchDeadlineKeepsTheFullGoalAndLeavesNoPreparedSearch() async throws {
+        let worker = ComputerUsePlanningWorker(), planner = BrowserResearchGoalFixture(), search = DriverSearchFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "search started"), returned: expectation(description: "search returned"))
+        defer { gate.finish(true); browser.close() }
+        let input = try ComputerUseBrowserGoalInput(taskID: "search-timeout", prompt: "Find concerts tomorrow.",
+            referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
+        let owner = makeOwner(input, browser: browser, planner: planner, worker: worker, timeout: 0.15)
+        _ = try await owner.interpretGoal()
+        search.beforeReply = { _ = await gate.wait() }
+        let delivered = expectation(description: "search deadline delivered")
+        let call = Task { () -> Result<ComputerUseBrowserSearchQuery, Error> in
+            defer { delivered.fulfill() }
+            do { return .success(try await owner.planInitialSearch(using: search)) } catch { return .failure(error) }
+        }
+        await fulfillment(of: [gate.started, delivered], timeout: 2, enforceOrder: true)
+        XCTAssertFalse(owner.isOperating); XCTAssertEqual(owner.initialSearchState, .notPrepared); XCTAssertNil(browser.taskID)
+        do { _ = try await owner.planInitialSearch(using: search); XCTFail("The old search planner still holds capacity") }
+        catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
+        XCTAssertEqual(search.inputs.map(\.input), [input])
+        gate.finish(true)
+        switch await call.value {
+        case .failure(let error): XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut)
+        case .success: XCTFail("Late search terms cannot replace the timeout")
+        }
+        await fulfillment(of: [gate.returned], timeout: 1)
+        try await waitForAvailablePlanningWorker(worker)
+        search.beforeReply = nil
+        let query = try await owner.planInitialSearch(using: search)
+        XCTAssertEqual(query.goalDigest, input.digest); XCTAssertEqual(search.inputs.map(\.input), [input, input])
+        XCTAssertEqual(planner.inputs, [input]); XCTAssertEqual(owner.initialSearchState, .notPrepared)
+    }
+
+    func testInvalidBrowserPlanningDeadlinesDoNotInvokeTheGoalPlanner() async throws {
+        let worker = ComputerUsePlanningWorker(), planner = BrowserResearchGoalFixture()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        for timeout in [0, -1, .infinity, .nan, ComputerUsePlanningWorker.maximumWait + 1] {
+            let owner = makeOwner(try goal(), browser: browser, planner: planner, worker: worker, timeout: timeout)
+            do { _ = try await owner.interpretGoal(); XCTFail("Invalid deadline must fail before invoking a model") }
+            catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .invalidDeadline) }
+            XCTAssertFalse(owner.isOperating)
+            try worker.requireAvailable()
+        }
+        XCTAssertTrue(planner.inputs.isEmpty); XCTAssertNil(browser.taskID)
     }
 
     func testResearchQuestionsPreserveRootAndInvalidateRevisionCaches() async throws {
@@ -227,17 +321,19 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
 
     func testRetirementCannotBeUndoneByLateModelReplyOrControlChange() async throws {
         let gate = BrowserResearchGate(), planner = BrowserResearchGoalFixture(), browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        let worker = ComputerUsePlanningWorker()
         var mayAct = true
         defer { gate.release(); browser.close() }
         planner.beforeReply = { await gate.suspend() }
         let owner = ComputerUseBrowserResearchTask(input: try goal(), browser: browser, goalPlanner: planner,
-            resultPlanner: BrowserResearchResultFixture(), mayAct: { mayAct })
+            resultPlanner: BrowserResearchResultFixture(), planningWorker: worker, mayAct: { mayAct })
         let running = Task { try await owner.interpretGoal() }
         try await gate.waitUntilStarted()
         owner.retire(); mayAct = false
         gate.release()
         do { _ = try await running.value; XCTFail("A retired owner cannot publish a late result") }
         catch { XCTAssertTrue(error is CancellationError) }
+        try await waitForAvailablePlanningWorker(worker)
         mayAct = true
         do { try await owner.resumeAfterUserControl(); XCTFail("Control restoration cannot revive a stopped owner") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .retired) }
@@ -284,8 +380,10 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
     private func goal(taskID: String = "research-root") throws -> ComputerUseBrowserGoalInput {
         try .init(taskID: taskID, prompt: "Find concert tickets tomorrow.", referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
     }
-    private func makeOwner(_ input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser, planner: BrowserResearchGoalFixture) -> ComputerUseBrowserResearchTask {
-        .init(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(), mayAct: { true })
+    private func makeOwner(_ input: ComputerUseBrowserGoalInput, browser: ComputerUseOwnedBrowser, planner: BrowserResearchGoalFixture,
+        worker: ComputerUsePlanningWorker = .init(), timeout: TimeInterval = 30) -> ComputerUseBrowserResearchTask {
+        .init(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(),
+            planningWorker: worker, planningTimeout: timeout, mayAct: { true })
     }
 }
 

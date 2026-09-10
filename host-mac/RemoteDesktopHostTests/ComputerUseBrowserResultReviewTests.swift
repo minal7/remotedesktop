@@ -251,21 +251,28 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
     }
 
-    func testPauseJoinsAReviewThatIgnoresCancellationAndResumeKeepsTheOriginalSearch() async throws {
+    func testPauseReturnsBeforeAStalledReviewAndResumeKeepsTheOriginalSearch() async throws {
         let gate = BrowserResearchGate(), reviewer = ResultReviewReply()
         reviewer.beforeReply = { await gate.suspend() }
         let fixture = try await ResearchDriverFixture.make(resultPlanner: ComputerUseReviewedBrowserResultPlanner(reader: NativeReviewReading(), reviewer: reviewer), candidateBodyHTML: "<p>USD 40</p>")
         defer { gate.release(); fixture.close() }
-        let running = Task { try await fixture.start() }
+        let delivered = expectation(description: "Review Pause delivered before reviewer return")
+        let running = Task { defer { delivered.fulfill() }; return try await fixture.start() }
         try await gate.waitUntilStarted()
         let owner = try fixture.owner(), original = owner.input
         owner.pause(); XCTAssertTrue(owner.isOperating)
         XCTAssertEqual(fixture.server.count("/details"), 0)
+        await fulfillment(of: [delivered], timeout: 1)
+        XCTAssertFalse(owner.isOperating)
+        XCTAssertThrowsError(try fixture.planningWorker.requireAvailable()) {
+            XCTAssertEqual($0 as? ComputerUsePlanningWorker.Failure, .busy)
+        }
         gate.release()
         do { _ = try await running.value; XCTFail("Late review cannot pass Pause") }
         catch { XCTAssertTrue(error is CancellationError) }
         XCTAssertFalse(owner.isOperating); XCTAssertEqual(owner.input, original)
         reviewer.beforeReply = nil
+        try await waitForAvailablePlanningWorker(fixture.planningWorker)
         try await owner.resumeAfterUserControl()
         _ = try await fixture.resume()
         XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)

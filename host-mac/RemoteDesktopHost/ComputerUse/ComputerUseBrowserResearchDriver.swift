@@ -47,12 +47,20 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         var sources: ComputerUseBrowserResearchSources?
         init(owner: ComputerUseBrowserResearchTask) { self.owner = owner; input = owner.input }
     }
+    private struct AdmissionInput {
+        let input: ComputerUseBrowserGoalInput
+        let date: Date
+        let zone: String
+    }
+    private var admissionInput: AdmissionInput?
     private let goalPlanner: any ComputerUseBrowserGoalPlanning
     private let resultPlanner: any ComputerUseBrowserResultPlanning
     private let searchPlanner: any ComputerUseBrowserSearchPlanning
     private let actionPlanner: any ComputerUseBrowserActionPlanning
     private let formPlanner: any ComputerUseBrowserFormPlanning
     private let planning: any ComputerUseBrowserResearchPlanning
+    private let planningWorker: ComputerUsePlanningWorker
+    private let planningTimeout: TimeInterval
     private let now: () -> Date
     private let timeZoneIdentifier: () -> String
     private let navigationLimit: Int
@@ -63,10 +71,12 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
          searchPlanner: any ComputerUseBrowserSearchPlanning, actionPlanner: any ComputerUseBrowserActionPlanning,
          formPlanner: any ComputerUseBrowserFormPlanning, planning: any ComputerUseBrowserResearchPlanning,
          navigationLimit: Int = 24, now: @escaping () -> Date = Date.init,
-         timeZoneIdentifier: @escaping () -> String = { TimeZone.current.identifier }) {
+         timeZoneIdentifier: @escaping () -> String = { TimeZone.current.identifier },
+         planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30) {
         self.goalPlanner = goalPlanner; self.resultPlanner = resultPlanner; self.searchPlanner = searchPlanner
         self.actionPlanner = actionPlanner; self.formPlanner = formPlanner
         self.planning = planning; self.now = now; self.timeZoneIdentifier = timeZoneIdentifier
+        self.planningWorker = planningWorker; self.planningTimeout = planningTimeout
         self.navigationLimit = min(32, max(1, navigationLimit))
     }
 
@@ -78,20 +88,42 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         isExecuting = true
         defer { isExecuting = false }
         try tools.validateBrowserResearchAdmission()
-        let date = now(), zone = timeZoneIdentifier()
-        let input = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: date, timeZoneIdentifier: zone)
+        let previousAdmission = admissionInput
+        let admission: AdmissionInput
+        if let original = admissionInput, original.input.taskID == taskID {
+            guard original.input.prompt.utf8.elementsEqual(prompt.utf8) else { throw Failure.invalidContinuation }
+            admission = original
+        } else {
+            let date = now(), zone = timeZoneIdentifier()
+            admission = .init(input: try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt, referenceDate: date, timeZoneIdentifier: zone), date: date, zone: zone)
+            admissionInput = admission
+        }
+        let input = admission.input
         // Text-only admission can decline before a browser owner is retained.
         // It sees no page/account data and cannot open or alter the browser.
         progress("Understanding the complete research request…")
         try tools.validateBrowserResearchAdmission()
-        let proposal = try await goalPlanner.propose(input)
+        let proposal: ComputerUseBrowserGoalProposal
+        do {
+            proposal = try await planningWorker.perform(timeout: planningTimeout) { [goalPlanner] in
+                try await goalPlanner.propose(input)
+            }
+        } catch ComputerUsePlanningWorker.Failure.busy {
+            // A competing request that never acquired planning capacity cannot
+            // replace the original request's retry clock.
+            admissionInput = previousAdmission
+            throw ComputerUsePlanningWorker.Failure.busy
+        } catch ComputerUsePlanningWorker.Failure.invalidDeadline {
+            admissionInput = previousAdmission
+            throw ComputerUsePlanningWorker.Failure.invalidDeadline
+        }
         try tools.validateBrowserResearchAdmission()
         guard proposal.input == input else { throw Failure.invalidProposal }
         if proposal.disposition == .unsupported { return nil }
         guard tools.ownedBrowserResearch(taskID: taskID) == nil else { throw Failure.invalidContinuation }
         let owner = try tools.prepareOwnedBrowserResearch(taskID: taskID, prompt: prompt,
             goalPlanner: SeededGoalPlanner(seed: proposal, base: goalPlanner), resultPlanner: resultPlanner,
-            referenceDate: date, timeZoneIdentifier: zone, didPrepare: { [self] owner in
+            referenceDate: admission.date, timeZoneIdentifier: admission.zone, planningWorker: planningWorker, planningTimeout: planningTimeout, didPrepare: { [self] owner in
                 guard owner.input == input else { throw Failure.invalidContinuation }
                 retained = Run(owner: owner) // Survives a later admission-observer error.
             })
@@ -180,6 +212,9 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
         } catch ComputerUseBrowserLinkPlanError.deadlineExceeded {
             try validate(run, tools: tools)
             return .userInterventionRequired("Choosing the next research link ran out of time. Earlier findings and the original task remain pending. Review the page, then choose Resume to continue.")
+        } catch let error as ComputerUsePlanningWorker.Failure {
+            try validate(run, tools: tools)
+            return .userInterventionRequired(error.localizedDescription + " The original research request remains pending.")
         } catch is ComputerUseBrowserLinkPlanError {
             try validate(run, tools: tools)
             return .userInterventionRequired("I could not choose the next step from the complete request and available readings. Earlier findings and the original task remain pending.")
