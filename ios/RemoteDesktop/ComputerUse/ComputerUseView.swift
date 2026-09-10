@@ -332,7 +332,11 @@ struct ComputerUseView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         case .live:
-            EmptyView()
+            if !session.inputActivity.allowsInput {
+                Text("Return to this window to control your Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

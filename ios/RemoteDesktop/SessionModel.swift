@@ -2,6 +2,7 @@ import Combine
 import CloudKit
 import Foundation
 import LiveKitWebRTC
+import UIKit
 
 /// Status of the optional screen/input companion for an authenticated local
 /// AI session. The TLS prompt/result channel is intentionally not represented
@@ -22,6 +23,18 @@ enum RemoteInputSourceKind: Hashable {
 struct RemoteInputSourceLease: Equatable {
     fileprivate let kind: RemoteInputSourceKind
     fileprivate let generation: UUID
+    fileprivate let id = UUID()
+}
+
+struct RemoteInputActivity: Equatable {
+    var applicationIsActive: Bool
+    var sceneIsActive: Bool
+    var allowsInput: Bool { applicationIsActive && sceneIsActive }
+    static let inactive = Self(applicationIsActive: false, sceneIsActive: false)
+    static let active = Self(applicationIsActive: true, sceneIsActive: true)
+}
+
+struct RemoteInputSceneLease: Equatable {
     fileprivate let id = UUID()
 }
 
@@ -71,6 +84,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
     @Published private(set) var remoteInputGeneration = UUID()
+    @Published private(set) var inputActivity: RemoteInputActivity
     @Published var error: String?
     @Published private(set) var experience: Experience = .remoteControl
     @Published private(set) var computerUseSession: ComputerUseSessionModel?
@@ -81,7 +95,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var isCloudAccountRevalidationPending = false
 
     var hasInteractiveRemoteScreen: Bool {
-        guard !isCloudAccountRevalidationPending else { return false }
+        guard inputActivity.allowsInput, !isCloudAccountRevalidationPending else { return false }
         guard experience == .computerUse,
               computerUseConnectionMode == .localPromptOnly else {
             return state == .connected && inputHelloReceived && display != nil && hasReceivedVideoFrame
@@ -108,6 +122,12 @@ final class SessionModel: ObservableObject {
         LocalComputerUseChannelConnector
     private let localPendingStore: any ComputerUsePendingPromptStoring
     private let accountChangeNotificationCenter: NotificationCenter
+    private let applicationNotificationCenter: NotificationCenter
+    private var applicationObservers: [NSObjectProtocol] = []
+    private var inputSceneLease: RemoteInputSceneLease?
+    private var desiredInputActivity: RemoteInputActivity
+    private var isUpdatingInputActivity = false
+    private var isRetiringInputSources = false
     private var transport: Transport?
     private var computerUseVisualSidecar: ComputerUseVisualSidecar?
     private var localConnectionTask: Task<Void, Never>?
@@ -139,6 +159,8 @@ final class SessionModel: ObservableObject {
     }
 
     init(
+        initialInputActivity: RemoteInputActivity = .inactive,
+        applicationNotificationCenter: NotificationCenter = .default,
         transportFactory: @escaping @MainActor () -> Transport = {
             WebRTCTransport()
         },
@@ -182,6 +204,9 @@ final class SessionModel: ObservableObject {
             ComputerUsePendingPromptStore.shared,
         accountChangeNotificationCenter: NotificationCenter = .default
     ) {
+        self.inputActivity = initialInputActivity
+        self.desiredInputActivity = initialInputActivity
+        self.applicationNotificationCenter = applicationNotificationCenter
         self.transportFactory = transportFactory
         self.computerUseVisualTransportFactory =
             computerUseVisualTransportFactory
@@ -199,13 +224,76 @@ final class SessionModel: ObservableObject {
                 self?.handleCloudKitAccountChanged()
             }
         }
+        for name in [UIApplication.willResignActiveNotification,
+                     UIApplication.didEnterBackgroundNotification,
+                     UIApplication.willTerminateNotification] {
+            applicationObservers.append(applicationNotificationCenter.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setApplicationInputActive(false) }
+            })
+        }
+        applicationObservers.append(applicationNotificationCenter.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setApplicationInputActive(true) }
+        })
     }
 
     deinit {
         accountRevalidationTask?.cancel()
+        for observer in applicationObservers { applicationNotificationCenter.removeObserver(observer) }
         if let accountChangeObserver {
             accountChangeNotificationCenter.removeObserver(
                 accountChangeObserver)
+        }
+    }
+
+    func setApplicationInputActive(_ active: Bool) {
+        var next = desiredInputActivity
+        next.applicationIsActive = active
+        updateInputActivity(next)
+    }
+
+    func bindRemoteInputScene(isActive: Bool) -> RemoteInputSceneLease {
+        // Scene replacement must retire input even when both windows are active.
+        let lease = RemoteInputSceneLease()
+        inputSceneLease = lease
+        var inactive = desiredInputActivity
+        inactive.sceneIsActive = false
+        updateInputActivity(inactive)
+        setRemoteInputSceneActive(isActive, lease: lease)
+        return lease
+    }
+
+    func setRemoteInputSceneActive(_ active: Bool, lease: RemoteInputSceneLease) {
+        guard inputSceneLease == lease else { return }
+        var next = desiredInputActivity
+        next.sceneIsActive = active
+        updateInputActivity(next)
+    }
+
+    func endRemoteInputScene(_ lease: RemoteInputSceneLease) {
+        guard inputSceneLease == lease else { return }
+        inputSceneLease = nil
+        var next = desiredInputActivity
+        next.sceneIsActive = false
+        updateInputActivity(next)
+    }
+
+    private func updateInputActivity(_ next: RemoteInputActivity) {
+        desiredInputActivity = next
+        guard !isUpdatingInputActivity else { return }
+        isUpdatingInputActivity = true
+        defer { isUpdatingInputActivity = false }
+        // A synchronous transport callback can report another lifecycle edge.
+        // Drain its latest state after cleanup instead of overwriting that edge.
+        while inputActivity != desiredInputActivity {
+            let target = desiredInputActivity
+            let retiresInput = inputActivity.allowsInput && !target.allowsInput
+            if retiresInput { releaseRemoteInputSources() }
+            inputActivity = target
+            if retiresInput { remoteInputGeneration = UUID() }
         }
     }
 
@@ -289,7 +377,8 @@ final class SessionModel: ObservableObject {
 
     func beginRemoteInputSource(_ kind: RemoteInputSourceKind,
                                 expectedInputGeneration: UUID) -> RemoteInputSourceLease? {
-        guard hasInteractiveRemoteScreen, remoteInputGeneration == expectedInputGeneration else { return nil }
+        guard !isRetiringInputSources, hasInteractiveRemoteScreen,
+              remoteInputGeneration == expectedInputGeneration else { return nil }
         if let previous = inputSources[kind]?.lease { endRemoteInputSource(previous) }
         // Sending cleanup may synchronously invalidate a failed transport.
         guard hasInteractiveRemoteScreen, remoteInputGeneration == expectedInputGeneration else { return nil }
@@ -299,7 +388,7 @@ final class SessionModel: ObservableObject {
     }
 
     func isRemoteInputSourceCurrent(_ lease: RemoteInputSourceLease) -> Bool {
-        hasInteractiveRemoteScreen && lease.generation == remoteInputGeneration
+        !isRetiringInputSources && hasInteractiveRemoteScreen && lease.generation == remoteInputGeneration
             && inputSources[lease.kind]?.lease == lease
     }
 
@@ -361,19 +450,28 @@ final class SessionModel: ObservableObject {
             remaining.remove(usage)
             let held = heldSourceKeys.union(remaining)
             guard !held.contains(usage) else { continue }
-            send(.key(usage: usage, down: false, modifiers: modifierMask(for: held)),
+            transmit(.key(usage: usage, down: false, modifiers: modifierMask(for: held)),
                  expectedInputGeneration: lease.generation)
         }
         if let pointer = source.pointer, pointer.buttons != 0 {
-            send(.pointer(x: pointer.x, y: pointer.y, buttons: 0), expectedInputGeneration: lease.generation)
+            transmit(.pointer(x: pointer.x, y: pointer.y, buttons: 0), expectedInputGeneration: lease.generation)
         }
         if let scroll = source.scroll {
-            send(.scroll(x: scroll.x, y: scroll.y, dx: 0, dy: 0, phase: .end),
+            transmit(.scroll(x: scroll.x, y: scroll.y, dx: 0, dy: 0, phase: .end),
                  expectedInputGeneration: lease.generation)
         }
     }
 
     func send(_ message: ControlMessage, expectedInputGeneration: UUID? = nil) {
+        switch message {
+        case .pointer, .scroll, .key, .text:
+            guard !isRetiringInputSources else { return }
+        case .hello, .qos, .bye: break
+        }
+        transmit(message, expectedInputGeneration: expectedInputGeneration)
+    }
+
+    private func transmit(_ message: ControlMessage, expectedInputGeneration: UUID? = nil) {
         guard !isCloudAccountRevalidationPending else { return }
         switch message {
         case .pointer, .scroll, .key, .text:
@@ -756,6 +854,9 @@ final class SessionModel: ObservableObject {
     }
 
     private func releaseRemoteInputSources() {
+        guard !isRetiringInputSources else { return }
+        isRetiringInputSources = true
+        defer { isRetiringInputSources = false }
         for kind: RemoteInputSourceKind in [.softKeyboard, .hardwareKeyboard, .pointer] {
             if let source = inputSources[kind]?.lease { endRemoteInputSource(source) }
         }

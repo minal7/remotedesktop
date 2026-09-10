@@ -182,7 +182,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
 
     @MainActor
     func test_remoteScreenReadinessDisablesRemoteGesturesAndKeepsViewportControlsLocal() {
-        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = ScreenInputTestTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeReady()
         let screen = RemoteScreenUIView(), zoom = RemoteScreenZoomController()
@@ -211,7 +211,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
 
     @MainActor
     func test_screenReplacementAndDismantlePreserveSuccessorControls() {
-        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = ScreenInputTestTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeReady()
         let zoom = RemoteScreenZoomController()
@@ -241,7 +241,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
 
     @MainActor
     func test_moveScreenToggle_reconfiguresActualGestureRecognizers() {
-        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = ScreenInputTestTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeReady()
         let controller = RemoteScreenZoomController()

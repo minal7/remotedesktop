@@ -714,7 +714,7 @@ final class InputAndDiscoveryTests: XCTestCase {
     @MainActor
     func test_softKeyboardCapture_forwardsExactTextThroughSessionTransport() throws {
         let transport = RecordingSoftKeyboardTransport()
-        let session = SessionModel(transportFactory: { transport })
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456")
         transport.makeScreenReady()
@@ -738,7 +738,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardCaptureRejectsRetiredBindingUntilExplicitRebind() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
@@ -765,7 +765,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_replacingKeyboardSourceReleasesItsHoldsAndRejectsLateCleanup() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let generation = session.remoteInputGeneration
@@ -787,7 +787,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_inputSourceCleanupPreservesSharedModifiersAndOtherKeyOwners() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         session.toggleSoftModifier(.cmd)
@@ -820,7 +820,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_pointerSourceReplacementEndsDragAndScrollAtTheirOwnedCoordinates() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let generation = session.remoteInputGeneration
@@ -841,7 +841,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_retiredInputSourceCannotReleaseOrAppendAcrossRecovery() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let generation = session.remoteInputGeneration
@@ -863,7 +863,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_inputSourceReplacementDoesNotAdmitAfterCleanupLosesTransport() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let generation = session.remoteInputGeneration
@@ -889,7 +889,7 @@ final class InputAndDiscoveryTests: XCTestCase {
     @MainActor
     func test_accountFreezeReleasesAllInputSourcesBeforeClosingAdmission() throws {
         let transport = RecordingSoftKeyboardTransport(), notifications = NotificationCenter()
-        let session = SessionModel(transportFactory: { transport }, localAccountBindingValidator: { _ in },
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport }, localAccountBindingValidator: { _ in },
             accountChangeNotificationCenter: notifications)
         defer { session.reset() }
         session.connect(code: "123456", localCloudAccountBinding: accountBinding)
@@ -913,7 +913,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_inputSourcesRejectUnmatchedReleasesAndForeignMessageKinds() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let generation = session.remoteInputGeneration
@@ -933,7 +933,7 @@ final class InputAndDiscoveryTests: XCTestCase {
 
     @MainActor
     func test_softKeyboardReplacementAndDismantleCannotTypeIntoSuccessor() throws {
-        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { session.reset() }
         session.connect(code: "123456"); transport.makeScreenReady()
         let old = SoftKeyboardCapture.CaptureField(frame: .zero)
@@ -953,6 +953,178 @@ final class InputAndDiscoveryTests: XCTestCase {
         next.stopCapture()
         next.deleteBackward()
         XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
+    }
+
+    @MainActor
+    func test_inputStartsClosedAndRequiresBothApplicationAndOwnedSceneActivity() throws {
+        for applicationFirst in [true, false] {
+            let transport = RecordingSoftKeyboardTransport(), notifications = NotificationCenter()
+            let session = SessionModel(applicationNotificationCenter: notifications, transportFactory: { transport })
+            defer { session.reset() }
+            session.connect(code: "123456"); transport.makeScreenReady()
+            XCTAssertFalse(session.hasInteractiveRemoteScreen)
+            XCTAssertNil(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+            session.send(.text("not active"))
+            let scene = session.bindRemoteInputScene(isActive: !applicationFirst)
+            if applicationFirst { notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil) }
+            XCTAssertFalse(session.hasInteractiveRemoteScreen)
+            if applicationFirst { session.setRemoteInputSceneActive(true, lease: scene) }
+            else { notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil) }
+            XCTAssertTrue(session.hasInteractiveRemoteScreen)
+            XCTAssertEqual(try inputSourceTrace(transport), [])
+            let source = try XCTUnwrap(session.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+            session.send(.text("current"), from: source)
+            XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
+        }
+    }
+
+    @MainActor
+    func test_applicationInactivityReleasesHoldsBeforeClosingInputAndDuplicateEdgesAreIdle() throws {
+        for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification,
+                     UIApplication.willTerminateNotification] {
+            let transport = RecordingSoftKeyboardTransport(), notifications = NotificationCenter()
+            let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: notifications,
+                transportFactory: { transport })
+            defer { session.reset() }
+            session.connect(code: "123456"); transport.makeScreenReady()
+            let generation = session.remoteInputGeneration
+            let keyboard = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+            let pointer = try XCTUnwrap(session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation))
+            session.toggleSoftModifier(.cmd)
+            session.send(.key(usage: 4, down: true, modifiers: 8), from: keyboard)
+            session.send(.pointer(x: 17, y: 29, buttons: 1), from: pointer)
+            session.send(.scroll(x: 31, y: 43, dx: 0, dy: 12, phase: .begin), from: pointer)
+            notifications.post(name: name, object: nil)
+            XCTAssertFalse(session.hasInteractiveRemoteScreen); XCTAssertEqual(session.state, .connected)
+            XCTAssertEqual(session.softModifierMask, 0)
+            XCTAssertNotEqual(session.remoteInputGeneration, generation)
+            XCTAssertEqual(try inputSourceTrace(transport).suffix(4), ["key:4:false:8", "pointer:17:29:0", "scroll:31:43:0:0:end", "key:227:false:0"])
+            let retiredGeneration = session.remoteInputGeneration, count = transport.sentPayloads.count
+            notifications.post(name: name, object: nil)
+            session.endRemoteInputSource(keyboard); session.endRemoteInputSource(pointer)
+            session.send(.key(usage: 5, down: true, modifiers: 0), from: keyboard)
+            session.send(.text("background callback")); session.toggleSoftModifier(.shift)
+            XCTAssertEqual(transport.sentPayloads.count, count)
+            XCTAssertEqual(session.remoteInputGeneration, retiredGeneration)
+        }
+    }
+
+    @MainActor
+    func test_sceneInactivityCannotBeOverriddenByApplicationActivityOrOldInput() throws {
+        let transport = RecordingSoftKeyboardTransport(), notifications = NotificationCenter()
+        let session = SessionModel(applicationNotificationCenter: notifications, transportFactory: { transport })
+        defer { session.reset() }
+        let scene = session.bindRemoteInputScene(isActive: true)
+        notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: old)
+        session.setRemoteInputSceneActive(false, lease: scene)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:4:false:0")
+        notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertTrue(session.inputActivity.applicationIsActive); XCTAssertFalse(session.inputActivity.sceneIsActive)
+        session.setRemoteInputSceneActive(true, lease: scene)
+        transport.onFirstVideoFrame?()
+        let count = transport.sentPayloads.count
+        session.send(.key(usage: 4, down: false, modifiers: 0), from: old)
+        session.endRemoteInputSource(old)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        let current = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: current)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:5:true:0")
+    }
+
+    @MainActor
+    func test_replacedSceneCallbacksCannotDeactivateOrReopenTheCurrentScene() throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        defer { session.reset() }
+        let oldScene = session.bindRemoteInputScene(isActive: true)
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let old = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: old)
+        let scene = session.bindRemoteInputScene(isActive: true)
+        transport.onFirstVideoFrame?()
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:4:false:0")
+        let current = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: session.remoteInputGeneration))
+        session.send(.key(usage: 5, down: true, modifiers: 0), from: current)
+        let generation = session.remoteInputGeneration, count = transport.sentPayloads.count
+        session.setRemoteInputSceneActive(false, lease: oldScene); session.endRemoteInputScene(oldScene)
+        XCTAssertTrue(session.hasInteractiveRemoteScreen); XCTAssertEqual(session.remoteInputGeneration, generation)
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        session.setRemoteInputSceneActive(false, lease: scene)
+        session.setRemoteInputSceneActive(true, lease: oldScene)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertEqual(try inputSourceTrace(transport).last, "key:5:false:0")
+    }
+
+    @MainActor
+    func test_activityCleanupRejectsReentrantInputAndRetainsTheLatestLifecycleEdges() throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        defer { session.reset() }
+        let scene = session.bindRemoteInputScene(isActive: true)
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let generation = session.remoteInputGeneration
+        let source = try XCTUnwrap(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+        session.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        transport.onSend = { [weak transport, weak session] in
+            transport?.onSend = nil
+            guard let session else { return }
+            XCTAssertNil(session.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: generation))
+            session.send(.text("during cleanup"))
+            session.setRemoteInputSceneActive(false, lease: scene)
+            session.setApplicationInputActive(true)
+        }
+        session.setApplicationInputActive(false)
+        XCTAssertTrue(session.inputActivity.applicationIsActive, "Keep the later activation edge")
+        XCTAssertFalse(session.inputActivity.sceneIsActive, "Keep the scene's independent deactivation edge")
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:4:true:0", "key:4:false:0"])
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        session.setRemoteInputSceneActive(true, lease: scene)
+        transport.onFirstVideoFrame?()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+    }
+
+    @MainActor
+    func test_activityCannotBypassTransportRecoveryOrAccountRevalidation() {
+        let transport = RecordingSoftKeyboardTransport(), accounts = NotificationCenter()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+            transportFactory: { transport }, localAccountBindingValidator: { _ in }, accountChangeNotificationCenter: accounts)
+        defer { session.reset() }
+        session.connect(code: "123456", localCloudAccountBinding: accountBinding); transport.makeScreenReady()
+        transport.onInputUnavailable?()
+        session.setApplicationInputActive(false); session.setApplicationInputActive(true)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+        transport.makeScreenReady()
+        XCTAssertTrue(session.hasInteractiveRemoteScreen)
+        accounts.post(name: NSNotification.Name.CKAccountChanged, object: nil)
+        session.setApplicationInputActive(false); session.setApplicationInputActive(true)
+        XCTAssertTrue(session.isCloudAccountRevalidationPending)
+        XCTAssertFalse(session.hasInteractiveRemoteScreen)
+    }
+
+    @MainActor
+    func test_softCaptureRequiresExplicitRebindAfterActivityLossEvenWithoutViewRemoval() throws {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        field.bindSession(session)
+        session.setApplicationInputActive(false)
+        session.setApplicationInputActive(true)
+        transport.onFirstVideoFrame?()
+        let count = transport.sentPayloads.count
+        field.deleteBackward()
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "old callback"))
+        XCTAssertFalse(field.canSendInput); XCTAssertEqual(transport.sentPayloads.count, count)
+        field.bindSession(session)
+        XCTAssertTrue(field.canSendInput)
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "current"))
+        XCTAssertEqual(try inputSourceTrace(transport).last, "text:current")
     }
 
     @MainActor

@@ -64,9 +64,14 @@ struct SessionView: View {
                 ZStack {
                     Color.black.ignoresSafeArea()
                     VStack(spacing: 12) {
-                        ProgressView().tint(.white)
-                        Text(session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…")
-                            .foregroundStyle(.white)
+                        if session.inputActivity.allowsInput {
+                            ProgressView().tint(.white)
+                            Text(session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…")
+                                .foregroundStyle(.white)
+                        } else {
+                            Text("Return to this window to control your Mac.")
+                                .foregroundStyle(.white)
+                        }
                     }
                 }
                 .allowsHitTesting(false)

@@ -1,6 +1,7 @@
 import XCTest
 import AVFAudio
 import CloudKit
+import UIKit
 @testable import RemoteDesktop
 
 @MainActor
@@ -11,7 +12,7 @@ final class WebRTCTransportTests: XCTestCase {
     func test_localRecoveryReadFailureStopsBeforeHandshakeOrVisualConnection() async throws {
         let unexpectedTransport = RecordingTargetTransport(connected: XCTestExpectation(description: "unexpected connection"))
         let expectedBinding = accountBinding
-        let model = SessionModel(
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
             transportFactory: { XCTFail("No fallback transport before recovery can be read"); return unexpectedTransport },
             computerUseVisualTransportFactory: { XCTFail("No visual connection before recovery can be read"); return unexpectedTransport },
             localAccountBindingValidator: { binding in
@@ -48,7 +49,7 @@ final class WebRTCTransportTests: XCTestCase {
             let channel = IdleComputerUseSessionChannel()
             let unexpectedTransport = RecordingTargetTransport(connected: XCTestExpectation(description: "unexpected visual connection"))
             let connected = expectation(description: "handshake uses the original session")
-            let model = SessionModel(
+            let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
                 computerUseVisualTransportFactory: { XCTFail("No visual connection when task recovery cannot finish"); return unexpectedTransport },
                 localAccountBindingValidator: { _ in },
                 localComputerUseChannelConnector: { _, _, _, _, sessionID, _, _ in
@@ -85,7 +86,7 @@ final class WebRTCTransportTests: XCTestCase {
             let connected = expectation(description: "visual sidecar starts after recovery lookup")
             let visual = RecordingTargetTransport(connected: connected)
             let channel = IdleComputerUseSessionChannel()
-            let model = SessionModel(computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
+            let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
                 localComputerUseChannelConnector: { _, _, _, _, sessionID, _, _ in
                     XCTAssertEqual(sessionID, pending.sessionID); return channel
                 }, localPendingStore: store, accountChangeNotificationCenter: NotificationCenter())
@@ -119,7 +120,7 @@ final class WebRTCTransportTests: XCTestCase {
         let store = HandshakeRecoveryStore(before: original, after: .success(original), replaceOnConditionalRead: newer)
         let channel = IdleComputerUseSessionChannel()
         let unexpectedTransport = RecordingTargetTransport(connected: XCTestExpectation(description: "unexpected visual connection"))
-        let model = SessionModel(
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
             computerUseVisualTransportFactory: { XCTFail("No visual connection after a recovery ownership conflict"); return unexpectedTransport },
             localAccountBindingValidator: { _ in },
             localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
@@ -248,7 +249,7 @@ final class WebRTCTransportTests: XCTestCase {
             description: "cloud-only computer use must not connect")
         connected.isInverted = true
         let transport = RecordingTargetTransport(connected: connected)
-        let model = SessionModel(transportFactory: { transport })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
 
         model.connect(
             code: "123456",
@@ -268,7 +269,7 @@ final class WebRTCTransportTests: XCTestCase {
     func test_sessionModelRequiresAnActualDecodedFrameForVideoReadiness() async {
         let connected = expectation(description: "transport connect called")
         let transport = RecordingTargetTransport(connected: connected)
-        let model = SessionModel(transportFactory: { transport })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
 
         model.connect(code: "123456")
         await fulfillment(of: [connected], timeout: 1)
@@ -305,7 +306,7 @@ final class WebRTCTransportTests: XCTestCase {
             description: "malformed local route must not connect")
         connected.isInverted = true
         let transport = RecordingTargetTransport(connected: connected)
-        let model = SessionModel(transportFactory: { transport })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
 
         model.connect(
             code: "123456",
@@ -332,7 +333,7 @@ final class WebRTCTransportTests: XCTestCase {
             description: "unbound local computer use must not connect")
         connected.isInverted = true
         let transport = RecordingTargetTransport(connected: connected)
-        let model = SessionModel(transportFactory: { transport })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
 
         model.connect(
             code: "123456",
@@ -359,7 +360,7 @@ final class WebRTCTransportTests: XCTestCase {
             connected: connected,
             disconnected: disconnected)
         let notifications = NotificationCenter()
-        let model = SessionModel(
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
             transportFactory: { transport },
             localAccountBindingValidator: { _ in
                 throw CloudKitAccountBindingResolutionError.noAccount
@@ -504,7 +505,7 @@ final class WebRTCTransportTests: XCTestCase {
         let validationGate = InitialLocalAccountValidationGate()
         let sessionChannel = IdleComputerUseSessionChannel()
         let expectedBinding = accountBinding
-        let model = SessionModel(
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
             computerUseVisualTransportFactory: {
                 sidecarCandidates.removeFirst()
             },
@@ -599,7 +600,7 @@ final class WebRTCTransportTests: XCTestCase {
     func test_remoteSessionRecoveryRequiresCurrentHelloDisplayAndFrameAndRetiresInputGeneration() async throws {
         let connected = expectation(description: "remote transport connected")
         let transport = RecordingTargetTransport(connected: connected)
-        let model = SessionModel(transportFactory: { transport })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
         defer { model.reset() }
         model.connect(code: "123456")
         await fulfillment(of: [connected], timeout: 1)
@@ -640,7 +641,7 @@ final class WebRTCTransportTests: XCTestCase {
     func test_sidecarTransientRecoveryKeepsPromptTransportAndClearsLocalControls() async throws {
         let connected = expectation(description: "visual transport connected")
         let visual = RecordingTargetTransport(connected: connected), channel = IdleComputerUseSessionChannel()
-        let model = SessionModel(computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
             localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
             localPendingStore: EmptyComputerUsePendingPromptStore(), accountChangeNotificationCenter: NotificationCenter())
         defer { model.reset() }
@@ -670,6 +671,41 @@ final class WebRTCTransportTests: XCTestCase {
         model.send(.text("current manual input"), expectedInputGeneration: model.remoteInputGeneration)
         XCTAssertEqual(visual.sentMessages.count, readyCount + 1)
         XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertTrue(model.isComputerUsePromptTransportReady)
+    }
+
+    func test_applicationInactivityRetiresSidecarInputAndPreservesPromptSessionState() async throws {
+        let connected = expectation(description: "visual transport connected")
+        let visual = RecordingTargetTransport(connected: connected), channel = IdleComputerUseSessionChannel()
+        let notifications = NotificationCenter()
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: notifications,
+            computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
+            localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
+            localPendingStore: EmptyComputerUsePendingPromptStore(), accountChangeNotificationCenter: NotificationCenter())
+        defer { model.reset() }
+        model.connect(code: "123456", experience: .computerUse, computerUseHostID: "HOST-B", hostName: "Mac",
+            localComputerUseEndpoint: LocalComputerUseEndpoint(host: "127.0.0.1", port: 443),
+            localCredentialID: String(repeating: "b", count: 64), localCloudAccountBinding: accountBinding)
+        await fulfillment(of: [connected], timeout: 1)
+        let promptSession = try XCTUnwrap(model.computerUseSession)
+        visual.onHostHello?(compatibleComputerUseHello()); visual.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); visual.onFirstVideoFrame?()
+        let state = promptSession.state
+        let source = try XCTUnwrap(model.beginRemoteInputSource(.hardwareKeyboard, expectedInputGeneration: model.remoteInputGeneration))
+        model.send(.key(usage: 4, down: true, modifiers: 0), from: source)
+        notifications.post(name: UIApplication.willResignActiveNotification, object: nil)
+        guard case let .key(usage, down, _) = visual.sentMessages.last?.message else { return XCTFail("Release belongs on the visual transport") }
+        XCTAssertEqual(usage, 4); XCTAssertFalse(down)
+        XCTAssertFalse(model.hasInteractiveRemoteScreen)
+        XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertTrue(promptSession.isConnected)
+        XCTAssertEqual(promptSession.state, state); XCTAssertTrue(model.isComputerUsePromptTransportReady)
+        XCTAssertEqual(model.state, .connected); XCTAssertTrue(visual.disconnectReasons.isEmpty)
+        let count = visual.sentMessages.count
+        model.send(.text("inactive input must not use TLS"))
+        XCTAssertEqual(visual.sentMessages.count, count)
+        notifications.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        visual.onFirstVideoFrame?()
+        model.send(.key(usage: 4, down: false, modifiers: 0), from: source)
+        XCTAssertEqual(visual.sentMessages.count, count)
+        XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertEqual(promptSession.state, state)
     }
 
     func test_presentationLeaseRejectsRetiredFramesAndReplacementProbeCallbacks() throws {
@@ -714,7 +750,7 @@ final class WebRTCTransportTests: XCTestCase {
         let firstConnected = expectation(description: "first"), secondConnected = expectation(description: "second")
         let first = RecordingTargetTransport(connected: firstConnected), second = RecordingTargetTransport(connected: secondConnected)
         var candidates = [first, second]
-        let model = SessionModel(transportFactory: { candidates.removeFirst() })
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { candidates.removeFirst() })
         defer { model.reset() }
         model.connect(code: "123456"); await fulfillment(of: [firstConnected], timeout: 1)
         first.onHostHello?(compatibleComputerUseHello()); first.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); first.onFirstVideoFrame?()
