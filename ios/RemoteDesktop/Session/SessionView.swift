@@ -117,6 +117,7 @@ struct SessionView: View {
             // ── Invisible soft-keyboard capture ────────────────
             if session.hasInteractiveRemoteScreen && softKeyboardOpen && !accessories.hasHardwareKeyboard {
                 SoftKeyboardCapture(isOpen: $softKeyboardOpen)
+                    .id(session.remoteInputGeneration)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
                     .allowsHitTesting(false)

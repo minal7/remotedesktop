@@ -722,10 +722,7 @@ final class InputAndDiscoveryTests: XCTestCase {
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
         field.session = session
 
-        XCTAssertFalse(field.textField(
-            field,
-            shouldChangeCharactersIn: NSRange(location: 0, length: 1),
-            replacementString: "HUMAN-CONTROL-2468"))
+        field.insertText("HUMAN-CONTROL-2468")
 
         let payload = try XCTUnwrap(transport.sentPayloads.last)
         let object = try XCTUnwrap(
@@ -733,7 +730,7 @@ final class InputAndDiscoveryTests: XCTestCase {
         XCTAssertEqual(object["t"] as? String, "text")
         XCTAssertEqual(object["s2"] as? String, "HUMAN-CONTROL-2468")
         XCTAssertEqual(object["s"] as? Int, 2)
-        XCTAssertEqual(field.text, " ")
+        XCTAssertEqual(field.text, "")
     }
 
     @MainActor
@@ -748,19 +745,151 @@ final class InputAndDiscoveryTests: XCTestCase {
         transport.onInputUnavailable?()
         let count = transport.sentPayloads.count
         field.deleteBackward()
-        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "old text"))
+        field.insertText("old text")
         XCTAssertEqual(transport.sentPayloads.count, count); XCTAssertFalse(field.canSendInput)
         transport.makeScreenReady()
         let afterHandshake = transport.sentPayloads.count
         field.deleteBackward()
-        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "late old text"))
+        field.insertText("late old text")
         XCTAssertEqual(transport.sentPayloads.count, afterHandshake)
         field.bindSession(session)
-        XCTAssertTrue(field.canSendInput); XCTAssertEqual(session.softModifierMask, 0)
+        XCTAssertFalse(field.canSendInput, "A retired native text input object cannot acquire a new generation")
+        let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
+        replacement.bindSession(session)
+        XCTAssertTrue(replacement.canSendInput); XCTAssertEqual(session.softModifierMask, 0)
         let expected = "  e\u{301} 😀\n"
-        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: expected))
+        field.insertText("late native commit")
+        XCTAssertEqual(transport.sentPayloads.count, afterHandshake)
+        replacement.insertText(expected)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(transport.sentPayloads.last)) as? [String: Any])
         XCTAssertEqual(object["t"] as? String, "text"); XCTAssertEqual(object["s2"] as? String, expected)
+    }
+
+    @MainActor
+    func test_softKeyboardProposedEditsDoNotSendUntilNativeCommit() throws {
+        let (transport, session, field) = makeCompositionFixture()
+        defer { field.stopCapture(); session.reset() }
+        XCTAssertTrue(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 0), replacementString: "proposed"))
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: NSNotFound, length: 0), replacementString: "invalid"))
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "invalid"))
+        XCTAssertFalse(field.textField(UITextField(), shouldChangeCharactersIn: NSRange(location: 0, length: 0), replacementString: "foreign"))
+        for value in ["A", "  e\u{301} 😀\n", "東京", " "] { field.insertText(value) }
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:A", "text:  e\u{301} 😀\n", "text:東京", "text: "])
+        XCTAssertEqual(field.text, "")
+    }
+
+    @MainActor
+    func test_softKeyboardCompositionCommitsOnceAndKeepsLocalDeleteAndReturnLocal() throws {
+        let (transport, session, field) = makeCompositionFixture()
+        defer { field.stopCapture(); session.reset() }
+        field.setMarkedText("ni", selectedRange: NSRange(location: 2, length: 0))
+        XCTAssertNotNil(field.markedTextRange)
+        field.deleteBackward()
+        XCTAssertEqual(try inputSourceTrace(transport), [], "Delete edits the local composition")
+        field.setMarkedText("你", selectedRange: NSRange(location: 1, length: 0))
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        XCTAssertFalse(field.textFieldShouldReturn(field))
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:你"], "Confirmation must not submit the remote form")
+        field.unmarkText()
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:你"], "A repeated unmark has no new content")
+        XCTAssertEqual(field.text, ""); XCTAssertNil(field.markedTextRange)
+        XCTAssertFalse(field.textFieldShouldReturn(field))
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:你", "key:40:true:0", "key:40:false:0"])
+        field.setMarkedText("e\u{301}", selectedRange: NSRange(location: 2, length: 0))
+        field.unmarkText()
+        XCTAssertEqual(try inputSourceTrace(transport).last, "text:e\u{301}")
+    }
+
+    @MainActor
+    func test_softKeyboardCompositionIsDiscardedAcrossRetirementAndFocusLoss() throws {
+        for boundary in ["focus", "activity", "replacement", "stop"] {
+            let (transport, session, field) = makeCompositionFixture()
+            defer { field.stopCapture(); session.reset() }
+            field.setMarkedText("未確定", selectedRange: NSRange(location: 3, length: 0))
+            XCTAssertNotNil(field.markedTextRange)
+            var replacement: SoftKeyboardCapture.CaptureField?
+            switch boundary {
+            case "focus": _ = field.resignFirstResponder()
+            case "activity":
+                session.setApplicationInputActive(false); session.setApplicationInputActive(true)
+                field.bindSession(session)
+            case "replacement":
+                replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
+                replacement?.bindSession(session)
+            default: field.stopCapture()
+            }
+            field.unmarkText()
+            XCTAssertEqual(try inputSourceTrace(transport), [], boundary)
+            XCTAssertEqual(field.text, "", boundary)
+            replacement?.insertText("new owner")
+            if boundary == "replacement" {
+                XCTAssertEqual(try inputSourceTrace(transport), ["text:new owner"])
+            }
+            replacement?.stopCapture()
+        }
+    }
+
+    @MainActor
+    func test_softKeyboardDeferredNativeCommitCannotReachAReplacementSource() async throws {
+        let (transport, session, field) = makeCompositionFixture()
+        let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
+        defer { field.stopCapture(); replacement.stopCapture(); session.reset() }
+        // An editing notification outside the overridden native mutation calls
+        // is observed on the next actor turn, after UIKit has set marked ranges.
+        field.text = "retired value"
+        field.sendActions(for: .editingChanged)
+        XCTAssertEqual(try inputSourceTrace(transport), [])
+        replacement.bindSession(session)
+        replacement.insertText("current value")
+        await Task.yield()
+        field.unmarkText()
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:current value"])
+        XCTAssertEqual(field.text, "")
+    }
+
+    @MainActor
+    func test_softKeyboardCommitKeepsItsSourceAcrossReentrantReplacement() throws {
+        let (transport, session, field) = makeCompositionFixture()
+        let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
+        defer { transport.onSend = nil; field.stopCapture(); replacement.stopCapture(); session.reset() }
+        field.setMarkedText("first", selectedRange: NSRange(location: 5, length: 0))
+        transport.onSend = {
+            transport.onSend = nil
+            XCTAssertEqual(field.text, "", "Retire the local buffer before external delivery")
+            replacement.bindSession(session)
+            field.unmarkText()
+            replacement.insertText("second")
+        }
+        field.unmarkText()
+        XCTAssertEqual(try inputSourceTrace(transport), ["text:first", "text:second"])
+        XCTAssertFalse(field.canSendInput); XCTAssertTrue(replacement.canSendInput)
+    }
+
+    @MainActor
+    func test_softKeyboardEmptyDeleteAndExplicitShortcutsSendOneOwnedKeyPair() throws {
+        let (transport, session, field) = makeCompositionFixture()
+        defer { field.stopCapture(); session.reset() }
+        XCTAssertTrue(field.hasText)
+        field.deleteBackward()
+        field.insertText("\n")
+        XCTAssertEqual(try inputSourceTrace(transport), ["key:42:true:0", "key:42:false:0", "key:40:true:0", "key:40:false:0"])
+        session.toggleSoftModifier(.cmd)
+        field.insertText("c")
+        XCTAssertEqual(Array(try inputSourceTrace(transport).suffix(2)), ["key:6:true:8", "key:6:false:8"])
+        session.releaseSoftModifiers()
+        field.insertText("A")
+        XCTAssertEqual(try inputSourceTrace(transport).last, "text:A", "Capitalization alone is not a physical shortcut")
+    }
+
+    @MainActor
+    private func makeCompositionFixture() -> (RecordingSoftKeyboardTransport, SessionModel, SoftKeyboardCapture.CaptureField) {
+        let transport = RecordingSoftKeyboardTransport()
+        let session = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(), transportFactory: { transport })
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        field.bindSession(session)
+        return (transport, session, field)
     }
 
     @MainActor
@@ -943,12 +1072,12 @@ final class InputAndDiscoveryTests: XCTestCase {
         XCTAssertFalse(old.canSendInput); XCTAssertTrue(next.canSendInput)
         old.bindSession(session)
         old.deleteBackward()
-        XCTAssertFalse(old.textField(old, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "late"))
+        old.insertText("late")
         old.stopCapture()
         old.bindSession(session)
         XCTAssertFalse(old.canSendInput); XCTAssertTrue(next.canSendInput)
         XCTAssertEqual(try inputSourceTrace(transport), [])
-        XCTAssertFalse(next.textField(next, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "current"))
+        next.insertText("current")
         XCTAssertEqual(try inputSourceTrace(transport), ["text:current"])
         next.stopCapture()
         next.deleteBackward()
@@ -1119,11 +1248,16 @@ final class InputAndDiscoveryTests: XCTestCase {
         transport.onFirstVideoFrame?()
         let count = transport.sentPayloads.count
         field.deleteBackward()
-        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "old callback"))
+        field.insertText("old callback")
         XCTAssertFalse(field.canSendInput); XCTAssertEqual(transport.sentPayloads.count, count)
         field.bindSession(session)
-        XCTAssertTrue(field.canSendInput)
-        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "current"))
+        XCTAssertFalse(field.canSendInput)
+        let replacement = SoftKeyboardCapture.CaptureField(frame: .zero)
+        replacement.bindSession(session)
+        XCTAssertTrue(replacement.canSendInput)
+        field.insertText("late native commit")
+        XCTAssertEqual(transport.sentPayloads.count, count)
+        replacement.insertText("current")
         XCTAssertEqual(try inputSourceTrace(transport).last, "text:current")
     }
 

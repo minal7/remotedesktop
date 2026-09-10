@@ -152,7 +152,7 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         tf.smartQuotesType = .no
         tf.smartDashesType = .no
         tf.smartInsertDeleteType = .no
-        tf.keyboardType = .asciiCapable
+        tf.keyboardType = .default
         tf.returnKeyType = .default
         // Defer to next runloop tick — UITextField can't become first
         // responder until it's been added to the window hierarchy.
@@ -165,7 +165,11 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         tf.bindSession(session)
         context.coordinator.isOpen = $isOpen
         tf.onKeyboardDismiss = context.coordinator.dismissKeyboard
-        if (!isOpen || !tf.canSendInput), tf.isFirstResponder {
+        if !isOpen {
+            tf.stopCapture()
+            return
+        }
+        if !tf.canSendInput, tf.isFirstResponder {
             tf.resignFirstResponder()
         } else if isOpen, tf.canSendInput, !tf.isFirstResponder {
             tf.becomeFirstResponder()
@@ -192,18 +196,36 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         weak var session: SessionModel? {
             didSet {
                 if oldValue !== session {
+                    if hasBoundSource { stopped = true }
                     let source = inputSource
                     inputSource = nil; inputGeneration = nil
                     if let source { oldValue?.endRemoteInputSource(source) }
+                    retireBinding()
                     synchronizeBinding()
                 }
             }
         }
         private var inputGeneration: UUID?
         private var inputSource: RemoteInputSourceLease?
+        private var hasBoundSource = false
         private var stopped = false
         private var detached = false
+        private var nativeMutationDepth = 0
+        private var mutationStartedWithMarkedText = false
+        private var isDiscardingNativeText = false
+        private var deferredCommit: Task<Void, Never>?
+        private var deferredCommitID: UUID?
         var onKeyboardDismiss: (() -> Void)?
+
+        private struct Destination {
+            let session: SessionModel
+            let source: RemoteInputSourceLease
+            let modifiers: UInt16
+        }
+
+        // The Mac owns the document. An empty local composition buffer must
+        // not disable Delete when there is remote text to remove.
+        override var hasText: Bool { true }
 
         var canSendInput: Bool {
             guard !stopped, !detached, let session, let inputSource else { return false }
@@ -217,12 +239,15 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         }
 
         private func retireBinding() {
+            // UIKit's later input callbacks do not carry our source token.
+            // Once a native field has owned a source it cannot be recycled
+            // into another generation; SwiftUI installs a new field instead.
+            if hasBoundSource { stopped = true }
             let source = inputSource
             inputSource = nil; inputGeneration = nil
             if let source { session?.endRemoteInputSource(source) }
             resignFirstResponder()
-            unmarkText()
-            text = " "
+            discardNativeText()
         }
 
         func stopCapture() {
@@ -244,22 +269,30 @@ struct SoftKeyboardCapture: UIViewRepresentable {
             let next = session?.hasInteractiveRemoteScreen == true ? session?.remoteInputGeneration : nil
             guard next != inputGeneration else { return }
             retireBinding()
-            inputGeneration = next
-            if let next {
-                inputSource = session?.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: next)
+            guard !stopped else { return }
+            if let next, let source = session?.beginRemoteInputSource(.softKeyboard, expectedInputGeneration: next) {
+                inputGeneration = next
+                inputSource = source
+                hasBoundSource = true
             }
         }
 
-        private func send(_ message: ControlMessage) {
-            guard canSendInput, let inputSource else { return }
-            session?.send(message, from: inputSource)
+        private var destination: Destination? {
+            guard canSendInput, let session, let inputSource else { return nil }
+            return .init(session: session, source: inputSource, modifiers: session.softModifierMask)
+        }
+
+        private func sendKey(_ usage: Int, to destination: Destination, modifiers: UInt16? = nil) {
+            let mask = modifiers ?? destination.modifiers
+            destination.session.send(.key(usage: usage, down: true, modifiers: mask), from: destination.source)
+            destination.session.send(.key(usage: usage, down: false, modifiers: mask), from: destination.source)
         }
 
         override init(frame: CGRect) {
             super.init(frame: frame)
             delegate = self
-            // Non-zero empty text so backspace fires `shouldChangeCharactersIn`.
-            text = " "
+            text = ""
+            addTarget(self, action: #selector(nativeTextDidChange), for: .editingChanged)
             inputAccessoryView = makeKeyboardAccessory()
         }
         required init?(coder: NSCoder) { fatalError() }
@@ -267,30 +300,145 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         func textField(_ textField: UITextField,
                        shouldChangeCharactersIn range: NSRange,
                        replacementString string: String) -> Bool {
-            let modifiers = session?.softModifierMask ?? 0
-            if string.isEmpty {
-                // Backspace: HID usage 0x2A.
-                send(.key(usage: 0x2A, down: true, modifiers: modifiers))
-                send(.key(usage: 0x2A, down: false, modifiers: modifiers))
-            } else if string == "\n" {
-                send(.key(usage: 0x28, down: true, modifiers: modifiers))
-                send(.key(usage: 0x28, down: false, modifiers: modifiers))
-            } else if let shortcut = SoftKeyboardShortcutMapper.map(string, baseModifiers: modifiers),
-                      shortcut.modifiers != 0 {
-                send(.key(usage: shortcut.usage, down: true, modifiers: shortcut.modifiers))
-                send(.key(usage: shortcut.usage, down: false, modifiers: shortcut.modifiers))
-            } else {
-                send(.text(string))
+            // This is a proposed local edit, including provisional IME text.
+            // Never send it or reset UIKit's document before it is applied.
+            guard textField === self, canSendInput, !isDiscardingNativeText else { return false }
+            let length = (textField.text ?? "").utf16.count
+            return range.location >= 0 && range.length >= 0 && range.location <= length
+                && range.length <= length - range.location
+        }
+
+        private func beginNativeMutation() {
+            if nativeMutationDepth == 0 { mutationStartedWithMarkedText = markedTextRange != nil }
+            nativeMutationDepth += 1
+        }
+
+        private func endNativeMutation() {
+            nativeMutationDepth -= 1
+            if nativeMutationDepth == 0 {
+                mutationStartedWithMarkedText = false
+                flushCommittedText()
             }
-            // Keep the buffer non-empty so backspace keeps firing.
-            textField.text = " "
+        }
+
+        override func insertText(_ text: String) {
+            guard let destination, !isDiscardingNativeText else { return }
+            if nativeMutationDepth == 0, markedTextRange == nil, (self.text ?? "").isEmpty {
+                // UIKeyInput inserts committed text. With no local composition
+                // to replace, preserve its exact bytes (including pasted line
+                // breaks) instead of normalizing them through a single-line field.
+                cancelDeferredCommit()
+                sendCommittedText(text, to: destination)
+                return
+            }
+            beginNativeMutation()
+            defer { endNativeMutation() }
+            super.insertText(text)
+        }
+
+        override func replace(_ range: UITextRange, withText text: String) {
+            guard canSendInput, !isDiscardingNativeText else { return }
+            beginNativeMutation()
+            defer { endNativeMutation() }
+            super.replace(range, withText: text)
+        }
+
+        override func setMarkedText(_ markedText: String?, selectedRange: NSRange) {
+            guard canSendInput, !isDiscardingNativeText else { return }
+            beginNativeMutation()
+            defer { endNativeMutation() }
+            super.setMarkedText(markedText, selectedRange: selectedRange)
+        }
+
+        override func unmarkText() {
+            beginNativeMutation()
+            defer { endNativeMutation() }
+            super.unmarkText()
+        }
+
+        @objc private func nativeTextDidChange() {
+            guard nativeMutationDepth == 0, !isDiscardingNativeText else { return }
+            cancelDeferredCommit()
+            guard let destination else { discardNativeText(); return }
+            let id = UUID()
+            deferredCommitID = id
+            // UIKit may establish marked ranges after notifying observers.
+            // Unwrapped native edits are inspected after that callback stack.
+            deferredCommit = Task { @MainActor [weak self] in
+                guard !Task.isCancelled, let self, self.deferredCommitID == id else { return }
+                self.deferredCommit = nil; self.deferredCommitID = nil
+                guard self.session === destination.session, self.inputSource == destination.source else { return }
+                self.flushCommittedText(to: destination)
+            }
+        }
+
+        private func cancelDeferredCommit() {
+            deferredCommit?.cancel(); deferredCommit = nil; deferredCommitID = nil
+        }
+
+        private func discardNativeText() {
+            cancelDeferredCommit()
+            guard !isDiscardingNativeText else { return }
+            isDiscardingNativeText = true
+            defer { isDiscardingNativeText = false }
+            super.unmarkText()
+            text = ""
+        }
+
+        private func flushCommittedText(to captured: Destination? = nil) {
+            guard nativeMutationDepth == 0, !isDiscardingNativeText else { return }
+            cancelDeferredCommit()
+            guard let target = captured ?? destination,
+                  session === target.session, inputSource == target.source, canSendInput else {
+                discardNativeText()
+                return
+            }
+            guard markedTextRange == nil, let value = text, !value.isEmpty else { return }
+            // Clear before external input callbacks; a reentrant successor
+            // cannot receive this commit or make a late notification repeat it.
+            discardNativeText()
+            sendCommittedText(value, to: target)
+        }
+
+        private func sendCommittedText(_ value: String, to target: Destination) {
+            guard !value.isEmpty else { return }
+            if value == "\n" {
+                sendKey(0x28, to: target)
+            } else if target.modifiers != 0,
+                      let shortcut = SoftKeyboardShortcutMapper.map(value, baseModifiers: target.modifiers) {
+                sendKey(shortcut.usage, to: target, modifiers: shortcut.modifiers)
+            } else {
+                target.session.send(.text(value), from: target.source)
+            }
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            guard textField === self, let destination else { return false }
+            if markedTextRange != nil || (nativeMutationDepth > 0 && mutationStartedWithMarkedText) {
+                unmarkText()
+                return false // Confirm composition, without submitting a remote form.
+            }
+            flushCommittedText()
+            sendKey(0x28, to: destination)
             return false
         }
 
         override func deleteBackward() {
-            let modifiers = session?.softModifierMask ?? 0
-            send(.key(usage: 0x2A, down: true, modifiers: modifiers))
-            send(.key(usage: 0x2A, down: false, modifiers: modifiers))
+            guard let destination, !isDiscardingNativeText else { return }
+            if markedTextRange != nil || !(text ?? "").isEmpty {
+                beginNativeMutation()
+                defer { endNativeMutation() }
+                super.deleteBackward()
+            } else {
+                sendKey(0x2A, to: destination)
+            }
+        }
+
+        override func resignFirstResponder() -> Bool {
+            // Resignation can unmark text. Discard it before UIKit can turn a
+            // hidden/dismissed composition into a committed remote value.
+            discardNativeText()
+            return super.resignFirstResponder()
         }
 
         private func makeKeyboardAccessory() -> UIView {
@@ -322,7 +470,7 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         @objc private func dismissKeyboardFromAccessory() {
             // A retiring field may still receive its old accessory action.
             let ownsDismissal = !stopped && (session == nil || canSendInput)
-            resignFirstResponder()
+            retireBinding()
             if ownsDismissal { onKeyboardDismiss?() }
         }
     }

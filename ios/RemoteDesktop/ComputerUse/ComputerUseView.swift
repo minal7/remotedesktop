@@ -155,6 +155,7 @@ struct ComputerUseView: View {
                remoteKeyboardOpen,
                model.isConnected {
                 SoftKeyboardCapture(isOpen: $remoteKeyboardOpen)
+                    .id(session.remoteInputGeneration)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
                     .allowsHitTesting(false)
