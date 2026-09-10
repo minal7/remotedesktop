@@ -533,7 +533,8 @@ extension ComputerUseOwnedBrowser {
     /// Fresh observations for the user's progress update, without promoting
     /// model grouping, scalar comparisons or historical readings to success.
     func prepareResearchReport(_ batch: ComputerUseBrowserResultCandidates, goal: ComputerUseBrowserGoalInput,
-                               policy: ComputerUseBrowserAnswerSourcePolicy) async throws -> ComputerUseBrowserResearchReport? {
+                               policy: ComputerUseBrowserAnswerSourcePolicy,
+                               pauseReason: ComputerUseBrowserResearchReport.PauseReason? = nil) async throws -> ComputerUseBrowserResearchReport? {
         do {
             guard batch.documentAnswerSourceStatus == .permitted else { return nil }
             try await validateResultAnswerSource(batch, goal: goal, policy: policy)
@@ -569,7 +570,7 @@ extension ComputerUseOwnedBrowser {
                 passages: passages, surroundingText: batch.surroundingTexts.map(\.text).joined(separator: "\n"),
                 requirements: requirements, incompleteReading: batch.sourceTruncated || batch.omittedStructure
                     || batch.omittedEmbeddedContent || batch.omittedControls || batch.projectionOmittedRecords || !batch.evidence.page.controls.isEmpty
-                    || batch.candidates.contains { !$0.unprojectedTextIDs.isEmpty || !$0.unprojectedLinkIDs.isEmpty })
+                    || batch.candidates.contains { !$0.unprojectedTextIDs.isEmpty || !$0.unprojectedLinkIDs.isEmpty }, pauseReason: pauseReason)
             try await validateResultAnswerSource(batch, goal: goal, policy: policy)
             try Task.checkCancellation()
             return report

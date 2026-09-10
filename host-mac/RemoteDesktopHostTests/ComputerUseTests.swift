@@ -4978,7 +4978,15 @@ final class ComputerUseTests: XCTestCase {
     }
 
     func test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch() async throws {
-        let source = try await ResearchDriverFixture.make(candidateBodyHTML: "<p>" + String(repeating: "Observed passage. ", count: 45) + "</p>")
+        try await verifyManagerResearchReport(navigationLimit: 8)
+    }
+
+    func test_managerNavigationLimitReportKeepsItsReasonThroughReplayAndExplicitHandback() async throws {
+        try await verifyManagerResearchReport(navigationLimit: 1)
+    }
+
+    private func verifyManagerResearchReport(navigationLimit: Int) async throws {
+        let source = try await ResearchDriverFixture.make(navigationLimit: navigationLimit, candidateBodyHTML: "<p>" + String(repeating: "Observed passage. ", count: 45) + "</p>")
         defer { source.close() }
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
             desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.driver)
@@ -5005,7 +5013,11 @@ final class ComputerUseTests: XCTestCase {
         let progress = try XCTUnwrap(first.researchProgress)
         XCTAssertGreaterThan(progress.text.count, 500)
         XCTAssertEqual(first.outcome, .userInterventionRequired)
-        XCTAssertNotNil(ComputerUseStatusSignal.userInterventionMessage(from: first.text))
+        let guidance = try XCTUnwrap(ComputerUseStatusSignal.userInterventionMessage(from: first.text))
+        if navigationLimit == 1 {
+            XCTAssertTrue(guidance.contains("navigation limit")); XCTAssertTrue(guidance.contains("Resume does not allow additional navigation"))
+            XCTAssertTrue(progress.text.contains(guidance))
+        } else { XCTAssertEqual(guidance, ComputerUseBrowserResearchReport.guidance) }
         XCTAssertEqual(fixture.manager.activity, .paused)
         XCTAssertNil(fixture.ledger.terminalOutcome(taskID: prompt.id))
         let original = try XCTUnwrap(source.goal.inputs.first)
@@ -5013,6 +5025,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
         let repeated = try await reports(2)
         XCTAssertEqual(repeated.last?.researchProgress, progress)
+        XCTAssertEqual(repeated.last.flatMap { ComputerUseStatusSignal.userInterventionMessage(from: $0.text) }, guidance)
         XCTAssertEqual(source.results.inputs.count, reads)
         let resume = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: first.hostControlEpoch)
         XCTAssertTrue(fixture.manager.handle(resume, channel: fixture.channel))

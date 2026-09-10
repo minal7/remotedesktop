@@ -109,6 +109,22 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
     }
 
+    func testLastPageResultSelectionCannotTraverseHistoryBeyondTheNavigationLimit() async throws {
+        let fixture = try await ResearchAnswerFixture.make(requested: 2, historyRoute: true, navigationLimit: 2)
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .browserResearchProgress(let report)? = result else { return XCTFail("The final-page reading should survive a blocked history choice") }
+        let owner = try fixture.source.owner()
+        XCTAssertEqual(report.pauseReason, .navigationLimit)
+        XCTAssertTrue(report.message.contains("Concert Alpha")); XCTAssertTrue(report.message.contains("2 options."))
+        XCTAssertEqual(fixture.inputs.count, 2)
+        XCTAssertNotNil(fixture.inputs[1].historyOptions.first { $0.visit == 0 })
+        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .resultLink])
+        XCTAssertFalse(owner.hasPendingHistoryNavigation)
+        XCTAssertEqual(try fixture.source.browser.navigationDispatchHistory(taskID: owner.taskID).attempts.count, 2)
+        XCTAssertEqual(fixture.source.server.count("/beta"), 0)
+    }
+
     func testDriverReadsOneOptionReturnsToSearchAndCombinesASecondDetailPage() async throws {
         let fixture = try await ResearchAnswerFixture.make(requested: 2, historyRoute: true)
         defer { fixture.source.close() }

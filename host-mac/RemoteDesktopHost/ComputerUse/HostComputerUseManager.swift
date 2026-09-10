@@ -6817,7 +6817,7 @@ final class HostComputerUseManager: ObservableObject {
                 throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
             }
             try owner.validateProgressReport(report)
-            pauseForLocalIntervention(context, guidance: ComputerUseBrowserResearchReport.guidance, report: progress)
+            pauseForLocalIntervention(context, guidance: report.interventionGuidance, report: progress)
 
         case .userInterventionRequired(let message):
             // This is not a terminal assistant response and must not complete

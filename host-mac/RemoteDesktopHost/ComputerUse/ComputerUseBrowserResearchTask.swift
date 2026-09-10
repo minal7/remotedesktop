@@ -1392,7 +1392,7 @@ final class ComputerUseBrowserResearchTask {
         try validateVisitHistory(of: reading)
     }
 
-    func prepareProgressReport() async throws -> ComputerUseBrowserResearchReport? {
+    func prepareProgressReport(pauseReason: ComputerUseBrowserResearchReport.PauseReason? = nil) async throws -> ComputerUseBrowserResearchReport? {
         try requireIdle()
         guard !hasPendingForm else { throw Failure.formPending }
         guard initialSearch?.isPending != true, !hasPendingNavigation, !hasPendingFormNavigation else { throw Failure.navigationPending }
@@ -1402,7 +1402,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         return try await operate { [self] in
             try checkCurrent(captured)
-            let report = try await browser.prepareResearchReport(retained, goal: captured, policy: policy)
+            let report = try await browser.prepareResearchReport(retained, goal: captured, policy: policy, pauseReason: pauseReason)
             try checkCurrent(captured)
             guard report == nil || (report?.goalRevision == captured.digest
                 && report?.readingIdentity == retained.requirementAssessmentIdentity) else { throw Failure.goalChanged }

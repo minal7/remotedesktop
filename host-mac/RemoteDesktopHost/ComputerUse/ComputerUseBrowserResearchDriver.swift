@@ -248,12 +248,31 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
             try check()
             return fresh
         }
+        func hasNavigationCapacity() throws -> Bool {
+            try check()
+            try synchronizeHistory()
+            return run.visits.count < navigationLimit
+        }
+        func stopAtNavigationLimit() async throws -> ComputerUseExecutionResult {
+            try check()
+            // Report only a completed, still-current reading. Pending native
+            // effects retain their original reconciliation obligations.
+            if !owner.hasPendingForm, !owner.hasPendingNavigation,
+               let report = try await owner.prepareProgressReport(pauseReason: .navigationLimit) {
+                try check()
+                return .browserResearchProgress(report)
+            }
+            try check()
+            return navigationLimitRequired
+        }
         try check()
         // The owner may have received a confirmed child result immediately
         // before Pause cancelled its outer return. Recover those native facts
         // before applying the task limit or selecting another action.
         try synchronizeHistory()
-        while run.visits.count < navigationLimit {
+        // A navigation limit restricts another navigation, not observation or
+        // verification of the final page already opened under this task.
+        while true {
             try check()
             if owner.hasPendingOptionSelection {
                 progress("Checking the pending dropdown choice…")
@@ -270,6 +289,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 continue
             }
             if owner.initialSearchState == .pending {
+                guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                 progress("Checking the pending search…")
                 let document: ComputerUseBrowserDocument?
                 do { document = try await owner.resumeInitialSearch() }
@@ -277,6 +297,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     let refresh = try await owner.refreshInitialSearchStartingPage()
                     try check()
                     guard refresh == .updated || refresh == .unchanged else { return reconciliationRequired }
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     document = try await owner.resumeInitialSearch()
                 }
                 guard let document, try record(.search, document) else { return reconciliationRequired }
@@ -339,12 +360,14 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 continue // Choose the next capability using the retained verified stage.
             }
             if owner.hasPendingFormNavigation {
+                guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                 progress("Checking the pending form search…")
                 guard let receipt = try await owner.resumeFormNavigation(),
                       try record(.formQuery, receipt.document) else { return reconciliationRequired }
                 continue
             }
             if owner.hasPendingNavigation {
+                guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                 if owner.hasPendingHistoryNavigation {
                     progress("Checking the pending return to an earlier page…")
                     do {
@@ -386,6 +409,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 run.sources = sources
             }
             if owner.initialSearchState == .notPrepared {
+                guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                 guard let sources = run.sources else { throw Failure.invalidContinuation }
                 let query = try await owner.planInitialSearch(using: searchPlanner)
                 try check()
@@ -393,6 +417,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     return .userInterventionRequired("I could not form a search for the complete request. The original task is still pending.")
                 }
                 progress("Searching for the requested information…")
+                guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                 let document = try await owner.openInitialSearch(query, provider: sources.provider)
                 guard try record(.search, document) else { return reconciliationRequired }
             } else {
@@ -414,6 +439,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     try check()
                     continue // A fresh reading must inspect options; opening is no result fact.
                 case .revisit:
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     progress("Returning to an earlier page…")
                     do {
                         let receipt = try await owner.revisit(for: action)
@@ -449,6 +475,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     try check()
                     continue
                 case .openQuery:
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     progress("Opening the verified form search…")
                     let receipt = try await owner.openFormQuery(for: action)
                     guard try record(.formQuery, receipt.document) else { return reconciliationRequired }
@@ -470,6 +497,7 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                 try check()
                 switch decision {
                 case .revisit(let option):
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     do {
                         let receipt = try await owner.revisitAfterReading(option)
                         guard try record(.revisit, receipt.document) else { return reconciliationRequired }
@@ -482,22 +510,24 @@ final class ComputerUseBrowserResearchDriver: ComputerUseBrowserResearchExecutin
                     try check()
                     return .browserResearchAnswer(answer)
                 case .unresolved:
-                    if let report = try await owner.prepareProgressReport() {
+                    if let report = try await owner.prepareProgressReport(pauseReason: run.visits.count >= navigationLimit ? .navigationLimit : nil) {
                         try check()
                         return .browserResearchProgress(report)
                     }
                     try check()
-                    return selectionRequired
+                    return run.visits.count >= navigationLimit ? navigationLimitRequired : selectionRequired
                 case .link(let choice):
+                    guard try hasNavigationCapacity() else { return try await stopAtNavigationLimit() }
                     let receipt = try await owner.openCandidateLink(candidateID: choice.candidateID, linkID: choice.linkID)
                     guard try record(.resultLink, receipt.document) else { return reconciliationRequired }
                 }
             }
         }
-        try check()
-        return .userInterventionRequired("The browser reached this task's navigation limit. The research answer is not yet verified; the original request remains pending.")
     }
 
+    private var navigationLimitRequired: ComputerUseExecutionResult {
+        .userInterventionRequired("The browser reached this task's navigation limit. The research answer is still unverified and earlier actions keep their reconciliation requirements. You can continue manually, then choose Resume to review the current page; Resume does not allow additional navigation for this task.")
+    }
     private var selectionRequired: ComputerUseExecutionResult {
         .userInterventionRequired("I could not select another result link that advances the complete request. More page interaction or result verification is needed; the original task is still pending.")
     }

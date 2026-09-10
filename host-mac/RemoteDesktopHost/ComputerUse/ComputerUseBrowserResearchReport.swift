@@ -4,6 +4,7 @@ import Foundation
 /// entire unresolved requirement ledger, never a completed research answer.
 /// URLs are native output for the user; this type has no planner projection.
 struct ComputerUseBrowserResearchReport: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum PauseReason: Equatable, Sendable { case navigationLimit }
     struct Passage: Sendable {
         let text: String
         let detailsLinks: [String]
@@ -17,11 +18,16 @@ struct ComputerUseBrowserResearchReport: Equatable, Sendable, CustomStringConver
     let message: String
     let passageCount: Int
     let requirementCount: Int
+    let pauseReason: PauseReason?
     var progress: ComputerUseResearchProgress? {
         try? .init(reportID: ComputerUseTaskContract.digest([
             "browser-research-report-v1", rootTaskID, goalRevision, readingIdentity, message]), text: message)
     }
     static let guidance = "I found page passages to review. The research answer is still unverified. Review the findings and page, then choose Resume to continue the original task."
+    var interventionGuidance: String {
+        pauseReason == .navigationLimit ? Self.navigationLimitGuidance : Self.guidance
+    }
+    private static let navigationLimitGuidance = "The browser reached this task's navigation limit. These findings are still unverified. You can continue manually, then choose Resume to review the current page; Resume does not allow additional navigation for this task."
 
     /// Keep the exact address or omit it. Removing a query/fragment could
     /// invent a different source; carrying one could expose session state.
@@ -35,13 +41,15 @@ struct ComputerUseBrowserResearchReport: Equatable, Sendable, CustomStringConver
     }
 
     init?(rootTaskID: String, goalRevision: String, readingIdentity: String, site: String, sourceLink: String?,
-          passages: [Passage], surroundingText: String, requirements: [String], incompleteReading: Bool) {
+          passages: [Passage], surroundingText: String, requirements: [String], incompleteReading: Bool, pauseReason: PauseReason? = nil) {
         guard !passages.isEmpty, passages.count <= 8, !requirements.isEmpty,
               [site, surroundingText].allSatisfy(Self.printable),
               requirements.allSatisfy(Self.printable), passages.allSatisfy({ Self.printable($0.text) }) else { return nil }
         self.rootTaskID = rootTaskID; self.goalRevision = goalRevision; self.readingIdentity = readingIdentity
+        self.pauseReason = pauseReason
         requirementCount = requirements.count
         var message = "I found page passages to review, but the complete research answer is still unverified. The original task remains pending.\n\n"
+        if pauseReason == .navigationLimit { message += "The browser reached this task's navigation limit.\n\n" }
         message += "Page source: " + site + "\n"
         if let sourceLink { message += "Source page: " + sourceLink + "\n" }
         else { message += "A source-page address is not included in this update.\n" }
@@ -55,7 +63,7 @@ struct ComputerUseBrowserResearchReport: Equatable, Sendable, CustomStringConver
         }
         let pending = "\nStill to verify against your request:\n"
             + requirements.enumerated().map { "\($0.offset + 1). " + Self.quote($0.element) }.joined(separator: "\n")
-            + "\n\nChoose Resume after reviewing the page to continue the original task."
+            + "\n\n" + (pauseReason == .navigationLimit ? Self.navigationLimitGuidance : "Choose Resume after reviewing the page to continue the original task.")
         guard (message + pending).utf8.count <= Self.maximumBytes else { return nil }
         var included = 0
         for passage in passages {

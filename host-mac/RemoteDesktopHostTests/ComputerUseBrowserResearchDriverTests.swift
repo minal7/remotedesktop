@@ -5,7 +5,15 @@ import XCTest
 @MainActor
 final class ComputerUseBrowserResearchDriverTests: XCTestCase {
     func testDriverRequestsManualSignInWithoutFollowingTheEntryAndResumesTheOriginalGoal() async throws {
-        let fixture = try await ResearchDriverFixture.make(searchBodyHTML: "<p>Sign in to view these concert tickets.</p><a href='/account'>Sign in</a>")
+        try await verifyManualLoginHandoff(navigationLimit: 8)
+    }
+
+    func testDriverAllowsExplicitLoginHandoffAndHandbackOnTheLastPermittedPage() async throws {
+        try await verifyManualLoginHandoff(navigationLimit: 1)
+    }
+
+    private func verifyManualLoginHandoff(navigationLimit: Int) async throws {
+        let fixture = try await ResearchDriverFixture.make(navigationLimit: navigationLimit, searchBodyHTML: "<p>Sign in to view these concert tickets.</p><a href='/account'>Sign in</a>")
         defer { fixture.close() }
         fixture.policy.choices = [false]
         fixture.actions.select = { input in
@@ -288,7 +296,7 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/details"), 1); XCTAssertEqual(fixture.server.count("/offers"), 0)
         owner.pause(); try await owner.resumeAfterUserControl()
         _ = try await fixture.resume()
-        XCTAssertEqual(fixture.policy.goals.count, 1); XCTAssertEqual(owner.input, original)
+        XCTAssertEqual(fixture.policy.goals.count, 3, "The last permitted page remains readable across handback"); XCTAssertEqual(owner.input, original)
         do { _ = try await fixture.start(); XCTFail("Admission must not restart the same root") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchDriver.Failure, .alreadyAdmitted) }
         let foreign = ComputerUseBrowserResearchTask(input: original, browser: fixture.browser, goalPlanner: fixture.goal,
@@ -361,10 +369,11 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
                     let history = owner.confirmedNavigationHistory
                     try await owner.resumeAfterUserControl()
                     let result = try await fixture.resume()
-                    guard case .userInterventionRequired = result else { return XCTFail("Recovered visits must still consume the task limit") }
+                    guard case .browserResearchProgress(let report) = result else { return XCTFail("Recover the final visit, read it, and retain findings without another navigation") }
+                    XCTAssertEqual(report.pauseReason, .navigationLimit)
                     XCTAssertEqual(owner.confirmedNavigationHistory, history)
                 }
-                XCTAssertEqual(fixture.policy.goals.count, limit - 1)
+                XCTAssertEqual(fixture.policy.goals.count, stop ? limit - 1 : limit)
                 XCTAssertEqual(fixture.search.inputs.count, 1)
                 XCTAssertEqual(fixture.server.count("/offers"), 0)
             }
@@ -546,6 +555,67 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
+    }
+
+    func testLastPageFindingsRemainAvailableWithoutResettingNavigationCapacity() async throws {
+        let fixture = try await ResearchDriverFixture.make(navigationLimit: 1, candidateBodyHTML: "<p>From USD 40. Fees apply.</p>")
+        defer { fixture.close() }
+        fixture.policy.choices = [true, true]
+        let first = try await fixture.start()
+        guard case .browserResearchProgress(let report)? = first else { return XCTFail("The last page's findings must survive a blocked next-link choice") }
+        let owner = try fixture.owner(), original = owner.input, history = owner.confirmedNavigationHistory
+        XCTAssertEqual(report.pauseReason, .navigationLimit)
+        XCTAssertTrue(report.message.contains("From USD 40. Fees apply.")); XCTAssertTrue(report.message.contains(fixture.request))
+        XCTAssertTrue(report.interventionGuidance.contains("Resume does not allow additional navigation"))
+        XCTAssertEqual(fixture.results.inputs, [original]); XCTAssertEqual(fixture.policy.goals, [original])
+        XCTAssertEqual(history.map(\.kind), [.search]); XCTAssertFalse(owner.hasPendingNavigation)
+        owner.pause(); try await owner.resumeAfterUserControl()
+        let resumed = try await fixture.resume()
+        guard case .browserResearchProgress(let repeated) = resumed else { return XCTFail("Handback can read the page without buying another navigation") }
+        XCTAssertEqual(repeated.pauseReason, .navigationLimit)
+        XCTAssertEqual(fixture.results.inputs, [original, original]); XCTAssertEqual(fixture.policy.goals, [original, original])
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.confirmedNavigationHistory, history)
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
+        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID).attempts.count, 1)
+    }
+
+    func testLastPageCanVerifyFormInputButCannotStartAnotherQuery() async throws {
+        let fixture = try await ResearchDriverFixture.make(navigationLimit: 1, searchForm: true)
+        defer { fixture.close() }
+        configureAutomaticFormQueries(fixture)
+        let result = try await fixture.start()
+        guard case .userInterventionRequired(let message)? = result else { return XCTFail("A new form query needs navigation capacity") }
+        XCTAssertTrue(message.contains("navigation limit"))
+        let owner = try fixture.owner(), original = owner.input, history = owner.confirmedFormHistory
+        XCTAssertEqual(history.count, 1); XCTAssertFalse(owner.hasPendingForm); XCTAssertFalse(owner.hasPendingFormNavigation)
+        XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        owner.pause(); try await owner.resumeAfterUserControl()
+        _ = try await fixture.resume()
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.confirmedFormHistory, history)
+        XCTAssertEqual(fixture.forms.inputs.count, 1); XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 1)
+        XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 0)
+        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID).attempts.count, 1)
+    }
+
+    func testLastPageActionCannotTraverseAnEarlierVisitBeyondTheNavigationLimit() async throws {
+        let fixture = try await ResearchDriverFixture.make(navigationLimit: 2)
+        defer { fixture.close() }
+        fixture.policy.choices = [true, false]
+        _ = try await fixture.start()
+        let owner = try fixture.owner(), original = owner.input, history = owner.confirmedNavigationHistory
+        var selectedVisit: Int?
+        fixture.actions.select = { input in
+            let visit = try XCTUnwrap(input.historyOptions.first?.visit)
+            selectedVisit = visit
+            return "{\"revisit\":\(visit)}"
+        }
+        let result = try await fixture.resume()
+        guard case .userInterventionRequired(let message) = result else { return XCTFail("A proposed revisit cannot open a new history stage without capacity") }
+        XCTAssertTrue(message.contains("navigation limit")); XCTAssertNotNil(selectedVisit)
+        XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.confirmedNavigationHistory, history)
+        XCTAssertFalse(owner.hasPendingHistoryNavigation)
+        XCTAssertEqual(try fixture.browser.navigationDispatchHistory(taskID: owner.taskID).attempts.count, 2)
+        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 1)
     }
 
     func testAdmissionDeadlineDoesNotCreateAnOwnerAndRetryRetainsTheOriginalClock() async throws {

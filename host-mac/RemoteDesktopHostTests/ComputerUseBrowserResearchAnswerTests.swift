@@ -4,6 +4,38 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
+    func testDriverCanVerifyTheCompleteAnswerOnTheLastPermittedPage() async throws {
+        for multiPage in [false, true] {
+            let limit = multiPage ? 3 : 2
+            let fixture = try await ResearchAnswerFixture.make(requested: multiPage ? 2 : 1, multiPage: multiPage, navigationLimit: limit)
+            defer { fixture.source.close() }
+            let result = try await fixture.source.start()
+            guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Opening the last permitted page must still allow full result verification") }
+            let owner = try fixture.source.owner()
+            try owner.validateAnswer(answer)
+            XCTAssertEqual(owner.confirmedNavigationHistory.count, limit)
+            XCTAssertEqual(owner.input.prompt, fixture.source.request)
+            for text in ["Concert Alpha", "USD 40", "Under USD 50.", "Do not buy."] { XCTAssertTrue(answer.message.contains(text), text) }
+            if multiPage { XCTAssertTrue(answer.message.contains("Concert Beta")); XCTAssertEqual(answer.recalledReadings, [1]) }
+            XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
+            XCTAssertEqual(fixture.source.server.count("/details"), 1)
+            XCTAssertEqual(fixture.source.server.count("/offers"), multiPage ? 1 : 0)
+            XCTAssertEqual(fixture.source.server.count("/more"), 0)
+        }
+    }
+
+    func testLastPermittedPageCannotRelaxTheOriginalAnswerRequirements() async throws {
+        let fixture = try await ResearchAnswerFixture.make(price: "USD 60", navigationLimit: 2)
+        defer { fixture.source.close() }
+        let result = try await fixture.source.start()
+        guard case .browserResearchProgress(let report)? = result else { return XCTFail("An over-budget offer must remain an unverified finding") }
+        XCTAssertEqual(report.pauseReason, .navigationLimit)
+        XCTAssertTrue(report.message.contains("USD 60")); XCTAssertTrue(report.message.contains("Under USD 50."))
+        XCTAssertTrue(try XCTUnwrap(fixture.inputs.last).answerCandidateIndices.isEmpty)
+        XCTAssertEqual(try fixture.source.owner().confirmedNavigationHistory.count, 2)
+        XCTAssertEqual(fixture.source.server.count("/offers"), 0)
+    }
+
     func testDriverRequiresExplicitDateReplacementThenChecksTheNewDateAndOriginalBudget() async throws {
         try await verifyDateReplacementAnswerEligibility(splitOriginal: false)
     }
@@ -796,7 +828,8 @@ struct ResearchAnswerFixture {
                      includeControls: Bool = false, multiPage: Bool = false, repeatedPage: Bool = false,
                      historyRoute: Bool = false, controlHTML: String = "", resultDate: String? = nil, resultLocation: String? = nil,
                      surroundingHTML: String = "", controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]? = nil,
-                     heldSignal: Bool = false, answerExclusion: String? = nil, navigationExclusionRole: String? = nil) async throws -> Self {
+                     heldSignal: Bool = false, answerExclusion: String? = nil, navigationExclusionRole: String? = nil,
+                     navigationLimit: Int = 8) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
             bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
@@ -830,7 +863,7 @@ struct ResearchAnswerFixture {
             : "<article><h2>Concert Beta</h2><a href='/more'>Beta details</a><p>USD 45</p></article>"
         let alpha = "<article><h2>Concert Alpha</h2><a href='/details'>Alpha details</a><p>USD 40</p></article>"
         let beta = "<article><h2>Concert Beta</h2><a href='/beta'>Beta details</a><p>USD 45</p></article>"
-        let source = try await ResearchDriverFixture.make(linkPlanner: planner, resultPlanner: reviewed,
+        let source = try await ResearchDriverFixture.make(navigationLimit: navigationLimit, linkPlanner: planner, resultPlanner: reviewed,
             additionalCardHTML: additional, candidateBodyHTML: "<p>\(price)</p>" + inventoryHTML + partyHTML + controlHTML
                 + (resultDate.map { "<p>Date: \($0)</p>" } ?? "") + (resultLocation.map { "<p>Location: \($0)</p>" } ?? ""), request: request,
             heldSignal: heldSignal, offersBodyHTML: multiPage ? second + "<p>Beta conditions apply</p>" : nil,

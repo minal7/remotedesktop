@@ -1,5 +1,7 @@
 # Connect retained research navigation without losing the original task
 
+Later source correction: the [navigation-limit review](BROWSER_NAVIGATION_LIMIT_REVIEW.md) moves the retained allowance to navigation boundaries so the final permitted page remains readable and verifiable. The original checkpoint below describes the earlier outer-loop limit.
+
 Parent source: `9ebf950`. This checkpoint adds the concrete research navigation control loop and prepares regression cases. It does not establish working natural-language research in the installed app.
 
 ## First-principles findings
