@@ -240,13 +240,14 @@ struct ComputerUseView: View {
 
     private func liveScreen(height: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            if session.hasInteractiveRemoteScreen {
+            if session.shouldPrepareRemoteScreenRenderer {
                 RemoteScreenView(accessories: accessories, zoom: zoom)
                     .background(.black)
                     .allowsHitTesting(
-                        model.isConnected && !model.isLiveScreenPrivacyShielded)
-                    .accessibilityHidden(model.isLiveScreenPrivacyShielded)
-            } else {
+                        session.hasInteractiveRemoteScreen && model.isConnected && !model.isLiveScreenPrivacyShielded)
+                    .accessibilityHidden(!session.hasInteractiveRemoteScreen || model.isLiveScreenPrivacyShielded)
+            }
+            if !session.hasInteractiveRemoteScreen {
                 Color(uiColor: .secondarySystemGroupedBackground)
                     .overlay {
                         VStack(spacing: 10) {
@@ -267,29 +268,6 @@ struct ComputerUseView: View {
                     }
                     .accessibilityElement(children: .combine)
                     .accessibilityIdentifier("computer-use-local-connection")
-            }
-
-            if session.hasInteractiveRemoteScreen,
-               !session.hasReceivedVideoFrame {
-                VStack(spacing: 8) {
-                    Label(
-                        session.state == .connecting
-                            ? "Connecting to live screen…"
-                            : "Waiting for the Mac screen…",
-                        systemImage: "display")
-                        .font(.callout.weight(.semibold))
-                    Text("If macOS asks, choose Allow on the Mac for RemoteDesktopHost Screen & System Audio Recording. This secure approval can only be completed on the Mac.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .padding(18)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("computer-use-live-screen-waiting")
             }
 
             if session.hasInteractiveRemoteScreen,
@@ -316,7 +294,7 @@ struct ComputerUseView: View {
                 .foregroundStyle(.secondary)
         case .waitingForFreshFrame:
             Label(
-                "Waiting for a fresh Mac screen frame…",
+                "Waiting for the Mac screen…",
                 systemImage: "display")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)

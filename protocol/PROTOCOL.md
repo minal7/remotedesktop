@@ -89,11 +89,19 @@ the transport instead of retrying possibly accepted input.
 
 A `display` sent with a scoped acknowledgement also includes that complete
 `inputSession` acknowledgement beside its dimensions. The phone accepts those
-dimensions only for its presented input session, arms a new decoder-frame probe
-after the current hello acknowledgement, and clears screen/input readiness on
-loss. Already-queued callbacks from retired probes cannot restore readiness.
-A post-handshake decoder callback does not prove post-handshake host capture;
-that media freshness boundary still needs native qualification. These display
+dimensions only for its current input session. After hello and display, an
+owned renderer subscription forwards decoded frames to the actual sink. Its
+first valid forwarded frame reports submission readiness. Replacement/removal
+retires the exact subscription before native track removal; old queued callbacks
+cannot establish readiness for the successor subscription. Renderer loss releases
+local holds under the still-current input scope, then disables direct input.
+The screen stays prepared behind an opaque waiting overlay so its replacement
+can receive a frame without requiring input readiness first. The optional video
+sidecar retains its current hello/display and leaves the TLS AI task connected.
+A forwarded frame is not a GPU presentation acknowledgement or proof of capture
+after the handshake. Deferred renderer work, capture freshness and foreground
+return still need repair and native qualification. See the
+[renderer ownership review](../docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md). These display
 requirements are part of the unreleased `inputSessions: 1` extension and require
 the matching host and phone implementation. See the
 [presentation recovery review](../docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
@@ -118,7 +126,7 @@ unavailable. A supporting peer receives the exact revoked acknowledgement:
 ```
 
 The phone acts only when this scope equals its current acknowledgement. It
-revokes input and screen readiness, retires old input/probe generations,
+revokes input and screen readiness, retires old input/renderer subscription generations,
 increments the client hello revision and sends a new hello. Duplicate or
 superseded invalidations do not restart that handshake or clear newer readiness.
 A delayed old acknowledgement cannot reopen the revoked revision. Malformed
@@ -140,11 +148,11 @@ waits remain 10 seconds and ICE recovery retains its separate timeout; concurren
 outages may therefore end sooner. These are configured limits, not measured
 network guarantees.
 
-This source implementation handles reported stream stops. Silent video stalls
-and blank/suspended output require further availability handling. Source output
-and a later decoded-frame callback do not prove that current pixels reached the
-phone's renderer. End-to-end media identity and native compatibility remain
-unqualified; see the [capture/input review](../docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
+The source implementation handles reported stream stops and nonterminal
+blank/suspended or invalid output. Silent stalls still need handling. Source
+output and a later renderer submission do not prove that current source pixels
+were displayed on the phone. End-to-end media identity, actual presentation and
+native compatibility remain unqualified; see the [capture/input review](../docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
 
 Each scoped input message carries a separate envelope, for example:
 

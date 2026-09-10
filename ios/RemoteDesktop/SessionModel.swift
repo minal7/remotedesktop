@@ -86,10 +86,14 @@ final class SessionModel: ObservableObject {
     @Published private(set) var remoteInputGeneration = UUID()
     @Published private(set) var inputActivity: RemoteInputActivity
     @Published var error: String?
-    @Published private(set) var experience: Experience = .remoteControl
+    @Published private(set) var experience: Experience = .remoteControl {
+        didSet { updateVideoRendererTarget() }
+    }
     @Published private(set) var computerUseSession: ComputerUseSessionModel?
     @Published private(set) var computerUseConnectionMode:
-        ComputerUseConnectionMode = .liveScreen
+        ComputerUseConnectionMode = .liveScreen {
+        didSet { updateVideoRendererTarget() }
+    }
     @Published private(set) var computerUseVisualSidecarState:
         ComputerUseVisualSidecarState = .unavailable
     @Published private(set) var isCloudAccountRevalidationPending = false
@@ -100,7 +104,20 @@ final class SessionModel: ObservableObject {
               computerUseConnectionMode == .localPromptOnly else {
             return state == .connected && inputHelloReceived && display != nil && hasReceivedVideoFrame
         }
-        return computerUseVisualSidecarState == .live
+        return computerUseVisualSidecarState == .live && hasReceivedVideoFrame && display != nil
+    }
+
+    /// Prepare the sink before asking it for a submitted-frame readiness edge.
+    /// Keep it mounted through transient frame loss, with pixels/input shielded.
+    var shouldPrepareRemoteScreenRenderer: Bool {
+        guard state == .connecting || state == .connected else { return false }
+        if experience == .computerUse, computerUseConnectionMode == .localPromptOnly {
+            switch computerUseVisualSidecarState {
+            case .connecting, .waitingForFreshFrame, .live: return true
+            case .unavailable, .failed: return false
+            }
+        }
+        return true
     }
 
     var isComputerUsePromptTransportReady: Bool {
@@ -128,8 +145,13 @@ final class SessionModel: ObservableObject {
     private var desiredInputActivity: RemoteInputActivity
     private var isUpdatingInputActivity = false
     private var isRetiringInputSources = false
-    private var transport: Transport?
-    private var computerUseVisualSidecar: ComputerUseVisualSidecar?
+    private let videoRendererBinding = RemoteVideoRendererBinding()
+    private var transport: Transport? {
+        didSet { updateVideoRendererTarget() }
+    }
+    private var computerUseVisualSidecar: ComputerUseVisualSidecar? {
+        didSet { updateVideoRendererTarget() }
+    }
     private var localConnectionTask: Task<Void, Never>?
     private var accountChangeObserver: NSObjectProtocol?
     private var accountRevalidationTask: Task<Void, Never>?
@@ -492,24 +514,34 @@ final class SessionModel: ObservableObject {
         transport?.send(message, seq: seq, ts: ts)
     }
 
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
-        if experience == .computerUse,
-           computerUseConnectionMode == .localPromptOnly {
-            computerUseVisualSidecar?.attachVideoRenderer(renderer)
+    private func updateVideoRendererTarget() {
+        if experience == .computerUse, computerUseConnectionMode == .localPromptOnly {
+            videoRendererBinding.bind(computerUseVisualSidecar)
         } else {
-            (transport as? VideoRenderingTransport)?
-                .attachVideoRenderer(renderer)
+            videoRendererBinding.bind(transport as? VideoRenderingTransport)
         }
     }
 
+    func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
+        videoRendererBinding.attach(renderer)
+    }
+
     func detachVideoRenderer(_ renderer: RTCVideoRenderer) {
-        if experience == .computerUse,
-           computerUseConnectionMode == .localPromptOnly {
-            computerUseVisualSidecar?.detachVideoRenderer(renderer)
-        } else {
-            (transport as? VideoRenderingTransport)?
-                .detachVideoRenderer(renderer)
-        }
+        videoRendererBinding.detach(renderer)
+    }
+
+    private func retireRenderedInput(while isCurrent: () -> Bool) {
+        guard hasReceivedVideoFrame, isCurrent() else { return }
+        let generation = remoteInputGeneration
+        // The wire input scope still exists, so release holds before hiding
+        // the screen. A reentrant teardown must not invalidate its successor.
+        releaseRemoteInputSources()
+        guard isCurrent(), remoteInputGeneration == generation else { return }
+        hasReceivedVideoFrame = false
+        softModifierMask = 0
+        inputSources.removeAll()
+        softModifierSource = nil
+        remoteInputGeneration = UUID()
     }
 
     func disconnect() {
@@ -735,8 +767,15 @@ final class SessionModel: ObservableObject {
         } else {
             let created = ComputerUseVisualSidecar(
                 transportFactory: computerUseVisualTransportFactory)
-            created.onStateChange = { [weak self] newState in
-                guard let self,
+            created.onVideoFrameUnavailable = { [weak self, weak created] in
+                guard let self, let created else { return }
+                self.retireRenderedInput {
+                    self.computerUseVisualSidecar === created &&
+                    self.experience == .computerUse && self.computerUseConnectionMode == .localPromptOnly
+                }
+            }
+            created.onStateChange = { [weak self, weak created] newState in
+                guard let self, let created, self.computerUseVisualSidecar === created,
                       self.experience == .computerUse,
                       self.computerUseConnectionMode == .localPromptOnly else {
                     return
@@ -745,8 +784,8 @@ final class SessionModel: ObservableObject {
                 if newState == .live { self.hasReceivedVideoFrame = true }
                 else { self.invalidateRemoteInput() }
             }
-            created.onDisplay = { [weak self] display in
-                guard let self,
+            created.onDisplay = { [weak self, weak created] display in
+                guard let self, let created, self.computerUseVisualSidecar === created,
                       self.state == .connected,
                       !self.isCloudAccountRevalidationPending else { return }
                 self.display = display
@@ -793,6 +832,10 @@ final class SessionModel: ObservableObject {
     }
 
     private func bind(_ t: Transport) {
+        t.onVideoFrameUnavailable = { [weak self, weak t] in
+            guard let self, let t else { return }
+            self.retireRenderedInput { self.transport === t }
+        }
         t.onInputUnavailable = { [weak self, weak t] in
             guard let self, let t, self.transport === t else { return }
             self.invalidateRemoteInput()
@@ -831,7 +874,7 @@ final class SessionModel: ObservableObject {
         t.onFirstVideoFrame = { [weak self, weak t] in
             guard let self, let t, self.transport === t, self.inputHelloReceived,
                   self.state == .connected else { return }
-            // Record decoded-frame readiness even while the account shield is
+            // Record renderer-submission readiness even while the account shield is
             // up. WebRTC reports this edge only once, while the pending flag
             // still keeps pixels hidden and outbound prompt/control disabled.
             self.hasReceivedVideoFrame = true
@@ -868,8 +911,9 @@ final class SessionModel: ObservableObject {
 /// AI session. It deliberately has no reference to `ComputerUseSessionModel`,
 /// so a video failure cannot stop, recreate, or reroute a durable AI task.
 @MainActor
-final class ComputerUseVisualSidecar {
+final class ComputerUseVisualSidecar: VideoRendererTarget {
     var onStateChange: ((ComputerUseVisualSidecarState) -> Void)?
+    var onVideoFrameUnavailable: (() -> Void)?
     var onDisplay: ((DisplayInfo) -> Void)?
 
     private(set) var state: ComputerUseVisualSidecarState = .unavailable
@@ -882,12 +926,17 @@ final class ComputerUseVisualSidecar {
     private let transportFactory: @MainActor () -> Transport
 
     private var configuration: Configuration?
-    private var transport: Transport?
+    private let videoRendererBinding = RemoteVideoRendererBinding()
+    private var transport: Transport? {
+        didSet { videoRendererBinding.bind(transport as? VideoRenderingTransport) }
+    }
     private var connectionTask: Task<Void, Never>?
     private var generation: UInt64 = 0
+    private var presentationID = UUID()
+    private var isRetiringRendererFrame = false
     private var didReceiveCompatibleHostHello = false
-    private var didReceiveCurrentDisplay = false
-    private var didReceiveFreshFrame = false
+    private var currentDisplay: DisplayInfo?
+    private var didReceiveRendererFrame = false
     private var seq: UInt32 = 0
 
     init(
@@ -913,18 +962,21 @@ final class ComputerUseVisualSidecar {
 
     func stop(preserveConfiguration: Bool) {
         generation &+= 1
+        let retirementGeneration = generation
+        presentationID = UUID()
         connectionTask?.cancel()
         connectionTask = nil
         let oldTransport = transport
-        transport = nil
         didReceiveCompatibleHostHello = false
-        didReceiveCurrentDisplay = false
-        didReceiveFreshFrame = false
+        currentDisplay = nil
+        didReceiveRendererFrame = false
         if !preserveConfiguration {
             configuration = nil
         }
-        transition(to: .unavailable)
+        transport = nil
         oldTransport?.disconnect(reason: "visual-sidecar-stopped")
+        guard generation == retirementGeneration else { return }
+        transition(to: .unavailable)
     }
 
     /// Sends only person-generated screen input. Protocol/lifecycle messages
@@ -933,7 +985,7 @@ final class ComputerUseVisualSidecar {
     func sendDirectInput(_ message: ControlMessage) -> Bool {
         guard state == .live,
               didReceiveCompatibleHostHello,
-              didReceiveFreshFrame,
+              didReceiveRendererFrame,
               let transport,
               Self.isDirectInput(message) else { return false }
         seq &+= 1
@@ -943,14 +995,11 @@ final class ComputerUseVisualSidecar {
     }
 
     func attachVideoRenderer(_ renderer: RTCVideoRenderer) {
-        guard state == .live else { return }
-        (transport as? VideoRenderingTransport)?
-            .attachVideoRenderer(renderer)
+        videoRendererBinding.attach(renderer)
     }
 
     func detachVideoRenderer(_ renderer: RTCVideoRenderer) {
-        (transport as? VideoRenderingTransport)?
-            .detachVideoRenderer(renderer)
+        videoRendererBinding.detach(renderer)
     }
 
     private func beginAttempt() {
@@ -961,22 +1010,29 @@ final class ComputerUseVisualSidecar {
 
         generation &+= 1
         let attemptGeneration = generation
+        presentationID = UUID()
         connectionTask?.cancel()
         connectionTask = nil
         let oldTransport = transport
         transport = nil
         oldTransport?.disconnect(reason: "visual-sidecar-replaced")
+        guard generation == attemptGeneration else { return }
 
         didReceiveCompatibleHostHello = false
-        didReceiveCurrentDisplay = false
-        didReceiveFreshFrame = false
+        currentDisplay = nil
+        didReceiveRendererFrame = false
         seq = 0
         let candidate = transportFactory()
-        transport = candidate
+        guard generation == attemptGeneration else { return }
         bind(candidate, generation: attemptGeneration)
+        transport = candidate
+        guard generation == attemptGeneration else { return }
         transition(to: .connecting)
+        guard generation == attemptGeneration else { return }
 
         connectionTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled, self?.generation == attemptGeneration,
+                  self?.transport === candidate else { return }
             do {
                 try await candidate.connect(
                     pairingCode: configuration.pairingCode,
@@ -996,15 +1052,28 @@ final class ComputerUseVisualSidecar {
     }
 
     private func bind(_ candidate: Transport, generation: UInt64) {
-        candidate.onInputUnavailable = { [weak self] in
-            guard let self, self.generation == generation else { return }
+        candidate.onVideoFrameUnavailable = { [weak self, weak candidate] in
+            guard let self, let candidate, self.transport === candidate, self.generation == generation, self.didReceiveRendererFrame,
+                  !self.isRetiringRendererFrame else { return }
+            let presentationID = self.presentationID
+            self.isRetiringRendererFrame = true
+            self.onVideoFrameUnavailable?()
+            self.isRetiringRendererFrame = false
+            guard self.generation == generation, self.presentationID == presentationID,
+                  self.didReceiveCompatibleHostHello else { return }
+            self.didReceiveRendererFrame = false
+            self.transition(to: .waitingForFreshFrame)
+        }
+        candidate.onInputUnavailable = { [weak self, weak candidate] in
+            guard let self, let candidate, self.transport === candidate, self.generation == generation else { return }
+            self.presentationID = UUID()
             self.didReceiveCompatibleHostHello = false
-            self.didReceiveCurrentDisplay = false
-            self.didReceiveFreshFrame = false
+            self.currentDisplay = nil
+            self.didReceiveRendererFrame = false
             self.transition(to: .connecting)
         }
-        candidate.onHostHello = { [weak self] hello in
-            guard let self,
+        candidate.onHostHello = { [weak self, weak candidate] hello in
+            guard let self, let candidate, self.transport === candidate,
                   self.generation == generation else { return }
             guard hello.orderedComputerUseControls
                     >= Config.orderedComputerUseControlsVersion else {
@@ -1013,31 +1082,35 @@ final class ComputerUseVisualSidecar {
                     disconnectTransport: true)
                 return
             }
-            self.didReceiveCurrentDisplay = false
-            self.didReceiveFreshFrame = false
+            let presentationID = UUID()
+            self.presentationID = presentationID
+            self.currentDisplay = nil
+            self.didReceiveRendererFrame = false
             self.didReceiveCompatibleHostHello = true
             self.sendQualityPolicy(on: candidate)
+            guard self.generation == generation, self.presentationID == presentationID,
+                  self.didReceiveCompatibleHostHello else { return }
             self.transition(to: .waitingForFreshFrame)
         }
-        candidate.onDisplay = { [weak self] display in
-            guard let self,
+        candidate.onDisplay = { [weak self, weak candidate] display in
+            guard let self, let candidate, self.transport === candidate,
                   self.generation == generation, self.didReceiveCompatibleHostHello,
                   display.w > 0, display.h > 0, display.scale.isFinite, display.scale > 0 else { return }
-            self.didReceiveCurrentDisplay = true
+            self.currentDisplay = display
             self.onDisplay?(display)
             if self.didReceiveCompatibleHostHello,
-               self.didReceiveFreshFrame {
+               self.didReceiveRendererFrame {
                 self.becomeLive(generation: generation)
             }
         }
-        candidate.onFirstVideoFrame = { [weak self] in
-            guard let self,
+        candidate.onFirstVideoFrame = { [weak self, weak candidate] in
+            guard let self, let candidate, self.transport === candidate,
                   self.generation == generation, self.didReceiveCompatibleHostHello else { return }
-            self.didReceiveFreshFrame = true
+            self.didReceiveRendererFrame = true
             self.becomeLive(generation: generation)
         }
-        candidate.onDisconnect = { [weak self] _ in
-            guard let self else { return }
+        candidate.onDisconnect = { [weak self, weak candidate] _ in
+            guard let self, let candidate, self.transport === candidate else { return }
             self.failCurrentGeneration(
                 generation,
                 disconnectTransport: false)
@@ -1047,8 +1120,14 @@ final class ComputerUseVisualSidecar {
     private func becomeLive(generation: UInt64) {
         guard self.generation == generation,
               didReceiveCompatibleHostHello,
-              didReceiveCurrentDisplay,
-              didReceiveFreshFrame else { return }
+              let display = currentDisplay,
+              didReceiveRendererFrame else { return }
+        // The screen model discards its layout when input is withdrawn. Replay
+        // the retained current display before restoring renderer readiness.
+        let presentationID = self.presentationID
+        onDisplay?(display)
+        guard self.generation == generation, self.presentationID == presentationID, didReceiveCompatibleHostHello,
+              currentDisplay == display, didReceiveRendererFrame else { return }
         transition(to: .live)
     }
 
@@ -1058,16 +1137,19 @@ final class ComputerUseVisualSidecar {
     ) {
         guard generation == failedGeneration else { return }
         generation &+= 1
+        let retirementGeneration = generation
+        presentationID = UUID()
         connectionTask?.cancel()
         connectionTask = nil
         let failedTransport = transport
-        transport = nil
         didReceiveCompatibleHostHello = false
-        didReceiveCurrentDisplay = false
-        didReceiveFreshFrame = false
+        currentDisplay = nil
+        didReceiveRendererFrame = false
+        transport = nil
         if disconnectTransport {
             failedTransport?.disconnect(reason: "visual-sidecar-failed")
         }
+        guard generation == retirementGeneration else { return }
         transition(to: .failed)
     }
 

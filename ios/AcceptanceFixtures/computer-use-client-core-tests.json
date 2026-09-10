@@ -13,7 +13,17 @@
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresObservedLocationAndBoundedDeltas",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryUsesAllLogicalCellsAndRejectsInvalidMappings",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_screenGeometryClipsZoomedContentBeforeNewGestures",
-    "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion"
+    "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingRetainsPreparationAndDetachesTheExactPreviousTarget",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingIgnoresStaleSinkCleanupAndReplacesOnlyOnce",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingReconcilesChangesDuringExternalAttachAndDetach",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionReportsOnlyAfterForwardingAValidFrame",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionRetirementRejectsOldFramesAndSizeCallbacks",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionRetiredInsideSinkDoesNotReportReadiness",
+    "RemoteDesktopTests/WebRTCTransportTests/test_rendererLossReleasesRemoteControlsAndRestoresWithoutAnotherHello",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarPreparesRendererAndTransfersItAcrossTransportReplacement",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererCleanupCannotWithdrawAReplacementPresentation",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererLossPreservesTLSAndRepublishesLayoutBeforeReadiness"
   ],
   "expectedTests": [
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry",
@@ -62,7 +72,17 @@
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresInsideBeginAndTheOwningGesture",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_scrollRoutingRequiresObservedLocationAndBoundedDeltas",
     "RemoteDesktopTests/RemoteScreenInteractionTests/test_touchCursorStaysInsideVisibleEdgesAndIgnoresInvalidMotion",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingIgnoresStaleSinkCleanupAndReplacesOnlyOnce",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingReconcilesChangesDuringExternalAttachAndDetach",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererBindingRetainsPreparationAndDetachesTheExactPreviousTarget",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionReportsOnlyAfterForwardingAValidFrame",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionRetiredInsideSinkDoesNotReportReadiness",
+    "RemoteDesktopTests/RemoteVideoRendererTests/test_rendererSubscriptionRetirementRejectsOldFramesAndSizeCallbacks",
     "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRequiresAKnownFullSurfaceMappingAndValidGeometry",
-    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope"
+    "RemoteDesktopTests/WebRTCTransportTests/test_displayDecoderRetainsSurfaceMappingUnderItsInputScope",
+    "RemoteDesktopTests/WebRTCTransportTests/test_rendererLossReleasesRemoteControlsAndRestoresWithoutAnotherHello",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarPreparesRendererAndTransfersItAcrossTransportReplacement",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererCleanupCannotWithdrawAReplacementPresentation",
+    "RemoteDesktopTests/WebRTCTransportTests/test_sidecarRendererLossPreservesTLSAndRepublishesLayoutBeforeReadiness"
   ]
 }

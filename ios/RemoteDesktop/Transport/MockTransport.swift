@@ -9,6 +9,7 @@ final class MockTransport: Transport {
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
     var onInputUnavailable: (@MainActor () -> Void)?
+    var onVideoFrameUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
