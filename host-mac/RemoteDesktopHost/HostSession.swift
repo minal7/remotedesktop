@@ -861,36 +861,47 @@ final class HostSession: ObservableObject {
                                     }
                                 })
                         }
+                        guard let offeredPeer = peerSession,
+                              let offeredOwner = activeWebRTCPeer,
+                              offeredOwner.senderID == offerSenderID else { continue }
                         do {
-                            try await peerSession?.acceptOffer(sdp: sdp)
+                            try await offeredPeer.acceptOffer(sdp: sdp)
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation,
+                                  !offeredPeer.isEnded else { continue }
                             flushPendingRemoteICEIfPossible()
                             advertiser.stop()
                             await client.stopAdvertising()
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation,
+                                  !offeredPeer.isEnded else { continue }
                             state = .paired(clientDescription: clientName)
                         } catch {
+                            // A capture deadline/close can retire this exact
+                            // peer while offer negotiation or advertisement
+                            // cleanup awaits. Old completion cannot act on a
+                            // successor or publish the retired peer as paired.
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             log.error("failed to accept WebRTC offer: \(String(describing: error), privacy: .public)")
-                            if let activeWebRTCPeer,
-                               activeWebRTCPeer.senderID == offerSenderID,
-                               activeWebRTCPeer.classification
-                                == .localComputerUseSidecar {
+                            if offeredOwner.classification == .localComputerUseSidecar {
                                 handlePeerEnded(
                                     reason: "error",
                                     senderID: offerSenderID,
-                                    generation:
-                                        activeWebRTCPeer.generation,
-                                    classification:
-                                        activeWebRTCPeer.classification)
+                                    generation: offeredOwner.generation,
+                                    classification: offeredOwner.classification)
                                 continue
                             }
                             state = .error("Couldn't start the WebRTC session.")
                             advertiser.stop()
                             await stopComputerUseBeforeTransportClosure()
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             activeWebRTCPeer = nil
-                            let captureTeardown = peerSession?.close(
-                                reason: "error")
+                            let captureTeardown = offeredPeer.close(reason: "error")
                             peerSession = nil
-                            await captureTeardown?.value
                             resetPendingRemoteICE()
+                            await captureTeardown.value
                             await client.cleanup()
                             return
                         }

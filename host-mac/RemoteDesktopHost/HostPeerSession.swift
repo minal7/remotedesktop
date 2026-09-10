@@ -255,6 +255,7 @@ final class HostPeerSession: NSObject {
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
+    private var captureStartupRequested = false
     private var captureRestartTask: Task<Void, Never>?
     private var captureRestartID: UUID?
     private var captureRecovery: CaptureRecoveryEpisode?
@@ -361,7 +362,9 @@ final class HostPeerSession: NSObject {
             ts: Date().timeIntervalSince1970))
         flushBufferedLocalICEAfterAnswer()
 
-        try await startCapture()
+        // Capture discovery/start and first-frame delivery have their own
+        // bounded worker. Keep signaling free to deliver ICE and disconnects.
+        try requestCaptureStartup()
     }
 
     func addRemoteIce(_ payload: [String: String]) {
@@ -517,10 +520,10 @@ final class HostPeerSession: NSObject {
             onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
             onVideoUnavailable: { [weak self] attempt in self?.handleCaptureVideoUnavailable(from: attempt) },
             onStopped: { [weak self] receipt, error in
-                // The current stream's synchronous callback revokes input
-                // before the asynchronous recovery/error handler can be delayed.
+                // Classify the stop before any retry can retire its receipt.
+                // Input closes synchronously; native peer teardown is deferred.
                 self?.revokeCaptureInput()
-                Task { [weak self] in self?.handleCaptureStopped(receipt, error: error) }
+                self?.handleCaptureStopped(receipt, error: error)
             }))
     }
 
@@ -538,10 +541,22 @@ final class HostPeerSession: NSObject {
         captureMaximumMacroblocksPerFrame = limit
     }
 
-    private var isEnded: Bool {
+    var isEnded: Bool {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
         return ended
+    }
+
+    private func requestCaptureStartup() throws {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureOwner != nil else { throw CancellationError() }
+        // Renegotiation joins the original request. It cannot renew an
+        // unavailable episode or restart a stream that is already available.
+        guard !captureStartupRequested else { return }
+        captureStartupRequested = true
+        beginCaptureRecoveryLocked()
+        startCaptureWorkerLocked()
     }
 
     private func startCapture() async throws {
@@ -587,6 +602,7 @@ final class HostPeerSession: NSObject {
         // All composed transitions acquire capture admission before the peer
         // lock. Validation and the recovery decision share that same admission.
         var terminalReason: String?
+        var terminalOwner: CaptureOwnerLease?
         capture.consumeStop(receipt) {
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
@@ -594,25 +610,25 @@ final class HostPeerSession: NSObject {
             guard ScreenCapture.isRecoverableStop(error) else {
                 log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
                 ended = true
+                terminalOwner = captureOwner
                 terminalReason = "Screen capture stopped. Reconnect to try again."
                 return
             }
             beginCaptureRecoveryLocked()
-            guard captureRestartTask == nil, let episode = captureRecovery else { return }
-            let worker = UUID()
-            captureRestartID = worker
-            captureRestartTask = Task { [weak self] in
-                await self?.restartCaptureLoop(worker: worker, episode: episode.id)
-            }
+            startCaptureWorkerLocked()
         }
         if let terminalReason {
-            close(reason: terminalReason)
-            onEnded(terminalReason)
+            // This method is entered under the capture callback's gate, with
+            // no outer peer lock. Retire native admission before a waiting
+            // worker can begin another attempt; defer native peer teardown.
+            if let terminalOwner { _ = capture.endSession(terminalOwner) }
+            scheduleCaptureClose(terminalReason)
         }
     }
 
-    /// Called under capture admission and then the peer lock. Nonterminal
-    /// output loss waits on the continuing stream instead of restarting it.
+    /// Called with the peer lock held. Startup arms the deadline before any
+    /// native await; capture callbacks acquire capture admission first.
+    /// Nonterminal output loss waits on the continuing stream without restart.
     private func beginCaptureRecoveryLocked(waitingForOutputFrom attempt: CaptureAttemptLease? = nil) {
         guard captureRecovery == nil else { return }
         let episode = CaptureRecoveryEpisode(now: ContinuousClock.now, waitingForOutputFrom: attempt)
@@ -621,6 +637,15 @@ final class HostPeerSession: NSObject {
             do { try await ContinuousClock().sleep(until: episode.deadline) }
             catch { return }
             self?.endCaptureRecovery(episode.id, reason: CaptureRecoveryEpisode.Failure.timedOut.message)
+        }
+    }
+
+    private func startCaptureWorkerLocked() {
+        guard captureRestartTask == nil, let episode = captureRecovery else { return }
+        let worker = UUID()
+        captureRestartID = worker
+        captureRestartTask = Task { [weak self] in
+            await self?.restartCaptureLoop(worker: worker, episode: episode.id)
         }
     }
 
@@ -708,6 +733,10 @@ final class HostPeerSession: NSObject {
         guard !ended else { closeStateLock.unlock(); return }
         ended = true
         closeStateLock.unlock()
+        scheduleCaptureClose(reason)
+    }
+
+    private func scheduleCaptureClose(_ reason: String) {
         // Native teardown must run after this capture callback releases its
         // gate. Input has already been revoked synchronously.
         Task { [weak self] in
@@ -753,7 +782,7 @@ final class HostPeerSession: NSObject {
         captureRecoveryDeadlineTask = nil
         captureRestartID = nil
         captureRestartTask = nil
-        log.info("screen capture recovery produced a complete frame from its current stream")
+        log.info("screen capture produced a complete frame from its current running stream")
     }
 
     private func retireCaptureRestart(_ worker: UUID) {

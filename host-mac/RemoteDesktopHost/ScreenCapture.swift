@@ -463,8 +463,9 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 }
 
-/// One recovery episode spans failed starts and starts that produce no usable
-/// video. A native await does not extend the deadline or reset the attempt cap.
+/// One availability episode, including initial startup, spans failed starts
+/// and starts that produce no usable video. A native await does not extend
+/// the deadline or reset the attempt cap.
 struct CaptureRecoveryEpisode {
     static let maximumAttempts = 5
     static let timeoutSeconds = DirectInputWire.captureRecoveryTimeoutSeconds
@@ -486,9 +487,9 @@ struct CaptureRecoveryEpisode {
         var message: String {
             switch self {
             case .timedOut:
-                return "Screen capture did not recover within \(CaptureRecoveryEpisode.timeoutSeconds) seconds. Reconnect to try again."
+                return "Screen capture did not become available within \(CaptureRecoveryEpisode.timeoutSeconds) seconds. Reconnect to try again."
             case .attemptsExhausted:
-                return "Screen capture could not recover after \(CaptureRecoveryEpisode.maximumAttempts) attempts. Reconnect to try again."
+                return "Screen capture did not become available after \(CaptureRecoveryEpisode.maximumAttempts) attempts. Reconnect to try again."
             }
         }
     }

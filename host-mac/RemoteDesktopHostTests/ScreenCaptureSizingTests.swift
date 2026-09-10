@@ -5,6 +5,92 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureInitialDeadlineCanRetireDiscoveryBeforeNativeReturn() async throws {
+        // Manually evaluate the production budget and retire the fake native
+        // owner. This fixture does not execute the peer's scheduled watchdog.
+        let trace = CaptureLifecycleTrace()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in trace.append("stop") }
+        let owner = lifecycle.beginOwner(context: "initial peer")
+        let stream = CaptureLifecycleTestStream()
+        let entered = expectation(description: "discovery entered")
+        let release = CaptureLifecycleTestLatch()
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        XCTAssertTrue(episode.reserveAttempt(at: now))
+        let start = try lifecycle.start(for: owner, prepare: {
+            entered.fulfill(); await release.wait(); return stream
+        }, startStream: { _ in trace.append("start") })
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertEqual(episode.failure(at: episode.deadline), .timedOut)
+        XCTAssertFalse(episode.reserveAttempt(at: episode.deadline))
+        let teardown = lifecycle.endOwner(owner)
+        XCTAssertFalse(lifecycle.withStream(stream) { _, _ in XCTFail("Discovery has not installed a stream") })
+        XCTAssertFalse(lifecycle.withRunningOwner(owner) { _ in XCTFail("Expired owner is closed") })
+        await release.open()
+        do { try await start.value; XCTFail("Late discovery must not start capture") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        await teardown.value
+        XCTAssertEqual(trace.values, ["stop"], "The prepared object is cleaned without a native start")
+        XCTAssertEqual(episode.attempts, 1)
+    }
+
+    func test_captureInitialEarlyFrameAndLateNativeSuccessCannotSatisfyExpiredReadiness() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let owner = lifecycle.beginOwner(context: "initial peer")
+        let stream = CaptureLifecycleTestStream()
+        let entered = expectation(description: "native start entered")
+        let release = CaptureLifecycleTestLatch()
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        XCTAssertTrue(episode.reserveAttempt(at: now))
+        let start = try lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in
+            entered.fulfill(); await release.wait()
+        })
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        await fulfillment(of: [entered], timeout: 2)
+        var output: CaptureAttemptLease?
+        var availability = CaptureVideoAvailability()
+        XCTAssertTrue(lifecycle.withStream(stream) { _, attempt in
+            output = attempt; availability.recordDeliveredFrame(from: attempt)
+        })
+        XCTAssertFalse(lifecycle.withRunningOwner(owner) { _ in XCTFail("Early output is not completed native startup") })
+        await release.open(); try await start.value
+        XCTAssertTrue(lifecycle.withRunningOwner(owner) { running in
+            XCTAssertTrue(availability.isAvailable(for: running))
+            XCTAssertTrue(episode.acceptsFrame(lastOutput: output, running: running,
+                at: episode.deadline.advanced(by: .nanoseconds(-1))))
+            XCTAssertFalse(episode.acceptsFrame(lastOutput: output, running: running, at: episode.deadline),
+                           "Even a delayed watchdog must not permit late source readiness")
+        })
+        await lifecycle.endOwner(owner).value
+    }
+
+    func test_captureInitialFailedStartsShareTheOriginalAttemptAndCleanupBudget() async throws {
+        let trace = CaptureLifecycleTrace()
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in trace.append("stop") }
+        let owner = lifecycle.beginOwner(context: "initial peer")
+        let now = ContinuousClock.now
+        var episode = CaptureRecoveryEpisode(now: now)
+        let id = episode.id, deadline = episode.deadline
+        for index in 0..<CaptureRecoveryEpisode.maximumAttempts {
+            XCTAssertTrue(episode.reserveAttempt(at: now.advanced(by: .seconds(index))))
+            let stream = CaptureLifecycleTestStream()
+            let start = try lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in
+                trace.append("start"); throw CaptureLifecycleTestError.start
+            })
+            do { try await start.value; XCTFail("Expected native start failure") }
+            catch { XCTAssertEqual(error as? CaptureLifecycleTestError, .start) }
+            XCTAssertFalse(lifecycle.withRunningOwner(owner) { _ in XCTFail("A failed attempt has no readiness") })
+            XCTAssertEqual(episode.id, id); XCTAssertEqual(episode.deadline, deadline)
+        }
+        XCTAssertFalse(episode.reserveAttempt(at: now.advanced(by: .seconds(6))))
+        XCTAssertEqual(episode.failure(at: now.advanced(by: .seconds(6))), .attemptsExhausted)
+        await lifecycle.endOwner(owner).value
+        XCTAssertEqual(trace.values, Array(repeating: ["start", "stop"], count: CaptureRecoveryEpisode.maximumAttempts).flatMap { $0 },
+                       "Each retry must join the previous native cleanup before the next start")
+    }
+
     func test_captureStatusDistinguishesIdleFromLossAndRejectsMalformedValues() {
         let known: [(SCFrameStatus, CaptureVideoStatus)] = [
             (.complete, .complete), (.idle, .idle), (.started, .started),
