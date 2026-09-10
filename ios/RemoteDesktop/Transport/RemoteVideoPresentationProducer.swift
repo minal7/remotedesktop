@@ -1,7 +1,6 @@
 import CoreImage
 import CoreVideo
 import Foundation
-import ImageIO
 import LiveKitWebRTC
 import Metal
 import QuartzCore
@@ -16,6 +15,7 @@ final class RemoteVideoPresentationProducer {
         case submitted(RemoteVideoPresentationTicket)
         case busy
         case unsupportedFrame
+        case preparationFailed
         case unavailable
         case encodingFailed
     }
@@ -92,16 +92,22 @@ final class RemoteVideoPresentationProducer {
                 }
                 onResult(frameID, result)
             }) else { return .busy }
-        guard let image = Self.image(for: frame) else {
+        let prepared: RemoteVideoFrameImage
+        switch RemoteVideoFrameImage.prepare(frame) {
+        case .ready(let value): prepared = value
+        case .unsupported:
             budget.abandonUncommitted(ticket)
             return .unsupportedFrame
+        case .resourceFailure:
+            budget.abandonUncommitted(ticket)
+            return .preparationFailed
         }
         guard let command = queue.makeCommandBuffer() else {
             budget.abandonUncommitted(ticket)
             return .encodingFailed
         }
         let bounds = CGRect(x: 0, y: 0, width: drawable.texture.width, height: drawable.texture.height)
-        let output = Self.place(image, in: bounds, contentMode: contentMode)
+        let output = Self.place(prepared.image, in: bounds, contentMode: contentMode)
         let destination = CIRenderDestination(mtlTexture: drawable.texture, commandBuffer: command)
         destination.colorSpace = colorSpace
         destination.alphaMode = .none
@@ -122,7 +128,7 @@ final class RemoteVideoPresentationProducer {
         let budget = self.budget
         // The command's completion handler keeps image inputs alive until
         // the actual GPU completion, independently of observer/view lifetime.
-        let resources = FrameResources(frame: frame, image: output, task: renderTask, context: imageContext)
+        let resources = FrameResources(frame: frame, prepared: prepared, image: output, task: renderTask, context: imageContext)
         command.addCompletedHandler { command in
             withExtendedLifetime(resources) {
                 let succeeded = command.status == .completed
@@ -147,31 +153,6 @@ final class RemoteVideoPresentationProducer {
             width * height <= 16_777_216
     }
 
-    private static func image(for frame: RTCVideoFrame) -> CIImage? {
-        guard let buffer = frame.buffer as? RTCCVPixelBuffer,
-              let geometry = RemoteVideoPixelGeometry(frameWidth: Int(frame.width), frameHeight: Int(frame.height),
-                bufferWidth: CVPixelBufferGetWidth(buffer.pixelBuffer), bufferHeight: CVPixelBufferGetHeight(buffer.pixelBuffer),
-                cropX: Int(buffer.cropX), cropY: Int(buffer.cropY), cropWidth: Int(buffer.cropWidth), cropHeight: Int(buffer.cropHeight),
-                rotation: frame.rotation.rawValue) else { return nil }
-        let formats: Set<OSType> = [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, kCVPixelFormatType_32BGRA, kCVPixelFormatType_32ARGB]
-        guard formats.contains(CVPixelBufferGetPixelFormatType(buffer.pixelBuffer)) else { return nil }
-        let input = CIImage(cvPixelBuffer: buffer.pixelBuffer)
-        guard input.extent == CGRect(x: 0, y: 0, width: geometry.bufferWidth, height: geometry.bufferHeight) else { return nil }
-        var image = input.cropped(to: geometry.cropInImageCoordinates)
-            .transformed(by: CGAffineTransform(translationX: -geometry.cropInImageCoordinates.minX,
-                                               y: -geometry.cropInImageCoordinates.minY))
-            .transformed(by: CGAffineTransform(scaleX: CGFloat(geometry.frameWidth) / CGFloat(geometry.cropWidth),
-                                               y: CGFloat(geometry.frameHeight) / CGFloat(geometry.cropHeight)))
-        switch geometry.rotation {
-        case 90: image = image.oriented(.right)
-        case 180: image = image.oriented(.down)
-        case 270: image = image.oriented(.left)
-        default: break
-        }
-        return image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
-    }
-
     private static func place(_ image: CIImage, in bounds: CGRect, contentMode: ContentMode) -> CIImage {
         var sx = bounds.width / image.extent.width, sy = bounds.height / image.extent.height
         if case .aspectFit = contentMode { sx = min(sx, sy); sy = sx }
@@ -185,11 +166,12 @@ final class RemoteVideoPresentationProducer {
 
     private final class FrameResources: @unchecked Sendable {
         let frame: RTCVideoFrame
+        let prepared: RemoteVideoFrameImage
         let image: CIImage
         let task: CIRenderTask
         let context: CIContext
-        init(frame: RTCVideoFrame, image: CIImage, task: CIRenderTask, context: CIContext) {
-            self.frame = frame; self.image = image; self.task = task; self.context = context
+        init(frame: RTCVideoFrame, prepared: RemoteVideoFrameImage, image: CIImage, task: CIRenderTask, context: CIContext) {
+            self.frame = frame; self.prepared = prepared; self.image = image; self.task = task; self.context = context
         }
     }
 }
