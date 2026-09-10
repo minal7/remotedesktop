@@ -3092,6 +3092,10 @@ final class ComputerUseActionGate: @unchecked Sendable {
     private var pendingAutomationAdopted = false
     private var automationActive = false
     private var approvalPending = false
+    struct InputIntervention: Equatable, Sendable {
+        fileprivate let id: UUID
+    }
+    private var pendingInputIntervention: InputIntervention?
     struct PausedInputSnapshot: Equatable, Sendable {
         let scopeID: UUID
         let generation: UInt64
@@ -3150,6 +3154,7 @@ final class ComputerUseActionGate: @unchecked Sendable {
     }
     private func reservePendingAutomationLocked() -> UUID {
         let id = UUID()
+        pendingInputIntervention = nil
         value = false
         pendingAutomationID = id
         pendingAutomationAdopted = false
@@ -3225,29 +3230,47 @@ final class ComputerUseActionGate: @unchecked Sendable {
             pendingAutomationAdopted = false
             automationActive = false
             approvalPending = false
+            pendingInputIntervention = nil
             return value
         }
     }
 
-    func beginApprovalWait() {
+    func beginApprovalWait() -> Bool {
         lock.withLock {
+            // A result arriving after synchronous input cannot recreate held
+            // approval authority while the input's actor callback is queued.
+            guard automationActive, value else { return false }
             value = false
             pendingAutomationID = nil
             pendingAutomationAdopted = false
             automationActive = false
             approvalPending = true
+            return true
         }
     }
 
     /// Record occurrence only. A paused burst schedules no actor callback or
     /// disk write; an arriving control reconciles its newest generation.
-    func recordUserInput() -> Bool {
+    func recordUserInput() -> InputIntervention? {
         lock.withLock {
             if pausedInputScopeID != nil {
                 if pausedInputGeneration < UInt64.max { pausedInputGeneration += 1 }
                 pausedInputUnacknowledged = true
             }
-            return blockForInterventionLocked()
+            guard blockForInterventionLocked() else { return nil }
+            let intervention = InputIntervention(id: UUID())
+            pendingInputIntervention = intervention
+            return intervention
+        }
+    }
+
+    /// The actor may apply this interruption once, only while the gate still
+    /// retains it. Pause, completion, Stop and a new admission retire it.
+    func consumeInputIntervention(_ intervention: InputIntervention) -> Bool {
+        lock.withLock {
+            guard pendingInputIntervention == intervention else { return false }
+            pendingInputIntervention = nil
+            return true
         }
     }
     func blockForIntervention() -> Bool {
@@ -4508,7 +4531,8 @@ final class HostComputerUseManager: ObservableObject {
         executor = nil
     }
 
-    /// Called before direct user input so automation and a person never race.
+    /// Immediate MainActor lifecycle interruption. Off-main physical/direct
+    /// input must use its captured receipt through applyUserInputIntervention.
     func userIntervened() {
         switch activity {
         case .working, .awaitingApproval:
@@ -4521,6 +4545,11 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    func applyUserInputIntervention(_ intervention: ComputerUseActionGate.InputIntervention) {
+        guard actionGate.consumeInputIntervention(intervention) else { return }
+        userIntervened()
+    }
+
     /// The WebRTC callback invokes this synchronously before injecting the
     /// person's event. Cancellation and UI state then follow on MainActor.
     /// This closes the small race where the model could otherwise inject one
@@ -4528,8 +4557,13 @@ final class HostComputerUseManager: ObservableObject {
     /// Actual physical/direct input, including while already paused. The
     /// callback carries no key, text, pointer coordinate or authentication data.
     @discardableResult
-    nonisolated func recordUserInputForIntervention() -> Bool {
-        injector.interruptAutomation { [actionGate] in actionGate.recordUserInput() }
+    nonisolated func recordUserInputForIntervention() -> ComputerUseActionGate.InputIntervention? {
+        var intervention: ComputerUseActionGate.InputIntervention?
+        injector.interruptAutomation { [actionGate] in
+            intervention = actionGate.recordUserInput()
+            return intervention != nil
+        }
+        return intervention
     }
 
     @discardableResult
@@ -7108,11 +7142,15 @@ final class HostComputerUseManager: ObservableObject {
             request: request,
             context: approval.context,
             operation: approval.operation)
+        guard actionGate.beginApprovalWait() else {
+            cancelApprovalIfNeeded(approval)
+            pauseForLocalIntervention(approval.context)
+            return
+        }
         pendingApproval = stampedApproval
         currentExecution = nil
         currentExecutionToken = nil
         executionTask = nil
-        actionGate.beginApprovalWait()
         activity = .awaitingApproval(request.message)
         startApprovalDelivery(stampedApproval)
         sendStatus(
@@ -7425,8 +7463,8 @@ final class HostComputerUseManager: ObservableObject {
         ]
         let interrupt: @Sendable (NSEvent) -> Void = { [weak self] event in
             guard !InputInjector.isSynthetic(event),
-                  self?.recordUserInputForIntervention() == true else { return }
-            Task { @MainActor [weak self] in self?.userIntervened() }
+                  let intervention = self?.recordUserInputForIntervention() else { return }
+            Task { @MainActor [weak self] in self?.applyUserInputIntervention(intervention) }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(
             matching: mask,

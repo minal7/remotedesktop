@@ -823,9 +823,9 @@ final class HostSession: ObservableObject {
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
                                 onUserInput: { [weak computerUse] in
-                                    if computerUse?.recordUserInputForIntervention() == true {
+                                    if let intervention = computerUse?.recordUserInputForIntervention() {
                                         Task { @MainActor [weak computerUse] in
-                                            computerUse?.userIntervened()
+                                            computerUse?.applyUserInputIntervention(intervention)
                                         }
                                     }
                                 },

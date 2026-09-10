@@ -308,7 +308,12 @@
     "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume",
     "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
-    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask"
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/testDelayedInputCallbackCannotPauseAReplacementWaitingForItsPredecessor",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputDuringVisualApprovalPreparationCannotCreateAnApprovalWait",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission",
+    "RemoteDesktopHostTests/ComputerUseTests/testSameTaskResumeRetiresAnOldInputReceiptWithoutLosingNewInput"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -1722,6 +1727,10 @@
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testTwoExecutorsWithTheSameFreshSnapshotCannotBothDispatchOrRewindProgress",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testTwoIdenticalQueriesUseDistinctStepsAndEachSubmissionNeedsItsOwnEvidence",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testUnconfirmedDiskCommitCannotDispatchOrReplayAnEffectAfterReconstruction",
+    "RemoteDesktopHostTests/ComputerUseTests/testDelayedInputCallbackCannotPauseAReplacementWaitingForItsPredecessor",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputDuringVisualApprovalPreparationCannotCreateAnApprovalWait",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission",
     "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
     "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputBurstAdvancesOneDurableEpochBeforeRejectingADelayedResume",
@@ -1730,6 +1739,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner",
     "RemoteDesktopHostTests/ComputerUseTests/testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck",
     "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/testSameTaskResumeRetiresAnOldInputReceiptWithoutLosingNewInput",
     "RemoteDesktopHostTests/ComputerUseTests/testUnreadyResumeAbandonsItsReservationAndKeepsTheOriginalPausedOwner",
     "RemoteDesktopHostTests/ComputerUseTests/test_applicationOpenCallbackCancellationReturnsBeforeLateNativeCompletion",
     "RemoteDesktopHostTests/ComputerUseTests/test_applicationOpenCallbackDeadlineAndFailuresCannotBecomeLateSuccess",

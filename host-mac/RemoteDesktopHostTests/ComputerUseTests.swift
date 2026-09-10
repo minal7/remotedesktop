@@ -239,7 +239,7 @@ final class ComputerUseTests: XCTestCase {
         let originalControls = try XCTUnwrap(fixture.browser.taskControls)
         server.releaseHeldResponses()
         await waitUntil(timeoutIterations: 1_000) { fixture.browser.hasOpenSignInWindow && server.count("/finish-signal") == 1 }
-        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        XCTAssertNil(fixture.manager.recordUserInputForIntervention())
         XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
             revision: 1, hostEpoch: 1), channel: fixture.channel))
         XCTAssertEqual(fixture.manager.activity, .paused)
@@ -6460,27 +6460,205 @@ final class ComputerUseTests: XCTestCase {
             "A canceled task must replay its terminal result without running again")
     }
 
+    func testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission() throws {
+        let gate = ComputerUseActionGate()
+        for active in [false, true] {
+            let admission = gate.reservePendingAutomation()
+            XCTAssertTrue(gate.adoptPendingAutomation(admission))
+            if active { XCTAssertTrue(gate.activatePendingAutomation(admission)) }
+            let first = try XCTUnwrap(gate.recordUserInput())
+            XCTAssertNil(gate.recordUserInput(), "A burst cannot replace the outstanding receipt")
+            XCTAssertFalse(gate.allowsActions)
+            XCTAssertFalse(gate.beginApprovalWait(), "Input cannot be overwritten by an approval transition")
+            XCTAssertFalse(gate.beginApprovedAutomation())
+            XCTAssertTrue(gate.consumeInputIntervention(first))
+            XCTAssertFalse(gate.consumeInputIntervention(first))
+            let replacement = gate.reservePendingAutomation()
+            XCTAssertTrue(gate.adoptPendingAutomation(replacement))
+            let second = try XCTUnwrap(gate.recordUserInput())
+            XCTAssertFalse(gate.consumeInputIntervention(first), "An old receipt cannot consume newer input")
+            XCTAssertTrue(gate.consumeInputIntervention(second))
+        }
+        let admission = gate.reservePendingAutomation()
+        XCTAssertTrue(gate.adoptPendingAutomation(admission)); XCTAssertTrue(gate.activatePendingAutomation(admission))
+        XCTAssertTrue(gate.beginApprovalWait())
+        let approvalInput = try XCTUnwrap(gate.recordUserInput())
+        XCTAssertFalse(gate.beginApprovedAutomation())
+        gate.endAutomation(allowsActions: false)
+        XCTAssertFalse(gate.consumeInputIntervention(approvalInput), "An already handled pause or Stop retires the receipt")
+        let next = gate.reservePendingAutomation()
+        XCTAssertTrue(gate.adoptPendingAutomation(next)); XCTAssertTrue(gate.activatePendingAutomation(next))
+        let completedInput = try XCTUnwrap(gate.recordUserInput())
+        gate.endAutomation(allowsActions: true)
+        XCTAssertFalse(gate.allowsActions, "Completion cannot reopen an interrupted gate")
+        XCTAssertFalse(gate.consumeInputIntervention(completedInput))
+        let reserved = gate.reservePendingAutomation()
+        XCTAssertTrue(gate.adoptPendingAutomation(reserved))
+        let pendingInput = try XCTUnwrap(gate.recordUserInput())
+        let replacement = gate.reservePendingAutomation()
+        XCTAssertFalse(gate.consumeInputIntervention(pendingInput), "A new admission retires an unconsumed callback")
+        XCTAssertTrue(gate.adoptPendingAutomation(replacement)); XCTAssertTrue(gate.activatePendingAutomation(replacement))
+        let foreignGate = ComputerUseActionGate()
+        let replacementInput = try XCTUnwrap(gate.recordUserInput())
+        XCTAssertFalse(foreignGate.consumeInputIntervention(replacementInput))
+        XCTAssertTrue(gate.consumeInputIntervention(replacementInput))
+    }
+
+    func testDelayedInputCallbackCannotPauseAReplacementWaitingForItsPredecessor() async throws {
+        let executor = StopJoinProbeExecutor(), channel = FakeHostComputerUseChannel()
+        let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { executor.releaseFirstExecution(); try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var actions: [ComputerUsePredictedAction] = []
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let first = makeEnvelope(id: "interrupted-before-stop", kind: .prompt, body: "Find concert tickets")
+        let next = makeEnvelope(id: "replacement-before-callback", kind: .prompt, body: "Find movie tickets")
+        manager.authorizePeer(senderID: first.senderID)
+        XCTAssertTrue(manager.handle(first, channel: channel))
+        await waitUntil { executor.firstExecutionStarted }
+        let delayed = try XCTUnwrap(manager.recordUserInputForIntervention())
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: first.id, revision: 1), channel: channel))
+        XCTAssertTrue(manager.handle(next, channel: channel))
+        let waiting = manager.activity
+        guard case .working = waiting else { return XCTFail("Replacement should be waiting to start") }
+        manager.applyUserInputIntervention(delayed)
+        XCTAssertEqual(manager.activity, waiting)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: next.id), 0)
+        XCTAssertEqual(executor.callCount, 1)
+        executor.releaseFirstExecution()
+        await waitUntil { executor.replacementExecutionStarted && manager.activity == .idle }
+        XCTAssertTrue(executor.staleActionWasBlocked); XCTAssertTrue(actions.isEmpty)
+        XCTAssertEqual(executor.prompts, [first.body, next.body])
+        XCTAssertTrue(ledger.isCancelled(taskID: first.id))
+        manager.applyUserInputIntervention(delayed)
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
+    func testSameTaskResumeRetiresAnOldInputReceiptWithoutLosingNewInput() async throws {
+        let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
+        let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "same-task-input-receipts", kind: .prompt, body: "Find travel tickets")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.callCount == 1 }
+        let first = try XCTUnwrap(manager.recordUserInputForIntervention())
+        manager.applyUserInputIntervention(first)
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        manager.applyUserInputIntervention(first)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1), channel: channel))
+        let waiting = manager.activity
+        guard case .working = waiting else { return XCTFail("Resume should own pending admission") }
+        let second = try XCTUnwrap(manager.recordUserInputForIntervention())
+        manager.applyUserInputIntervention(first)
+        XCTAssertEqual(manager.activity, waiting)
+        manager.applyUserInputIntervention(second)
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 2)
+        manager.applyUserInputIntervention(second)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 2)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: 2), channel: channel))
+        await waitUntil { executor.callCount == 2 }
+        let running = manager.activity
+        manager.applyUserInputIntervention(first); manager.applyUserInputIntervention(second)
+        XCTAssertEqual(manager.activity, running); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 2)
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body])
+        let third = try XCTUnwrap(manager.recordUserInputForIntervention())
+        manager.applyUserInputIntervention(third)
+        XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 3)
+    }
+
+    func testInputDuringVisualApprovalPreparationCannotCreateAnApprovalWait() async throws {
+        let executor = ReadinessHookComputerUseExecutor(results: [
+            .approvalRequired(message: "Send", action: .key(usage: 0x28, modifiers: 0), continuation: .init(taskID: "", nonce: UUID())),
+            .completed("Continued from the same request")])
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var actions: [ComputerUsePredictedAction] = []
+        var receipt: ComputerUseActionGate.InputIntervention?
+        var manager: HostComputerUseManager!
+        manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, approvalTargetProvider: { _ in
+                receipt = manager.recordUserInputForIntervention()
+                return ComputerUseApprovalTargetSnapshot(context: "Fixture send button", applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "fixture-send-target")
+            }, actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "input-before-visual-approval", kind: .prompt, body: "Reply to the message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { manager.activity == .paused }
+        let delayed = try XCTUnwrap(receipt)
+        XCTAssertEqual(executor.cancelledVisualApprovals.count, 1)
+        XCTAssertTrue(actions.isEmpty); XCTAssertEqual(executor.callCount, 1)
+        let epoch = ledger.hostControlEpoch(taskID: prompt.id)
+        manager.applyUserInputIntervention(delayed)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), epoch)
+        let messages = await channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.kind == .approvalRequest })
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: epoch), channel: channel))
+        await waitUntil { executor.callCount == 2 && manager.activity == .idle }
+        XCTAssertEqual(executor.trustedUserPrompts, [prompt.body, prompt.body]); XCTAssertTrue(actions.isEmpty)
+    }
+
+    func testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable() async throws {
+        let taskID = "input-before-mcp-approval"
+        let tool = try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID, processGeneration: 7,
+            toolName: RemoteDesktopMailMCP.toolName, description: "Fixture Mail tool", inputSchema: .object(["type": .string("object")]),
+            risk: .approvalRequired, approval: MCPApprovalDisplay(summary: "Send?", details: "Fixture only", confirmLabel: "Send"))
+        let call = try tool.makeCall(taskID: taskID, arguments: ["to": .string("fixture@example.invalid"),
+            "subject": .string("Fixture"), "body": .string("Must not send"), "send_now": .bool(true)])
+        let prepared = MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call), display: call.approvalDisplay)
+        let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, resultAfterFirstExecution: .completed("Continued"))
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        var receipt: ComputerUseActionGate.InputIntervention?
+        executor.beforeFirstResult = { receipt = manager.recordUserInputForIntervention() }
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Send the fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { manager.activity == .paused }
+        let delayed = try XCTUnwrap(receipt), epoch = ledger.hostControlEpoch(taskID: taskID)
+        XCTAssertGreaterThan(executor.cancelMCPWorkCount, 0)
+        XCTAssertEqual(executor.continueAfterApprovalCount, 0); XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+        let messages = await channel.sentMessages()
+        XCTAssertFalse(messages.contains { $0.kind == .approvalRequest })
+        manager.applyUserInputIntervention(delayed)
+        XCTAssertEqual(ledger.hostControlEpoch(taskID: taskID), epoch)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID, revision: 1, hostEpoch: epoch), channel: channel))
+        await waitUntil { executor.executeCount == 2 && manager.activity == .idle }
+        XCTAssertEqual(executor.continueAfterApprovalCount, 0); XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+    }
+
     func testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner() throws {
         let gate = ComputerUseActionGate(), firstOwner = UUID()
         gate.endAutomation(allowsActions: false)
         gate.trackPausedInput(scopeID: firstOwner)
         let before = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
-        for _ in 0..<1_000 { XCTAssertFalse(gate.recordUserInput()) }
+        for _ in 0..<1_000 { XCTAssertNil(gate.recordUserInput()) }
         XCTAssertTrue(gate.hasUnacknowledgedInput(before))
         gate.acknowledgePausedInput(before)
         XCTAssertTrue(gate.hasUnacknowledgedInput(before), "A checkpoint from before the input cannot clear it")
         let checkpoint = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
-        XCTAssertFalse(gate.recordUserInput())
+        XCTAssertNil(gate.recordUserInput())
         gate.acknowledgePausedInput(checkpoint)
         XCTAssertNil(gate.reservePendingAutomation(after: checkpoint), "Input during persistence must prevent admission")
         let current = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: firstOwner))
         gate.acknowledgePausedInput(current)
         let reserved = try XCTUnwrap(gate.reservePendingAutomation(after: current))
-        XCTAssertTrue(gate.recordUserInput())
+        XCTAssertNotNil(gate.recordUserInput())
         XCTAssertFalse(gate.adoptPendingAutomation(reserved), "Input after reservation revokes the same continuation")
         let replacement = UUID()
         gate.trackPausedInput(scopeID: replacement)
-        XCTAssertFalse(gate.recordUserInput())
+        XCTAssertNil(gate.recordUserInput())
         gate.acknowledgePausedInput(current)
         XCTAssertNil(gate.reservePendingAutomation(after: current))
         let replacementInput = try XCTUnwrap(gate.pausedInputSnapshot(scopeID: replacement))
@@ -6504,7 +6682,7 @@ final class ComputerUseTests: XCTestCase {
         await waitUntil { fixture.manager.activity == .paused }
         let priorData = try Data(contentsOf: url), epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id)
         let owner = try XCTUnwrap(fixture.browser.taskControls?.ownerID)
-        for _ in 0..<1_000 { XCTAssertFalse(fixture.manager.recordUserInputForIntervention()) }
+        for _ in 0..<1_000 { XCTAssertNil(fixture.manager.recordUserInputForIntervention()) }
         XCTAssertEqual(try Data(contentsOf: url), priorData, "A paused input burst performs no per-event ledger writes")
         XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch)
         let delayed = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: epoch)
@@ -6538,9 +6716,9 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
         await waitUntil { fixture.manager.activity == .paused }
         let displayed = try XCTUnwrap(fixture.browser.taskControls), epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id)
-        for _ in 0..<30 { XCTAssertFalse(fixture.manager.recordUserInputForIntervention()) }
+        for _ in 0..<30 { XCTAssertNil(fixture.manager.recordUserInputForIntervention()) }
         // Includes the local Resume mouse-down, before its explicit action.
-        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        XCTAssertNil(fixture.manager.recordUserInputForIntervention())
         fixture.browser.requestTaskControl(.resume, displayed: displayed)
         await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
         XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1)
@@ -6558,7 +6736,7 @@ final class ComputerUseTests: XCTestCase {
         fixture.manager.authorizePeer(senderID: prompt.senderID)
         XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
         await waitUntil { fixture.manager.activity == .paused }
-        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        XCTAssertNil(fixture.manager.recordUserInputForIntervention())
         let epoch = fixture.ledger.hostControlEpoch(taskID: prompt.id), owner = fixture.browser.taskControls?.ownerID
         let delayed = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: epoch)
         try FileManager.default.moveItem(at: directory, to: moved)
@@ -6591,7 +6769,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .pause, taskID: prompt.id, revision: 1), channel: channel))
         XCTAssertTrue(manager.handle(prompt, channel: channel)); XCTAssertEqual(manager.activity, .paused)
         XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 0)
-        XCTAssertFalse(manager.recordUserInputForIntervention())
+        XCTAssertNil(manager.recordUserInputForIntervention())
         XCTAssertTrue(manager.handle(makeEnvelope(kind: .resume, body: ""), channel: channel))
         XCTAssertEqual(manager.activity, .paused); XCTAssertEqual(executor.callCount, 0)
         XCTAssertEqual(ledger.hostControlEpoch(taskID: prompt.id), 1)
@@ -6610,7 +6788,7 @@ final class ComputerUseTests: XCTestCase {
         fixture.manager.authorizePeer(senderID: first.senderID)
         XCTAssertTrue(fixture.manager.handle(first, channel: fixture.channel))
         await waitUntil { fixture.manager.activity == .paused }
-        XCTAssertFalse(fixture.manager.recordUserInputForIntervention())
+        XCTAssertNil(fixture.manager.recordUserInputForIntervention())
         let epoch = fixture.ledger.hostControlEpoch(taskID: first.id)
         _ = fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: first.id, revision: 1, sessionID: "other", hostEpoch: epoch), channel: fixture.channel)
         XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: first.id), epoch)
@@ -6650,7 +6828,7 @@ final class ComputerUseTests: XCTestCase {
                 XCTAssertThrowsError(try oldTools.perform(.typeText("stale task input"))) {
                     guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
                 }
-                if intervene { inputRevokedAdmission = fixture.manager.recordUserInputForIntervention() }
+                if intervene { inputRevokedAdmission = fixture.manager.recordUserInputForIntervention() != nil }
             }
             if localResume { fixture.browser.requestTaskControl(.resume, displayed: controls) }
             else {
@@ -7455,6 +7633,12 @@ final class ComputerUseTests: XCTestCase {
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            allowsExternalServices: false,
+            approvalTargetProvider: { _ in
+                .init(context: "Fixture delete button", applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "fixture-delete-target")
+            },
+            actionPerformer: { _ in XCTFail("Interrupted approval must not perform an action") },
             channelFactory: { _ in channel })
         let prompt = makeEnvelope(kind: .prompt, body: "Delete the file")
         manager.authorizePeer(senderID: prompt.senderID)
@@ -7471,8 +7655,9 @@ final class ComputerUseTests: XCTestCase {
             sent.first(where: { $0.kind == .approvalRequest }))
         let approval = try ComputerUseApprovalRequest.decodeBody(approvalEnvelope.body)
 
-        XCTAssertTrue(manager.blockActionsForUserIntervention())
-        manager.userIntervened()
+        let intervention = try XCTUnwrap(manager.recordUserInputForIntervention())
+        manager.applyUserInputIntervention(intervention)
+        manager.applyUserInputIntervention(intervention)
         XCTAssertEqual(manager.activity, .paused)
         await waitUntil {
             await channel.sentMessages().contains { envelope in
@@ -10751,6 +10936,7 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     private(set) var continueAfterApprovalCount = 0
     private(set) var cancelMCPWorkCount = 0
     private(set) var approvedActionSideEffectCount = 0
+    var beforeFirstResult: (() -> Void)?
 
     init(prepared: MCPPreparedApproval, resultGate: ComputerUsePlanningTestGate<Bool>? = nil,
          resultAfterFirstExecution: ComputerUseExecutionResult? = nil, approvalResult: MCPApprovedActionResult? = nil) {
@@ -10766,6 +10952,10 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         executeCount += 1
+        if executeCount == 1 {
+            let hook = beforeFirstResult; beforeFirstResult = nil
+            hook?()
+        }
         if executeCount > 1, let resultAfterFirstExecution { return resultAfterFirstExecution }
         return .mcpApprovalRequired(prepared)
     }

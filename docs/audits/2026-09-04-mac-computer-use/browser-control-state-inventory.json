@@ -165,7 +165,12 @@
     "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputPersistenceFailureRetainsTheMarkerAndDoesNotAcknowledgeResume",
     "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
-    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask"
+    "RemoteDesktopHostTests/ComputerUseTests/testPausedInputCannotBeAcknowledgedByForeignControlAndStopRetiresItBeforeANewTask",
+    "RemoteDesktopHostTests/ComputerUseTests/testDelayedInputCallbackCannotPauseAReplacementWaitingForItsPredecessor",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputDuringVisualApprovalPreparationCannotCreateAnApprovalWait",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission",
+    "RemoteDesktopHostTests/ComputerUseTests/testSameTaskResumeRetiresAnOldInputReceiptWithoutLosingNewInput"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/ComputerUseBrowserActionPlannerTests/testActionContextRetainsTheWholeGoalAndObservedFormsWithoutPrivateValuesOrTargets",
@@ -1306,6 +1311,10 @@
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUsedSessionDoesNotBecomeUnnavigatedWhenClaimClearsEvidence",
     "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUserControlPageNeedsExplicitHandbackAndNeverBecomesNavigationProof",
     "RemoteDesktopHostTests/ComputerUseTaskExecutionTests/testReloadRejectsMissingRewoundNoncanonicalOrForeignProgressBeforeObservation",
+    "RemoteDesktopHostTests/ComputerUseTests/testDelayedInputCallbackCannotPauseAReplacementWaitingForItsPredecessor",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputDuringVisualApprovalPreparationCannotCreateAnApprovalWait",
+    "RemoteDesktopHostTests/ComputerUseTests/testInputInterventionReceiptIsSingleUseAndCannotCrossAnAdmission",
     "RemoteDesktopHostTests/ComputerUseTests/testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause",
     "RemoteDesktopHostTests/ComputerUseTests/testLocalHandbackIncludesItsPrecedingInputWithoutInvalidatingItsOwnClick",
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputBurstAdvancesOneDurableEpochBeforeRejectingADelayedResume",
@@ -1314,6 +1323,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner",
     "RemoteDesktopHostTests/ComputerUseTests/testPrePromptResumeReservationCannotBeRecreatedAfterInputDuringFirstReadinessCheck",
     "RemoteDesktopHostTests/ComputerUseTests/testResumeReadinessKeepsBrowserOwnershipAndOldToolsClosedUntilTheSameAdmissionIsAdopted",
+    "RemoteDesktopHostTests/ComputerUseTests/testSameTaskResumeRetiresAnOldInputReceiptWithoutLosingNewInput",
     "RemoteDesktopHostTests/ComputerUseTests/testUnreadyResumeAbandonsItsReservationAndKeepsTheOriginalPausedOwner",
     "RemoteDesktopHostTests/ComputerUseTests/test_browserLocalControlEpochRejectsDelayedPhoneChoices",
     "RemoteDesktopHostTests/ComputerUseTests/test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun",
