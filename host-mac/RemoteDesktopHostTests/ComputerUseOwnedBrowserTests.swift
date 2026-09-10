@@ -6,6 +6,116 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testCompletedNavigationPublicationCannotOverwriteStoppedOrReclaimedStatus() async throws {
+        for ending in ["stop", "reclaim", "close"] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "completion")
+            var interrupted = false, details: [String] = []
+            var expectedDetail: String?
+            var committed: ComputerUseBrowserDocument?
+            var history: ComputerUseBrowserNavigationDispatchHistory?
+            let detailSubscription = browser.$detail.sink { details.append($0) }
+            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+                guard !interrupted, let receipt = browser.receipt(taskID: "completion", operationID: "load") else { return }
+                interrupted = true; committed = receipt
+                do { history = try browser.navigationDispatchHistory(taskID: "completion") }
+                catch { XCTFail("Missing native completion history: \(error)") }
+                if ending == "close" { browser.close() } else { browser.stop() }
+                if ending == "reclaim" {
+                    do { _ = try browser.prepareWorkflowSession(taskID: "completion") }
+                    catch { XCTFail("Cannot reclaim stopped context: \(error)") }
+                }
+                expectedDetail = browser.detail
+            }
+            defer { subscription.cancel(); detailSubscription.cancel() }
+            do {
+                _ = try await browser.navigate(taskID: "completion", operationID: "load", to: base.appendingPathComponent("load"))
+                XCTFail("The waiting caller must reject a retired current result")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            XCTAssertTrue(interrupted)
+            XCTAssertEqual(browser.detail, try XCTUnwrap(expectedDetail))
+            XCTAssertFalse(details.contains("Page opened"), "The old callback cannot announce completion in its successor's status")
+            XCTAssertEqual(try XCTUnwrap(committed).committedURL, base.appendingPathComponent("load"))
+            XCTAssertEqual(history?.attempts.last?.outcome, .documentCommitted)
+            XCTAssertEqual(server.count("/load"), 1)
+        }
+    }
+
+    func testCompletedNavigationPublicationTakeoverKeepsReceiptWithoutCurrentStatus() async throws {
+        for reopen in [false, true] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, interrupted = false, details: [String] = []
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            let session = try browser.prepareWorkflowSession(taskID: "takeover")
+            let detailSubscription = browser.$detail.sink { details.append($0) }
+            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+                guard !interrupted, browser.receipt(taskID: "takeover", operationID: "load") != nil else { return }
+                interrupted = true; allowed = false
+                browser.prepareForUserControl(taskID: "takeover")
+                allowed = reopen
+            }
+            defer { subscription.cancel(); detailSubscription.cancel() }
+            do {
+                _ = try await browser.navigate(taskID: "takeover", operationID: "load", to: base.appendingPathComponent("load"))
+                XCTFail("A completed load cannot return as current across a publication-time takeover")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            XCTAssertTrue(interrupted)
+            XCTAssertFalse(details.contains("Page opened"))
+            allowed = true
+            XCTAssertEqual(browser.handbackRequirement(taskID: "takeover", required: true), session)
+            XCTAssertEqual(try XCTUnwrap(browser.receipt(taskID: "takeover", operationID: "load")).committedURL, base.appendingPathComponent("load"))
+            XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "takeover").attempts.last?.outcome, .documentCommitted)
+            XCTAssertEqual(server.count("/load"), 1)
+        }
+    }
+
+    func testObservedPageCompletionCannotPublishReadinessAfterReentrantStop() async throws {
+        for ending in ["stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: """
+                <title>Manual navigation fixture</title><p>Continue manually</p>
+                <script>fetch('/continue').then(() => { location.href = '/login'; });</script>
+                """), "/continue": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, interrupted = false, details: [String] = []
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "observed")
+            _ = try await browser.navigate(taskID: "observed", operationID: "start", to: base.appendingPathComponent("start"))
+            try await waitUntil { server.count("/continue") == 1 }
+            let detailSubscription = browser.$detail.sink { details.append($0) }
+            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+                guard !interrupted else { return }
+                // Locate the delegate's accepted-page publication without
+                // assuming when WebKit updates its separate isLoading flag.
+                allowed = true
+                let accepted = try? browser.navigationDispatchHistory(taskID: "observed").pageObservationEvents.last
+                allowed = false
+                guard accepted?.phase == .accepted,
+                      accepted?.observation.source == .userControlObservation else { return }
+                interrupted = true
+                if ending == "stop" { browser.stop() } else { browser.close() }
+            }
+            defer { subscription.cancel(); detailSubscription.cancel() }
+            allowed = false
+            browser.prepareForUserControl(taskID: "observed")
+            server.releaseHeldResponses()
+            try await waitUntil { interrupted }
+            XCTAssertEqual(browser.detail, "Stopped")
+            XCTAssertFalse(details.contains { $0.hasPrefix("Page ready") })
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            XCTAssertNil(browser.taskID)
+            XCTAssertEqual(server.count("/start"), 1); XCTAssertEqual(server.count("/login"), 1)
+        }
+    }
+
     func testNavigationPublicationTakeoverRetiresReservationBeforeNativeDispatch() async throws {
         for publication in ["site", "detail"] {
             for control in ["paused", "reopened", "gate-only"] {
