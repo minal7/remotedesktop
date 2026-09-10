@@ -7,6 +7,157 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testPresentationWillChangeKeepsLatestFieldAndIndependentChanges() {
+        let state = ComputerUseBrowserPresentation()
+        state.update(.retire(.stopped, clearSite: false))
+        var replaced = false
+        let subscription = state.objectWillChange.sink {
+            guard !replaced else { return }
+            replaced = true
+            state.update(.page(.changed))
+            state.update(.issue(.parentProcessStopped))
+        }
+        state.update(.claim("next"))
+        subscription.cancel()
+        XCTAssertEqual(state.state.task, .active)
+        XCTAssertEqual(state.state.taskID, "next")
+        XCTAssertEqual(state.state.page, .changed, "A claim reset cannot overwrite newer page activity")
+        XCTAssertEqual(state.state.issue?.message, "Browser process stopped")
+
+        var values: [String] = [], interrupted = false
+        let valuesSubscription = state.siteChanges.dropFirst().sink { values.append($0) }
+        let replacementSubscription = state.objectWillChange.sink {
+            guard !interrupted else { return }
+            interrupted = true
+            state.update(.site("https://new.test/"))
+        }
+        state.update(.site("https://old.test/"))
+        replacementSubscription.cancel(); valuesSubscription.cancel()
+        XCTAssertEqual(state.state.site, "https://new.test/")
+        XCTAssertEqual(values, ["https://new.test/"], "An obsolete will-change setter must never commit")
+    }
+
+    func testPresentationSerializesNestedValueDeliveryForEverySubscriber() {
+        let state = ComputerUseBrowserPresentation()
+        var first: [String] = [], second: [String] = []
+        let one = state.siteChanges.dropFirst().sink { value in
+            first.append(value)
+            if value == "https://one.test/" {
+                state.update(.site("https://two.test/"))
+                XCTAssertEqual(state.state.site, "https://two.test/", "Getters expose committed state during delivery")
+            }
+        }
+        let two = state.siteChanges.dropFirst().sink { second.append($0) }
+        state.update(.site("https://one.test/"))
+        one.cancel(); two.cancel()
+        XCTAssertEqual(first, ["https://one.test/", "https://two.test/"])
+        XCTAssertEqual(second, first, "A second subscriber cannot receive the successor before the old event")
+        var initial: String?
+        let latest = state.siteChanges.sink { initial = $0 }
+        latest.cancel()
+        XCTAssertEqual(initial, state.state.site)
+    }
+
+    func testPresentationRetainsTaskAndFailureAcrossPageActivity() {
+        let state = ComputerUseBrowserPresentation()
+        state.update(.claim("task"))
+        state.update(.issue(.parentProcessStopped))
+        state.update(.page(.changed)); state.update(.page(.opening))
+        XCTAssertEqual(state.state.detail, "Browser process stopped")
+        XCTAssertEqual(state.state.page, .opening)
+        state.update(.retire(.stopped, clearSite: false))
+        state.update(.page(.changed))
+        XCTAssertEqual(state.state.taskDetail, "Stopped")
+        XCTAssertEqual(state.state.detail, "Stopped")
+        XCTAssertEqual(state.state.issue?.message, "Browser process stopped")
+        state.update(.retire(.closed, clearSite: true)); state.update(.page(.changed))
+        XCTAssertEqual(state.state.detail, "Closed")
+        state.update(.claim("replacement"))
+        XCTAssertNil(state.state.issue)
+        state.update(.issue(.sourceBlocked)); state.update(.page(.changed))
+        XCTAssertNotNil(state.state.issue)
+        state.update(.page(.opened, recovered: true))
+        XCTAssertNil(state.state.issue)
+        XCTAssertEqual(state.state.detail, "Page opened")
+    }
+
+    func testControlPublicationKeepsSnapshotAndHandlerInOneBinding() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "controls")
+        let initial = ComputerUseBrowserTaskControls(taskID: "controls", scopeID: UUID(), presentationID: UUID(), phase: .working, canResume: false)
+        let abandoned = ComputerUseBrowserTaskControls(taskID: "controls", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)
+        let latest = ComputerUseBrowserTaskControls(taskID: "controls", scopeID: UUID(), presentationID: UUID(), phase: .awaitingApproval, canResume: false)
+        var calls: [String] = [], replaced = false, published: [ComputerUseBrowserTaskControls?] = []
+        browser.updateTaskControls(initial) { _, _ in calls.append("initial") }
+        let values = browser.taskControlsChanges.dropFirst().sink { published.append($0) }
+        let subscription = browser.objectWillChange.sink {
+            guard !replaced else { return }
+            replaced = true
+            XCTAssertEqual(browser.taskControls, initial)
+            browser.requestTaskControl(.stop, displayed: initial)
+            browser.updateTaskControls(latest) { _, _ in calls.append("latest") }
+        }
+        browser.updateTaskControls(abandoned) { _, _ in calls.append("abandoned") }
+        subscription.cancel(); values.cancel()
+        XCTAssertEqual(browser.taskControls, latest)
+        browser.requestTaskControl(.stop, displayed: latest)
+        XCTAssertEqual(calls, ["initial", "latest"])
+        XCTAssertEqual(published, [latest])
+    }
+
+    func testRetirementWillChangeCannotRestoreStatusOverAReplacementClaim() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "old")
+        var replaced = false
+        let subscription = browser.objectWillChange.sink {
+            guard !replaced else { return }
+            replaced = true
+            do { try browser.claim(taskID: "new") }
+            catch { XCTFail("Retirement publication follows cleanup: \(error)") }
+        }
+        browser.stop()
+        subscription.cancel()
+        XCTAssertEqual(browser.taskID, "new")
+        XCTAssertEqual(browser.detail, "Ready")
+        XCTAssertEqual(browser.taskDetail, "Task active")
+        browser.close()
+        XCTAssertEqual(browser.detail, "Closed")
+    }
+
+    func testControlOwnerChangeKeepsNewerBindingFromChildCleanup() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+            "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/provider-ready');</script>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, replaced = false, calls: [String] = []
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "owner-change")
+        _ = try await browser.navigate(taskID: "owner-change", operationID: "login", to: base.appendingPathComponent("login"))
+        try await waitUntil { server.count("/signal") == 1 }
+        allowed = false
+        browser.updateTaskControls(.init(taskID: "owner-change", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)) { _, _ in calls.append("initial") }
+        server.releaseHeldResponses()
+        try await waitUntil { browser.hasOpenSignInWindow && server.count("/provider-ready") == 1 }
+        let latest = ComputerUseBrowserTaskControls(taskID: "owner-change", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)
+        let subscription = browser.signInSiteChanges.dropFirst().sink { site in
+            guard site == nil, !replaced else { return }
+            replaced = true
+            browser.updateTaskControls(latest) { _, _ in calls.append("latest") }
+        }
+        browser.updateTaskControls(.init(taskID: "owner-change", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)) { _, _ in calls.append("abandoned") }
+        subscription.cancel()
+        XCTAssertTrue(replaced)
+        XCTAssertFalse(browser.hasOpenSignInWindow)
+        XCTAssertNil(browser.signInSite)
+        XCTAssertEqual(browser.taskControls, latest)
+        browser.requestTaskControl(.stop, displayed: latest)
+        XCTAssertEqual(calls, ["latest"])
+        XCTAssertEqual(server.count("/login"), 1); XCTAssertEqual(server.count("/provider"), 1)
+    }
+
     func testLocationInboxRetainsReportedURLsAndBoundsOverflow() throws {
         let inbox = ComputerUseBrowserLocationInbox(), epoch = UUID()
         let source = inbox.beginSurface(ownershipEpoch: epoch)
@@ -162,7 +313,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         let view = try XCTUnwrap(nativeView), source = try XCTUnwrap(browser.locationChanges.activeSource)
         let delivery = try XCTUnwrap(browser.locationChanges.enqueue(base.appendingPathComponent("changed"), from: source))
         var replacement: ComputerUseBrowserHandbackRequirement?, status: String?
-        let subscription = browser.$displayedSite.dropFirst().sink { _ in
+        let subscription = browser.displayedSiteChanges.dropFirst().sink { _ in
             guard replacement == nil else { return }
             browser.stop()
             do { replacement = try browser.prepareWorkflowSession(taskID: "replacement"); status = browser.detail }
@@ -391,8 +542,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         let original = try browser.prepareWorkflowSession(taskID: "original")
         var replaced = false
         var replacement: ComputerUseBrowserHandbackRequirement?
-        let subscription = browser.$detail.sink { status in
-            guard status == "Stopped", !replaced else { return }
+        let subscription = browser.detailChanges.sink { status in
+            guard status == "Closed", !replaced else { return }
             replaced = true
             do { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
             catch { XCTFail("Native cleanup must finish before final status can admit a replacement: \(error)") }
@@ -426,8 +577,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 server.releaseHeldResponses()
                 try await waitUntil { browser.hasOpenSignInWindow && server.count("/ready") == 1 }
                 var replacement: ComputerUseBrowserHandbackRequirement?
-                let detailSubscription = browser.$detail.sink { details.append($0) }
-                let subscription = browser.$signInSite.dropFirst().sink { site in
+                let detailSubscription = browser.detailChanges.sink { details.append($0) }
+                let subscription = browser.signInSiteChanges.dropFirst().sink { site in
                     guard site == nil, !observedRetirement else { return }
                     observedRetirement = true
                     XCTAssertNil(browser.taskID, "Parent authority must retire before child-clear publication")
@@ -449,7 +600,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 } else {
                     XCTAssertNil(browser.taskID)
                     XCTAssertEqual(browser.hasSession, !close)
-                    XCTAssertEqual(browser.detail, "Stopped")
+                    XCTAssertEqual(browser.detail, close ? "Closed" : "Stopped")
                     _ = try browser.prepareWorkflowSession(taskID: "replacement")
                 }
                 let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
@@ -528,12 +679,12 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                             phase: .paused, canResume: true, ownerID: UUID()), handler: { _, _ in })
                     }
                 }
-                let detailSubscription = browser.$signInDetail.dropFirst().sink { _ in
+                let detailSubscription = browser.signInDetailChanges.dropFirst().sink { _ in
                     if interrupted { lateResets += 1 }
                 }
                 let subscription: AnyCancellable
-                if publication == "site" { subscription = browser.$signInSite.dropFirst().sink { if $0 != nil { interrupt() } } }
-                else { subscription = browser.$signInDetail.dropFirst().sink { _ in interrupt() } }
+                if publication == "site" { subscription = browser.signInSiteChanges.dropFirst().sink { if $0 != nil { interrupt() } } }
+                else { subscription = browser.signInDetailChanges.dropFirst().sink { _ in interrupt() } }
                 defer { subscription.cancel(); detailSubscription.cancel() }
                 server.releaseHeldResponses()
                 try await waitUntil { server.count("/attempted?child=no") + server.count("/attempted?child=yes") == 1 }
@@ -567,7 +718,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             try await waitUntil { browser.hasOpenSignInWindow && server.count("/provider-ready") == 1 }
             var expectedDetail: String?
             var replacement: ComputerUseBrowserHandbackRequirement?
-            let subscription = browser.$signInSite.dropFirst().sink { site in
+            let subscription = browser.signInSiteChanges.dropFirst().sink { site in
                 guard site == nil, !interrupted else { return }
                 interrupted = true; allowed = true
                 if ending == "close" { browser.close() }
@@ -617,8 +768,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                     phase: .working, canResume: false, ownerID: ownerID), handler: { _, _ in })
             }
             let subscription: AnyCancellable
-            if publication == "site" { subscription = browser.$signInSite.dropFirst().sink { if $0 != nil { resume() } } }
-            else { subscription = browser.$signInDetail.dropFirst().sink { _ in resume() } }
+            if publication == "site" { subscription = browser.signInSiteChanges.dropFirst().sink { if $0 != nil { resume() } } }
+            else { subscription = browser.signInDetailChanges.dropFirst().sink { _ in resume() } }
             defer { subscription.cancel() }
             server.releaseHeldResponses()
             try await waitUntil { resumed && server.count("/provider-ready") == 1 }
@@ -645,8 +796,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             var expectedDetail: String?
             var committed: ComputerUseBrowserDocument?
             var history: ComputerUseBrowserNavigationDispatchHistory?
-            let detailSubscription = browser.$detail.sink { details.append($0) }
-            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+            let detailSubscription = browser.detailChanges.sink { details.append($0) }
+            let subscription = browser.displayedSiteChanges.dropFirst().sink { _ in
                 guard !interrupted, let receipt = browser.receipt(taskID: "completion", operationID: "load") else { return }
                 interrupted = true; committed = receipt
                 do { history = try browser.navigationDispatchHistory(taskID: "completion") }
@@ -681,8 +832,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
             defer { browser.close() }
             let session = try browser.prepareWorkflowSession(taskID: "takeover")
-            let detailSubscription = browser.$detail.sink { details.append($0) }
-            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+            let detailSubscription = browser.detailChanges.sink { details.append($0) }
+            let subscription = browser.displayedSiteChanges.dropFirst().sink { _ in
                 guard !interrupted, browser.receipt(taskID: "takeover", operationID: "load") != nil else { return }
                 interrupted = true; allowed = false
                 browser.prepareForUserControl(taskID: "takeover")
@@ -717,8 +868,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             _ = try browser.prepareWorkflowSession(taskID: "observed")
             _ = try await browser.navigate(taskID: "observed", operationID: "start", to: base.appendingPathComponent("start"))
             try await waitUntil { server.count("/continue") == 1 }
-            let detailSubscription = browser.$detail.sink { details.append($0) }
-            let subscription = browser.$displayedSite.dropFirst().sink { _ in
+            let detailSubscription = browser.detailChanges.sink { details.append($0) }
+            let subscription = browser.displayedSiteChanges.dropFirst().sink { _ in
                 guard !interrupted else { return }
                 // Locate the delegate's accepted-page publication without
                 // assuming when WebKit updates its separate isLoading flag.
@@ -735,7 +886,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
             browser.prepareForUserControl(taskID: "observed")
             server.releaseHeldResponses()
             try await waitUntil { interrupted }
-            XCTAssertEqual(browser.detail, "Stopped")
+            XCTAssertEqual(browser.detail, ending == "stop" ? "Stopped" : "Closed")
             XCTAssertFalse(details.contains { $0.hasPrefix("Page ready") })
             XCTAssertFalse(browser.hasPageAwaitingHandback)
             XCTAssertNil(browser.taskID)
@@ -753,7 +904,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
                 defer { browser.close() }
                 let session = try browser.prepareWorkflowSession(taskID: "publication")
-                let detailSubscription = browser.$detail.sink { details.append($0) }
+                let detailSubscription = browser.detailChanges.sink { details.append($0) }
                 let subscription = observeNavigationPublication(publication, browser: browser) {
                     guard !interrupted else { return }
                     interrupted = true; allowed = false
@@ -884,7 +1035,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         defer { browser.close() }
         _ = try browser.prepareWorkflowSession(taskID: "cancelled")
         var cancelled = false, details: [String] = []
-        let detailSubscription = browser.$detail.sink { details.append($0) }
+        let detailSubscription = browser.detailChanges.sink { details.append($0) }
         let subscription = observeNavigationPublication("site", browser: browser) {
             guard !cancelled else { return }
             cancelled = true
@@ -934,8 +1085,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
     private func observeNavigationPublication(_ publication: String, browser: ComputerUseOwnedBrowser,
                                                action: @escaping () -> Void) -> AnyCancellable {
-        if publication == "site" { return browser.$displayedSite.dropFirst().sink { _ in action() } }
-        return browser.$detail.dropFirst().sink { if $0 == "Opening page…" { action() } }
+        if publication == "site" { return browser.displayedSiteChanges.dropFirst().sink { _ in action() } }
+        return browser.detailChanges.dropFirst().sink { if $0 == "Opening page…" { action() } }
     }
 
     func testHostTakeoverRetiresPendingNavigationBeforeCancellationUnwinds() async throws {
@@ -2507,7 +2658,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
         var sites: [String] = []
-        let observation = browser.$displayedSite.sink { sites.append($0) }
+        let observation = browser.displayedSiteChanges.sink { sites.append($0) }
         defer { observation.cancel() }
         let requested = try XCTUnwrap(URL(string: search, relativeTo: base)?.absoluteURL)
         let committed = try XCTUnwrap(URL(string: callback, relativeTo: base)?.absoluteURL)
@@ -2573,7 +2724,7 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
         defer { browser.close() }
         var sites: [String] = []
-        let observation = browser.$displayedSite.sink { sites.append($0) }
+        let observation = browser.displayedSiteChanges.sink { sites.append($0) }
         defer { observation.cancel() }
         try browser.claim(taskID: "handoff-callback")
         let original = try await browser.navigate(taskID: "handoff-callback", operationID: "login",
@@ -3336,6 +3487,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         let deliveryDeadline = ContinuousClock.now + .seconds(2)
         while browser.locationChanges.hasPending && ContinuousClock.now < deliveryDeadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(browser.locationChanges.hasPending, "A delivery deferred by cleanup must receive another wake-up")
+        XCTAssertEqual(browser.detail, "Stopped", "A delayed page update cannot hide task retirement")
+        XCTAssertEqual(browser.taskDetail, "Stopped")
         XCTAssertNil(browser.taskID); XCTAssertTrue(browser.hasSession)
         allowed = true
         _ = try browser.prepareWorkflowSession(taskID: "replacement")
@@ -3374,7 +3527,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         let (_, view) = try fixtureWindow("AI Browser — Remote Desktop")
         var replaced = false
         var replacement: ComputerUseBrowserHandbackRequirement?
-        let subscription = browser.$detail.sink { status in
+        let subscription = browser.detailChanges.sink { status in
             guard status == "Browser process stopped", !replaced else { return }
             replaced = true
             XCTAssertEqual(browser.taskID, "failed-load", "Failure must not invent task cancellation")
@@ -3470,8 +3623,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
                 let (popup, child) = try fixtureWindow("Sign-in window — AI Browser")
                 var cleared = false, replacement: ComputerUseBrowserHandbackRequirement?
                 var details: [String] = []
-                let detailSubscription = browser.$detail.sink { details.append($0) }
-                let subscription = browser.$signInSite.dropFirst().sink { site in
+                let detailSubscription = browser.detailChanges.sink { details.append($0) }
+                let subscription = browser.signInSiteChanges.dropFirst().sink { site in
                     guard site == nil, !cleared else { return }
                     cleared = true
                     XCTAssertEqual(browser.taskID, "login")
@@ -3557,7 +3710,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
                 XCTAssertFalse(history.claimEvents.contains { $0.phase == .retired })
             } else {
                 XCTAssertNil(browser.taskID)
-                XCTAssertEqual(browser.detail, "Stopped")
+                XCTAssertEqual(browser.detail, ending == "stop" ? "Stopped" : "Closed")
                 XCTAssertEqual(browser.hasSession, ending == "stop")
             }
             _ = try browser.prepareWorkflowSession(taskID: "replacement")

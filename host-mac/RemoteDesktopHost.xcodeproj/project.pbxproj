@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1ED3C4F4D709486CB8A3185F /* ComputerUseBrowserPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */; };
 		FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */; };
 		118C3A0AD32CF1720A773392 /* ComputerUseBrowserSearchPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99ED4432B2B249D56CD6DEAC /* ComputerUseBrowserSearchPlanner.swift */; };
 		0DFDF6E26E89800D0C96BE6B /* ComputerUseBrowserLinkPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 470BA959CA234D685362D54F /* ComputerUseBrowserLinkPlanner.swift */; };
@@ -289,6 +290,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserPresentation.swift; sourceTree = "<group>"; };
 		154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlanner.swift; sourceTree = "<group>"; };
 		99ED4432B2B249D56CD6DEAC /* ComputerUseBrowserSearchPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserSearchPlanner.swift; sourceTree = "<group>"; };
 		470BA959CA234D685362D54F /* ComputerUseBrowserLinkPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserLinkPlanner.swift; sourceTree = "<group>"; };
@@ -798,6 +800,7 @@
 				9CFFC6BE4C86643F7E4FC5ED /* ComputerUseNativeTextExecutor.swift */,
 				CD81C130C0A7FB1CA8798FF5 /* ComputerUseObservationWorker.swift */,
 				E09CEC62020A486F86406FAC /* ComputerUsePlanningWorker.swift */,
+				E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */,
 				1C1AE3096F7B69B5AC2241E3 /* ComputerUseOwnedBrowser.swift */,
 				69F152A5A5E039C32A3B87C8 /* ComputerUseQuotedTextRequest.swift */,
 				1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */,
@@ -1238,6 +1241,7 @@
 				F674E7C3ABE15334F5E8836A /* ComputerUseNativeTextExecutor.swift in Sources */,
 				70CD60F7F7C9999D9E6CA995 /* ComputerUseObservationWorker.swift in Sources */,
 				EB170CE61CEF4A3090B664EE /* ComputerUsePlanningWorker.swift in Sources */,
+				1ED3C4F4D709486CB8A3185F /* ComputerUseBrowserPresentation.swift in Sources */,
 				0DF12E6DA244CE4819B792C1 /* ComputerUseOwnedBrowser.swift in Sources */,
 				E4E713CCFFA1E99FDD1133EB /* ComputerUseProtocol.swift in Sources */,
 				CBFCFF4E5B6C0A10368BDE29 /* ComputerUseQuotedTextRequest.swift in Sources */,

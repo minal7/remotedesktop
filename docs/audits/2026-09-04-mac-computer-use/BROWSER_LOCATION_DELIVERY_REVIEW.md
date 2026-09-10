@@ -48,3 +48,7 @@ The local documentation scan checked 248 Markdown files and 2104 local targets w
 3. Continue native correlation for first-seen late events and callbacks without navigation identity. A notification emitted by WebKit only after claim change is still received under the then-current owner. Missing notifications, physical event order and same-view process/response attribution remain unresolved; unordered data must not become route/source completion proof.
 4. Qualify queued changes during exact observed navigation, DOM mutation, explicit login handback and process failure. Preserve uncertain effects and the original task while acquiring fresh evidence. Include provider-window changes and status/readiness interaction; no automatic replay follows from queue consumption.
 5. Complete correctness work before the authorized later model and live-task phase. Natural-language travel, concert and movie tasks, actual account login/Resume, alternate-model selection and 8 GB resource behavior remain unqualified.
+
+## Source follow-up
+
+The [presentation state review](BROWSER_PRESENTATION_STATE_REVIEW.md) separates task retirement and page failure from URL activity, replaces reentrant scalar publication, and adds a Stop-caption expectation to the existing visible delivery fixture. Its source checks do not execute or qualify native delivery.

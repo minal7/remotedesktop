@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import WebKit
 
@@ -648,12 +649,32 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     private typealias NavigationHistory = ComputerUseBrowserNavigationDispatchHistory
     let contextID = UUID().uuidString
-    @Published private(set) var displayedSite = ComputerUseBrowserSite.displayName(for: nil)
-    @Published private(set) var detail = "Ready"
-    @Published private(set) var taskControls: ComputerUseBrowserTaskControls?
-    @Published private(set) var signInSite: String?
-    @Published private(set) var signInDetail = "You control this window. AI is paused."
-    private var taskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
+    private let presentation = ComputerUseBrowserPresentation()
+    var objectWillChange: ObservableObjectPublisher { presentation.objectWillChange }
+    private(set) var displayedSite: String {
+        get { presentation.state.site }
+        set { publish(.site(newValue)) }
+    }
+    var detail: String { presentation.state.detail }
+    var taskDetail: String { hasOpenSignInWindow ? "You control sign-in. AI is waiting." : presentation.state.taskDetail }
+    var pageDetail: String { presentation.state.page.displayDetail }
+    var pageIssue: String? { presentation.state.issue?.message }
+    var taskControls: ComputerUseBrowserTaskControls? { presentation.state.controls }
+    private(set) var signInSite: String? {
+        get { presentation.state.signInSite }
+        set { publish(.signInSite(newValue), child: true) }
+    }
+    private(set) var signInDetail: String {
+        get { presentation.state.signInDetail }
+        set { publish(.signInDetail(newValue), child: true) }
+    }
+    var displayedSiteChanges: AnyPublisher<String, Never> { presentation.siteChanges }
+    var detailChanges: AnyPublisher<String, Never> { presentation.detailChanges }
+    var signInSiteChanges: AnyPublisher<String?, Never> { presentation.signInSiteChanges }
+    var signInDetailChanges: AnyPublisher<String, Never> { presentation.signInDetailChanges }
+    var taskControlsChanges: AnyPublisher<ComputerUseBrowserTaskControls?, Never> { presentation.controlsChanges }
+    private var taskControlHandler: ComputerUseBrowserPresentation.Handler? { presentation.state.handler }
+    private var controlUpdateID = UUID()
     private(set) var taskID: String?
     private var generation: UInt64 = 0
     private var ownershipEpoch = UUID()
@@ -725,9 +746,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var windowIsClosing = false
         var windowControlRequest: (() -> Void)?
         var released = false
-        var status: String
+        var status: ComputerUseBrowserPresentation.TaskState
 
-        init(view: WKWebView?, window: NSWindow?, releasesBrowser: Bool, status: String) {
+        init(view: WKWebView?, window: NSWindow?, releasesBrowser: Bool, status: ComputerUseBrowserPresentation.TaskState) {
             self.view = view; self.window = window; self.releasesBrowser = releasesBrowser; self.status = status
         }
     }
@@ -845,14 +866,55 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return responseResource == documentResource
     }
 
+    /// Scope display mutations independently from document/action evidence.
+    /// Child lifetime deliberately excludes the parent's document generation
+    /// and control phase: the opener may navigate while sign-in is in progress.
+    private func publish(_ update: ComputerUseBrowserPresentation.Update, child: Bool = false) {
+        let parent = browser, session = browserSessionID, epoch = ownershipEpoch, ownerTask = taskID
+        let childView = signInBrowser, childID = signInInstanceID, controlOwner = taskControls?.ownerID
+        let pageGeneration = generation, revision = locationRevision, takeover = takeoverEpoch
+        let lifecycle: Bool
+        switch update { case .claim, .retire: lifecycle = true; default: lifecycle = false }
+        presentation.update(update) { [weak self] in
+            guard let self, ownershipEpoch == epoch, taskID == ownerTask else { return false }
+            if lifecycle { return true }
+            guard browser === parent, browserSessionID == session, taskControls?.ownerID == controlOwner else { return false }
+            if child {
+                return signInBrowser === childView && signInInstanceID == childID && taskControls?.ownerID == controlOwner
+            }
+            return generation == pageGeneration && locationRevision == revision && takeoverEpoch == takeover
+        }
+    }
+
     func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
         handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
+        let updateID = UUID(), epoch = ownershipEpoch
+        controlUpdateID = updateID
         if let scope = signInScope,
            controls?.taskID != scope.taskID || controls?.ownerID != scope.ownerID {
             closeSignInWindow(restoreParent: false)
         }
-        taskControlHandler = handler
-        if taskControls != controls { taskControls = controls }
+        guard controlUpdateID == updateID, ownershipEpoch == epoch else { return }
+        // The snapshot and handler are one binding. Reentrant cleanup or a
+        // will-change subscriber can replace it only with a newer update.
+        presentation.update(.controls(controls, handler)) { [weak self] in
+            self?.controlUpdateID == updateID && self?.ownershipEpoch == epoch
+        }
+    }
+
+    fileprivate func controls(in view: WKWebView) -> ComputerUseBrowserTaskControls? {
+        guard view === browser || view === signInBrowser, let controls = taskControls,
+              controls.taskID == taskID else { return nil }
+        if view === signInBrowser, !canNavigateSignInWindow { return nil }
+        return controls
+    }
+
+    fileprivate func isCurrentMainView(_ view: WKWebView) -> Bool { view === browser }
+    fileprivate func isCurrentSignInView(_ view: WKWebView) -> Bool { view === signInBrowser }
+
+    fileprivate func closeSignInWindow(in view: WKWebView) {
+        guard view === signInBrowser else { return }
+        closeSignInWindow()
     }
 
     func requestTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
@@ -893,6 +955,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             observedNavigationAttempts.removeAll()
             navigationDispatchLog?.recordClaim(phase: .claimed, parentSessionID: browser == nil ? nil : browserSessionID,
                 ownershipEpoch: ownershipEpoch, generation: generation)
+            let claimGeneration = generation, claimRevision = locationRevision, claimTakeover = takeoverEpoch
+            publish(.claim(taskID))
+            guard hasOwnership(taskID: taskID), ownershipEpoch == nextEpoch, self.taskID == taskID,
+                  generation == claimGeneration, locationRevision == claimRevision, takeoverEpoch == claimTakeover,
+                  pending == nil, pendingDOM == nil, observedNavigation == nil else {
+                throw ComputerUseBrowserError.ownershipLost
+            }
         }
     }
 
@@ -1057,7 +1126,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         retirePageObservations(.taskAdmission)
         guard let requirement = handbackRequirement(taskID: taskID, required: true) else { throw ComputerUseBrowserError.handbackContextLost }
         try validateWorkflowSession(requirement)
-        detail = "Checking the page for the new request"
+        publish(.page(.checkingRequest, recovered: true))
         return requirement
     }
 
@@ -1167,7 +1236,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             try validateWorkflowSession(requirement)
             try validateHandback(requirement, taskID: taskID)
             guard hasOwnership(taskID: taskID), hasUnnavigatedContents else { throw ComputerUseBrowserError.pageChanged }
-            detail = "Control returned — ready to open the first page"
+            publish(.page(.returnedEmpty, recovered: true))
             return
         }
         try validateHandback(requirement, taskID: taskID)
@@ -1184,7 +1253,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             try await adoptPageObservation(observed, source: .activePageObservation, taskID: taskID, nativeReacquisitionID: nativeOperationID)
         } else { throw ComputerUseBrowserError.pageChanged }
         try validateHandback(requirement, taskID: taskID)
-        detail = "Control returned — checking the current page"
+        publish(.page(.returned, recovered: true))
     }
 
     private func adoptPageObservation(_ observed: ObservedPage, source: ComputerUseBrowserDocument.Source,
@@ -1227,7 +1296,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         observedUserPage = nil
         observedActivePage = nil
         loadedPageIdentity = identity
-        detail = "Checking the current page"
+        publish(.page(.checking, recovered: true))
     }
 
     func callDOM(_ command: ComputerUseBrowserDOMCommand, arguments: [String: Any],
@@ -1866,7 +1935,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                         try checkPendingAdmission()
                         displayedSite = ComputerUseBrowserSite.displayName(for: url)
                         try checkPendingAdmission()
-                        detail = "Opening page…"
+                        publish(.page(.opening))
                         try checkPendingAdmission()
                     } catch {
                         failPending(id: id, error: (error as? ComputerUseBrowserError) ?? .ownershipLost)
@@ -1954,14 +2023,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             // Native callbacks can upgrade Stop to Close, but cannot start a
             // second cleanup or share its view with a new claim midway through.
             active.releasesBrowser = active.releasesBrowser || releasesBrowser
+            if releasesBrowser { active.status = .closed }
             if closingWindow === active.window, closingWindow != nil {
-                active.windowIsClosing = true; active.status = "Closed"
+                active.windowIsClosing = true; active.status = .closed
                 if active.windowControlRequest == nil { active.windowControlRequest = windowControlRequest }
             }
             return
         }
         let retirement = NativeRetirement(view: browser, window: window, releasesBrowser: releasesBrowser,
-            status: closingWindow == nil ? "Stopped" : "Closed")
+            status: releasesBrowser ? .closed : .stopped)
         retirement.windowIsClosing = closingWindow != nil
         retirement.windowControlRequest = windowControlRequest
         nativeRetirement = retirement
@@ -1999,21 +2069,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         request?()
         releaseRetiredBrowserIfRequested(retirement)
 
-        let epoch = ownershipEpoch, retiredGeneration = generation, retiredView = browser
-        let controlsOwner = taskControls?.ownerID, controlsTask = taskControls?.taskID
         nativeRetirement = nil
-        func retainsRetirement() -> Bool {
-            nativeRetirement == nil && ownershipEpoch == epoch && generation == retiredGeneration
-                && taskID == nil && browser === retiredView
-                && taskControls?.ownerID == controlsOwner && taskControls?.taskID == controlsTask
-        }
-        // Captured cleanup calls and resource detachment precede new admission.
-        // Every later projection belongs only to this still-retired context.
-        if signInSite != nil { signInSite = nil }
-        guard retainsRetirement() else { return }
-        if retirement.released { displayedSite = ComputerUseBrowserSite.displayName(for: nil) }
-        guard retainsRetirement() else { return }
-        if detail != retirement.status { detail = retirement.status }
+        // Commit retirement coherently after captured native cleanup. Nested
+        // publications may claim a successor, but cannot restore this status.
+        publish(.retire(retirement.status, clearSite: retirement.released))
     }
 
     private func releaseRetiredBrowserIfRequested(_ retirement: NativeRetirement) {
@@ -2171,7 +2230,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard isCurrentNavigationCallback(callback) else { return }
         displayedSite = ComputerUseBrowserSite.displayName(for: currentURL)
         guard isCurrentNavigationCallback(callback) else { return }
-        if invalidatedIdlePage { detail = "Page changed" }
+        if invalidatedIdlePage { publish(.page(.changed)) }
     }
 
     private func prepareNavigationCallback(in view: WKWebView) -> Bool {
@@ -2217,7 +2276,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         } else {
             loadedPageIdentity = nil
         }
-        detail = "Page changed"
+        publish(.page(.changed))
     }
 
     private var isUserControllingTask: Bool {
@@ -2382,7 +2441,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard retainsParent() else { return }
         signInSite = nil
         guard retainsParent() else { return }
-        detail = "Sign-in window closed — choose Let AI continue when you are ready"
+        publish(.page(.signInClosed))
         guard retainsParent(), window === detached.parentWindow else { return }
         if restoreParent, detached.wasKey { detached.parentWindow?.makeKeyAndOrderFront(nil) }
         // Closing is not handback, a login assertion, or a navigation receipt.
@@ -2437,7 +2496,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if pending.nativeDispatchStarted { view?.stopLoading() }
         if browser === view, ownershipEpoch == epoch, generation == retiredGeneration,
            taskID == pending.taskID, self.pending == nil {
-            detail = error.localizedDescription
+            if error == .ownershipLost { publish(.page(.interrupted)) }
+            else { publish(.issue(.navigation(error))) }
         }
         pending.continuation.resume(throwing: error)
     }
@@ -2670,7 +2730,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             decide(.cancel, control: .automationAllowed, policyCheck: .blocked)
             guard isCurrentNavigationCallback(callback) else { return }
             if let id = callback?.pendingID { failPending(id: id, error: .sourceNotAllowed) }
-            else { detail = "Blocked a page outside this task's allowed sources." }
+            else { publish(.issue(.sourceBlocked)) }
             return
         }
         decide(.allow, control: appliesPolicy ? .automationAllowed : .userControl,
@@ -2721,7 +2781,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             endObservedNavigation(.sourceBlocked)
             retirePageObservations(.sourceBlocked)
             if let id = callback?.pendingID { failPending(id: id, error: .sourceNotAllowed) }
-            else { detail = "Blocked a page outside this task's allowed sources." }
+            else { publish(.issue(.sourceBlocked)) }
             return
         }
         pending?.successfulResponseURL = response.url
@@ -2765,7 +2825,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             decide(false, control: .automationAllowed, policyCheck: .blocked)
             guard isCurrentNavigationCallback(callback) else { return }
             if let id = callback?.pendingID { failPending(id: id, error: .sourceNotAllowed) }
-            else { detail = "Blocked a page outside this task's allowed sources." }
+            else { publish(.issue(.sourceBlocked)) }
             return
         }
         var exactHistoryItem = false
@@ -2823,7 +2883,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
                     control: observedNavigation.map { $0.startedWhileActive ? .automationAllowed : .userControl } ?? .unknown)
             }
-            detail = "Page changed"
+            publish(.page(.changed))
             return
         }
         if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
@@ -2881,8 +2941,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard isCurrentNavigationCallback(callback) else { return }
             let readyWhileActive = observed.startedWhileActive && mayAct()
             guard isCurrentNavigationCallback(callback) else { return }
-            detail = readyWhileActive ? "Page ready — checking the current task"
-                : "Page ready — choose Let AI continue when you are finished"
+            publish(.page(readyWhileActive ? .readyForTask : .readyForHandback, recovered: true))
             return
         }
         guard let pending, navigation === pending.navigation else { return }
@@ -2941,7 +3000,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let callback = browser.flatMap { navigationCallbackScope(in: $0) }
         displayedSite = ComputerUseBrowserSite.displayName(for: url)
         guard isCurrentNavigationCallback(callback) else { return }
-        detail = "Page opened"
+        publish(.page(.opened, recovered: true))
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
@@ -2971,6 +3030,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if let observed = observedNavigation, navigation === observed.navigation {
             endObservedNavigation(.callbackFailed)
             retirePageObservations(.navigationFailed)
+            publish(.issue(.navigation(.navigationFailed)))
+            return
         }
         if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
     }
@@ -3026,8 +3087,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard retainsProjection() else { return }
         if signInSite != nil { signInSite = nil }
         guard retainsProjection() else { return }
-        detail = invalidatedParent ? "Browser process stopped"
-            : "The sign-in window stopped. Check the main page before continuing."
+        publish(.issue(invalidatedParent ? .parentProcessStopped : .signInProcessStopped))
         guard retainsProjection(), !invalidatedParent, let child,
               child.wasKey, window === child.parentWindow else { return }
         child.parentWindow?.makeKeyAndOrderFront(nil)
@@ -3043,16 +3103,18 @@ private struct OwnedBrowserContent: View {
     @ObservedObject var context: ComputerUseOwnedBrowser
     let browser: WKWebView
     var body: some View {
+        let current = context.isCurrentMainView(browser)
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "globe")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(context.displayedSite).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        .accessibilityLabel("Website: \(context.displayedSite)")
-                    Text(context.detail).font(.caption).foregroundStyle(.secondary)
+                    Text(current ? context.displayedSite : "Website unavailable").lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                        .accessibilityLabel("Website: \(current ? context.displayedSite : "Website unavailable")")
+                    Text(current ? context.taskDetail : "Closed").font(.caption).fontWeight(.medium)
+                    if current && context.taskID != nil { Text(context.pageDetail).font(.caption).foregroundStyle(.secondary) }
                 }
                 Spacer(minLength: 0)
-                if let controls = context.taskControls {
+                if let controls = context.controls(in: browser) {
                     if controls.phase == .paused {
                         Button("Let AI continue") { context.requestTaskControl(.resume, displayed: controls) }
                             .disabled(!controls.canResume || context.hasOpenSignInWindow)
@@ -3062,7 +3124,12 @@ private struct OwnedBrowserContent: View {
                     Button("Stop AI") { context.requestTaskControl(.stop, displayed: controls) }
                 }
             }.padding(12)
-            if context.hasOpenSignInWindow {
+            if current, let issue = context.pageIssue {
+                Text(issue).font(.caption).foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.bottom, 8)
+            }
+            if current && context.hasOpenSignInWindow {
                 Text("Finish or close the sign-in window before returning control to AI.")
                     .font(.caption).padding(.horizontal, 12).padding(.bottom, 8)
             }
@@ -3076,16 +3143,18 @@ private struct OwnedBrowserSignInContent: View {
     @ObservedObject var context: ComputerUseOwnedBrowser
     let browser: WKWebView
     var body: some View {
+        let current = context.isCurrentSignInView(browser)
+        let site = current ? (context.signInSite ?? "Website unavailable") : "Website unavailable"
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                Text(context.signInSite ?? "Website unavailable")
+                Text(site)
                     .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                    .accessibilityLabel("Website: \(context.signInSite ?? "Website unavailable")")
-                Text(context.signInDetail).font(.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("Website: \(site)")
+                Text(current ? context.signInDetail : "Sign-in window closed").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Button("Close sign-in window") { context.closeSignInWindow() }
+                    Button("Close sign-in window") { context.closeSignInWindow(in: browser) }.disabled(!current)
                     Spacer()
-                    if let controls = context.taskControls {
+                    if let controls = context.controls(in: browser) {
                         Button("Stop AI") { context.requestTaskControl(.stop, displayed: controls) }
                     }
                 }

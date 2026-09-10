@@ -1,0 +1,34 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCompletedNavigationPublicationCannotOverwriteStoppedOrReclaimedStatus",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testControlOwnerChangeKeepsNewerBindingFromChildCleanup",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testControlPublicationKeepsSnapshotAndHandlerInOneBinding",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testLocationDrainPublicationCannotContinueIntoReplacementOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageCompletionCannotPublishReadinessAfterReentrantStop",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testParentCloseStatusCannotReleaseAReplacementSession",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testParentRetirementCannotOfferHandbackOrEraseReplacementFromChildPublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationRetainsTaskAndFailureAcrossPageActivity",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationSerializesNestedValueDeliveryForEverySubscriber",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationWillChangeKeepsLatestFieldAndIndependentChanges",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRetirementWillChangeCannotRestoreStatusOverAReplacementClaim",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInClosurePublicationPreservesReplacementParentAndControlOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationKeepsSameOwnerDuringEarlyResumePublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationPublicationCannotReturnARetiredChild"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testCompletedNavigationPublicationCannotOverwriteStoppedOrReclaimedStatus",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testControlOwnerChangeKeepsNewerBindingFromChildCleanup",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testControlPublicationKeepsSnapshotAndHandlerInOneBinding",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testLocationDrainPublicationCannotContinueIntoReplacementOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testObservedPageCompletionCannotPublishReadinessAfterReentrantStop",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testParentCloseStatusCannotReleaseAReplacementSession",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testParentRetirementCannotOfferHandbackOrEraseReplacementFromChildPublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationRetainsTaskAndFailureAcrossPageActivity",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationSerializesNestedValueDeliveryForEverySubscriber",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testPresentationWillChangeKeepsLatestFieldAndIndependentChanges",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRetirementWillChangeCannotRestoreStatusOverAReplacementClaim",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInClosurePublicationPreservesReplacementParentAndControlOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationKeepsSameOwnerDuringEarlyResumePublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationPublicationCannotReturnARetiredChild"
+  ]
+}
