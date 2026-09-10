@@ -1,0 +1,26 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseBrowserClarificationTransportTests/testAcceptedAnswerMapsOnlyCurrentExecutionToBrowserRootAndLifecycle",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testActiveObservationWaitCannotCrossCancellationTakeoverOrSameTaskOwnershipRestart",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedAndCancelledFirstLoadsNeverBecomeUnnavigatedSessions",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHostTakeoverRetiresPendingNavigationBeforeCancellationUnwinds",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHostTakeoverRetiresURLLoadWithAnUnrelatedRetainedResearchOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRepeatedTakeoverPreservesObservedUserNavigationAndHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testTakeoverPreparationRejectsForeignOwnersAndOpenAdmission",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testTakeoverWithdrawsDOMReplyWhileJoiningItsNativeCallback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUnnavigatedSessionHandbackRetainsIdentityWithoutPageOrReceipt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseBrowserClarificationTransportTests/testAcceptedAnswerMapsOnlyCurrentExecutionToBrowserRootAndLifecycle",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testActiveObservationWaitCannotCrossCancellationTakeoverOrSameTaskOwnershipRestart",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testFailedAndCancelledFirstLoadsNeverBecomeUnnavigatedSessions",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHostTakeoverRetiresPendingNavigationBeforeCancellationUnwinds",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testHostTakeoverRetiresURLLoadWithAnUnrelatedRetainedResearchOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testRepeatedTakeoverPreservesObservedUserNavigationAndHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testTakeoverPreparationRejectsForeignOwnersAndOpenAdmission",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testTakeoverWithdrawsDOMReplyWhileJoiningItsNativeCallback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testUnnavigatedSessionHandbackRetainsIdentityWithoutPageOrReceipt",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerLoginHandbackWaitsForPageAndPreservesTaskAndBrowserSession"
+  ]
+}

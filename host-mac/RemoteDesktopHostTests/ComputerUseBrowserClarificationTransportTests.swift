@@ -506,10 +506,10 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
         _ = try bridge.consume(issued.reference, answer: "Paris", for: request("answer"), retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
         XCTAssertEqual(tools.ownedBrowserTaskID(forExecution: "answer"), "root")
         XCTAssertEqual(tools.ownedBrowserTaskID(forExecution: "unrelated"), "unrelated")
-        tools.pauseOwnedBrowserResearch(taskID: "root")
+        tools.pauseOwnedBrowserForUserControl(taskID: "root")
         tools.retireOwnedBrowserResearch(taskID: "root")
         _ = try await owner.interpretGoal()
-        tools.pauseOwnedBrowserResearch(taskID: "answer")
+        tools.pauseOwnedBrowserForUserControl(taskID: "answer")
         do { _ = try await owner.interpretGoal(); XCTFail("The accepted answer's Pause must reach its original owner") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
         try await tools.resumeOwnedBrowserResearch(taskID: "answer")

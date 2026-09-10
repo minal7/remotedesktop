@@ -1251,7 +1251,7 @@ final class ComputerUseHostTools {
         return try await operation()
     }
 
-    func pauseOwnedBrowserResearch(taskID: String) { browserNavigationTask?.pauseResearchTask(taskID: taskID) }
+    func pauseOwnedBrowserForUserControl(taskID: String) { browserNavigationTask?.pauseForUserControl(taskID: taskID) }
     func resumeOwnedBrowserResearch(taskID: String) async throws { try await browserNavigationTask?.resumeResearchTask(taskID: taskID) }
     func retireOwnedBrowserResearch(taskID: String) { browserNavigationTask?.retireResearchTask(taskID: taskID) }
     func ownedBrowserResearch(taskID: String) -> ComputerUseBrowserResearchTask? { browserNavigationTask?.researchTask(taskID: taskID) }
@@ -5248,7 +5248,7 @@ final class HostComputerUseManager: ObservableObject {
         // observe Task cancellation promptly and may still unwind through a
         // final tool call.
         actionGate.endAutomation(allowsActions: false)
-        tools.pauseOwnedBrowserResearch(taskID: context.envelope.id)
+        tools.pauseOwnedBrowserForUserControl(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         pausedExecution = context
         currentExecution = nil

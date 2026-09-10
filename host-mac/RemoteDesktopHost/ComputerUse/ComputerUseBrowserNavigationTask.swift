@@ -217,7 +217,20 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     func browserTaskID(forExecution taskID: String) -> String {
         research?.executionTaskID == taskID ? (research?.taskID ?? taskID) : taskID
     }
-    func pauseResearchTask(taskID: String) { if research?.executionTaskID == taskID { research?.pause() } }
+    func pauseForUserControl(taskID: String) {
+        if let research, research.executionTaskID == taskID {
+            // An accepted answer may own a different execution ID from the
+            // browser root. A stale root command cannot pause that successor.
+            let requirement = browser.handbackRequirement(taskID: research.taskID, required: true)
+            research.pause()
+            guard self.research === research, research.executionTaskID == taskID,
+                  browser.handbackRequirement(taskID: research.taskID, required: true) == requirement else { return }
+            browser.prepareForUserControl(taskID: research.taskID)
+        } else {
+            guard research?.taskID != taskID else { return }
+            browser.prepareForUserControl(taskID: taskID)
+        }
+    }
     func resumeResearchTask(taskID: String) async throws {
         if research?.executionTaskID == taskID { try await research?.resumeAfterUserControl() }
     }

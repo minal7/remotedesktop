@@ -6,6 +6,146 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testHostTakeoverRetiresPendingNavigationBeforeCancellationUnwinds() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/old": .init(held: true), "/next": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed }, browserNavigationTask: navigation)
+        defer { tools.closeOwnedBrowser(); try? FileManager.default.removeItem(at: directory) }
+        let session = try browser.prepareWorkflowSession(taskID: "takeover")
+        let old = Task { try await browser.navigate(taskID: "takeover", operationID: "old", to: base.appendingPathComponent("old")) }
+        try await waitUntil { server.count("/old") == 1 }
+        old.cancel() // Queues the navigation's existing asynchronous cleanup.
+        allowed = false
+        tools.pauseOwnedBrowserForUserControl(taskID: "takeover")
+        // Inspect immediately, without yielding to that cancellation handler.
+        allowed = true
+        let retired = try browser.navigationDispatchHistory(taskID: "takeover")
+        XCTAssertEqual(retired.attempts.last?.outcome, .ownershipLost)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "takeover", required: true), session)
+        XCTAssertNil(browser.receipt(taskID: "takeover", operationID: "old"))
+        let next = Task { try await browser.navigate(taskID: "takeover", operationID: "next", to: base.appendingPathComponent("next")) }
+        try await waitUntil { server.count("/next") == 1 }
+        server.releaseHeldResponses() // Includes any remaining old response.
+        let current = try await next.value
+        do { _ = try await old.value; XCTFail("The retired request cannot return a current page") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(browser.validate(current))
+        XCTAssertEqual(current.committedURL, base.appendingPathComponent("next"))
+        XCTAssertEqual(server.count("/old"), 1); XCTAssertEqual(server.count("/next"), 1)
+        XCTAssertNil(browser.receipt(taskID: "takeover", operationID: "old"))
+    }
+
+    func testHostTakeoverRetiresURLLoadWithAnUnrelatedRetainedResearchOwner() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/held": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed }, browserNavigationTask: navigation)
+        defer { tools.closeOwnedBrowser(); try? FileManager.default.removeItem(at: directory) }
+        let retained = try tools.prepareOwnedBrowserResearch(taskID: "old-research", prompt: "Find concert tickets.",
+            goalPlanner: BrowserResearchGoalFixture(), resultPlanner: BrowserResearchResultFixture())
+        tools.retireOwnedBrowserResearch(taskID: "old-research")
+        _ = try browser.prepareWorkflowSession(taskID: "new-url-task")
+        let load = Task { try await browser.navigate(taskID: "new-url-task", operationID: "held", to: base.appendingPathComponent("held")) }
+        try await waitUntil { server.count("/held") == 1 }
+        allowed = false
+        tools.pauseOwnedBrowserForUserControl(taskID: "new-url-task")
+        allowed = true
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "new-url-task").attempts.last?.outcome, .ownershipLost)
+        do { _ = try await load.value; XCTFail("An unrelated retained research owner cannot prevent native takeover") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertTrue(tools.ownedBrowserResearch(taskID: "old-research") === retained)
+        XCTAssertNil(browser.receipt(taskID: "new-url-task", operationID: "held"))
+        XCTAssertEqual(server.count("/held"), 1)
+    }
+
+    func testRepeatedTakeoverPreservesObservedUserNavigationAndHandback() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: """
+            <!doctype html><title>Handoff fixture</title><p>Continue manually</p>
+            <script>fetch('/continue').then(() => { location.href = '/login'; });</script>
+            """), "/continue": .init(held: true), "/login": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "manual-navigation")
+        _ = try await browser.navigate(taskID: "manual-navigation", operationID: "start", to: base.appendingPathComponent("start"))
+        try await waitUntil { server.count("/continue") == 1 }
+        allowed = false
+        browser.prepareForUserControl(taskID: "manual-navigation")
+        server.releaseHeldResponses()
+        try await waitUntil { server.count("/login") == 1 }
+        XCTAssertTrue(browser.isLoadingPage)
+        browser.prepareForUserControl(taskID: "manual-navigation")
+        browser.prepareForUserControl(taskID: "manual-navigation")
+        XCTAssertTrue(browser.isLoadingPage, "Repeated takeover cannot stop an observed user-time navigation")
+        server.releaseHeldResponses()
+        try await waitUntil { browser.hasPageAwaitingHandback }
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "manual-navigation", requirement: session)
+        let current = try XCTUnwrap(browser.currentDocument(taskID: "manual-navigation"))
+        XCTAssertEqual(current.source, .userControlObservation)
+        XCTAssertEqual(current.committedURL, base.appendingPathComponent("login"))
+        XCTAssertNil(browser.receipt(taskID: "manual-navigation", operationID: current.operationID))
+        XCTAssertEqual(server.count("/start"), 1); XCTAssertEqual(server.count("/login"), 1)
+    }
+
+    func testTakeoverPreparationRejectsForeignOwnersAndOpenAdmission() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/held": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "current")
+        let load = Task { try await browser.navigate(taskID: "current", operationID: "held", to: base.appendingPathComponent("held")) }
+        try await waitUntil { server.count("/held") == 1 }
+        allowed = false
+        browser.prepareForUserControl(taskID: "foreign")
+        allowed = true
+        browser.prepareForUserControl(taskID: "current")
+        XCTAssertTrue(browser.isLoadingPage)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "current").attempts.last?.outcome, .pending)
+        server.releaseHeldResponses()
+        let current = try await load.value
+        XCTAssertTrue(browser.validate(current))
+        XCTAssertEqual(server.count("/held"), 1)
+    }
+
+    func testTakeoverWithdrawsDOMReplyWhileJoiningItsNativeCallback() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, withdrew = false
+        weak var owner: ComputerUseOwnedBrowser?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+            guard command == .pageSnapshot, !withdrew else { return }
+            withdrew = true; allowed = false
+            owner?.prepareForUserControl(taskID: "dom-takeover")
+            allowed = true // A reopened gate cannot resurrect the withdrawn reply.
+        }, mayAct: { allowed })
+        owner = browser
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "dom-takeover")
+        let document = try await browser.navigate(taskID: "dom-takeover", operationID: "page", to: base)
+        do { _ = try await browser.observePage(document: document); XCTFail("A withdrawn native reply cannot reach the task") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertTrue(withdrew)
+        try await browser.waitForDOMCompletion(document: document)
+        let fresh = try await browser.observePage(document: document)
+        try await browser.validatePageEvidence(fresh)
+        XCTAssertEqual(server.requestCount, 1)
+    }
+
     func testUnnavigatedSessionHandbackRetainsIdentityWithoutPageOrReceipt() async throws {
         var allowed = true, commands: [ComputerUseBrowserDOMCommand] = []
         let browser = ComputerUseOwnedBrowser(presentsWindow: false,

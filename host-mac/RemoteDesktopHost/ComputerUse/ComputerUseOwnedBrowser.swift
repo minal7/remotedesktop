@@ -1734,6 +1734,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
+    /// Synchronous host takeover preparation after action admission closes.
+    /// Retire only explicit AI work; preserve the native session, provider
+    /// window and navigation already being observed under user control.
+    func prepareForUserControl(taskID: String) {
+        guard self.taskID == taskID, !mayAct() else { return }
+        let view = browser, sessionID = browserSessionID, epoch = ownershipEpoch
+        let domID = pendingDOM?.id
+        if let pending { failPending(id: pending.id, error: .ownershipLost) }
+        guard self.taskID == taskID, browser === view, browserSessionID == sessionID,
+              ownershipEpoch == epoch, !mayAct() else { return }
+        // A dispatched script cannot be recalled. Withdraw its result now,
+        // keeping the native slot occupied until its callback actually joins.
+        if let domID { interruptDOM(id: domID, error: ComputerUseBrowserError.ownershipLost) }
+    }
+
     func stop() { stop(retirement: .stopped) }
 
     private func stop(retirement: NavigationHistory.ClaimEvent.Retirement) {
@@ -2008,6 +2023,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func failPending(id: UUID, error: ComputerUseBrowserError) {
         guard let pending, pending.id == id else { return }
+        let view = browser, epoch = ownershipEpoch
         let outcome: ComputerUseBrowserNavigationDispatchHistory.Outcome
         switch error {
         case .sourceNotAllowed: outcome = .sourceBlocked
@@ -2020,10 +2036,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pending.timeout?.cancel()
         pending.restoration?.cancel()
         generation &+= 1
+        let retiredGeneration = generation
         document = nil
         loadedPageIdentity = nil
-        detail = error.localizedDescription
-        browser?.stopLoading()
+        // stopLoading affects the native view, not one WKNavigation. Finish
+        // this call before publishing detail, which may admit a successor.
+        view?.stopLoading()
+        if browser === view, ownershipEpoch == epoch, generation == retiredGeneration,
+           taskID == pending.taskID, self.pending == nil {
+            detail = error.localizedDescription
+        }
         pending.continuation.resume(throwing: error)
     }
 

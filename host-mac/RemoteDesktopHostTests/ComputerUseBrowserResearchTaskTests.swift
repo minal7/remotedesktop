@@ -389,7 +389,7 @@ final class ComputerUseBrowserResearchTaskTests: XCTestCase {
         XCTAssertThrowsError(try tools.prepareOwnedBrowserResearch(taskID: original.taskID, prompt: "Changed request",
             goalPlanner: planner, resultPlanner: reader))
         _ = try await owner.interpretGoal()
-        tools.pauseOwnedBrowserResearch(taskID: original.taskID)
+        tools.pauseOwnedBrowserForUserControl(taskID: original.taskID)
         do { _ = try await owner.interpretGoal(); XCTFail("Host Pause reaches the retained owner") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
         try await tools.resumeOwnedBrowserResearch(taskID: original.taskID)
