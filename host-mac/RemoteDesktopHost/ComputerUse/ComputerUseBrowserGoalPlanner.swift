@@ -78,6 +78,22 @@ struct ComputerUseBrowserGoalInput: Equatable, Sendable, CustomStringConvertible
         digest = ComputerUseTaskContract.digest(["browser-clarified-goal-input-v1", rootDigest] + clarifications.map(\.digest))
     }
 
+    private init(prefixOf input: Self, answerCount: Int) {
+        taskID = input.taskID; prompt = input.prompt; rootDateContext = input.rootDateContext; rootDigest = input.rootDigest
+        clarifications = Array(input.clarifications.prefix(answerCount))
+        digest = clarifications.isEmpty ? rootDigest
+            : ComputerUseTaskContract.digest(["browser-clarified-goal-input-v1", rootDigest] + clarifications.map(\.digest))
+    }
+
+    /// Recover an actual accepted prefix without reparsing timestamps or
+    /// admitting an arbitrary sibling revision with the same root task.
+    func inputBeforeAnswer(at index: Int) -> Self? {
+        guard clarifications.indices.contains(index) else { return nil }
+        let earlier = Self(prefixOf: self, answerCount: index)
+        guard earlier.digest == clarifications[index].inputDigest, continues(earlier) else { return nil }
+        return earlier
+    }
+
     /// The turn can only be created by the scoped clarification boundary.
     /// Appending user input changes the revision, never the root task/clock.
     func appending(_ turn: ComputerUseBrowserGoalClarificationTurn) throws -> Self {
@@ -181,6 +197,18 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
         self.input = input; self.disposition = disposition; self.requirements = requirements; self.question = question
         digest = ComputerUseTaskContract.digest(["browser-goal-proposal-v4", input.digest, disposition.rawValue,
             question?.topic.rawValue ?? "none"] + (question?.requirementIDs ?? []) + requirements.map(\.id))
+    }
+
+    /// Only the complete interpretation sealed by a native question can be
+    /// restored. This is historical context, not authority for new effects.
+    static func interpretationBeforeAnswer(at index: Int, in input: ComputerUseBrowserGoalInput) -> Self? {
+        guard let earlier = input.inputBeforeAnswer(at: index) else { return nil }
+        let turn = input.clarifications[index]
+        let proposal = Self(input: earlier, disposition: turn.priorDisposition,
+            requirements: turn.priorRequirements, question: turn.priorQuestion)
+        guard proposal.digest == turn.priorInterpretationDigest,
+              proposal.requirements.allSatisfy({ earlier.source(of: $0) != nil }) else { return nil }
+        return proposal
     }
 
     func source(of requirement: Requirement) -> String? {

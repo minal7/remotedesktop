@@ -4,6 +4,74 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testPolicyConfigurationOrderCannotBeRepairedByALaterMatchingInstallation() throws {
+        typealias Check = ComputerUseBrowserResultAssessment.PolicyHistory
+        let input = try goal(), sources = try policyHistorySources(input), epoch = UUID()
+        let original = try ComputerUseBrowserSourcePolicy(goal: input)
+        let replacement = try ComputerUseBrowserSourcePolicy(goal: input, excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
+        let records: [Check.Record] = [
+            .init(order: 0, ownershipEpoch: epoch, value: .installation(previous: nil, policy: original)),
+            .init(order: 1, ownershipEpoch: epoch, value: .use(original)),
+            .init(order: 2, ownershipEpoch: epoch, value: .installation(previous: original, policy: replacement)),
+            .init(order: 3, ownershipEpoch: epoch, value: .use(replacement)),
+            .init(order: 4, ownershipEpoch: epoch, value: .installation(previous: replacement, policy: original)),
+            .init(order: 5, ownershipEpoch: epoch, value: .use(original))]
+        func check(_ values: [Check.Record], scopes: Bool = true, complete: Bool = true) -> Check {
+            .init(records: values, claimScopesReconciled: scopes, recordsComplete: complete, sources: sources)
+        }
+        let valid = check(records)
+        XCTAssertTrue(valid.gaps.isEmpty); XCTAssertEqual(valid.installationCount, 3)
+        XCTAssertEqual(valid.useCount, 3); XCTAssertEqual(valid.matchedUseCount, 3)
+        XCTAssertEqual(valid.lineageCounts[.currentMatches], 2)
+        XCTAssertEqual(check(Array(records.reversed())), valid, "Native ordinals establish the configuration order")
+        let wrong = Array(records.prefix(3)) + [Check.Record(order: 3, ownershipEpoch: epoch, value: .use(original))] + Array(records.suffix(2))
+        XCTAssertTrue(check(wrong).gaps.contains(.configurationMismatch)); XCTAssertEqual(check(wrong).matchedUseCount, 2)
+        let missing = records.filter { $0.order != 2 }
+        XCTAssertTrue(check(missing).gaps.contains(.previousPolicyMismatch)); XCTAssertTrue(check(missing).gaps.contains(.configurationMismatch))
+        XCTAssertTrue(check(records + [records[0]]).gaps.contains(.duplicateRecordOrder))
+        XCTAssertTrue(check(records, scopes: false).gaps.contains(.claimScopesUnreconciled))
+        XCTAssertTrue(check(records, complete: false).gaps.contains(.recordOverflow))
+        let nextEpoch = UUID()
+        let unconfigured = check(records + [.init(order: 6, ownershipEpoch: nextEpoch, value: .use(nil))])
+        XCTAssertEqual(unconfigured.unconfiguredUseCount, 1); XCTAssertEqual(unconfigured.matchedUseCount, 4)
+        XCTAssertTrue(check(records + [.init(order: 6, ownershipEpoch: nextEpoch, value: .use(original))]).gaps.contains(.configurationMismatch))
+        let projection = try ResearchAnswerFixture.json(valid.plannerContext)
+        for hidden in [input.digest, input.taskID, original.digest, replacement.digest, epoch.uuidString, "blocked.test"] { XCTAssertFalse(projection.contains(hidden)) }
+    }
+
+    func testNativePolicyHistoryKeepsEachDispatchConfigurationAcrossRestoration() async throws {
+        let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), sources = try policyHistorySources(input), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        let original = try ComputerUseBrowserSourcePolicy(goal: input)
+        let replacement = try ComputerUseBrowserSourcePolicy(goal: input, excludedOrigins: [ComputerUseBrowserSourceOrigin(url("https://blocked.test"))])
+        try browser.installSourcePolicy(original, replacing: nil, session: session)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "first-policy", to: base)
+        let before = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let first = ComputerUseBrowserResultAssessment.PolicyHistory(history: before, sources: sources)
+        try browser.installSourcePolicy(replacement, replacing: original.digest, session: session)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "second-policy", to: base)
+        try browser.installSourcePolicy(original, replacing: replacement.digest, session: session)
+        let after = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let current = ComputerUseBrowserResultAssessment.PolicyHistory(history: after, sources: sources)
+        XCTAssertEqual(after.attempts.map(\.policy), [original, replacement])
+        XCTAssertEqual(current.installationCount, 3); XCTAssertEqual(current.lineageCounts[.currentMatches], 2)
+        XCTAssertEqual(current.matchedUseCount, current.useCount); XCTAssertGreaterThan(current.useCount, first.useCount)
+        XCTAssertEqual(current.unconfiguredUseCount, 0); XCTAssertTrue(current.gaps.isEmpty)
+        XCTAssertEqual(first.lineageCounts[.currentMatches], 1); XCTAssertTrue(first.gaps.isEmpty)
+        XCTAssertEqual(ComputerUseBrowserResultAssessment.PolicyHistory(history: before, sources: sources), first)
+        XCTAssertNotEqual(before.identity, after.identity)
+    }
+
+    private func policyHistorySources(_ input: ComputerUseBrowserGoalInput) throws -> ComputerUseBrowserSourceRequirements {
+        let proposal = try ComputerUseBrowserGoalProposal.decode(content: ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":[["turn":0, "source":input.prompt, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]]],
+            "question":["topic":"none", "requirements":[]]]), input: input)
+        return .init(proposal: proposal)
+    }
+
     func testBlankClaimsRecordExactRetirementWithoutCreatingBrowserOrControlAuthority() throws {
         var allowed = true, calls = 0
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { calls += 1; return allowed })

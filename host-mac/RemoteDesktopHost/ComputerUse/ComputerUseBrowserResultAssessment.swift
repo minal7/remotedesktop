@@ -114,6 +114,97 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "matched_record_count":matchedRecordCount, "gaps":gaps.map(\.rawValue)]
         }
     }
+    /// Native configuration order and exact accepted-goal ancestry. Neither
+    /// matching scope nor installation order certifies the resulting route.
+    struct PolicyHistory: Equatable, Sendable {
+        typealias History = ComputerUseBrowserNavigationDispatchHistory
+        typealias Lineage = ComputerUseBrowserSourceRequirements.NavigationPolicyLineage
+        enum Gap: String, CaseIterable, Hashable, Sendable {
+            case claimScopesUnreconciled, recordOverflow, duplicateRecordOrder, previousPolicyMismatch, configurationMismatch
+            case currentRequirementsUncompiled, historicalRequirementsUncompiled, historicalInterpretationUnavailable
+            case currentPolicyMismatch, ancestorPolicyMismatch, changedNavigationScope, unrecordedRevision, foreignGoal
+        }
+        struct Record: Sendable {
+            enum Value: Sendable {
+                case installation(previous: ComputerUseBrowserSourcePolicy?, policy: ComputerUseBrowserSourcePolicy)
+                case use(ComputerUseBrowserSourcePolicy?)
+            }
+            let order: Int
+            let ownershipEpoch: UUID
+            let value: Value
+        }
+        let installationCount: Int
+        let useCount: Int
+        let matchedUseCount: Int
+        let unconfiguredUseCount: Int
+        let lineageCounts: [Lineage: Int]
+        let gaps: [Gap]
+
+        init(history: History, sources: ComputerUseBrowserSourceRequirements) {
+            var records = history.policyInstallations.map {
+                Record(order: $0.order, ownershipEpoch: $0.ownershipEpoch, value: .installation(previous: $0.previousPolicy, policy: $0.policy))
+            }
+            records += history.attempts.map { .init(order: $0.order, ownershipEpoch: $0.ownershipEpoch, value: .use($0.policy)) }
+            records += history.observations.filter { $0.surface == .mainDocument }.map {
+                .init(order: $0.order, ownershipEpoch: $0.ownershipEpoch, value: .use($0.configuredPolicy))
+            }
+            self.init(records: records, claimScopesReconciled: ClaimHistory(history: history).gaps.isEmpty,
+                recordsComplete: !history.overflowed && !history.policyInstallationsOverflowed && !history.observationsOverflowed,
+                sources: sources)
+        }
+
+        /// Pure inspection of frozen records; accepting diagnostic input
+        /// cannot install a policy, admit a goal revision or authorize work.
+        init(records: [Record], claimScopesReconciled: Bool, recordsComplete: Bool,
+             sources: ComputerUseBrowserSourceRequirements) {
+            var found: Set<Gap> = []
+            if !claimScopesReconciled { found.insert(.claimScopesUnreconciled) }
+            if !recordsComplete { found.insert(.recordOverflow) }
+            var current: [UUID: ComputerUseBrowserSourcePolicy] = [:], seenOrders: Set<Int> = []
+            var policies: [ComputerUseBrowserSourcePolicy] = [], installations = 0, uses = 0, matched = 0, unconfigured = 0
+            func remember(_ policy: ComputerUseBrowserSourcePolicy?) {
+                if let policy, !policies.contains(policy) { policies.append(policy) }
+            }
+            for record in records.sorted(by: { $0.order < $1.order }) {
+                guard record.order >= 0, seenOrders.insert(record.order).inserted else { found.insert(.duplicateRecordOrder); continue }
+                switch record.value {
+                case .installation(let previous, let policy):
+                    installations += 1; remember(previous); remember(policy)
+                    if current[record.ownershipEpoch] != previous { found.insert(.previousPolicyMismatch) }
+                    current[record.ownershipEpoch] = policy
+                case .use(let policy):
+                    uses += 1; remember(policy)
+                    if policy == nil { unconfigured += 1 }
+                    if current[record.ownershipEpoch] == policy { matched += 1 } else { found.insert(.configurationMismatch) }
+                }
+            }
+            var lineage: [Lineage: Int] = [:]
+            for policy in policies {
+                let status = sources.navigationPolicyLineage(policy)
+                lineage[status, default: 0] += 1
+                switch status {
+                case .currentMatches, .ancestorMatchesUnchangedScope: break
+                case .currentMismatch: found.insert(.currentPolicyMismatch)
+                case .currentUncompiled, .ancestorMatchesCurrentUncompiled: found.insert(.currentRequirementsUncompiled)
+                case .ancestorMatchesChangedScope: found.insert(.changedNavigationScope)
+                case .ancestorMismatch: found.insert(.ancestorPolicyMismatch)
+                case .ancestorUncompiled: found.insert(.historicalRequirementsUncompiled)
+                case .historicalInterpretationUnavailable: found.insert(.historicalInterpretationUnavailable)
+                case .unrecordedRevision: found.insert(.unrecordedRevision)
+                case .foreignGoal: found.insert(.foreignGoal)
+                }
+            }
+            installationCount = installations; useCount = uses; matchedUseCount = matched
+            unconfiguredUseCount = unconfigured; lineageCounts = lineage; gaps = Gap.allCases.filter(found.contains)
+        }
+        var plannerContext: [String: Any] {
+            ["installation_count":installationCount, "use_count":useCount, "matched_use_count":matchedUseCount,
+             "unconfigured_use_count":unconfiguredUseCount, "lineage":Lineage.allCases.compactMap { status -> [String: Any]? in
+                 guard let count = lineageCounts[status] else { return nil }; return ["status":status.rawValue, "count":count]
+             }, "gaps":gaps.map(\.rawValue)]
+        }
+    }
+
     /// Reconcile recorded control episodes only. Even a complete pair does
     /// not prove authentication, callback coverage or authority to act now.
     struct ControlHistory: Equatable, Sendable {
@@ -579,12 +670,12 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             case historyUnavailable, foreignContext, unresolvedSourceRequirements
             case discardedClaimHistory, claimBoundary
             case attemptOverflow, observationOverflow, controlOverflow, policyInstallationOverflow, claimOverflow
-            case unconfiguredDispatch, mismatchedPolicy, earlierGoalPolicy, foreignGoalPolicy
+            case unconfiguredDispatch, mismatchedPolicy, earlierGoalPolicy, foreignGoalPolicy, unrecordedGoalPolicy
             case pendingDispatch, unsuccessfulDispatch, unknownDispatchOrigin
             case weakObservationBinding, unattributedObservation, unorderedObservation
             case ownerHistoryUnavailable, ownerVisitBindingMismatch, duplicateOwnerVisit, ownerVisitOrderMismatch
             case unclaimedCommittedDispatch
-            case claimScopesUnreconciled, controlEpisodesUnreconciled, ownerVisitsUnreconciled, navigationEpisodesUnreconciled, pageObservationsUnreconciled, platformCoverageUnqualified
+            case policyHistoryUnreconciled, claimScopesUnreconciled, controlEpisodesUnreconciled, ownerVisitsUnreconciled, navigationEpisodesUnreconciled, pageObservationsUnreconciled, platformCoverageUnqualified
         }
         let attemptCount: Int
         let observationCount: Int
@@ -594,6 +685,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let matchedOwnerVisitCount: Int
         let controlHistory: ControlHistory?
         let claimHistory: ClaimHistory?
+        let policyHistory: PolicyHistory?
         let navigationEpisodes: NavigationEpisodes?
         let pageObservationHistory: PageObservationHistory?
         /// Callback count, not distinct requests and not proof of a violation:
@@ -609,6 +701,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             ownerVisitCount = ownerVisits?.count
             controlHistory = history.map { ControlHistory(history: $0) }
             claimHistory = history.map { ClaimHistory(history: $0) }
+            policyHistory = history.map { PolicyHistory(history: $0, sources: sources) }
             navigationEpisodes = history.map { NavigationEpisodes(history: $0) }
             pageObservationHistory = history.map { PageObservationHistory(history: $0) }
             var found: Set<Gap> = [.platformCoverageUnqualified]
@@ -631,12 +724,15 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                         found.insert(.unknownDispatchOrigin)
                     }
                 }
-                let policies = history.policyInstallations.map(\.policy) + history.attempts.compactMap(\.policy)
-                    + history.observations.filter { $0.surface == .mainDocument }.compactMap(\.configuredPolicy)
-                for policy in policies {
-                    if policy.taskID != sources.goal.taskID || policy.rootDigest != sources.goal.rootDigest { found.insert(.foreignGoalPolicy) }
-                    else if policy.goalRevision != sources.goal.digest { found.insert(.earlierGoalPolicy) }
-                    else if sources.unresolved.isEmpty && !sources.matchesNavigationPolicy(policy) { found.insert(.mismatchedPolicy) }
+                if let policyHistory {
+                    if !policyHistory.gaps.isEmpty { found.insert(.policyHistoryUnreconciled) }
+                    if policyHistory.gaps.contains(.foreignGoal) { found.insert(.foreignGoalPolicy) }
+                    if policyHistory.gaps.contains(.unrecordedRevision) { found.insert(.unrecordedGoalPolicy) }
+                    if !Set(policyHistory.gaps).isDisjoint(with: [.currentPolicyMismatch, .ancestorPolicyMismatch]) { found.insert(.mismatchedPolicy) }
+                    if !Set(policyHistory.lineageCounts.keys).isDisjoint(with: [.ancestorMatchesChangedScope, .ancestorUncompiled,
+                        .historicalInterpretationUnavailable, .ancestorMismatch, .ancestorMatchesCurrentUncompiled]) {
+                        found.insert(.earlierGoalPolicy)
+                    }
                 }
                 for observation in history.observations {
                     if [.pendingSlot, .observedSlot].contains(observation.binding) { found.insert(.weakObservationBinding) }
@@ -686,6 +782,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "owner_visit_count":ownerVisitCount.map { $0 as Any } ?? NSNull(), "matched_owner_visit_count":matchedOwnerVisitCount,
              "control_history":controlHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "claim_history":claimHistory.map { $0.plannerContext as Any } ?? NSNull(),
+             "policy_history":policyHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "navigation_episodes":navigationEpisodes.map { $0.plannerContext as Any } ?? NSNull(),
              "page_observations":pageObservationHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "blocked_source_observation_count":blockedSourceObservationCount]
@@ -963,7 +1060,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 14 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 15 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
@@ -976,7 +1073,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              }, "requirements":candidate.requirements.map(\.status.rawValue)] as [String: Any]
          }]
         if let navigationHistory { context["navigation_history_at_reading"] = navigationHistory.plannerContext }
-        if !dateReplacements.isEmpty { context["version"] = navigationAssessment ? 14 : 13; context["date_replacements"] = dateReplacements.map(\.context) }
+        if !dateReplacements.isEmpty { context["version"] = navigationAssessment ? 15 : 13; context["date_replacements"] = dateReplacements.map(\.context) }
         return context
     }
 

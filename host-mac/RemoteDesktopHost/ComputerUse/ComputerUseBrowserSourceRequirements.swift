@@ -6,6 +6,13 @@ import Foundation
 /// page text, model-authored URL or implicit search-provider exception enters
 /// the policy. Ambiguous/unsupported source clauses remain unresolved.
 struct ComputerUseBrowserSourceRequirements: Sendable {
+    /// Configuration comparison against sealed interpretations. These are
+    /// not claims about routes, actors or semantic classification accuracy.
+    enum NavigationPolicyLineage: String, CaseIterable, Hashable, Sendable {
+        case currentMatches, currentMismatch, currentUncompiled
+        case ancestorMatchesUnchangedScope, ancestorMatchesChangedScope, ancestorMatchesCurrentUncompiled, ancestorMismatch, ancestorUncompiled
+        case historicalInterpretationUnavailable, unrecordedRevision, foreignGoal
+    }
     enum UnresolvedReason: String, Hashable, Sendable {
         case ambiguousScope, unsupportedRelation, invalidOrigin, contradictorySources, unresolvedDisposition, sourceLimit
     }
@@ -188,6 +195,24 @@ struct ComputerUseBrowserSourceRequirements: Sendable {
         guard let expected = try? ComputerUseBrowserSourcePolicy(goal: goal,
             allowedOrigins: navigation.allowed.map(Array.init), excludedOrigins: Array(navigation.excluded)) else { return false }
         return policy == expected
+    }
+
+    func navigationPolicyLineage(_ policy: ComputerUseBrowserSourcePolicy) -> NavigationPolicyLineage {
+        guard policy.taskID == goal.taskID, policy.rootDigest == goal.rootDigest else { return .foreignGoal }
+        if policy.goalRevision == goal.digest {
+            guard isResearch, unresolved.isEmpty else { return .currentUncompiled }
+            return matchesNavigationPolicy(policy) ? .currentMatches : .currentMismatch
+        }
+        guard let index = goal.clarifications.firstIndex(where: { $0.inputDigest == policy.goalRevision }) else { return .unrecordedRevision }
+        guard let earlier = ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: index, in: goal) else {
+            return .historicalInterpretationUnavailable
+        }
+        let previous = Self(proposal: earlier)
+        guard previous.isResearch, previous.unresolved.isEmpty else { return .ancestorUncompiled }
+        guard previous.matchesNavigationPolicy(policy) else { return .ancestorMismatch }
+        guard isResearch, unresolved.isEmpty else { return .ancestorMatchesCurrentUncompiled }
+        return navigation.allowed == previous.navigation.allowed && navigation.excluded == previous.navigation.excluded
+            ? .ancestorMatchesUnchangedScope : .ancestorMatchesChangedScope
     }
 
     /// A resegmented row may contain other work as well. This identifies

@@ -4,6 +4,84 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
+    func testPolicyLineageRestoresOnlyExactAcceptedPrefixesAndTheirSealedInterpretations() throws {
+        let rows = [row("Find concerts in Montre\u{301}al. "),
+            row("Never visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])]
+        let original = try proposal(rows), excluded = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        let rootPolicy = try ComputerUseBrowserSourcePolicy(goal: original.input, excludedOrigins: [excluded])
+        let firstInput = try answered(original, with: "Paris", topic: .location)
+        let first = try proposal([row(original.input.prompt), row("Paris", field: "location", relation: "unspecified", turn: 1)], input: firstInput)
+        let firstPolicy = try ComputerUseBrowserSourcePolicy(goal: firstInput, excludedOrigins: [excluded])
+        let currentInput = try answered(first, with: "2 tickets", topic: .quantity, answerID: "answer-2")
+        let current = try proposal([row(original.input.prompt), row("Paris", field: "location", relation: "unspecified", turn: 1),
+            row("2 tickets", field: "quantity", relation: "unspecified", turn: 2)], input: currentInput)
+        XCTAssertEqual(currentInput.inputBeforeAnswer(at: 0), original.input)
+        XCTAssertEqual(currentInput.inputBeforeAnswer(at: 1), firstInput)
+        XCTAssertNil(currentInput.inputBeforeAnswer(at: -1)); XCTAssertNil(currentInput.inputBeforeAnswer(at: 2))
+        XCTAssertEqual(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: 0, in: currentInput), original)
+        XCTAssertEqual(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: 1, in: currentInput), first)
+        XCTAssertNil(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: 2, in: currentInput))
+        XCTAssertEqual(currentInput.inputBeforeAnswer(at: 1)?.rootDateContext, original.input.rootDateContext)
+        XCTAssertEqual(currentInput.inputBeforeAnswer(at: 1)?.clarifications.first?.dateContext, firstInput.clarifications.first?.dateContext)
+        let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertEqual(sources.navigationPolicyLineage(rootPolicy), .ancestorMatchesUnchangedScope)
+        XCTAssertEqual(sources.navigationPolicyLineage(firstPolicy), .ancestorMatchesUnchangedScope)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: currentInput, excludedOrigins: [excluded])), .currentMatches)
+        let projection = try ResearchAnswerFixture.json(currentInput.plannerContext)
+        for hidden in [original.digest, first.digest, "priorDisposition", "priorQuestion", "priorRequirements"] { XCTAssertFalse(projection.contains(hidden)) }
+    }
+
+    func testPolicyLineageKeepsChangedSourceScopeAndEarlierMismatchedConfigurationUnresolved() throws {
+        let rows = [row("Find concerts. "), row("Never visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])]
+        let original = try proposal(rows), oldOrigin = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        let addedOrigin = try ComputerUseBrowserSourceOrigin(url("https://second.test"))
+        let oldPolicy = try ComputerUseBrowserSourcePolicy(goal: original.input, excludedOrigins: [oldOrigin])
+        let wrongOldPolicy = try ComputerUseBrowserSourcePolicy(goal: original.input)
+        let input = try answered(original, with: "Also exclude second.test.", topic: .source, requirementIndex: 1)
+        let current = try proposal(rows + [row("Also exclude second.test.", field: "navigationSource", relation: "exclude", values: ["second.test"], turn: 1)], input: input)
+        let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertEqual(sources.navigationPolicyLineage(oldPolicy), .ancestorMatchesChangedScope)
+        XCTAssertEqual(sources.navigationPolicyLineage(wrongOldPolicy), .ancestorMismatch)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: input, excludedOrigins: [oldOrigin, addedOrigin])), .currentMatches)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: input, excludedOrigins: [addedOrigin])), .currentMismatch)
+        let unresolved = try proposal(rows + [row("Also exclude second.test.", field: "source", relation: "exclude", values: ["second.test"], turn: 1)], input: input)
+        XCTAssertEqual(ComputerUseBrowserSourceRequirements(proposal: unresolved).navigationPolicyLineage(oldPolicy), .ancestorMatchesCurrentUncompiled)
+        XCTAssertEqual(ComputerUseBrowserSourceRequirements(proposal: unresolved).navigationPolicyLineage(try .init(goal: input)), .currentUncompiled)
+    }
+
+    func testPolicyLineageRejectsSiblingRevisionsAndForeignRootsEvenWithIdenticalOrigins() throws {
+        let rows = [row("Find concerts. "), row("Never visit blocked.test.", role: "prohibition", field: "navigationSource", relation: "exclude", values: ["blocked.test"])]
+        let original = try proposal(rows), origin = try ComputerUseBrowserSourceOrigin(url("https://blocked.test"))
+        let currentInput = try answered(original, with: "Paris", topic: .location)
+        let sibling = try answered(original, with: "Paris", topic: .location)
+        XCTAssertEqual(currentInput.rootDigest, sibling.rootDigest); XCTAssertFalse(currentInput.continues(sibling))
+        let current = try proposal(rows + [row("Paris", field: "location", relation: "unspecified", turn: 1)], input: currentInput)
+        let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: sibling, excludedOrigins: [origin])), .unrecordedRevision)
+        let foreign = try goal(original.input.prompt, id: "different-root")
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: foreign, excludedOrigins: [origin])), .foreignGoal)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: original.input, excludedOrigins: [origin])), .ancestorMatchesUnchangedScope)
+    }
+
+    func testRestoredClarificationDispositionCannotBeTurnedIntoHistoricalResearchAuthority() throws {
+        let rows = [row("Find concerts. "), row("Only use tickets.test.", field: "source", values: ["tickets.test"])]
+        let input = try goal(rows.compactMap { $0["source"] as? String }.joined())
+        let original = try ComputerUseBrowserGoalProposal.decode(content: ResearchAnswerFixture.json([
+            "disposition":"clarification", "requirements":rows, "question":["topic":"source", "requirements":[1]]]), input: input)
+        let answer = "Only report results from tickets.test."
+        let updated = try answered(original, with: answer, topic: .source, requirementIndex: 1)
+        let recovered = try XCTUnwrap(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: 0, in: updated))
+        XCTAssertEqual(recovered, original); XCTAssertEqual(recovered.disposition, .clarification)
+        XCTAssertEqual(recovered.question, original.question)
+        XCTAssertEqual(updated.clarifications[0].priorDisposition, .clarification)
+        XCTAssertEqual(updated.clarifications[0].priorQuestion, original.question)
+        let current = try proposal([row(input.prompt), row(answer, field: "answerSource", values: ["tickets.test"], turn: 1)], input: updated)
+        let sources = ComputerUseBrowserSourceRequirements(proposal: current)
+        XCTAssertTrue(sources.unresolved.isEmpty)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: input)), .ancestorUncompiled)
+        XCTAssertEqual(sources.navigationPolicyLineage(try .init(goal: updated)), .currentMatches)
+    }
+
     func testNavigationPolicyCorrespondenceRequiresTheCompiledRestrictionsAndExactGoal() throws {
         let interpreted = try proposal([row("Find concert tickets. "),
             row("Only use tickets.test. ", field: "navigationSource", values: ["tickets.test"]),

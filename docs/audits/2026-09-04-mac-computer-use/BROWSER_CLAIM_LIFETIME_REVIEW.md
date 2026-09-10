@@ -43,6 +43,8 @@ Five changed Swift files pass parse-only checks. Default/focused source inventor
 
 ## Remaining repair order
 
+Source follow-up: [policy lineage and installation-order reconciliation](BROWSER_POLICY_LINEAGE_REVIEW.md) now compares recorded configurations with exact accepted ancestors and checks their native installation/use sequence. Semantic correction, temporal intent changes, actor attribution and platform qualification remain open; the counts above describe this earlier checkpoint.
+
 1. Reconcile source-policy and goal lineage across legitimate answers, explicit replacements and correction of earlier interpretations. A policy installed now cannot certify earlier activity.
 2. Reconcile workflow/manual-control intervals with navigation initiation, observed-page adoption and required task criteria. Native claim scope alone cannot identify the actor, prove login success or rebind pending form duties to a changed document.
 3. Qualify macOS/WebKit callback and redirect coverage, late events across retirement, real account handoff and source-constrained completion before enabling affirmative route evidence. Cross-task ledger replacement and process loss still retain missing history.

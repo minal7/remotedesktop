@@ -65,6 +65,8 @@ struct ComputerUseBrowserGoalClarificationTurn: Equatable, Sendable, CustomStrin
     /// Historical classification of every clause, including clauses outside
     /// the question's scope. A later answer cannot erase this provenance.
     let priorInterpretationDigest: String
+    let priorDisposition: ComputerUseBrowserGoalProposal.Disposition
+    let priorQuestion: ComputerUseBrowserGoalProposal.Question?
     let priorRequirements: [ComputerUseBrowserGoalProposal.Requirement]
     let answerTaskID: String
     let answer: String
@@ -74,6 +76,7 @@ struct ComputerUseBrowserGoalClarificationTurn: Equatable, Sendable, CustomStrin
                      dateContext: ComputerUseBrowserGoalInput.DateContext) {
         inputDigest = question.inputDigest; questionID = question.id; topic = question.topic; scope = question.scope
         priorInterpretationDigest = question.interpretationDigest; priorRequirements = question.requirements
+        priorDisposition = question.interpretationDisposition; priorQuestion = question.interpretationQuestion
         self.answerTaskID = answerTaskID; self.answer = answer; self.dateContext = dateContext
         digest = ComputerUseTaskContract.digest(["browser-goal-answer-v3", inputDigest, questionID,
             priorInterpretationDigest, answerTaskID, answer, String(dateContext.referenceMilliseconds), dateContext.timeZoneIdentifier])
@@ -114,6 +117,8 @@ final class ComputerUseBrowserGoalClarification {
         let topic: ComputerUseBrowserClarificationTopic
         let scope: [ComputerUseBrowserGoalClarificationTurn.Scope]
         let interpretationDigest: String
+        let interpretationDisposition: ComputerUseBrowserGoalProposal.Disposition
+        let interpretationQuestion: ComputerUseBrowserGoalProposal.Question?
         let requirements: [ComputerUseBrowserGoalProposal.Requirement]
         let issuedAt: Date
         let expiresAt: Date
@@ -124,6 +129,7 @@ final class ComputerUseBrowserGoalClarification {
             let input = proposal.input
             taskID = input.taskID; inputDigest = input.digest; self.topic = topic; self.scope = scope
             interpretationDigest = proposal.digest; requirements = proposal.requirements
+            interpretationDisposition = proposal.disposition; interpretationQuestion = proposal.question
             self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.context = context
             text = try Self.render(topic: topic, scope: scope, input: input)
             guard text.count <= ComputerUseTaskLedger.maximumClarificationCharacters,
