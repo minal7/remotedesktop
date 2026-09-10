@@ -6,6 +6,201 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testNavigationPublicationTakeoverRetiresReservationBeforeNativeDispatch() async throws {
+        for publication in ["site", "detail"] {
+            for control in ["paused", "reopened", "gate-only"] {
+                let server = try OwnedBrowserHTTPFixture()
+                let base = try await server.start()
+                defer { server.stop() }
+                var allowed = true, interrupted = false, details: [String] = []
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+                defer { browser.close() }
+                let session = try browser.prepareWorkflowSession(taskID: "publication")
+                let detailSubscription = browser.$detail.sink { details.append($0) }
+                let subscription = observeNavigationPublication(publication, browser: browser) {
+                    guard !interrupted else { return }
+                    interrupted = true; allowed = false
+                    if control != "gate-only" {
+                        browser.prepareForUserControl(taskID: "publication")
+                        // Inspect in the callback, before the old caller can
+                        // proceed or its asynchronous cleanup can run.
+                        allowed = true
+                        do {
+                            let history = try browser.navigationDispatchHistory(taskID: "publication")
+                            XCTAssertEqual(history.attempts.last?.outcome, .ownershipLost)
+                        } catch { XCTFail("Missing retired reservation: \(error)") }
+                        allowed = control == "reopened"
+                    }
+                }
+                defer { subscription.cancel(); detailSubscription.cancel() }
+                do {
+                    _ = try await browser.navigate(taskID: "publication", operationID: "old", to: base.appendingPathComponent("old"))
+                    XCTFail("A status callback cannot allow the old preparation to dispatch")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+                XCTAssertTrue(interrupted)
+                allowed = true
+                XCTAssertEqual(browser.handbackRequirement(taskID: "publication", required: true), session)
+                XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "publication").attempts.last?.outcome, .ownershipLost)
+                XCTAssertNil(browser.receipt(taskID: "publication", operationID: "old"))
+                if publication == "site" { XCTAssertFalse(details.contains("Opening page…")) }
+                let next = try await browser.navigate(taskID: "publication", operationID: "next", to: base.appendingPathComponent("next"))
+                XCTAssertTrue(browser.validate(next))
+                XCTAssertEqual(server.count("/old"), 0); XCTAssertEqual(server.count("/next"), 1)
+            }
+        }
+    }
+
+    func testNavigationPublicationReplacementCannotBeOverwrittenByOldUnwind() async throws {
+        for publication in ["site", "detail"] {
+            for ending in ["stop", "close"] {
+                let server = try OwnedBrowserHTTPFixture()
+                let base = try await server.start()
+                defer { server.stop() }
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+                defer { browser.close() }
+                let original = try browser.prepareWorkflowSession(taskID: "same-task")
+                var interrupted = false
+                var replacement: ComputerUseBrowserHandbackRequirement?
+                var replacementHistory: ComputerUseBrowserNavigationDispatchHistory?
+                let subscription = observeNavigationPublication(publication, browser: browser) {
+                    guard !interrupted else { return }
+                    interrupted = true
+                    if ending == "stop" { browser.stop() } else { browser.close() }
+                    do {
+                        replacement = try browser.prepareWorkflowSession(taskID: "same-task")
+                        replacementHistory = try browser.navigationDispatchHistory(taskID: "same-task")
+                    } catch { XCTFail("Cannot prepare replacement: \(error)") }
+                }
+                defer { subscription.cancel() }
+                do {
+                    _ = try await browser.navigate(taskID: "same-task", operationID: "old", to: base.appendingPathComponent("old"))
+                    XCTFail("The old call cannot dispatch into a replacement with the same task ID")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+                let current = try XCTUnwrap(replacement)
+                XCTAssertNotEqual(current, original)
+                XCTAssertEqual(browser.handbackRequirement(taskID: "same-task", required: true), current)
+                XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "same-task"), try XCTUnwrap(replacementHistory))
+                XCTAssertNil(browser.receipt(taskID: "same-task", operationID: "old"))
+                let next = try await browser.navigate(taskID: "same-task", operationID: "next", to: base.appendingPathComponent("next"))
+                XCTAssertTrue(browser.validate(next))
+                XCTAssertEqual(server.count("/old"), 0); XCTAssertEqual(server.count("/next"), 1)
+            }
+        }
+    }
+
+    func testNavigationPreparationRejectsTakeoverEvenWhenAdmissionReopens() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, callbacks = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "preparation")
+        do {
+            _ = try await browser.navigate(taskID: "preparation", operationID: "old", to: base.appendingPathComponent("old"), willBeginEffect: {
+                callbacks += 1; allowed = false
+                browser.prepareForUserControl(taskID: "preparation")
+                allowed = true
+            })
+            XCTFail("A reopened gate cannot revive the preparation preceding Take Control")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertEqual(callbacks, 1)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "preparation", required: true), session)
+        XCTAssertTrue(try browser.isUnnavigatedSession(session))
+        XCTAssertTrue(try browser.navigationDispatchHistory(taskID: "preparation").attempts.isEmpty)
+        let next = try await browser.navigate(taskID: "preparation", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertEqual(server.count("/old"), 0); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testNavigationPreparationRejectsSameTaskClaimAndBrowserReplacement() async throws {
+        for ending in ["stop", "close"] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+            defer { browser.close() }
+            let original = try browser.prepareWorkflowSession(taskID: "same-task")
+            var replacement: ComputerUseBrowserHandbackRequirement?
+            do {
+                _ = try await browser.navigate(taskID: "same-task", operationID: "old", to: base.appendingPathComponent("old"), willBeginEffect: {
+                    if ending == "stop" { browser.stop() } else { browser.close() }
+                    replacement = try browser.prepareWorkflowSession(taskID: "same-task")
+                })
+                XCTFail("An unbound first-page call still needs its original owner and browser")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            let current = try XCTUnwrap(replacement)
+            XCTAssertNotEqual(current, original)
+            XCTAssertTrue(try browser.isUnnavigatedSession(current))
+            XCTAssertTrue(try browser.navigationDispatchHistory(taskID: "same-task").attempts.isEmpty)
+            let next = try await browser.navigate(taskID: "same-task", operationID: "next", to: base.appendingPathComponent("next"))
+            XCTAssertTrue(browser.validate(next))
+            XCTAssertEqual(server.count("/old"), 0); XCTAssertEqual(server.count("/next"), 1)
+        }
+    }
+
+    func testNavigationPublicationCancellationStopsBeforeOpeningStatusAndLoad() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "cancelled")
+        var cancelled = false, details: [String] = []
+        let detailSubscription = browser.$detail.sink { details.append($0) }
+        let subscription = observeNavigationPublication("site", browser: browser) {
+            guard !cancelled else { return }
+            cancelled = true
+            withUnsafeCurrentTask { task in
+                XCTAssertNotNil(task)
+                task?.cancel()
+            }
+        }
+        defer { subscription.cancel(); detailSubscription.cancel() }
+        let running = Task { try await browser.navigate(taskID: "cancelled", operationID: "old", to: base.appendingPathComponent("old")) }
+        do { _ = try await running.value; XCTFail("Cancelled preparation cannot continue into WebKit") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(cancelled); XCTAssertTrue(running.isCancelled)
+        XCTAssertFalse(details.contains("Opening page…"))
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "cancelled").attempts.last?.outcome, .ownershipLost)
+        let next = try await browser.navigate(taskID: "cancelled", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertEqual(server.count("/old"), 0); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    func testFinishedNavigationCannotReturnAcrossTakeoverDuringIdentityRead() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true, interrupted = false
+        weak var owner: ComputerUseOwnedBrowser?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+            guard command == .pageIdentity, !interrupted else { return }
+            interrupted = true; allowed = false
+            owner?.prepareForUserControl(taskID: "identity")
+            allowed = true
+        }, mayAct: { allowed })
+        owner = browser
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "identity")
+        do {
+            _ = try await browser.navigate(taskID: "identity", operationID: "completed", to: base.appendingPathComponent("completed"))
+            XCTFail("Takeover cannot be swallowed as an optional DOM identity failure")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        XCTAssertTrue(interrupted)
+        let historical = try XCTUnwrap(browser.receipt(taskID: "identity", operationID: "completed"))
+        XCTAssertEqual(historical.committedURL, base.appendingPathComponent("completed"))
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "identity").attempts.last?.outcome, .documentCommitted)
+        try await browser.waitForDOMCompletion(document: historical)
+        XCTAssertEqual(server.count("/completed"), 1, "Losing the current result cannot erase a native fact or authorize retry")
+    }
+
+    private func observeNavigationPublication(_ publication: String, browser: ComputerUseOwnedBrowser,
+                                               action: @escaping () -> Void) -> AnyCancellable {
+        if publication == "site" { return browser.$displayedSite.dropFirst().sink { _ in action() } }
+        return browser.$detail.dropFirst().sink { if $0 == "Opening page…" { action() } }
+    }
+
     func testHostTakeoverRetiresPendingNavigationBeforeCancellationUnwinds() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/old": .init(held: true), "/next": .init(held: true)])
         let base = try await server.start()

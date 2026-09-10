@@ -573,6 +573,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private(set) var taskID: String?
     private var generation: UInt64 = 0
     private var ownershipEpoch = UUID()
+    // Pause must invalidate a preparation even if admission reopens before
+    // its synchronous callback returns. Handback keeps ownershipEpoch intact.
+    private var takeoverEpoch = UUID()
     private var browserSessionID = UUID()
     /// Monotonic for one WKWebView lifetime. A failed/cancelled load or a URL
     /// returning to nil cannot turn a used session into an untouched one.
@@ -654,6 +657,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let requestedURL: URL
         let sourceAttemptID: UUID?
         let continuation: CheckedContinuation<ComputerUseBrowserDocument, Error>
+        var nativeDispatchStarted = false
         var navigation: WKNavigation?
         var successfulResponseURL: URL?
         var receivedSuccessfulResponse: Bool { successfulResponseURL != nil }
@@ -1616,6 +1620,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageChanged
         }
         guard let url = Self.validatedURL(url) else { throw ComputerUseBrowserError.invalidURL }
+        let claimEpoch = ownershipEpoch, admissionEpoch = takeoverEpoch, initialGeneration = generation
         let capturedPolicy = sourcePolicy
         let historyItem = try historyTarget.flatMap { try self.historyItem(for: $0) }
         if let historyTarget, case .history = historyTarget.source, historyItem == nil {
@@ -1640,30 +1645,32 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         try checkInitialSession()
         let browser = makeBrowser()
+        let sessionID = browserSessionID
+        func checkOwner() throws {
+            try Task.checkCancellation()
+            guard hasOwnership(taskID: taskID), self.browser === browser, browserSessionID == sessionID,
+                  ownershipEpoch == claimEpoch, takeoverEpoch == admissionEpoch else {
+                throw ComputerUseBrowserError.ownershipLost
+            }
+        }
+        func checkPreparation() throws {
+            try checkOwner()
+            guard generation == initialGeneration else { throw ComputerUseBrowserError.pageChanged }
+            guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
+            if let expectedDocument {
+                guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
+                guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+            }
+            try checkInitialSession()
+            try checkSource()
+        }
+        try checkOwner()
         presentIfNeeded(browser)
-        try Task.checkCancellation()
-        guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
-        // A later workflow step must still start from its exact prerequisite
-        // document at dispatch. A historical receipt or equal URL is not a
-        // current-document check. Keep this after presentation and before any
-        // generation change, pending operation or WebKit load is created.
-        if let expectedDocument {
-            guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
-            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-        }
-        try checkInitialSession()
-        try checkSource()
+        try checkPreparation()
         try willBeginEffect()
-        try Task.checkCancellation()
-        guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
-        // Reacquiring the same task ID after a callback retires its earlier
-        // document. Ownership alone cannot validate that prerequisite.
-        if let expectedDocument {
-            guard validate(expectedDocument) else { throw ComputerUseBrowserError.pageChanged }
-            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-        }
-        try checkInitialSession()
-        try checkSource()
+        // Same task text, a reopened gate, or a replacement blank browser
+        // cannot give this preparation a new native lifetime.
+        try checkPreparation()
         guard !navigationAttemptIDs.contains(operationID), navigationAttemptIDs.count < 64 else { throw ComputerUseBrowserError.pageChanged }
         navigationAttemptIDs.insert(operationID)
         sessionHasNavigationActivity = true
@@ -1677,21 +1684,47 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         document = nil
         loadedPageIdentity = nil
         retirePageObservations(.navigationStarted)
-        displayedSite = ComputerUseBrowserSite.displayName(for: url)
-        detail = "Opening page…"
+        let navigationGeneration = generation
         let id = UUID()
+        func checkPendingAdmission() throws {
+            try checkOwner()
+            guard pending?.id == id, generation == navigationGeneration,
+                  pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.pageChanged }
+            guard sourcePolicy == capturedPolicy else { throw ComputerUseBrowserError.pageChanged }
+            try validateUnretiredNavigation(operationID: operationID)
+            try validateSourceURL(url)
+            if expectedDocument != nil, !hasRequiredPresentation { throw ComputerUseBrowserError.windowNotActive }
+        }
         return try await withTaskCancellationHandler {
             do {
                 let result: ComputerUseBrowserDocument = try await withCheckedThrowingContinuation { continuation in
-                    pending = PendingNavigation(id: id, taskID: taskID, generation: generation,
+                    pending = PendingNavigation(id: id, taskID: taskID, generation: navigationGeneration,
                         operationID: operationID, requestedURL: url, sourceAttemptID: sourceAttemptID, continuation: continuation)
                     pending?.historyOperationID = historySourceOperationID
                     pending?.timeout = Task { [weak self, navigationTimeout] in
                         do { try await Task.sleep(for: navigationTimeout) } catch { return }
                         self?.failPending(id: id, error: .deadlineExceeded)
                     }
-                    if let historyItem { pending?.navigation = browser.go(to: historyItem) }
-                    else { pending?.navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)) }
+                    do {
+                        // Register before observable publication. A synchronous
+                        // Take Control/Stop can now retire this exact request.
+                        try checkPendingAdmission()
+                        displayedSite = ComputerUseBrowserSite.displayName(for: url)
+                        try checkPendingAdmission()
+                        detail = "Opening page…"
+                        try checkPendingAdmission()
+                    } catch {
+                        failPending(id: id, error: (error as? ComputerUseBrowserError) ?? .ownershipLost)
+                        return
+                    }
+                    pending?.nativeDispatchStarted = true
+                    let navigation: WKNavigation?
+                    if let historyItem { navigation = browser.go(to: historyItem) }
+                    else { navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)) }
+                    // Native dispatch may itself reenter the delegate. Never
+                    // write an old return value into a replacement pending slot.
+                    guard pending?.id == id else { return }
+                    pending?.navigation = navigation
                     if pending?.navigation == nil { failPending(id: id, error: .navigationFailed) }
                     if historyItem != nil, pending?.id == id {
                         // Cached/Instant Back may omit normal response/load
@@ -1707,22 +1740,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 }
                 let focusDeadline = ContinuousClock.now + .seconds(2)
                 while !hasRequiredPresentation && ContinuousClock.now < focusDeadline {
-                    try Task.checkCancellation()
-                    guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
+                    try checkOwner()
                     try await Task.sleep(for: .milliseconds(25))
                 }
-                try Task.checkCancellation()
+                try checkOwner()
                 guard validate(result) else { throw ComputerUseBrowserError.ownershipLost }
                 guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 do {
-                    loadedPageIdentity = try await readPageIdentity(validateContext: { self.validate(result) })
+                    let identity = try await readPageIdentity(validateContext: { self.validate(result) })
+                    try checkOwner()
+                    guard validate(result) else { throw ComputerUseBrowserError.pageChanged }
+                    loadedPageIdentity = identity
                 } catch {
-                    try Task.checkCancellation()
+                    try checkOwner()
                     guard validate(result) else { throw ComputerUseBrowserError.pageChanged }
                     // Opening a PDF or other non-DOM resource does not depend
                     // on the text adapter. Such pages have no history proof.
                     loadedPageIdentity = nil
                 }
+                try checkOwner()
                 guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
                 return result
             } catch {
@@ -1739,6 +1775,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// window and navigation already being observed under user control.
     func prepareForUserControl(taskID: String) {
         guard self.taskID == taskID, !mayAct() else { return }
+        takeoverEpoch = UUID()
         let view = browser, sessionID = browserSessionID, epoch = ownershipEpoch
         let domID = pendingDOM?.id
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
@@ -2041,7 +2078,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         loadedPageIdentity = nil
         // stopLoading affects the native view, not one WKNavigation. Finish
         // this call before publishing detail, which may admit a successor.
-        view?.stopLoading()
+        if pending.nativeDispatchStarted { view?.stopLoading() }
         if browser === view, ownershipEpoch == epoch, generation == retiredGeneration,
            taskID == pending.taskID, self.pending == nil {
             detail = error.localizedDescription
