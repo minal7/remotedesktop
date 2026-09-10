@@ -604,8 +604,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private let navigationTimeout: Duration
     private let domTimeout: Duration
     private let domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)?
+    private let nativeNavigationDidDispatch: ((WKWebView, WKNavigation?) -> Void)?
     private var browser: WKWebView?
     private var window: NSWindow?
+    // Remember identity while WebKit or a callback still retains the object.
+    // Do not pin every past load or forget a live retired navigation by age.
+    private let knownMainNavigations = NSHashTable<WKNavigation>(options: [.weakMemory, .objectPointerPersonality], capacity: 0)
+    @MainActor
+    private final class NativeNavigationDispatch {
+        struct Callback {
+            let navigation: WKNavigation?
+            let replay: () -> Void
+        }
+        let view: WKWebView
+        let pendingID: UUID
+        var callbacks: [Callback] = []
+
+        init(view: WKWebView, pendingID: UUID) { self.view = view; self.pendingID = pendingID }
+    }
+    private var nativeNavigationDispatch: NativeNavigationDispatch?
     @MainActor
     private final class NativeRetirement {
         let view: WKWebView?
@@ -699,11 +716,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     init(presentsWindow: Bool = true, navigationTimeout: Duration = .seconds(30), domTimeout: Duration = .seconds(5),
-         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil, mayAct: @escaping () -> Bool) {
+         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil,
+         nativeNavigationDidDispatch: ((WKWebView, WKNavigation?) -> Void)? = nil, mayAct: @escaping () -> Bool) {
         self.presentsWindow = presentsWindow
         self.navigationTimeout = navigationTimeout
         self.domTimeout = domTimeout
         self.domScriptDidDispatch = domScriptDidDispatch
+        self.nativeNavigationDidDispatch = nativeNavigationDidDispatch
         self.mayAct = mayAct
     }
 
@@ -750,7 +769,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func claim(taskID: String) throws {
-        guard !isNativeCleanupActive else { throw ComputerUseBrowserError.busy }
+        guard !isNativeCleanupActive, nativeNavigationDispatch == nil else { throw ComputerUseBrowserError.busy }
         guard !hasOpenSignInWindow else { throw ComputerUseBrowserError.signInWindowOpen }
         guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
@@ -1643,7 +1662,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   willBeginEffect: () throws -> Void = {}, historyTarget: ComputerUseBrowserNavigationTarget? = nil) async throws -> ComputerUseBrowserDocument {
         try Task.checkCancellation()
         guard hasOwnership(taskID: taskID) else { throw ComputerUseBrowserError.ownershipLost }
-        guard pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
+        guard nativeNavigationDispatch == nil, pending == nil, pendingDOM == nil, observedNavigation == nil else { throw ComputerUseBrowserError.busy }
         guard !navigationAttemptIDs.contains(operationID), navigationAttemptIDs.count < 64,
               receipts[operationID] == nil, receipts.count < 64, !operationID.isEmpty else {
             // An uncertain navigation is reconciled by the step engine. This
@@ -1748,15 +1767,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                         failPending(id: id, error: (error as? ComputerUseBrowserError) ?? .ownershipLost)
                         return
                     }
+                    let dispatch = NativeNavigationDispatch(view: browser, pendingID: id)
+                    nativeNavigationDispatch = dispatch
                     pending?.nativeDispatchStarted = true
                     let navigation: WKNavigation?
                     if let historyItem { navigation = browser.go(to: historyItem) }
                     else { navigation = browser.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)) }
-                    // Native dispatch may itself reenter the delegate. Never
-                    // write an old return value into a replacement pending slot.
-                    guard pending?.id == id else { return }
-                    pending?.navigation = navigation
-                    if pending?.navigation == nil { failPending(id: id, error: .navigationFailed) }
+                    // A fixture can exercise the same unbound-return interval
+                    // as a synchronous native delegate callback. Production
+                    // has no hook. Bind the return before replaying callbacks.
+                    nativeNavigationDidDispatch?(browser, navigation)
+                    finishNavigationDispatch(dispatch, navigation: navigation)
                     if historyItem != nil, pending?.id == id {
                         // Cached/Instant Back may omit normal response/load
                         // callbacks. Confirm the exact retained native item,
@@ -1996,7 +2017,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private var canOpenSignInWindow: Bool {
-        !isNativeCleanupActive && isUserControllingTask && !hasOpenSignInWindow && pending == nil
+        !isNativeCleanupActive && nativeNavigationDispatch == nil && isUserControllingTask && !hasOpenSignInWindow && pending == nil
             && pendingDOM == nil && browser?.isLoading == false
     }
 
@@ -2292,6 +2313,44 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
+    private func isRetiredMainNavigation(_ navigation: WKNavigation?, in view: WKWebView) -> Bool {
+        guard view === browser, let navigation, knownMainNavigations.contains(navigation) else { return false }
+        return navigation !== pending?.navigation && navigation !== observedNavigation?.navigation
+    }
+
+    private func deferNavigationCallback(_ phase: NavigationHistory.Phase, in view: WKWebView,
+                                         navigation: WKNavigation?, replay: @escaping () -> Void) -> Bool {
+        guard !isNativeCleanupActive, let dispatch = nativeNavigationDispatch, dispatch.view === view else { return false }
+        guard !isRetiredMainNavigation(navigation, in: view) else { return true }
+        // Preserve notification order and its original binding. Replaying
+        // state handling after load returns must not manufacture a later
+        // callback or promote an unbound history entry to an exact receipt.
+        recordNavigationCallback(phase, in: view, navigation: navigation)
+        dispatch.callbacks.append(.init(navigation: navigation, replay: replay))
+        return true
+    }
+
+    private func finishNavigationDispatch(_ dispatch: NativeNavigationDispatch, navigation: WKNavigation?) {
+        if let navigation { knownMainNavigations.add(navigation) }
+        let callbacks = dispatch.callbacks
+        dispatch.callbacks.removeAll()
+        if nativeNavigationDispatch === dispatch { nativeNavigationDispatch = nil }
+        if pending?.id == dispatch.pendingID {
+            pending?.navigation = navigation
+            if navigation == nil { failPending(id: dispatch.pendingID, error: .navigationFailed) }
+        }
+        for callback in callbacks {
+            guard pending?.id == dispatch.pendingID else {
+                // An early policy decision, Stop or completion retired the
+                // original reservation. These callbacks cannot start a new
+                // observation in whichever claim now occupies the view.
+                if let navigation = callback.navigation { knownMainNavigations.add(navigation) }
+                continue
+            }
+            callback.replay()
+        }
+    }
+
     // A policy callback lacks an exact WKNavigation. This snapshot prevents
     // reentrant continuation into a successor; it does not invent correlation
     // for a late callback that was already stale when it entered the delegate.
@@ -2511,12 +2570,30 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if deferNavigationCallback(.provisionalStart, in: webView, navigation: navigation, replay: { [weak self] in
+            self?.handleProvisionalStart(in: webView, navigation: navigation, recordCallback: false)
+        }) { return }
+        handleProvisionalStart(in: webView, navigation: navigation, recordCallback: true)
+    }
+
+    private func handleProvisionalStart(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
         guard !isNativeCleanupActive else { return }
         if webView === signInBrowser {
-            recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation)
+            if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
             return
         }
         guard webView === browser else { return }
+        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        if let navigation, let observed = observedNavigation, navigation === observed.navigation {
+            // A repeated start for the same live navigation is not a second
+            // observed load and must not discard its response or handback ID.
+            if recordCallback {
+                recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
+                    control: observed.startedWhileActive ? .automationAllowed : .userControl)
+            }
+            return
+        }
+        if let navigation { knownMainNavigations.add(navigation) }
         sessionHasNavigationActivity = true
         locationRevision &+= 1
         guard let pending else {
@@ -2526,19 +2603,26 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             loadedPageIdentity = nil
             retirePageObservations(.navigationStarted)
             if let navigation, let taskID {
+                let callback = navigationCallbackScope(in: webView)
+                let startedWhileActive = mayAct()
+                guard isCurrentNavigationCallback(callback) else { return }
                 observedNavigation = ObservedNavigation(navigation: navigation, generation: generation,
-                    taskID: taskID, parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, startedWhileActive: mayAct())
+                    taskID: taskID, parentSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, startedWhileActive: startedWhileActive)
             }
-            recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
-                control: observedNavigation.map { $0.startedWhileActive ? .automationAllowed : .userControl } ?? .unknown)
+            if recordCallback {
+                recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation,
+                    control: observedNavigation.map { $0.startedWhileActive ? .automationAllowed : .userControl } ?? .unknown)
+            }
             detail = "Page changed"
             return
         }
-        recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation)
+        if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
         guard navigation === pending.navigation else { failPending(id: pending.id, error: .pageChanged); return }
     }
 
     func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+        if deferNavigationCallback(.serverRedirect, in: webView, navigation: navigation, replay: {}) { return }
+        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
         // This callback supplies a WKNavigation, not a destination request.
         // The live WebView URL is a location observation, never a fabricated
         // redirect target or an allow/cancel policy decision.
@@ -2546,13 +2630,24 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        if deferNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation, replay: {}) { return }
+        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
         recordNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if deferNavigationCallback(.documentFinished, in: webView, navigation: navigation, replay: { [weak self] in
+            self?.handleNavigationFinished(in: webView, navigation: navigation, recordCallback: false)
+        }) { return }
+        handleNavigationFinished(in: webView, navigation: navigation, recordCallback: true)
+    }
+
+    private func handleNavigationFinished(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
         guard !isNativeCleanupActive else { return }
-        recordNavigationCallback(.documentFinished, in: webView, navigation: navigation)
-        guard webView === browser else { return }
+        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        if recordCallback { recordNavigationCallback(.documentFinished, in: webView, navigation: navigation) }
+        guard webView === browser, let navigation else { return }
+        knownMainNavigations.add(navigation)
         if pending == nil {
             guard let observed = observedNavigation,
                   navigation === observed.navigation else { return }
@@ -2560,10 +2655,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
                   Self.validatedURL(url) != nil else { endObservedNavigation(.finishRejected); return }
             endObservedNavigation(.finished)
+            let finishedScope = navigationCallbackScope(in: webView)
+            let requiresExplicitHandback = !mayAct()
+            guard isCurrentNavigationCallback(finishedScope) else { return }
             let evidence = NavigationHistory.PageObservation(taskID: observed.taskID, parentSessionID: browserSessionID,
                 ownershipEpoch: ownershipEpoch, generation: generation, url: url, basis: .completedNavigation,
                 navigationCorrelationID: observed.id, source: observed.startedWhileActive ? .activePageObservation : .userControlObservation,
-                requiresExplicitHandback: !mayAct())
+                requiresExplicitHandback: requiresExplicitHandback)
             let page = ObservedPage(evidence: evidence, url: url, proof: .navigation)
             if observed.startedWhileActive { observedActivePage = page }
             else { observedUserPage = page }
@@ -2571,7 +2669,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             let callback = navigationCallbackScope(in: webView)
             displayedSite = ComputerUseBrowserSite.displayName(for: url)
             guard isCurrentNavigationCallback(callback) else { return }
-            detail = observed.startedWhileActive && mayAct() ? "Page ready — checking the current task"
+            let readyWhileActive = observed.startedWhileActive && mayAct()
+            guard isCurrentNavigationCallback(callback) else { return }
+            detail = readyWhileActive ? "Page ready — checking the current task"
                 : "Page ready — choose Let AI continue when you are finished"
             return
         }
@@ -2635,27 +2735,29 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        guard !isNativeCleanupActive else { return }
-        recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
-        if webView === signInBrowser {
-            signInDetail = "The sign-in page did not finish loading. Close this window to return."
-            return
-        }
-        guard webView === browser else { return }
-        if let observed = observedNavigation, navigation === observed.navigation {
-            endObservedNavigation(.callbackFailed)
-            retirePageObservations(.navigationFailed)
-        }
-        if let pending, navigation === pending.navigation { failPending(id: pending.id, error: .navigationFailed) }
+        if deferNavigationCallback(.navigationFailure, in: webView, navigation: navigation, replay: { [weak self] in
+            self?.handleNavigationFailure(in: webView, navigation: navigation, recordCallback: false)
+        }) { return }
+        handleNavigationFailure(in: webView, navigation: navigation, recordCallback: true)
     }
+
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if deferNavigationCallback(.navigationFailure, in: webView, navigation: navigation, replay: { [weak self] in
+            self?.handleNavigationFailure(in: webView, navigation: navigation, recordCallback: false)
+        }) { return }
+        handleNavigationFailure(in: webView, navigation: navigation, recordCallback: true)
+    }
+
+    private func handleNavigationFailure(in webView: WKWebView, navigation: WKNavigation?, recordCallback: Bool) {
         guard !isNativeCleanupActive else { return }
-        recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation)
+        guard !isRetiredMainNavigation(navigation, in: webView) else { return }
+        if recordCallback { recordNavigationCallback(.navigationFailure, in: webView, navigation: navigation) }
         if webView === signInBrowser {
             signInDetail = "The sign-in page did not finish loading. Close this window to return."
             return
         }
-        guard webView === browser else { return }
+        guard webView === browser, let navigation else { return }
+        knownMainNavigations.add(navigation)
         if let observed = observedNavigation, navigation === observed.navigation {
             endObservedNavigation(.callbackFailed)
             retirePageObservations(.navigationFailed)

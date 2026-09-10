@@ -7,6 +7,212 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    private func replayNativeCallbacks(_ navigation: WKNavigation, in view: WKWebView, to browser: ComputerUseOwnedBrowser) {
+        browser.webView(view, didStartProvisionalNavigation: navigation)
+        browser.webView(view, didReceiveServerRedirectForProvisionalNavigation: navigation)
+        browser.webView(view, didCommit: navigation)
+        browser.webView(view, didFinish: navigation)
+        let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+        browser.webView(view, didFail: navigation, withError: error)
+        browser.webView(view, didFailProvisionalNavigation: navigation, withError: error)
+    }
+
+    func testRetiredNativeCallbacksCannotInvalidateCompletedOrPendingReplacement() async throws {
+        for reclaim in [false, true] {
+            for held in [false, true] {
+                let server = try OwnedBrowserHTTPFixture(routes: ["/next": .init(held: held)])
+                let base = try await server.start()
+                defer { server.stop() }
+                var returned: [(WKWebView, WKNavigation)] = []
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, navigation in
+                    if let navigation { returned.append((view, navigation)) }
+                }, mayAct: { true })
+                defer { browser.close() }
+                _ = try browser.prepareWorkflowSession(taskID: "original")
+                _ = try await browser.navigate(taskID: "original", operationID: "old", to: base.appendingPathComponent("old"))
+                let old = try XCTUnwrap(returned.first)
+                let taskID = reclaim ? "replacement" : "original"
+                if reclaim { browser.stop(); _ = try browser.prepareWorkflowSession(taskID: taskID) }
+                let next = Task { try await browser.navigate(taskID: taskID, operationID: "next", to: base.appendingPathComponent("next")) }
+                defer { next.cancel() }
+                try await waitUntil { server.count("/next") == 1 }
+                let completed: ComputerUseBrowserDocument?
+                if held { completed = nil } else { completed = try await next.value }
+                let before = try browser.navigationDispatchHistory(taskID: taskID)
+                let requirement = browser.handbackRequirement(taskID: taskID, required: true)
+                let detail = browser.detail
+                replayNativeCallbacks(old.1, in: old.0, to: browser)
+                XCTAssertEqual(try browser.navigationDispatchHistory(taskID: taskID), before, "A retired navigation cannot add evidence to the current operation or claim")
+                XCTAssertEqual(browser.handbackRequirement(taskID: taskID, required: true), requirement)
+                XCTAssertEqual(browser.detail, detail)
+                if let completed { XCTAssertTrue(browser.validate(completed)) }
+                if held { server.releaseHeldResponses() }
+                let result = try await next.value
+                XCTAssertTrue(browser.validate(result))
+                XCTAssertEqual(server.count("/old"), 1); XCTAssertEqual(server.count("/next"), 1)
+            }
+        }
+    }
+
+    func testNavigationReturnBindsBeforeSynchronousStartAndNilTerminalCallbacks() async throws {
+        let server = try OwnedBrowserHTTPFixture()
+        let base = try await server.start()
+        defer { server.stop() }
+        weak var owner: ComputerUseOwnedBrowser?
+        var dispatches = 0
+        var deferredEvents: [ComputerUseBrowserNavigationDispatchHistory.Observation] = []
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, navigation in
+            guard let owner, let navigation else { return XCTFail("Missing native dispatch") }
+            guard let before = try? owner.navigationDispatchHistory(taskID: "unbound-return") else { return XCTFail("Missing original dispatch history") }
+            dispatches += 1
+            let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorCancelled)
+            // This hook runs before the returned native object is bound to
+            // the reservation. Nil is never an exact navigation identity.
+            owner.webView(view, didFinish: nil)
+            owner.webView(view, didFail: nil, withError: error)
+            owner.webView(view, didFailProvisionalNavigation: nil, withError: error)
+            owner.webView(view, didStartProvisionalNavigation: navigation)
+            do {
+                let recorded = Array(try owner.navigationDispatchHistory(taskID: "unbound-return").observations.dropFirst(before.observations.count))
+                XCTAssertEqual(recorded.map(\.phase), [.documentFinished, .navigationFailure, .navigationFailure, .provisionalStart])
+                XCTAssertTrue(recorded.allSatisfy { $0.binding == .none }, "Unbound callbacks cannot claim exact identity before the load return")
+                deferredEvents += recorded
+            } catch { XCTFail("Record arrival before callback state replay: \(error)") }
+            XCTAssertTrue(owner.isLoadingPage)
+            XCTAssertThrowsError(try owner.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+        }, mayAct: { true })
+        owner = browser
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "unbound-return")
+        for operation in ["first", "next"] {
+            let document = try await browser.navigate(taskID: "unbound-return", operationID: operation, to: base.appendingPathComponent(operation))
+            XCTAssertTrue(browser.validate(document))
+            XCTAssertEqual(server.count("/" + operation), 1)
+        }
+        XCTAssertEqual(dispatches, 2)
+        let history = try browser.navigationDispatchHistory(taskID: "unbound-return")
+        XCTAssertEqual(history.attempts.map(\.outcome), [.documentCommitted, .documentCommitted])
+        XCTAssertEqual(history.observations.filter { $0.phase == .navigationFailure && $0.binding == .none }.count, 4)
+        let deferredOrders = Set(deferredEvents.map(\.order))
+        XCTAssertEqual(history.observations.filter { deferredOrders.contains($0.order) }, deferredEvents, "Later state replay cannot rewrite notification time, origin or binding")
+    }
+
+    func testRetiredNativeReturnCannotStartAnObservationInTheReclaimedSession() async throws {
+        for close in [false, true] {
+            let server = try OwnedBrowserHTTPFixture()
+            let base = try await server.start()
+            defer { server.stop() }
+            weak var owner: ComputerUseOwnedBrowser?
+            var capturedOld: (WKWebView, WKNavigation)?
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, navigation in
+                guard capturedOld == nil, let owner, let navigation else { return }
+                capturedOld = (view, navigation)
+                owner.webView(view, didStartProvisionalNavigation: navigation)
+                owner.webView(view, didFinish: navigation)
+                if close { owner.close() } else { owner.stop() }
+                XCTAssertThrowsError(try owner.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+            }, mayAct: { true })
+            owner = browser
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "original")
+            do { _ = try await browser.navigate(taskID: "original", operationID: "old", to: base.appendingPathComponent("old")); XCTFail("Retired native dispatch cannot succeed") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            let old = try XCTUnwrap(capturedOld)
+            let current = try browser.prepareWorkflowSession(taskID: "replacement")
+            let history = try browser.navigationDispatchHistory(taskID: "replacement")
+            replayNativeCallbacks(old.1, in: old.0, to: browser)
+            XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "replacement"), history)
+            XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+            XCTAssertFalse(browser.hasPageAwaitingHandback)
+            let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+            XCTAssertTrue(browser.validate(next))
+            XCTAssertLessThanOrEqual(server.count("/old"), 1); XCTAssertEqual(server.count("/next"), 1)
+        }
+    }
+
+    func testRepeatedObservedStartPreservesOneNavigationThroughHandback() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/manual": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        var nativeView: WKWebView?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { native, _ in nativeView = native }, mayAct: { allowed })
+        defer { browser.close() }
+        let session = try browser.prepareWorkflowSession(taskID: "handback")
+        _ = try await browser.navigate(taskID: "handback", operationID: "start", to: base.appendingPathComponent("start"))
+        let view = try XCTUnwrap(nativeView)
+        allowed = false
+        browser.prepareForUserControl(taskID: "handback")
+        let navigation = try XCTUnwrap(view.load(URLRequest(url: base.appendingPathComponent("manual"))))
+        func history() throws -> ComputerUseBrowserNavigationDispatchHistory {
+            allowed = true
+            defer { allowed = false }
+            return try browser.navigationDispatchHistory(taskID: "handback")
+        }
+        try await waitUntil {
+            (try? history().observations.contains { $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation }) == true
+        }
+        try await waitUntil { server.count("/manual") == 1 }
+        let before = try history()
+        let started = try XCTUnwrap(before.observations.last { $0.phase == .provisionalStart && $0.binding == .exactObservedNavigation })
+        browser.webView(view, didStartProvisionalNavigation: navigation)
+        let repeated = try history()
+        let repeatedStart = try XCTUnwrap(repeated.observations.last)
+        XCTAssertEqual(repeatedStart.phase, .provisionalStart)
+        XCTAssertEqual(repeatedStart.navigationCorrelationID, started.navigationCorrelationID)
+        XCTAssertEqual(repeatedStart.generation, started.generation)
+        XCTAssertEqual(repeated.observations.filter { $0.phase == .observedNavigationEnded }, before.observations.filter { $0.phase == .observedNavigationEnded })
+        server.releaseHeldResponses()
+        try await waitUntil { browser.hasPageAwaitingHandback }
+        let finished = try history()
+        replayNativeCallbacks(navigation, in: view, to: browser)
+        XCTAssertEqual(try history(), finished, "A completed manual load cannot be restarted by its delayed callback")
+        XCTAssertTrue(browser.hasPageAwaitingHandback)
+        allowed = true
+        try await browser.reacquireAfterUserControl(taskID: "handback", requirement: session)
+        let current = try XCTUnwrap(browser.currentDocument(taskID: "handback"))
+        XCTAssertEqual(current.committedURL, base.appendingPathComponent("manual"))
+        XCTAssertTrue(browser.validate(current))
+        XCTAssertEqual(browser.handbackRequirement(taskID: "handback", required: true), session)
+        XCTAssertEqual(server.count("/start"), 1); XCTAssertEqual(server.count("/manual"), 1)
+    }
+
+    func testObservedStartCannotCaptureAReplacementDuringControlSampling() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/manual": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        weak var owner: ComputerUseOwnedBrowser?
+        var nativeView: WKWebView?, replaceOnSample = false
+        var replacement: ComputerUseBrowserHandbackRequirement?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, _ in nativeView = view }, mayAct: {
+            if replaceOnSample, let owner {
+                replaceOnSample = false
+                owner.stop()
+                do { replacement = try owner.prepareWorkflowSession(taskID: "replacement") }
+                catch { XCTFail("The replacement must not inherit an old observation: \(error)") }
+            }
+            return true
+        })
+        owner = browser
+        defer { browser.close() }
+        _ = try browser.prepareWorkflowSession(taskID: "original")
+        _ = try await browser.navigate(taskID: "original", operationID: "start", to: base.appendingPathComponent("start"))
+        let view = try XCTUnwrap(nativeView)
+        let navigation = try XCTUnwrap(view.load(URLRequest(url: base.appendingPathComponent("manual"))))
+        replaceOnSample = true
+        browser.webView(view, didStartProvisionalNavigation: navigation)
+        let current = try XCTUnwrap(replacement)
+        XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), current)
+        XCTAssertFalse(browser.hasPageAwaitingHandback)
+        let history = try browser.navigationDispatchHistory(taskID: "replacement")
+        XCTAssertFalse(history.observations.contains { $0.binding == .exactObservedNavigation })
+        replayNativeCallbacks(navigation, in: view, to: browser)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "replacement"), history)
+        let next = try await browser.navigate(taskID: "replacement", operationID: "next", to: base.appendingPathComponent("next"))
+        XCTAssertTrue(browser.validate(next))
+        XCTAssertLessThanOrEqual(server.count("/manual"), 1); XCTAssertEqual(server.count("/next"), 1)
+    }
+
     func testParentCloseStatusCannotReleaseAReplacementSession() async throws {
         let server = try OwnedBrowserHTTPFixture()
         let base = try await server.start()

@@ -37,7 +37,7 @@ The [new visible failure inventory](browser-process-failure-visible-inventory.js
 
 ## Remaining repair and qualification list
 
-1. Attribute callbacks already stale on entry, especially process/URL/response callbacks from the same retained WKWebView after Stop or a claim change. The new barrier protects cleanup continuation; it does not supply the native process/navigation correlation missing from those delegate signatures.
+1. Known retired WKNavigation callbacks now have a [subsequent source repair](BROWSER_NATIVE_NAVIGATION_IDENTITY_REVIEW.md), including native return binding. First-seen callbacks already stale on entry and process/URL/response callbacks from the same retained WKWebView remain unresolved. Neither repair supplies identity missing from those delegate signatures.
 2. Check coherent observable presentation. Rechecks protect later assignments, but cannot undo a setter already publishing when a subscriber changes state. Window focus calls and outer AppKit close completion also need actual native evidence.
 3. Qualify real process death and script callback order after permission: failure before/after dispatch, shared child/opener failure, lost callbacks, explicit Close, same-task pause/Resume, preserved source/attempt history and uncertain mutations. Do not interpret injected notification or callback arrival as evidence that a network effect was undone.
 4. Qualify these opt-in cases together with actual host control persistence and login handback. The retained task must reacquire fresh page evidence; it must neither report login success from child closure nor silently replay its prior operation.
