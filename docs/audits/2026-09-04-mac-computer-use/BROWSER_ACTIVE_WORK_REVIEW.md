@@ -61,3 +61,5 @@ These use simulated clocks and controlled fixtures; they are authored assertions
 4. Define durable accounting and recovery for application/process restarts and all capability routes. Initial runtime activation and direct internal owner work are not universally charged by this driver policy.
 5. Continue the [repair checklist](../../../TODO.md), including complete provider semantics, source-history qualification, general corrections and model competence. No whole-goal correctness, 8 GB memory or fan-load qualification follows from this patch.
 6. Keep real travel/concert/movie/login runs and model/RTX 3080 adaptation at their later authorized stage. No model, SSH, app or browser execution occurred here.
+
+The next source repair adds [explicit quantity corrections](BROWSER_QUANTITY_REPLACEMENT_REVIEW.md) without resetting the retained request or active-work allowance. Its new fixtures remain unrun.

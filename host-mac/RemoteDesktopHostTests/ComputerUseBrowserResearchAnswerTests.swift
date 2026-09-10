@@ -37,33 +37,43 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
     }
 
     func testDriverRequiresExplicitDateReplacementThenChecksTheNewDateAndOriginalBudget() async throws {
-        try await verifyDateReplacementAnswerEligibility(splitOriginal: false)
+        try await verifyReplacementAnswerEligibility(splitOriginal: false)
     }
 
     func testDriverKeepsSplitHistoricalDateCorrectionsInAnswerEligibility() async throws {
-        try await verifyDateReplacementAnswerEligibility(splitOriginal: true)
+        try await verifyReplacementAnswerEligibility(splitOriginal: true)
     }
 
-    private func verifyDateReplacementAnswerEligibility(splitOriginal: Bool) async throws {
-        for (resultDate, price) in [("2026-10-17", "USD 40"), ("2026-10-16", "USD 40"), ("2026-10-17", "USD 60")] {
-            let fixture = try await ResearchAnswerFixture.make(price: price, extra: ("2026-10-16. ", "condition", "date"), resultDate: resultDate)
+    func testDriverRequiresExplicitQuantityReplacementThenChecksCapacityAndOriginalBudget() async throws {
+        try await verifyReplacementAnswerEligibility(splitOriginal: false, quantity: true)
+    }
+
+    private func verifyReplacementAnswerEligibility(splitOriginal: Bool, quantity: Bool = false) async throws {
+        let field = quantity ? "quantity" : "date", replacementTopic = quantity ? "replaceQuantity" : "replaceDate"
+        let oldSource = quantity ? "2 tickets. " : "2026-10-16. "
+        let replacementSource = quantity ? "3 tickets" : "2026-10-17"
+        let goodValue = quantity ? "3" : "2026-10-17", badValue = quantity ? "2" : "2026-10-16"
+        for (resultDate, price) in [(goodValue, "USD 40"), (badValue, "USD 40"), (goodValue, "USD 60")] {
+            let fixture: ResearchAnswerFixture
+            if quantity { fixture = try await ResearchAnswerFixture.make(price: price, inventory: try XCTUnwrap(Int(resultDate))) }
+            else { fixture = try await ResearchAnswerFixture.make(price: price, extra: (oldSource, "condition", field), resultDate: resultDate) }
             defer { fixture.source.close() }
             var rows: [[String: Any]] = [
                 ["turn":0, "source":"Find concerts. ", "role":"outcome", "field":"category", "relation":"unspecified", "values":[String]()],
                 ["turn":0, "source":"Under USD 50. ", "role":"condition", "field":"price", "relation":"unspecified", "values":[String]()],
-                ["turn":0, "source":"2026-10-16. ", "role":"condition", "field":"date", "relation":"unspecified", "values":[String]()],
+                ["turn":0, "source":oldSource, "role":"condition", "field":field, "relation":"unspecified", "values":[String]()],
                 ["turn":0, "source":"Do not buy.", "role":"prohibition", "field":"other", "relation":"unspecified", "values":[String]()]]
             let originalRows = rows
             fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
-                "disposition":"clarification", "requirements":originalRows, "question":["topic":"date", "requirements":[2]]]) }
+                "disposition":"clarification", "requirements":originalRows, "question":["topic":field, "requirements":[2]]]) }
             let first = try await fixture.source.start()
-            guard case .browserClarificationRequired(let request)? = first else { return XCTFail("Expected the original date question") }
+            guard case .browserClarificationRequired(let request)? = first else { return XCTFail("Expected the original clarification") }
             let owner = try fixture.source.owner(), original = owner.input
             let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
                 controllerID: "phone", controllerSessionID: "session")
-            _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "conflicting-date", answer: "2026-10-17",
+            _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "conflicting-date", answer: replacementSource,
                 controllerID: "phone", controllerSessionID: "session")
-            rows.append(["turn":1, "source":"2026-10-17", "role":"condition", "field":"navigationSource", "relation":"unspecified", "values":[String]()])
+            rows.append(["turn":1, "source":replacementSource, "role":"condition", "field":"navigationSource", "relation":"unspecified", "values":[String]()])
             if splitOriginal {
                 rows = Array(rows.prefix(2)) + ["2026-", "10-16. "].map {
                     ["turn":0, "source":$0, "role":"condition", "field":"location", "relation":"unspecified", "values":[String]()] as [String: Any]
@@ -71,38 +81,38 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
             }
             let conflictingRows = rows
             fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
-                "disposition":"clarification", "requirements":conflictingRows, "question":["topic":"replaceDate", "requirements":[conflictingRows.count - 1]]]) }
+                "disposition":"clarification", "requirements":conflictingRows, "question":["topic":replacementTopic, "requirements":[conflictingRows.count - 1]]]) }
             let next = try await fixture.source.driver.continueBrowserResearch(taskID: "conflicting-date", research: owner, tools: fixture.source.tools, progress: { _ in })
-            guard case .browserClarificationRequired(let replacement) = next else { return XCTFail("An ordinary conflict must not silently replace the date") }
-            XCTAssertEqual(replacement.topic, .replaceDate)
+            guard case .browserClarificationRequired(let replacement) = next else { return XCTFail("An ordinary conflict must not silently replace the criterion") }
+            XCTAssertEqual(replacement.topic, quantity ? .replaceQuantity : .replaceDate)
             XCTAssertFalse(fixture.source.browser.hasSession); XCTAssertEqual(fixture.source.server.requestCount, 0)
             let permission = try owner.issueQuestion(topic: replacement.topic, requirementIDs: replacement.requirementIDs,
                 controllerID: "phone", controllerSessionID: "session")
-            XCTAssertTrue(permission.text.contains("replace the selected date requirement"))
-            XCTAssertEqual(permission.scope.map(\.source), splitOriginal ? ["2026-", "10-16. "] : ["2026-10-16. "])
-            let updated = try owner.answerQuestion(questionID: permission.id, answerTaskID: "explicit-replacement", answer: "2026-10-17",
+            XCTAssertTrue(permission.text.contains(quantity ? "replace the selected quantity requirement" : "replace the selected date requirement"))
+            XCTAssertEqual(permission.scope.map(\.source), splitOriginal ? ["2026-", "10-16. "] : [oldSource])
+            let updated = try owner.answerQuestion(questionID: permission.id, answerTaskID: "explicit-replacement", answer: replacementSource,
                 controllerID: "phone", controllerSessionID: "session")
-            rows.append(["turn":2, "source":"2026-10-17", "role":"condition", "field":"date", "relation":"unspecified", "values":[String]()])
+            rows.append(["turn":2, "source":replacementSource, "role":"condition", "field":field, "relation":"unspecified", "values":[String]()])
             let finalRows = rows
             fixture.source.goal.select = { _ in try ResearchAnswerFixture.json([
                 "disposition":"research", "requirements":finalRows, "question":["topic":"none", "requirements":[]]]) }
             let result = try await fixture.source.driver.continueBrowserResearch(taskID: "explicit-replacement", research: owner, tools: fixture.source.tools, progress: { _ in })
-            let qualifies = resultDate == "2026-10-17" && price == "USD 40"
-            if qualifies { guard case .browserResearchAnswer = result else { return XCTFail("The corrected date and unchanged budget should reach answer selection") } }
-            else if case .browserResearchAnswer = result { return XCTFail("Replacement cannot excuse the wrong current date or an excessive price") }
+            let qualifies = resultDate == goodValue && price == "USD 40"
+            if qualifies { guard case .browserResearchAnswer = result else { return XCTFail("The corrected criterion and unchanged budget should reach answer selection") } }
+            else if case .browserResearchAnswer = result { return XCTFail("Replacement cannot excuse the wrong current criterion or an excessive price") }
             let decision = try XCTUnwrap(fixture.inputs.first)
             XCTAssertEqual(decision.answerCandidateIndices, qualifies ? [0] : [])
             let context = try ResearchAnswerFixture.object(Data(decision.contextJSON.utf8))
             let assessment = try XCTUnwrap(context["requirement_assessment"] as? [String: Any])
-            XCTAssertEqual(assessment["version"] as? Int, 15)
+            XCTAssertEqual(assessment["version"] as? Int, quantity ? 16 : 15)
             let candidates = try XCTUnwrap(assessment["candidates"] as? [[String: Any]])
             let statuses = try XCTUnwrap(candidates.first?["requirements"] as? [String])
-            for index in splitOriginal ? [2, 3, 5] : [2, 4] { XCTAssertEqual(statuses[index], "dateRequirementSuperseded") }
-            XCTAssertEqual(statuses[finalRows.count - 1], resultDate == "2026-10-17" ? "quotedValueMatches" : "quotedValueConflicts")
+            for index in splitOriginal ? [2, 3, 5] : [2, 4] { XCTAssertEqual(statuses[index], quantity ? "quantityRequirementSuperseded" : "dateRequirementSuperseded") }
+            XCTAssertEqual(statuses[finalRows.count - 1], quantity ? (resultDate == goodValue ? "quotedCapacitySufficient" : "quotedCapacityInsufficient") : (resultDate == goodValue ? "quotedValueMatches" : "quotedValueConflicts"))
             XCTAssertEqual(statuses[1], price == "USD 40" ? "quotedValueMatches" : "quotedValueConflicts")
             if !qualifies { XCTAssertThrowsError(try ComputerUseBrowserLinkProposal.decode(content: #"{"answer":[0]}"#, input: decision)) }
             XCTAssertTrue(updated.continues(original)); XCTAssertEqual(owner.input, updated)
-            XCTAssertEqual(updated.userTurns, [original.prompt, "2026-10-17", "2026-10-17"])
+            XCTAssertEqual(updated.userTurns, [original.prompt, replacementSource, replacementSource])
             XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
         }
     }

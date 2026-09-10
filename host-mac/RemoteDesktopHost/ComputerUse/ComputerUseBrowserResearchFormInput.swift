@@ -193,7 +193,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
     /// group. That total does not replace either category's criterion.
     static func normalizations(for interpretation: ComputerUseBrowserGoalProposal) -> [Normalization] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
-        var parties: Set<[String]> = [], dates: Set<[String]> = []
+        var parties: Set<[String]> = [], dates: Set<[String]> = [], quantities: Set<[String]> = []
         return ledger.entries.enumerated().flatMap { index, entry -> [Normalization] in
             guard case .bound(let condition) = entry.resolution else { return [] }
             switch condition.predicate {
@@ -213,13 +213,16 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                         requirementIndices: indices, partySourceID: ledger.partySourceIdentity(for: condition))
                 }
             case .quantity(.equal, let count, let unit):
+                guard quantities.insert(condition.sourceRequirementIDs).inserted else { return [] }
+                let indices = interpretation.requirements.indices.filter { condition.sourceRequirementIDs.contains(interpretation.requirements[$0].id) }
+                guard indices.count == condition.sourceRequirementIDs.count, let primary = indices.first else { return [] }
                 let kind: Normalization.Kind
                 switch unit.scope {
                 case .resultSet: return []
                 case .ticketInventory: kind = .ticketCount
                 case .party: kind = .partySize
                 }
-                return [.init(id: "value\(index + 1)", requirementIndex: index, kind: kind, value: String(count), unit: unit.rawValue)]
+                return [.init(id: "value\(index + 1)", requirementIndex: primary, kind: kind, value: String(count), unit: unit.rawValue, requirementIndices: indices)]
             default: return []
             }
         }
@@ -229,7 +232,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
          preservedControls: [ComputerUseBrowserControlPreservation] = [], previous: ComputerUseBrowserResearchFormContinuation? = nil,
          scopeReview: ComputerUseBrowserEffectScopeReview? = nil, nativePreservation: ComputerUseBrowserFormPreservation? = nil,
          preparationBaseline: ComputerUseBrowserFormPreparationBaseline? = nil) throws {
-        guard interpretation.disposition == .research, !interpretation.hasUncompiledDateReplacements,
+        guard interpretation.disposition == .research, !interpretation.hasUncompiledRequirementReplacements,
               interpretation.input.taskID.utf8.elementsEqual(evidence.page.document.taskID.utf8),
               (1...16).contains(evidence.fields.count), preservedControls.count <= 16,
               Set(preservedControls.map(\.controlID)).count == preservedControls.count else { throw ComputerUseBrowserResearchFormError.invalidInput }
@@ -317,7 +320,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             return (alias, intent.requirementIndices)
         })
         fieldIntentRequirements = intentRequirements
-        let supersededTargets = try previous?.supersededDateTargetIDs(in: interpretation) ?? []
+        let supersededTargets = try previous?.supersededTaskTargetIDs(in: interpretation) ?? []
         var retainedSources: [String: [ComputerUseBrowserFormSource]] = [:]
         for intent in scopeReview?.formScope?.fieldIntents ?? [] where intent.disposition == .retain {
             guard let index = evidence.fields.firstIndex(where: { $0.control.id == intent.controlID }),
@@ -448,6 +451,13 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         }
         if normalized.contains(where: \.isPartyTotal) { context["version"] = 22 }
         if normalizedChoices { context["version"] = 23 }
+        let quantityReplacements = interpretation.quantityReplacementContexts
+        if !quantityReplacements.isEmpty {
+            context["version"] = 24
+            context["quantity_replacements"] = quantityReplacements.map(\.context)
+            let retired = interpretation.retiredTaskPurposeRequirementIDs
+            context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
+        }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID

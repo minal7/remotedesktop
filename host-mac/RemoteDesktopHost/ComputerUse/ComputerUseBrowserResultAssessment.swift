@@ -789,7 +789,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         }
     }
     enum Status: String, Sendable {
-        case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied, dateRequirementSuperseded
+        case needsSemanticVerification, needsResultSet, uncompiledRequirement, clarificationApplied, dateRequirementSuperseded, quantityRequirementSuperseded
         case needsTicketInventory, needsPartyCapacity
         case reviewSelectedQuantity, reviewPurchaseLimit, reviewPackageSize, reviewQuantityUnresolved
         case quotedCapacitySufficient, quotedCapacityInsufficient
@@ -841,7 +841,8 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
     let requirements: [Requirement]
     let candidates: [Candidate]
     let navigationHistory: NavigationHistory?
-    let dateReplacements: [Scalars.DateReplacementContext]
+    let dateReplacements: [Scalars.ReplacementContext]
+    let quantityReplacements: [Scalars.ReplacementContext]
     private let readingIdentity: String
 
     init(interpretation: ComputerUseBrowserGoalProposal, reading: ComputerUseBrowserResultCandidates) throws {
@@ -851,6 +852,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         readingIdentity = reading.requirementAssessmentIdentity
         let scalars = Scalars(proposal: interpretation), sources = ComputerUseBrowserSourceRequirements(proposal: interpretation)
         dateReplacements = scalars.dateReplacementContexts
+        quantityReplacements = scalars.quantityReplacementContexts
         navigationHistory = reading.navigationHistoryAssessment(for: sources)
         let unresolvedSources = Set(sources.unresolved.map(\.requirementID))
         let conditions = Dictionary(uniqueKeysWithValues: scalars.entries.map { ($0.requirementID, $0.resolution) })
@@ -878,7 +880,9 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     .init(requirementID: requirement.id, status: status, quoteIndices: quotes)
                 }
                 guard interpretation.disposition == .research else { return result(.uncompiledRequirement) }
-                if case .superseded? = conditions[requirement.id] { return result(.dateRequirementSuperseded) }
+                if case .superseded(let record)? = conditions[requirement.id] {
+                    return result(record.topic == .replaceQuantity ? .quantityRequirementSuperseded : .dateRequirementSuperseded)
+                }
                 if case .clarification? = conditions[requirement.id] { return result(.clarificationApplied) }
                 if case .unresolved(let reason)? = conditions[requirement.id],
                    [.ambiguousClarification, .clarificationScope, .contradictoryClarification, .missingQuantityUnit, .ambiguousPartyScope].contains(reason) {
@@ -1074,6 +1078,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
          }]
         if let navigationHistory { context["navigation_history_at_reading"] = navigationHistory.plannerContext }
         if !dateReplacements.isEmpty { context["version"] = navigationAssessment ? 15 : 13; context["date_replacements"] = dateReplacements.map(\.context) }
+        if !quantityReplacements.isEmpty { context["version"] = 16; context["quantity_replacements"] = quantityReplacements.map(\.context) }
         return context
     }
 

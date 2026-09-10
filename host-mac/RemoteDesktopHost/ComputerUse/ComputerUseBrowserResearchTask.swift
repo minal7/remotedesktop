@@ -896,7 +896,7 @@ final class ComputerUseBrowserResearchTask {
         guard !hasPendingNavigation else { throw Failure.navigationPending }
         guard !hasQuestion else { throw Failure.questionPending }
         guard let interpretation, interpretation.proposal.input == input,
-              interpretation.proposal.disposition == .research, !interpretation.proposal.hasUncompiledDateReplacements else { throw Failure.interpretationRequired }
+              interpretation.proposal.disposition == .research, !interpretation.proposal.hasUncompiledRequirementReplacements else { throw Failure.interpretationRequired }
         guard sourcePolicy == nil || (sourcePolicyInstalled && sourcePolicy?.goalRevision == input.digest) else { throw Failure.navigationUnavailable }
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
@@ -1305,9 +1305,9 @@ final class ComputerUseBrowserResearchTask {
     }
 
     private func requireCurrentFormPurposes(_ stage: any ComputerUseBrowserFormStage) throws {
-        guard input.clarifications.contains(where: { $0.topic == .replaceDate }) else { return }
+        guard input.clarifications.contains(where: { $0.topic.isReplacement }) else { return }
         guard let interpretation, interpretation.proposal.input == input, let continuation = stage.nativeContinuation,
-              try continuation.supersededDateTargetIDs(in: interpretation.proposal).isEmpty else {
+              try continuation.supersededTaskTargetIDs(in: interpretation.proposal).isEmpty else {
             throw ComputerUseBrowserResearchFormError.inputChanged
         }
     }

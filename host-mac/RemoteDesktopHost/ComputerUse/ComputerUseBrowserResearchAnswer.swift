@@ -68,8 +68,9 @@ struct ComputerUseBrowserResearchAnswer: Equatable, Sendable, CustomStringConver
                 let covered = interpretation.requirements.enumerated().allSatisfy { offset, requirement in
                     let status = evaluations[offset].status
                     let retainedScalar = nativeScalarSources.contains(requirement.id)
-                    if status == .dateRequirementSuperseded {
-                        guard retainedScalar, case .superseded = scalars.entries[offset].resolution else { return false }
+                    if status == .dateRequirementSuperseded || status == .quantityRequirementSuperseded {
+                        guard retainedScalar, case .superseded(let record) = scalars.entries[offset].resolution,
+                              (record.topic == .replaceQuantity) == (status == .quantityRequirementSuperseded) else { return false }
                         return true // The replacement rows still require their own current evidence below.
                     }
                     // A host-bound literal scalar parameter keeps its typed

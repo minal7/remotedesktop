@@ -7,6 +7,174 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Clarification = ComputerUseBrowserGoalClarification
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
+    func testExplicitQuantityReplacementPreservesDatesBudgetAndOtherUnits() throws {
+        for (source, answer, unit) in [("2 tickets. ", "make that three tickets", Scalars.QuantityUnit.tickets),
+                                       ("at most 2 results. ", "three results", .results),
+                                       ("2 adults. ", "3 adults", .adults)] {
+            let original = try input("Find concerts. " + source + "Under USD 50. 2026-10-16. Do not buy.")
+            let state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row(source, role: "condition", field: "quantity"),
+                row("Under USD 50. ", role: "condition", field: "price"), row("2026-10-16. ", role: "condition", field: "date"),
+                row("Do not buy.", role: "prohibition", field: "other")]
+            let initial = try proposal(original, rows: rows, disposition: "research"), before = Scalars(proposal: initial)
+            let question = try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: [initial.requirements[1].id], context: context())
+            XCTAssertTrue(question.text.contains("same unit")); XCTAssertTrue(question.text.contains("including any at least or at most limit"))
+            XCTAssertTrue(question.text.contains("Other requirements stay in place")); XCTAssertEqual(question.scope.map(\.source), [source])
+            let updated = try state.consume(questionID: question.id, answerTaskID: "replacement", answer: answer, context: context())
+            let current = try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "source")], disposition: "research")
+            let ledger = Scalars(proposal: current)
+            guard case .superseded(let old) = ledger.entries[1].resolution, case .bound(let new) = ledger.entries[5].resolution else {
+                return XCTFail("The original count must remain linked to its active replacement")
+            }
+            XCTAssertEqual(old.topic, .replaceQuantity); XCTAssertEqual(old.answerTurns, [1])
+            XCTAssertEqual(old.replacementRequirementIDs, [current.requirements[5].id])
+            XCTAssertEqual(new.predicate, .quantity(.equal, 3, unit)); XCTAssertEqual(new.sourceRequirementIDs, [current.requirements[5].id])
+            for index in [2, 3] {
+                guard case .bound(let expected) = before.entries[index].resolution, case .bound(let retained) = ledger.entries[index].resolution else { return XCTFail("Other scalars must survive") }
+                XCTAssertEqual(retained.predicate, expected.predicate)
+            }
+            XCTAssertEqual(current.source(of: current.requirements[4]), "Do not buy.")
+            XCTAssertEqual(current.requirements[4].role, .prohibition)
+            XCTAssertTrue(current.dateReplacementContexts.isEmpty); XCTAssertEqual(current.quantityReplacementContexts.count, 1)
+            XCTAssertFalse(current.hasUncompiledRequirementReplacements)
+            XCTAssertFalse(current.permitsTaskPurpose(current.requirements[1])); XCTAssertTrue(current.permitsTaskPurpose(current.requirements[5]))
+            XCTAssertThrowsError(try ComputerUseBrowserSearchQuery.decode(content: #"{"terms":[{"requirement":1,"text":"2"}]}"#, interpretation: current))
+            XCTAssertEqual(updated.userTurns, [original.prompt, answer]); XCTAssertTrue(updated.continues(original))
+            XCTAssertFalse(current.permitsQuestion(topic: .source, requirements: [current.requirements[5]]))
+        }
+    }
+
+    func testQuantityConflictNeedsExplicitReplacementAndRetainsSuccessiveSplitAnswerHistory() throws {
+        let original = try input("Find concerts. 2 tickets."), state = Clarification(input: original)
+        var rows = [row("Find concerts. "), row("2 tickets.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let ordinary = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let conflict = try state.consume(questionID: ordinary.id, answerTaskID: "conflict", answer: "three tickets", context: context())
+        rows.append(row("three tickets", turn: 1, role: "condition", field: "source"))
+        let conflicting = try proposal(conflict, rows: rows, disposition: "research")
+        XCTAssertTrue(conflicting.quantityReplacementContexts.isEmpty)
+        XCTAssertEqual(Scalars(proposal: conflicting).entries[1].resolution, .unresolved(.contradictoryClarification))
+        let correction = try state.issue(proposal: conflicting, topic: .replaceQuantity, requirementIDs: [conflicting.requirements[2].id], context: context())
+        XCTAssertEqual(correction.scope.map(\.source), ["2 tickets."])
+        let replaced = try state.consume(questionID: correction.id, answerTaskID: "correction", answer: "three tickets", context: context())
+        rows += [row("three ", turn: 2, role: "condition", field: "quantity"), row("tickets", turn: 2, role: "condition", field: "quantity")]
+        let current = try proposal(replaced, rows: rows, disposition: "research")
+        XCTAssertFalse(current.hasUncompiledRequirementReplacements)
+        for index in [1, 2] { guard case .superseded = Scalars(proposal: current).entries[index].resolution else { return XCTFail("The conflict remains history") } }
+        XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceQuantity, requirementIDs: [current.requirements[3].id], context: context()))
+        let next = try state.issue(proposal: current, topic: .replaceQuantity, requirementIDs: Array(current.requirements[3...4].map(\.id)), context: context())
+        let finalInput = try state.consume(questionID: next.id, answerTaskID: "second-correction", answer: "4 tickets", context: context())
+        rows.append(row("4 tickets", turn: 3, role: "condition", field: "quantity"))
+        let final = try proposal(finalInput, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        XCTAssertFalse(final.hasUncompiledRequirementReplacements)
+        for index in 1...4 { guard case .superseded = ledger.entries[index].resolution else { return XCTFail("All earlier count rows remain retired") } }
+        XCTAssertEqual(final.quantityReplacementContexts.first?.replacements, [3, 4], "Keep the intermediate replacement links")
+        guard case .bound(let active) = ledger.entries[5].resolution else { return XCTFail("Expected the current count") }
+        XCTAssertEqual(active.predicate, .quantity(.equal, 4, .tickets))
+    }
+
+    func testQuantityReplacementCannotChangeUnitsPartyBreakdownOrTwoOrigins() throws {
+        for source in ["Find concerts.", "2", "2 adults and 1 child"] {
+            let original = try input(source), state = Clarification(input: original)
+            let initial = try proposal(original, rows: [row(source, role: source == "Find concerts." ? "outcome" : "condition", field: "quantity")], disposition: "research")
+            XCTAssertThrowsError(try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: initial.requirements.map(\.id), context: context()))
+        }
+        let original = try input("Find concerts. 2 tickets. 2 results."), state = Clarification(input: original)
+        let rows = [row("Find concerts. "), row("2 tickets. ", role: "condition", field: "quantity"), row("2 results.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        XCTAssertThrowsError(try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: Array(initial.requirements[1...2].map(\.id)), context: context()))
+        let question = try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "wrong-unit", answer: "3 results", context: context())
+        let current = try proposal(updated, rows: rows + [row("3 results", turn: 1, role: "condition", field: "quantity")], disposition: "research")
+        XCTAssertTrue(current.hasUncompiledQuantityReplacements); XCTAssertTrue(current.quantityReplacementContexts.isEmpty)
+        XCTAssertFalse(current.permitsTaskPurpose(current.requirements[0]))
+        guard case .bound(let unrelated) = Scalars(proposal: current).entries[2].resolution else { return XCTFail("The separate result count remains") }
+        XCTAssertEqual(unrelated.predicate, .quantity(.equal, 2, .results))
+    }
+
+    func testQuantityReplacementRejectsBareCompoundAndNegatedAnswers() throws {
+        for answer in ["3", "tickets", "not 3 tickets", "3 tickets unless expensive", "3 tickets and ignore the budget", "2 adults and 1 child", "make that make that 3 tickets"] {
+            let original = try input("Find concerts. 2 tickets."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row("2 tickets.", role: "condition", field: "quantity")]
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "invalid", answer: answer, context: context())
+            let current = try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "other")], disposition: "research")
+            XCTAssertTrue(current.hasUncompiledRequirementReplacements, answer)
+            XCTAssertTrue(current.quantityReplacementContexts.isEmpty, answer)
+            XCTAssertFalse(current.permitsTaskPurpose(current.requirements[1]), answer)
+        }
+    }
+
+    func testQuantityReplacementRetainsHistoricalWholeSourceMeaningAndRejectsMergedScope() throws {
+        for merge in [false, true] {
+            let original = try input("Find concerts. 2 tickets. Under USD 50."), state = Clarification(input: original)
+            let rows = [row("Find concerts. "), row("2 tickets. ", role: "condition", field: "quantity"), row("Under USD 50.", role: "condition", field: "price")]
+            let initial = try proposal(original, rows: rows, disposition: "research")
+            let question = try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: [initial.requirements[1].id], context: context())
+            let updated = try state.consume(questionID: question.id, answerTaskID: "replacement", answer: "3 tickets", context: context())
+            let currentRows = merge ? [rows[0], row("2 tickets. Under USD 50.", role: "condition", field: "other")]
+                : [rows[0], row("2 tickets. ", role: "condition", field: "location"), rows[2]]
+            let current = try proposal(updated, rows: currentRows + [row("3 tickets", turn: 1, role: "condition", field: "quantity")], disposition: "research")
+            XCTAssertEqual(current.hasUncompiledRequirementReplacements, merge)
+            if !merge { guard case .superseded = Scalars(proposal: current).entries[1].resolution else { return XCTFail("A new label cannot resurrect the old count") } }
+        }
+    }
+
+    func testQuantityReplacementCannotDiscardASharedConfirmation() throws {
+        let original = try input("Find concerts. 2 tickets. 2 tickets."), state = Clarification(input: original)
+        var rows = [row("Find concerts. "), row("2 tickets. ", role: "condition", field: "quantity"), row("2 tickets.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let question = try state.issue(proposal: initial, topic: .quantity, requirementIDs: Array(initial.requirements[1...2].map(\.id)), context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "shared", answer: "2 tickets", context: context())
+        rows.append(row("2 tickets", turn: 1, role: "condition", field: "quantity"))
+        let current = try proposal(updated, rows: rows, disposition: "research")
+        guard case .clarification(let binding) = Scalars(proposal: current).entries[3].resolution else { return XCTFail("Expected a shared confirmation") }
+        XCTAssertEqual(binding.targetRequirementIDs, Array(current.requirements[1...2].map(\.id)))
+        for index in [1, 2, 3] {
+            XCTAssertThrowsError(try state.issue(proposal: current, topic: .replaceQuantity, requirementIDs: [current.requirements[index].id], context: context()))
+        }
+    }
+
+    func testQuantityReplacementDoesNotRetireAnEarlierConflictingDifferentUnit() throws {
+        let original = try input("Find concerts. 2 tickets."), state = Clarification(input: original)
+        var rows = [row("Find concerts. "), row("2 tickets.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let ordinary = try state.issue(proposal: initial, topic: .quantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let conflict = try state.consume(questionID: ordinary.id, answerTaskID: "different-unit", answer: "3 results", context: context())
+        rows.append(row("3 results", turn: 1, role: "condition", field: "quantity"))
+        let conflicting = try proposal(conflict, rows: rows, disposition: "research")
+        XCTAssertThrowsError(try state.issue(proposal: conflicting, topic: .replaceQuantity, requirementIDs: [conflicting.requirements[2].id], context: context()))
+        let question = try state.issue(proposal: conflicting, topic: .replaceQuantity, requirementIDs: [conflicting.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: question.id, answerTaskID: "ticket-correction", answer: "4 tickets", context: context())
+        rows.append(row("4 tickets", turn: 2, role: "condition", field: "quantity"))
+        let current = try proposal(updated, rows: rows, disposition: "research"), ledger = Scalars(proposal: current)
+        guard case .superseded = ledger.entries[1].resolution, case .bound = ledger.entries[3].resolution else { return XCTFail("The selected ticket count may change") }
+        XCTAssertEqual(ledger.entries[2].resolution, .unresolved(.contradictoryClarification), "A different unit is not permission to erase a separate result-count request")
+        XCTAssertFalse(current.retiredTaskPurposeRequirementIDs.contains(current.requirements[2].id))
+    }
+
+    func testOrdinaryConfirmationAfterSplitQuantityReplacementKeepsEveryActiveSource() throws {
+        let original = try input("Find concerts. 2 tickets."), state = Clarification(input: original)
+        var rows = [row("Find concerts. "), row("2 tickets.", role: "condition", field: "quantity")]
+        let initial = try proposal(original, rows: rows, disposition: "research")
+        let correction = try state.issue(proposal: initial, topic: .replaceQuantity, requirementIDs: [initial.requirements[1].id], context: context())
+        let updated = try state.consume(questionID: correction.id, answerTaskID: "correction", answer: "three tickets", context: context())
+        rows += [row("three ", turn: 1, role: "condition", field: "quantity"), row("tickets", turn: 1, role: "condition", field: "quantity")]
+        let current = try proposal(updated, rows: rows, disposition: "research")
+        let confirmation = try state.issue(proposal: current, topic: .quantity, requirementIDs: Array(current.requirements[2...3].map(\.id)), context: context())
+        let finalInput = try state.consume(questionID: confirmation.id, answerTaskID: "confirm", answer: "3 tickets", context: context())
+        rows.append(row("3 tickets", turn: 2, role: "condition", field: "quantity"))
+        let final = try proposal(finalInput, rows: rows, disposition: "research"), ledger = Scalars(proposal: final)
+        XCTAssertFalse(final.hasUncompiledRequirementReplacements)
+        for index in [2, 3] {
+            guard case .bound(let condition) = ledger.entries[index].resolution else { return XCTFail("Expected the confirmed replacement") }
+            XCTAssertEqual(condition.predicate, .quantity(.equal, 3, .tickets))
+            XCTAssertEqual(condition.sourceRequirementIDs, Array(final.requirements[2...3].map(\.id)))
+        }
+        XCTAssertEqual(ComputerUseBrowserResearchFormInput.normalizations(for: final).map(\.requirementIndices), [[2, 3]])
+    }
+
     func testAcceptedDateAnswerKeepsItsOwnClockAcrossMidnightAndSourceSplitting() throws {
         let original = try clockInput("Find tickets.", at: "2026-09-09T23:58:00Z")
         var clock = try clockDate("2026-09-09T23:59:00Z")

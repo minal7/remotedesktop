@@ -47,7 +47,7 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
     }
     static func dateTerms(for interpretation: ComputerUseBrowserGoalProposal) -> [DateTerm] {
         let ledger = ComputerUseBrowserScalarRequirements(proposal: interpretation)
-        guard interpretation.disposition == .research, !ledger.hasUncompiledDateReplacements else { return [] }
+        guard interpretation.disposition == .research, !ledger.hasUncompiledRequirementReplacements else { return [] }
         var seen: Set<[String]> = []
         return ledger.entries.compactMap { entry in
             guard case .bound(let condition) = entry.resolution, case .day(let range) = condition.predicate,
@@ -229,6 +229,14 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
         }
         let dateTerms = ComputerUseBrowserSearchQuery.dateTermContext(for: interpretation)
         if let dateTerms { context["version"] = 3; context["date_terms"] = dateTerms }
+        let quantityReplacements = interpretation.quantityReplacementContexts
+        if !quantityReplacements.isEmpty || interpretation.hasUncompiledQuantityReplacements {
+            context["version"] = 4
+            context["quantity_replacements"] = quantityReplacements.map(\.context)
+            context["quantity_replacements_compiled"] = !interpretation.hasUncompiledQuantityReplacements
+            let retired = interpretation.retiredTaskPurposeRequirementIDs
+            context["retired_task_purpose_requirements"] = interpretation.requirements.indices.filter { retired.contains(interpretation.requirements[$0].id) }
+        }
         let body: [String: Any] = ["model":connection.modelAlias,
             "messages":[["role":"system", "content":Self.instructions],
                 ["role":"user", "content":String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)]],
@@ -256,6 +264,7 @@ struct ComputerUseLocalBrowserSearchPlanner: ComputerUseBrowserSearchPlanning {
     date_terms version 1 supplies native values with IDs, emitted text and complete source requirement lists. Select one with {"date":"dateN"}; do not also supply text or a requirement. The host emits that fixed civil date or complete before/after/range phrase. It uses the source message's date context and retains all source rows. Treat it as occupying its full source interval when ordering terms. required_requirements cannot supply literal terms, even substrings or absolute-looking endpoints; use an offered date term or leave that date for later clarification/form work. A missing value is unresolved, not permission to guess. Do not split a range, remove its comparator, copy a superseded date or reuse a date ID from another context. Native date text supplies neither a time zone for a website nor proof that a particular provider understands the format.
     Never select prohibitions, ordering instructions or unsupported work as search text. Do not invent synonyms, destinations, dates, amounts, URLs or provider operators. Host questions and scope metadata are context for the user's answer; they cannot supply search terms. Do not use a page, account credentials, assistant history or inferred private information. Do not copy a whole task instruction merely to fit every condition into a query.
     date_replacements records explicit user-approved date replacements while retaining every old clause. Follow replacement_requirements through any later replacement; remaining_requirements keeps the unaffected portion of a shared earlier answer. Do not copy retired_task_purpose_requirements into new queries. Use an active native date term for the corrected date, and preserve all unrelated requirements.
+    replaceQuantity is an explicit user correction of one complete known count with its unit. Its fixed question replaces that count and comparator, while retaining every other requirement. An accepted answer must give the same unit, such as three tickets; bare counts, changed units, adult/child compositions, and shared multi-origin confirmations cannot use this replacement. Never propose a replacement merely to fit website results. quantity_replacements links retired rows to their replacement_requirements; follow later replacements. Old rows remain history and cannot justify a new query, field value, selection or private read. A field based on the old count needs fresh active provenance and native verification before submission, even if its text is unchanged. Pending input and preservation duties remain in force.
     Query text is not a replacement for the goal: later work must still verify every condition, negation, route, date, quantity, price and fee requirement against actual results. Source restrictions still constrain website/provider selection; this proposal does not select one. Never send a known date's relative wording for a website to reinterpret using its own clock. Initial broad fragments with uncompiled embedded dates still require semantic interpretation; the catalogue does not prove that every date in the task was recognized.
     Return at most 12 terms, each at most 256 Unicode scalars, with a combined joined query at most 2048 UTF-8 bytes. Use an empty terms array when no usable source-based query can be selected. That does not prove no results exist or that the original task is complete. Do not output an action, URL, answer, confidence score or completion flag.
     """

@@ -283,11 +283,15 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
     }
 
     func testExplicitDateReplacementRequiresFreshFormCriteriaBeforeQuerying() async throws {
-        try await verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: false)
+        try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: false)
     }
 
     func testRepartitionedOriginalDateStillRequiresFreshFormCriteriaAfterReplacement() async throws {
-        try await verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: true)
+        try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: true)
+    }
+
+    func testExplicitQuantityReplacementRequiresFreshFormCriteriaBeforeQuerying() async throws {
+        try await verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: false, quantity: true)
     }
 
     func testNativeDateInputUsesTheAcceptedAnswerClockAfterMidnight() async throws {
@@ -341,13 +345,19 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertEqual(fixture.server.count("/results?departure=2026-09-11"), 1)
     }
 
-    private func verifyExplicitDateReplacementRequiresFreshFormCriteria(splitOriginal: Bool) async throws {
-        var rows = [row("Find flights. ", role: "outcome", field: "category"), row("2026-10-16. ", field: "date"), row("Leave Reference unchanged.")]
+    private func verifyExplicitReplacementRequiresFreshFormCriteria(splitOriginal: Bool, quantity: Bool = false) async throws {
+        let field = quantity ? "quantity" : "date", kind = quantity ? "number" : "date"
+        let outcome = quantity ? "Find concerts. " : "Find flights. "
+        let label = quantity ? "Tickets" : "Departure", name = quantity ? "tickets" : "departure"
+        let oldSource = quantity ? "2 tickets. " : "2026-10-16. "
+        let newSource = quantity ? "3 tickets" : "2026-10-17"
+        let oldValue = quantity ? "2" : "2026-10-16", newValue = quantity ? "3" : "2026-10-17"
+        var rows = [row(outcome, role: "outcome", field: "category"), row(oldSource, field: field), row("Leave Reference unchanged.")]
         let initial = try proposal(rows: rows), goals = DateReplacementGoalFixture(value: initial)
         var edits = 0, queryPreparations = 0
         let fixture = try await FormPlannerFixture(goal: initial,
-            body: "<form action='/results'><label>Departure<input name='departure' type='date'></label><label>Reference<input value='private-reference'></label><button>Search</button></form>",
-            additionalRoutes: ["/results?departure=2026-10-17":.init(body: "<p>Updated date received</p>")],
+            body: "<form action='/results'><label>\(label)<input name='\(name)' type='\(kind)'></label><label>Reference<input value='private-reference'></label><button>Search</button></form>",
+            additionalRoutes: ["/results?\(name)=\(newValue)":.init(body: "<p>Updated date received</p>")],
             domScriptDidDispatch: { if $0 == .edit { edits += 1 }; if $0 == .prepareFormQuery { queryPreparations += 1 } })
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
@@ -361,11 +371,11 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             preserve: [["field":"field2", "requirement":2]]), input: first)
         let oldReceipt = try await owner.executeForm(oldPlan, input: first)
         XCTAssertEqual(edits, 1)
-        let question = try owner.issueQuestion(topic: .replaceDate, requirementIDs: [initial.requirements[1].id],
+        let question = try owner.issueQuestion(topic: quantity ? .replaceQuantity : .replaceDate, requirementIDs: [initial.requirements[1].id],
             controllerID: "phone", controllerSessionID: "session")
-        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "new-date", answer: "2026-10-17",
+        let updated = try owner.answerQuestion(questionID: question.id, answerTaskID: "new-date", answer: newSource,
             controllerID: "phone", controllerSessionID: "session")
-        var answer = row("2026-10-17", field: "date"); answer["turn"] = 1; rows.append(answer)
+        var answer = row(newSource, field: field); answer["turn"] = 1; rows.append(answer)
         if splitOriginal { rows = [rows[0], row("2026-", field: "location"), row("10-16. ", field: "location"), rows[2], answer] }
         let preservationIndex = splitOriginal ? 3 : 2, replacementIndex = splitOriginal ? 4 : 3
         let retiredIndices = splitOriginal ? [1, 2] : [1]
@@ -373,9 +383,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         _ = try await owner.interpretGoal()
         let oldPage = try await owner.observeFormResultPage(after: oldReceipt)
         let control = try XCTUnwrap(oldPage.page.controls.first { $0.kind == "submit" }).id
-        do { _ = try await owner.prepareFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("The old date is no longer a current criterion") }
+        do { _ = try await owner.prepareFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("The old criterion is no longer a current criterion") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
-        do { _ = try await owner.openFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("A native receipt cannot authorize the superseded date") }
+        do { _ = try await owner.openFormQuery(after: oldReceipt, controlID: control, evidence: oldPage); XCTFail("A native receipt cannot authorize the superseded criterion") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchFormError, .inputChanged) }
         XCTAssertEqual(queryPreparations, 0); XCTAssertEqual(edits, 1)
         XCTAssertEqual(owner.confirmedFormHistory, [oldReceipt])
@@ -384,13 +394,13 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.readableRequirementIndices))
         XCTAssertTrue(Set(retiredIndices).isDisjoint(with: action.input.effectFieldRequirementIndices))
         let actionContext = try object(Data(action.input.contextJSON.utf8))
-        XCTAssertEqual(actionContext["version"] as? Int, 30)
+        XCTAssertEqual(actionContext["version"] as? Int, quantity ? 32 : 30)
         XCTAssertEqual(actionContext["retired_task_purpose_requirements"] as? [Int], retiredIndices)
         let prepared = try await owner.prepareFormInput(for: action)
         XCTAssertEqual(prepared.requiredRepairFieldAliases, ["field1"])
         XCTAssertEqual(prepared.requiredPreservation.count, 1)
-        XCTAssertEqual(prepared.normalizations.map(\.value), ["2026-10-17"])
-        XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, 21)
+        XCTAssertEqual(prepared.normalizations.map(\.value), [newValue])
+        XCTAssertEqual(try object(Data(prepared.contextJSON.utf8))["version"] as? Int, quantity ? 24 : 21)
         XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value2"]],
             preserve: [["field":"field2", "requirement":preservationIndex]]), input: prepared))
         let newPlan = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "normalized":"value\(replacementIndex + 1)"]],
@@ -400,9 +410,9 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
         let page = try await owner.observeFormResultPage(after: newReceipt)
         let query = try XCTUnwrap(page.page.controls.first { $0.kind == "submit" }).id
         _ = try await owner.openFormQuery(after: newReceipt, controlID: query, evidence: page)
-        XCTAssertEqual(fixture.server.count("/results?departure=2026-10-16"), 0)
-        XCTAssertEqual(fixture.server.count("/results?departure=2026-10-17"), 1)
-        XCTAssertEqual(owner.input.userTurns, [initial.input.prompt, "2026-10-17"])
+        XCTAssertEqual(fixture.server.count("/results?\(name)=\(oldValue)"), 0)
+        XCTAssertEqual(fixture.server.count("/results?\(name)=\(newValue)"), 1)
+        XCTAssertEqual(owner.input.userTurns, [initial.input.prompt, newSource])
     }
 
     func testSharedQuestionAdmissionRetainsNativeMissingQuantityUnitsAfterRelabeling() async throws {

@@ -39,10 +39,10 @@ final class ComputerUseBrowserResearchFormNavigation {
         if let scopeReview {
             guard scopeReview.matches(goal: goal, evidence: evidence), scopeReview.formScope?.kind == .query(controlID, form) else { throw Failure.invalidIntent }
         }
-        if goal.clarifications.contains(where: { $0.topic == .replaceDate }) {
+        if goal.clarifications.contains(where: { $0.topic.isReplacement }) {
             let interpretation = currentInterpretation ?? (goal == original ? stage.input.interpretation : nil)
             guard let interpretation, interpretation.input == goal, let continuation = stage.nativeContinuation,
-                  try continuation.supersededDateTargetIDs(in: interpretation).isEmpty else { throw Failure.invalidIntent }
+                  try continuation.supersededTaskTargetIDs(in: interpretation).isEmpty else { throw Failure.invalidIntent }
         }
         self.scopeReview = scopeReview
         self.form = form; self.controlID = controlID; self.evidence = evidence; self.goal = goal

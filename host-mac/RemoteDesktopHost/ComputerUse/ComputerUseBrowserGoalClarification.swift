@@ -3,8 +3,10 @@ import Foundation
 /// Host-authored task questions only. Account authentication continues to use
 /// visible manual takeover, not this answer channel or model-authored text.
 enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
-    case origin, destination, location, date, replaceDate, time, quantity, currency, priceBasis, fees, source
+    case origin, destination, location, date, replaceDate, time, quantity, replaceQuantity, currency, priceBasis, fees, source
     var isDateTopic: Bool { self == .date || self == .replaceDate }
+    var isQuantityTopic: Bool { self == .quantity || self == .replaceQuantity }
+    var isReplacement: Bool { self == .replaceDate || self == .replaceQuantity }
     var question: String {
         switch self {
         case .origin: return "Where will you be traveling from?"
@@ -14,6 +16,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .replaceDate: return "What date or date range should replace the selected date requirement? This replaces that whole date requirement, including its weekday or before/after limit. Other requirements stay in place. You can use YYYY-MM-DD."
         case .time: return "What local time or time range should I use?"
         case .quantity: return "How many results, tickets or people do you mean? Please specify which, and adult/child counts when relevant."
+        case .replaceQuantity: return "What count should replace the selected quantity requirement? Give the count and the same unit, for example three tickets. This replaces the whole selected count, including any at least or at most limit. Other requirements stay in place."
         case .currency: return "Which currency do you mean? Please give its three-letter code."
         case .priceBasis: return "Is the budget a total, per person or per ticket?"
         case .fees: return "Should the price limit include fees?"
@@ -21,7 +24,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         }
     }
     func accepts(_ requirement: ComputerUseBrowserGoalProposal.Requirement) -> Bool {
-        if self == .replaceDate { return false } // Native source lineage, not model labels, admits replacements.
+        if isReplacement { return false } // Native source lineage, not model labels, admits replacements.
         if self == .source, scopeFields.contains(requirement.field),
            requirement.role == .prohibition || requirement.role == .order { return true }
         if requirement.role == .outcome { return true } // A missing detail may have no separate source clause.
@@ -35,7 +38,7 @@ enum ComputerUseBrowserClarificationTopic: String, CaseIterable, Sendable {
         case .location: return [.location]
         case .date, .replaceDate: return [.date]
         case .time: return [.time]
-        case .quantity: return [.quantity]
+        case .quantity, .replaceQuantity: return [.quantity]
         case .currency, .priceBasis: return [.price]
         case .fees: return [.fees, .price]
         case .source: return [.source, .navigationSource, .answerSource]
@@ -228,6 +231,9 @@ final class ComputerUseBrowserGoalClarification {
             // Display and bind the actual origin being replaced, not just the
             // later literal the model happened to select.
             guard let origins = proposal.dateReplacementTargets(for: selected) else { throw Failure.invalidProposal }
+            requirements = origins
+        } else if topic == .replaceQuantity {
+            guard let origins = proposal.quantityReplacementTargets(for: selected) else { throw Failure.invalidProposal }
             requirements = origins
         } else { requirements = selected }
         let scope = try requirements.map { requirement -> ComputerUseBrowserGoalClarificationTurn.Scope in
