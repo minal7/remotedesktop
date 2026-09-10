@@ -509,6 +509,73 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertNil(next.clarification); XCTAssertTrue(next.conversation.isEmpty)
     }
 
+    func testCountQuestionRejectsExtraInstructionsLocallyAndKeepsTheSavedDraftForCorrection() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets for 2 adults and 1 child."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true, format: .childCount)
+        let reference = try await fixture.question(for: root, text: "What child count should replace 1 child? The adult count will remain 2.",
+            answerPolicy: policy, supportsRecovery: true)
+        let mode = fixture.model.composerMode, draft = "  0 children. Keep e\u{301} tickets.\n"
+        fixture.model.updateQuestionDraft(draft)
+        XCTAssertFalse(fixture.model.sendPrompt(draft))
+        XCTAssertEqual(fixture.model.composerMode, mode); XCTAssertFalse(fixture.model.hasActivePrompt)
+        XCTAssertEqual(fixture.model.statusText, policy.format?.instruction)
+        try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft == draft }
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        XCTAssertEqual(saved.reference, reference); XCTAssertEqual(saved.answerPolicy, policy)
+        XCTAssertTrue(try XCTUnwrap(saved.draft).utf8.elementsEqual(draft.utf8))
+        let sent = await fixture.channel.sentCount(); XCTAssertEqual(sent, 1)
+        XCTAssertTrue(fixture.model.sendPrompt("zero children"))
+        let corrected = try await fixture.channel.prompt(at: 1), request = try ComputerUsePromptRequest.decodeBody(corrected.body)
+        XCTAssertEqual(request.prompt, "zero children"); XCTAssertEqual(request.clarification, reference)
+        XCTAssertTrue(request.supportsClarificationRetry); XCTAssertTrue(request.supportsClarificationFormatRetry)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.clarificationValidUntil, saved.validUntil)
+    }
+
+    func testFormatRetryRequiresExplicitSupportAndRestoresTheExactDraftWithoutRenewingItsDeadline() async throws {
+        for negotiated in [false, true] {
+            var now = Date()
+            let fixture = ClarificationClientFixture(now: { now })
+            defer { fixture.model.stop() }
+            fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets for 2 adults and 1 child."))
+            let root = try await fixture.channel.prompt(at: 0)
+            // A mismatched controlled hint lets the answer reach native rejection.
+            let reference = try await fixture.question(for: root, text: "Which count?", answerPolicy: .init(maximumUTF8Bytes: 256,
+                requiresNonblank: true, supportsRetry: true, format: negotiated ? .adultCount : nil), supportsRecovery: true)
+            guard case .answer(_, let deadline) = fixture.model.composerMode else { return XCTFail("Expected original question") }
+            let draft = "  exactly 3 adults.\n"
+            XCTAssertTrue(fixture.model.sendPrompt(draft))
+            let attempt = try await fixture.channel.prompt(at: 1), submitted = try ComputerUsePromptRequest.decodeBody(attempt.body)
+            XCTAssertTrue(submitted.supportsClarificationRetry); XCTAssertEqual(submitted.supportsClarificationFormatRetry, negotiated)
+            now = now.addingTimeInterval(30)
+            let retry = try ComputerUseClarificationRetry(reference: reference, reason: .formatMismatch,
+                answerPolicy: .init(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true, format: .childCount))
+            let response = try ComputerUseTaskUpdate(taskID: attempt.id, text: "What child count? The adult count will remain 2.",
+                outcome: .userInterventionRequired, clarificationRetry: retry, supportsClarificationRecovery: true).encodedBody()
+            await fixture.channel.deliver(response); try await fixture.channel.waitForDelivery()
+            if !negotiated {
+                XCTAssertTrue(fixture.model.hasActivePrompt); XCTAssertNil(fixture.model.restoredClarificationDraft)
+                XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.messageID, attempt.id)
+                continue
+            }
+            XCTAssertEqual(fixture.model.composerMode, .answer(reference, validUntil: deadline))
+            XCTAssertTrue(try XCTUnwrap(fixture.model.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
+            XCTAssertEqual(fixture.model.statusText, retry.answerPolicy.message(for: .formatMismatch))
+            let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+            XCTAssertEqual(saved.validUntil, deadline); XCTAssertEqual(saved.answerPolicy, retry.answerPolicy)
+            XCTAssertTrue(try XCTUnwrap(saved.draft).utf8.elementsEqual(draft.utf8))
+            XCTAssertFalse(fixture.model.sendPrompt(draft)); XCTAssertEqual(fixture.model.restoredClarificationDraft, draft)
+            XCTAssertTrue(fixture.model.sendPrompt("zero children"))
+            let corrected = try await fixture.channel.prompt(at: 2)
+            XCTAssertEqual(try ComputerUsePromptRequest.decodeBody(corrected.body).clarification, reference)
+            XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.clarificationValidUntil, deadline)
+            await fixture.channel.deliver(response); try await fixture.channel.waitForDelivery()
+            XCTAssertTrue(fixture.model.hasActivePrompt); XCTAssertNil(fixture.model.restoredClarificationDraft)
+        }
+    }
+
     func testRejectedAnswerRestoresExactDraftQuestionAndOriginalDeadlineBeforeCorrection() async throws {
         var now = Date()
         let fixture = ClarificationClientFixture(now: { now })

@@ -100,7 +100,7 @@ struct ComputerUseBrowserGoalClarificationTurn: Equatable, Sendable, CustomStrin
 /// The durable transport ledger must claim the answer ID before consumption.
 @MainActor
 final class ComputerUseBrowserGoalClarification {
-    enum Failure: Error, Equatable { case invalidReference, expired, contextChanged, invalidProposal, inputLimit, retired, questionPending }
+    enum Failure: Error, Equatable { case invalidReference, expired, contextChanged, invalidProposal, inputLimit, retired, questionPending, invalidAnswer }
     struct Context: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         private let digest: String
         init(controllerID: String, controllerSessionID: String, browserSessionDigest: String?) throws {
@@ -133,6 +133,16 @@ final class ComputerUseBrowserGoalClarification {
         let expiresAt: Date
         let context: Context
         let text: String
+        var answerFormat: ComputerUseClarificationAnswerPolicy.Format? {
+            switch topic {
+            case .replaceAdults: return .adultCount
+            case .replaceChildren: return .childCount
+            default: return nil
+            }
+        }
+        func answerPolicy(maximumUTF8Bytes: Int) throws -> ComputerUseClarificationAnswerPolicy {
+            try .init(maximumUTF8Bytes: maximumUTF8Bytes, requiresNonblank: true, supportsRetry: true, format: answerFormat)
+        }
         fileprivate init(proposal: ComputerUseBrowserGoalProposal, topic: ComputerUseBrowserClarificationTopic,
                          scope: [ComputerUseBrowserGoalClarificationTurn.Scope], issuedAt: Date, expiresAt: Date, context: Context) throws {
             let input = proposal.input
@@ -269,6 +279,7 @@ final class ComputerUseBrowserGoalClarification {
         guard acceptedAt >= question.issuedAt else { throw Failure.inputLimit }
         guard question.context == context else { throw Failure.contextChanged }
         guard Context.validIdentifier(answerTaskID) else { throw Failure.inputLimit }
+        if let format = question.answerFormat, format.count(in: answer) == nil { throw Failure.invalidAnswer }
         let dateContext = try ComputerUseBrowserGoalInput.DateContext(referenceDate: acceptedAt, timeZoneIdentifier: input.timeZoneIdentifier)
         let turn = ComputerUseBrowserGoalClarificationTurn(question: question, answerTaskID: answerTaskID, answer: answer, dateContext: dateContext)
         let continued: ComputerUseBrowserGoalInput

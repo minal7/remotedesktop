@@ -6171,7 +6171,8 @@ final class HostComputerUseManager: ObservableObject {
                 continuation = nil
                 browserContinuation = nil
             }
-        } catch let rejection as ComputerUseBrowserClarificationTransport.RejectedAnswer where request.supportsClarificationRetry {
+        } catch let rejection as ComputerUseBrowserClarificationTransport.RejectedAnswer
+            where request.supportsClarificationRetry && (rejection.retry.reason != .formatMismatch || request.supportsClarificationFormatRetry) {
             sendClarificationRetry(rejection, replyingTo: envelope, channel: channel)
             sendStatus("ready", replyingTo: envelope, channel: channel)
             return

@@ -982,6 +982,54 @@ final class ComputerUseTests: XCTestCase {
         }
     }
 
+    func test_managerNegotiatesComponentFormatRecoveryWithoutConsumingInvalidAnswers() async throws {
+        for (basicRetry, formatRetry) in [(false, false), (true, false), (true, true)] {
+            let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+            executor.initialQuestionTopic = .replaceChildren; executor.pauseFirstAnswer = true
+            executor.planner.questionRequirementIndices = [1]
+            executor.planner.requirementRows = [
+                ["source":"Find concerts. ", "turn":0, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
+                ["source":"2 adults and 1 child.", "turn":0, "role":"condition", "field":"quantity", "relation":"unspecified", "values":[]]]
+            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            defer { fixture.manager.stop(); fixture.browser.close() }
+            let root = makeEnvelope(id: "format-root", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: "Find concerts. 2 adults and 1 child.").encodedBody())
+            fixture.manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
+            let question = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
+            let reference = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
+            XCTAssertEqual(question.clarificationAnswerPolicy?.format, .childCount)
+            let native = try XCTUnwrap(owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+            let attempt = makeEnvelope(id: "invalid-format", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: "3 adults and 2 children", supportsClarificationRetry: basicRetry,
+                    supportsClarificationFormatRetry: formatRetry).encodedBody())
+            XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+            let rejected = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel)
+            XCTAssertEqual(rejected.outcome, formatRetry ? .userInterventionRequired : .unableToComplete)
+            XCTAssertEqual(rejected.clarificationRetry?.reason, formatRetry ? .formatMismatch : nil)
+            if formatRetry {
+                XCTAssertEqual(rejected.text, question.text)
+                XCTAssertEqual(rejected.clarificationRetry?.answerPolicy, question.clarificationAnswerPolicy)
+                let before = await fixture.channel.sentMessages().count
+                XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
+                let replay = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel, afterCount: before)
+                XCTAssertEqual(replay.clarificationRetry, rejected.clarificationRetry)
+            }
+            XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.executionTaskID, root.id)
+            XCTAssertEqual(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID), native)
+            XCTAssertTrue(executor.continued.isEmpty); XCTAssertEqual(executor.planner.inputs.count, 1)
+            let correction = makeEnvelope(id: "corrected-format", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: "zero children", supportsClarificationRetry: basicRetry,
+                    supportsClarificationFormatRetry: formatRetry).encodedBody())
+            XCTAssertTrue(fixture.manager.handle(correction, channel: fixture.channel))
+            await waitUntil { executor.continued.count == 1 }
+            XCTAssertEqual(executor.continued.first?.taskID, correction.id)
+            XCTAssertEqual(owner.input.userTurns, [original.prompt, "zero children"])
+            XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
+        }
+    }
+
     func test_managerRetriesRejectedBrowserAnswersWithoutAcceptingThemAndRetiresStaleRetryReplays() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

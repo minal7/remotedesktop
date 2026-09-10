@@ -8,7 +8,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     private typealias Scalars = ComputerUseBrowserScalarRequirements
 
     func testPartyComponentCorrectionRetainsTheOtherCountBudgetAndTicketRequirementAcrossPartitions() throws {
-        for (topic, answer, adults, children) in [(ComputerUseBrowserClarificationTopic.replaceAdults, "3 adults", 3, 1), (.replaceChildren, "0 children", 2, 0)] {
+        for (topic, answer, adults, children) in [(ComputerUseBrowserClarificationTopic.replaceAdults, "3 adults", 3, 1), (.replaceChildren, "0 children", 2, 0), (.replaceChildren, "zero children", 2, 0)] {
           for split in [false, true] {
             let original = try input("Find concerts. 2 adults and 1 child. Under USD 50. 2 tickets."), state = Clarification(input: original)
             let rows = [row("Find concerts. "), row("2 adults and 1 child. ", role: "condition", field: "quantity"),
@@ -64,11 +64,20 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
                 let rows = [row("Find concerts. "), row("2 adults and 1 child.", role: "condition", field: "quantity")]
                 let initial = try proposal(original, rows: rows, disposition: "research")
                 let question = try state.issue(proposal: initial, topic: topic, requirementIDs: [initial.requirements[1].id], context: context())
-                let updated = try state.consume(questionID: question.id, answerTaskID: "invalid-component", answer: answer, context: context())
-                let current = try proposal(updated, rows: rows + [row(answer, turn: 1, role: "condition", field: "quantity")], disposition: "research")
-                XCTAssertTrue(current.hasUncompiledQuantityReplacements, answer)
-                XCTAssertTrue(current.quantityReplacementContexts.isEmpty, answer)
-                XCTAssertFalse(current.permitsTaskPurpose(current.requirements[0]), answer)
+                XCTAssertThrowsError(try state.consume(questionID: question.id, answerTaskID: "invalid-component", answer: answer, context: context())) {
+                    XCTAssertEqual($0 as? Clarification.Failure, .invalidAnswer, answer)
+                }
+                XCTAssertEqual(state.input, original)
+                XCTAssertEqual(try state.pendingQuestion(context: context()), question)
+                let correction = topic == .replaceAdults ? "3 adults" : "zero children"
+                let updated = try state.consume(questionID: question.id, answerTaskID: "corrected-component", answer: correction, context: context())
+                XCTAssertEqual(updated.userTurns, [original.prompt, correction])
+                XCTAssertEqual(updated.rootDateContext, original.rootDateContext)
+                XCTAssertNil(try state.pendingQuestion(context: context()))
+                let current = try proposal(updated, rows: rows + [row(correction, turn: 1, role: "condition", field: "quantity")], disposition: "research")
+                XCTAssertFalse(current.hasUncompiledQuantityReplacements, answer)
+                XCTAssertEqual(Scalars(proposal: current).currentParty(requirementIDs: [current.requirements[2].id]),
+                    Scalars.PartyComposition(adults: topic == .replaceAdults ? 3 : 2, children: topic == .replaceAdults ? 1 : 0))
             }
         }
     }

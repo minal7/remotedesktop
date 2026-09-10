@@ -379,7 +379,8 @@ final class ComputerUseSessionModel: ObservableObject {
             switch composerMode {
             case .answer(let reference, _):
                 request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true,
-                    supportsClarificationRetry: clarificationAnswerPolicy?.supportsRetry == true)
+                    supportsClarificationRetry: clarificationAnswerPolicy?.supportsRetry == true,
+                    supportsClarificationFormatRetry: clarificationAnswerPolicy?.supportsRetry == true && clarificationAnswerPolicy?.format != nil)
             case .legacyAnswer:
                 request = .init(prompt: rawPrompt, conversation: recentConversation(), supportsApprovedActionEvidence: true)
             case .request:
@@ -482,8 +483,8 @@ final class ComputerUseSessionModel: ObservableObject {
         guard value.count <= ComputerUsePromptRequest.maximumPromptLength, value.utf8.count <= 32 * 1_024 else {
             return "This text is too long. Shorten it before sending."
         }
-        if case .answer = composerMode, let rejection = clarificationAnswerPolicy?.rejection(of: value) {
-            return rejection.message
+        if case .answer = composerMode, let policy = clarificationAnswerPolicy, let rejection = policy.rejection(of: value) {
+            return policy.message(for: rejection)
         }
         return nil
     }
@@ -1171,7 +1172,7 @@ final class ComputerUseSessionModel: ObservableObject {
                     waitingQuestionRecord = savedQuestion; questionDraft = savedQuestion?.question?.draft
                     awaitClarification(retry.reference, answerPolicy: retry.answerPolicy, originalDeadline: recovery.deadline)
                     if case .answer = composerMode {
-                        restoredClarificationDraft = recovery.text; statusText = retry.reason.message
+                        restoredClarificationDraft = recovery.text; statusText = retry.answerPolicy.message(for: retry.reason)
                     }
                 } else {
                     applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification,
@@ -1580,6 +1581,7 @@ final class ComputerUseSessionModel: ObservableObject {
               hostControlPaused != true, let body = activePromptBody,
               let submitted = try? ComputerUsePromptRequest.decodeBody(body), submitted.supportsClarificationRetry,
               submitted.clarification == retry.reference, retry.answerPolicy.rejection(of: submitted.prompt) == retry.reason,
+              retry.reason != .formatMismatch || submitted.supportsClarificationFormatRetry,
               let deadline = activeClarificationValidUntil, deadline.timeIntervalSince1970.isFinite,
               deadline <= retry.reference.expiresAt, let createdAt = activePromptCreatedAt,
               deadline <= createdAt.addingTimeInterval(600) else { return nil }

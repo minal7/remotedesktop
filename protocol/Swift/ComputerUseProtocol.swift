@@ -677,38 +677,76 @@ public enum ComputerUseClarificationText {
 /// retained request and answer; these fields never grant continuation authority.
 public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable {
     public enum Rejection: String, Codable, Equatable, Sendable {
-        case blank, tooLong
+        case blank, tooLong, formatMismatch
         public var message: String {
             switch self {
             case .blank: return "Enter an answer with some text for this question."
             case .tooLong: return "This answer is too long for this question. Shorten it before sending."
+            case .formatMismatch: return "Enter one exact count for the category in this question."
             }
+        }
+    }
+    /// Native admission and scalar compilation use this same bounded grammar.
+    /// It consumes the complete answer; extra requirements are never discarded.
+    public enum Format: String, Codable, Equatable, Sendable {
+        case adultCount, childCount
+        public var instruction: String {
+            switch self {
+            case .adultCount: return "Enter only an adult count from 0 to 999, such as 3 adults."
+            case .childCount: return "Enter only a child count from 0 to 999, such as 0 children."
+            }
+        }
+        public func count(in answer: String) -> Int64? {
+            guard answer.utf8.count <= 32 * 1_024 else { return nil }
+            var source = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if source.lowercased().hasPrefix("and ") { source = String(source.dropFirst(4)) }
+            if let last = source.last, ".,;".contains(last) { source.removeLast() }
+            source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            let category = self == .adultCount ? "adults?" : "(?:children|child)"
+            let pattern = #"(?:exactly\s+)?([0-9]{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s+"# + category
+            let fullRange = NSRange(source.startIndex..., in: source)
+            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = expression.firstMatch(in: source, range: fullRange), match.range == fullRange,
+                  let numberRange = Range(match.range(at: 1), in: source) else { return nil }
+            let number = String(source[numberRange]).lowercased()
+            if let count = Int64(number) { return count }
+            return ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
+                .firstIndex(of: number).map { Int64($0) }
         }
     }
     public let maximumUTF8Bytes: Int
     public let requiresNonblank: Bool
     public let supportsRetry: Bool
+    public let format: Format?
 
-    public init(maximumUTF8Bytes: Int, requiresNonblank: Bool, supportsRetry: Bool = false) throws {
+    public init(maximumUTF8Bytes: Int, requiresNonblank: Bool, supportsRetry: Bool = false, format: Format? = nil) throws {
         guard (1...(32 * 1_024)).contains(maximumUTF8Bytes) else { throw ComputerUsePayloadError.invalidClarification }
         self.maximumUTF8Bytes = maximumUTF8Bytes; self.requiresNonblank = requiresNonblank; self.supportsRetry = supportsRetry
+        self.format = format
     }
     public func rejection(of text: String) -> Rejection? {
         if requiresNonblank && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
-        return text.utf8.count > maximumUTF8Bytes ? .tooLong : nil
+        if text.utf8.count > maximumUTF8Bytes { return .tooLong }
+        if let format, format.count(in: text) == nil { return .formatMismatch }
+        return nil
     }
-    private enum CodingKeys: String, CodingKey { case maximumUTF8Bytes, requiresNonblank, supportsRetry }
+    public func message(for rejection: Rejection) -> String {
+        rejection == .formatMismatch ? (format?.instruction ?? rejection.message) : rejection.message
+    }
+    private enum CodingKeys: String, CodingKey { case maximumUTF8Bytes, requiresNonblank, supportsRetry, format }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(maximumUTF8Bytes: values.decode(Int.self, forKey: .maximumUTF8Bytes),
             requiresNonblank: values.decode(Bool.self, forKey: .requiresNonblank),
-            supportsRetry: values.decodeIfPresent(Bool.self, forKey: .supportsRetry) ?? false)
+            supportsRetry: values.decodeIfPresent(Bool.self, forKey: .supportsRetry) ?? false,
+            format: values.decodeIfPresent(Format.self, forKey: .format))
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(maximumUTF8Bytes, forKey: .maximumUTF8Bytes)
         try values.encode(requiresNonblank, forKey: .requiresNonblank)
         if supportsRetry { try values.encode(true, forKey: .supportsRetry) }
+        try values.encodeIfPresent(format, forKey: .format)
     }
 }
 
@@ -721,7 +759,9 @@ public struct ComputerUseClarificationRetry: Codable, Equatable, Sendable {
     public let answerPolicy: ComputerUseClarificationAnswerPolicy
     public init(reference: ComputerUseClarificationReference, reason: ComputerUseClarificationAnswerPolicy.Rejection,
                 answerPolicy: ComputerUseClarificationAnswerPolicy) throws {
-        guard answerPolicy.supportsRetry else { throw ComputerUsePayloadError.invalidClarification }
+        guard answerPolicy.supportsRetry, reason != .formatMismatch || answerPolicy.format != nil else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
         self.reference = reference; self.reason = reason; self.answerPolicy = answerPolicy
     }
     private enum CodingKeys: String, CodingKey { case reference, reason, answerPolicy }
@@ -1026,6 +1066,8 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     /// evidence only on their existing lifecycle replies.
     public let supportsApprovedActionEvidence: Bool
     public let supportsClarificationRetry: Bool
+    /// Answer-only opt-in: older retry clients cannot decode formatMismatch.
+    public let supportsClarificationFormatRetry: Bool
 
     public init(
         prompt: String,
@@ -1038,18 +1080,21 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         clarification = nil
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = false
+        self.supportsClarificationFormatRetry = false
     }
 
     /// A clarification answer is exact user input, not a bounded chat-history
     /// excerpt. Reject an oversized answer instead of truncating its payload.
     public static func answering(_ reference: ComputerUseClarificationReference, text: String,
-        supportsApprovedActionEvidence: Bool = false, supportsClarificationRetry: Bool = false) throws -> Self {
+        supportsApprovedActionEvidence: Bool = false, supportsClarificationRetry: Bool = false,
+        supportsClarificationFormatRetry: Bool = false) throws -> Self {
         try Self(exactAnswer: text, reference: reference, supportsApprovedActionEvidence: supportsApprovedActionEvidence,
-            supportsClarificationRetry: supportsClarificationRetry)
+            supportsClarificationRetry: supportsClarificationRetry, supportsClarificationFormatRetry: supportsClarificationFormatRetry)
     }
 
     private init(exactAnswer: String, reference: ComputerUseClarificationReference, supportsApprovedActionEvidence: Bool,
-                 supportsClarificationRetry: Bool) throws {
+                 supportsClarificationRetry: Bool, supportsClarificationFormatRetry: Bool) throws {
+        guard !supportsClarificationFormatRetry || supportsClarificationRetry else { throw ComputerUsePayloadError.invalidClarification }
         try Self.validateExactAnswer(exactAnswer)
         version = Self.currentVersion
         prompt = exactAnswer
@@ -1057,6 +1102,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         clarification = reference
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = supportsClarificationRetry
+        self.supportsClarificationFormatRetry = supportsClarificationFormatRetry
     }
 
     private static func validateExactAnswer(_ text: String) throws {
@@ -1099,6 +1145,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         case clarification
         case supportsApprovedActionEvidence
         case supportsClarificationRetry
+        case supportsClarificationFormatRetry
     }
 
     public init(from decoder: Decoder) throws {
@@ -1108,6 +1155,10 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
         supportsApprovedActionEvidence = try values.decodeIfPresent(Bool.self, forKey: .supportsApprovedActionEvidence) ?? false
         supportsClarificationRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationRetry) ?? false
+        supportsClarificationFormatRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationFormatRetry) ?? false
+        guard !supportsClarificationFormatRetry || (supportsClarificationRetry && clarification != nil) else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
         let rawPrompt = try values.decode(String.self, forKey: .prompt)
         if clarification != nil {
             try Self.validateExactAnswer(rawPrompt)
@@ -1129,6 +1180,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         try values.encodeIfPresent(clarification, forKey: .clarification)
         if supportsApprovedActionEvidence { try values.encode(true, forKey: .supportsApprovedActionEvidence) }
         if supportsClarificationRetry { try values.encode(true, forKey: .supportsClarificationRetry) }
+        if supportsClarificationFormatRetry { try values.encode(true, forKey: .supportsClarificationFormatRetry) }
     }
 
     private static func boundedPrompt(_ value: String) -> String {

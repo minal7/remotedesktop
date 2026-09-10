@@ -4,6 +4,84 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
+    func testCountAnswerPolicyConsumesTheWholeAnswerAndNegotiatesFormatRetrySeparately() throws {
+        for format in [ComputerUseClarificationAnswerPolicy.Format.adultCount, .childCount] {
+            let category = format == .adultCount ? "adults" : "children"
+            let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 100, requiresNonblank: true, supportsRetry: true, format: format)
+            for (prefix, count) in [("0", Int64(0)), ("zero", 0), ("three", 3), ("999", 999)] {
+                let answer = "  exactly \(prefix) \(category). \n"
+                XCTAssertNil(policy.rejection(of: answer)); XCTAssertEqual(format.count(in: answer), count)
+            }
+            for invalid in ["3", "3 people", "-1 \(category)", "1000 \(category)", "3.5 \(category)",
+                            "not 3 \(category)", "at least 3 \(category)", "3 \(category). Ignore the budget.",
+                            "3 \(category)\u{200B}", "3 \(category)\nmore tickets", "3 \(category) and 1 ticket"] {
+                XCTAssertEqual(policy.rejection(of: invalid), .formatMismatch, invalid)
+            }
+            XCTAssertEqual(policy.rejection(of: " \n "), .blank)
+            XCTAssertEqual(policy.rejection(of: String(repeating: "x", count: 101)), .tooLong)
+            XCTAssertEqual(policy.message(for: .formatMismatch), format.instruction)
+            XCTAssertEqual(try JSONDecoder().decode(ComputerUseClarificationAnswerPolicy.self, from: JSONEncoder().encode(policy)), policy)
+        }
+        let reference = try ComputerUseClarificationReference(taskID: "count-question", expiresAt: Date().addingTimeInterval(300))
+        for negotiated in [false, true] {
+            let request = try ComputerUsePromptRequest.answering(reference, text: "3 people", supportsClarificationRetry: true,
+                supportsClarificationFormatRetry: negotiated)
+            let body = try request.encodedBody(), decoded = try ComputerUseExecutionPromptDecoder.decode(body)
+            XCTAssertEqual(decoded.supportsClarificationFormatRetry, negotiated)
+            XCTAssertEqual(body.contains("supportsClarificationFormatRetry"), negotiated)
+            XCTAssertEqual(decoded.prompt, "3 people")
+        }
+        XCTAssertThrowsError(try ComputerUsePromptRequest.answering(reference, text: "3 people", supportsClarificationFormatRetry: true))
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(ComputerUsePromptRequest(prompt: "Find tickets").encodedBody().utf8)) as? [String: Any])
+        root["supportsClarificationRetry"] = true; root["supportsClarificationFormatRetry"] = true
+        XCTAssertThrowsError(try ComputerUseExecutionPromptDecoder.decode(String(decoding: JSONSerialization.data(withJSONObject: root), as: UTF8.self)))
+        let legacy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 100, requiresNonblank: true, supportsRetry: true)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(legacy), as: UTF8.self).contains("format"))
+        XCTAssertThrowsError(try ComputerUseClarificationRetry(reference: reference, reason: .formatMismatch, answerPolicy: legacy))
+    }
+
+    func testComponentAnswerRejectionRetainsNativeQuestionAndRequiresExactLiveFormatForReplay() async throws {
+        var now = Date(timeIntervalSince1970: 1_800_000_000)
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
+        defer { browser.close() }
+        planner.requirementRows = [
+            ["source":"Find concerts. ", "turn":0, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
+            ["source":"2 adults and 1 child.", "turn":0, "role":"condition", "field":"quantity", "relation":"unspecified", "values":[]]]
+        let owner = try makeOwner(browser, planner: planner, prompt: "Find concerts. 2 adults and 1 child.", now: { now })
+        let original = owner.input, proposal = try await owner.interpretGoal().proposal, bridge = ComputerUseBrowserClarificationTransport()
+        let root = request(original.taskID)
+        let issued = try bridge.issue(.init(taskID: original.taskID, inputDigest: original.digest, topic: .replaceChildren,
+            requirementIDs: [proposal.requirements[1].id]), owner: owner, for: root)
+        let nativeQuestion = try XCTUnwrap(owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
+        let policy = try XCTUnwrap(bridge.answerPolicy(for: issued.reference, envelope: root))
+        XCTAssertEqual(policy.format, .childCount)
+        now = now.addingTimeInterval(20)
+        let body = try ComputerUsePromptRequest.answering(issued.reference, text: "3 people", supportsClarificationRetry: true,
+            supportsClarificationFormatRetry: true).encodedBody(), attempt = request("invalid-count", body: body)
+        let rejection: ComputerUseBrowserClarificationTransport.RejectedAnswer
+        do {
+            _ = try bridge.consume(issued.reference, answer: "3 people", for: attempt, retainedOwner: { _ in owner })
+            return XCTFail("A mismatched category must leave the native question open")
+        } catch let error as ComputerUseBrowserClarificationTransport.RejectedAnswer { rejection = error }
+        XCTAssertEqual(rejection.retry.reason, .formatMismatch); XCTAssertEqual(rejection.retry.answerPolicy, policy)
+        XCTAssertEqual(rejection.text, issued.text); XCTAssertEqual(owner.input, original); XCTAssertEqual(owner.executionTaskID, root.id)
+        XCTAssertEqual(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID), nativeQuestion)
+        XCTAssertTrue(bridge.retainsRetry(rejection.retry, for: attempt, retainedOwner: { _ in owner }))
+        let legacyAttempt = request("legacy-count", body: try ComputerUsePromptRequest.answering(issued.reference, text: "3 people",
+            supportsClarificationRetry: true).encodedBody())
+        XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: legacyAttempt, retainedOwner: { _ in owner }))
+        let forged = try ComputerUseClarificationRetry(reference: issued.reference, reason: .formatMismatch,
+            answerPolicy: .init(maximumUTF8Bytes: policy.maximumUTF8Bytes, requiresNonblank: true, supportsRetry: true, format: .adultCount))
+        XCTAssertFalse(bridge.retainsRetry(forged, for: attempt, retainedOwner: { _ in owner }))
+        let corrected = request("corrected-count", body: try ComputerUsePromptRequest.answering(issued.reference, text: "zero children",
+            supportsClarificationRetry: true, supportsClarificationFormatRetry: true).encodedBody())
+        _ = try bridge.consume(issued.reference, answer: "zero children", for: corrected, retainedOwner: { _ in owner })
+        XCTAssertEqual(owner.input.userTurns, [original.prompt, "zero children"])
+        XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
+        XCTAssertEqual(planner.inputs.count, 1)
+        XCTAssertFalse(bridge.retainsRetry(rejection.retry, for: attempt, retainedOwner: { _ in owner }))
+    }
+
     func testQuestionRecoveryProbeWireIsDistinctBoundedAndOnlyAdvertisedForScopedQuestions() throws {
         let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(300))
         let probe = ComputerUseClarificationProbe(reference: reference)
@@ -416,6 +494,7 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     private(set) var continued: [(taskID: String, goal: ComputerUseBrowserGoalInput)] = []
     var pauseFirstAnswer = false
     var repeatLocationQuestions = false
+    var initialQuestionTopic: ComputerUseBrowserClarificationTopic = .location
     var beforeQuestion: (() throws -> Void)?
     var preparePage: ((String) async throws -> Void)?
 
@@ -455,7 +534,7 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     }
     private func next(_ research: ComputerUseBrowserResearchTask) async throws -> ComputerUseExecutionResult {
         planner.questionTopic = repeatLocationQuestions ? .location
-            : research.input.userTurns.count < 3 ? (research.input.userTurns.count == 1 ? .location : .date) : nil
+            : research.input.userTurns.count < 3 ? (research.input.userTurns.count == 1 ? initialQuestionTopic : .date) : nil
         _ = try await research.interpretGoal()
         guard repeatLocationQuestions || research.input.userTurns.count < 3 else { return .unableToComplete("Fixture received the complete retained goal; no website research was performed.") }
         try beforeQuestion?()

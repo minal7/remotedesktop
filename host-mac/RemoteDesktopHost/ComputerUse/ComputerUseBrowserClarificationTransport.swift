@@ -89,15 +89,13 @@ final class ComputerUseBrowserClarificationTransport {
     /// The opaque answer reference is unchanged for older controller versions.
     func answerPolicy(for reference: ComputerUseClarificationReference?, envelope: ComputerUseEnvelope) -> ComputerUseClarificationAnswerPolicy? {
         guard retains(reference, for: envelope), let pending else { return nil }
-        return try? ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit,
-            requiresNonblank: true, supportsRetry: true)
+        return try? pending.question.answerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit)
     }
 
     func consume(_ reference: ComputerUseClarificationReference, answer: String, for envelope: ComputerUseEnvelope,
                  retainedOwner: (String) -> ComputerUseBrowserResearchTask?) throws -> Continuation {
         let pending = try validatedAnswerQuestion(reference, envelope: envelope, retainedOwner: retainedOwner)
-        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit,
-            requiresNonblank: true, supportsRetry: true)
+        let policy = try pending.question.answerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit)
         if let reason = policy.rejection(of: answer) {
             throw RejectedAnswer(retry: try .init(reference: reference, reason: reason, answerPolicy: policy), question: pending.question.text)
         }
@@ -127,9 +125,10 @@ final class ComputerUseBrowserClarificationTransport {
         guard let pending = try? validatedAnswerQuestion(retry.reference, envelope: envelope, retainedOwner: retainedOwner),
               let submitted = try? ComputerUseExecutionPromptDecoder.decode(envelope.body),
               submitted.supportsClarificationRetry, submitted.clarification == retry.reference,
+              retry.reason != .formatMismatch || submitted.supportsClarificationFormatRetry,
               retry.answerPolicy.rejection(of: submitted.prompt) == retry.reason,
-              retry.answerPolicy.maximumUTF8Bytes == pending.owner.input.nextAnswerByteLimit,
-              retry.answerPolicy.requiresNonblank else { return false }
+              let livePolicy = try? pending.question.answerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit),
+              retry.answerPolicy == livePolicy else { return false }
         return true
     }
 

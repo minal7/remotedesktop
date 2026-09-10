@@ -1816,11 +1816,11 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     }
     private static let partyComponentPattern = #"([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(adults?|children|child)"#
     private static func partyComponentReplacementAnswer(_ answer: String, topic: ComputerUseBrowserClarificationTopic) -> Int64? {
-        guard topic.isPartyComponentReplacement,
-              let parts = groups("^(?:exactly\\s+)?" + partyComponentPattern + "$", conditionSource(answer)),
-              let unit = QuantityUnit.literal(parts[1]), unit == (topic == .replaceAdults ? .adults : .children),
-              let count = Int64(parts[0]) ?? quantityWords[parts[0].lowercased()], (0...999).contains(count) else { return nil }
-        return count
+        switch topic {
+        case .replaceAdults: return ComputerUseClarificationAnswerPolicy.Format.adultCount.count(in: answer)
+        case .replaceChildren: return ComputerUseClarificationAnswerPolicy.Format.childCount.count(in: answer)
+        default: return nil
+        }
     }
     private static var partyPattern: String {
         let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
