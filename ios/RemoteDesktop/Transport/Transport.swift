@@ -1,6 +1,41 @@
 import Foundation
 import LiveKitWebRTC
 
+/// Local presentation identity, distinct from successful input dispatch. A
+/// queued frame callback must match both the handshake and the installed probe.
+struct RemoteInputPresentationState {
+    struct FrameLease: Equatable { let inputID: UUID; let probeID: UUID }
+    private var inputID: UUID?
+    private var probeID: UUID?
+    private var acknowledgement: DirectInputAcknowledgement?
+
+    func matches(_ acknowledgement: DirectInputAcknowledgement?) -> Bool {
+        inputID != nil && self.acknowledgement == acknowledgement
+    }
+
+    mutating func begin(_ acknowledgement: DirectInputAcknowledgement?) {
+        inputID = UUID(); probeID = nil; self.acknowledgement = acknowledgement
+    }
+
+    mutating func invalidate() -> Bool {
+        let hadPresentation = inputID != nil
+        inputID = nil; probeID = nil; acknowledgement = nil
+        return hadPresentation
+    }
+
+    mutating func retireProbe() { probeID = nil }
+
+    mutating func armProbe() -> FrameLease? {
+        guard let inputID else { return nil }
+        let probeID = UUID(); self.probeID = probeID
+        return .init(inputID: inputID, probeID: probeID)
+    }
+
+    func acceptsFrame(_ lease: FrameLease) -> Bool {
+        inputID == lease.inputID && probeID == lease.probeID
+    }
+}
+
 /// Transport abstraction. The session model drives a `Transport`
 /// without caring whether it's a mock loopback, LAN Bonjour fast-path,
 /// or a full WebRTC peer connection. Callbacks fire on the main actor.
@@ -12,7 +47,10 @@ protocol Transport: AnyObject {
     // MainActor context.
     var onHostHello: (@MainActor (HostHello) -> Void)? { get set }
     var onDisplay: (@MainActor (DisplayInfo) -> Void)? { get set }
-    /// Fires once the transport has decoded an actual remote video frame.
+    /// Revokes the previous input/screen lifetime before a recovery handshake.
+    /// Consumers discard local holds; they must not send releases to a new lifetime.
+    var onInputUnavailable: (@MainActor () -> Void)? { get set }
+    /// Fires once for a decoded frame after the current input handshake.
     /// A negotiated track or control-channel hello is not sufficient: the
     /// macOS host can reach both while ScreenCaptureKit is still waiting for
     /// the person to answer its secure recording-consent prompt.

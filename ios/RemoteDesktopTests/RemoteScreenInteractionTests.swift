@@ -181,9 +181,42 @@ final class RemoteScreenInteractionTests: XCTestCase {
     }
 
     @MainActor
+    func test_remoteScreenReadinessDisablesRemoteGesturesAndKeepsViewportControlsLocal() {
+        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeReady()
+        let screen = RemoteScreenUIView(), zoom = RemoteScreenZoomController()
+        screen.bindSession(session); screen.bindZoomController(zoom)
+        XCTAssertTrue(screen.interactionState.remoteIndirectInputEnabled)
+        let generation = session.remoteInputGeneration
+        transport.onInputUnavailable?()
+        let count = transport.sentCount
+        screen.bindSession(session)
+        XCTAssertFalse(screen.interactionState.remoteScrollEnabled)
+        XCTAssertFalse(screen.interactionState.remoteLongPressEnabled)
+        XCTAssertFalse(screen.interactionState.remoteIndirectInputEnabled)
+        zoom.moveScreenEnabled = true
+        XCTAssertTrue(screen.interactionState.viewportPinchEnabled)
+        XCTAssertTrue(screen.interactionState.viewportPanEnabled)
+        XCTAssertEqual(transport.sentCount, count, "Resetting remote recognizers cannot send cleanup into recovery")
+        transport.makeReady()
+        screen.bindSession(session)
+        XCTAssertNotEqual(session.remoteInputGeneration, generation)
+        XCTAssertFalse(screen.interactionState.remoteIndirectInputEnabled, "Viewport mode stays local after recovery")
+        zoom.moveScreenEnabled = false
+        XCTAssertTrue(screen.interactionState.remoteScrollEnabled)
+        XCTAssertTrue(screen.interactionState.remoteLongPressEnabled)
+        XCTAssertTrue(screen.interactionState.remoteIndirectInputEnabled)
+    }
+
+    @MainActor
     func test_moveScreenToggle_reconfiguresActualGestureRecognizers() {
+        let transport = ScreenInputTestTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeReady()
         let controller = RemoteScreenZoomController()
         let screen = RemoteScreenUIView()
+        screen.bindSession(session)
         screen.bindZoomController(controller)
 
         XCTAssertEqual(screen.interactionState, RemoteScreenInteractionState(
@@ -208,5 +241,22 @@ final class RemoteScreenInteractionTests: XCTestCase {
             remoteIndirectInputEnabled: true,
             viewportPinchEnabled: false,
             viewportPanEnabled: false))
+    }
+}
+
+@MainActor
+private final class ScreenInputTestTransport: Transport {
+    var onHostHello: (@MainActor (HostHello) -> Void)?
+    var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onInputUnavailable: (@MainActor () -> Void)?
+    var onFirstVideoFrame: (@MainActor () -> Void)?
+    var onDisconnect: (@MainActor (String) -> Void)?
+    private(set) var sentCount = 0
+    func connect(pairingCode: String, expectedHostID: String?) async throws {}
+    func send(_ message: ControlMessage, seq: UInt32, ts: UInt64) { sentCount += 1 }
+    func disconnect(reason: String) {}
+    func makeReady() {
+        onHostHello?(HostHello(app: "Fixture", version: "1", hostname: "Mac", os: "macOS", audio: false, monitors: 1))
+        onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); onFirstVideoFrame?()
     }
 }

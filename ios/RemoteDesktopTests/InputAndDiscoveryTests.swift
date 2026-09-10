@@ -714,7 +714,9 @@ final class InputAndDiscoveryTests: XCTestCase {
     func test_softKeyboardCapture_forwardsExactTextThroughSessionTransport() throws {
         let transport = RecordingSoftKeyboardTransport()
         let session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
         session.connect(code: "123456")
+        transport.makeScreenReady()
 
         let field = SoftKeyboardCapture.CaptureField(frame: .zero)
         field.session = session
@@ -729,8 +731,35 @@ final class InputAndDiscoveryTests: XCTestCase {
             JSONSerialization.jsonObject(with: payload) as? [String: Any])
         XCTAssertEqual(object["t"] as? String, "text")
         XCTAssertEqual(object["s2"] as? String, "HUMAN-CONTROL-2468")
-        XCTAssertEqual(object["s"] as? Int, 1)
+        XCTAssertEqual(object["s"] as? Int, 2)
         XCTAssertEqual(field.text, " ")
+    }
+
+    @MainActor
+    func test_softKeyboardCaptureRejectsRetiredBindingUntilExplicitRebind() throws {
+        let transport = RecordingSoftKeyboardTransport(), session = SessionModel(transportFactory: { transport })
+        defer { session.reset() }
+        session.connect(code: "123456"); transport.makeScreenReady()
+        let field = SoftKeyboardCapture.CaptureField(frame: .zero)
+        field.bindSession(session)
+        XCTAssertTrue(field.canSendInput)
+        session.toggleSoftModifier(.cmd)
+        transport.onInputUnavailable?()
+        let count = transport.sentPayloads.count
+        field.deleteBackward()
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "old text"))
+        XCTAssertEqual(transport.sentPayloads.count, count); XCTAssertFalse(field.canSendInput)
+        transport.makeScreenReady()
+        let afterHandshake = transport.sentPayloads.count
+        field.deleteBackward()
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: "late old text"))
+        XCTAssertEqual(transport.sentPayloads.count, afterHandshake)
+        field.bindSession(session)
+        XCTAssertTrue(field.canSendInput); XCTAssertEqual(session.softModifierMask, 0)
+        let expected = "  e\u{301} 😀\n"
+        XCTAssertFalse(field.textField(field, shouldChangeCharactersIn: NSRange(location: 0, length: 1), replacementString: expected))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(transport.sentPayloads.last)) as? [String: Any])
+        XCTAssertEqual(object["t"] as? String, "text"); XCTAssertEqual(object["s2"] as? String, expected)
     }
 
     @MainActor
@@ -837,9 +866,16 @@ private final class TestDeviceIdentityStorage: @unchecked Sendable {
 private final class RecordingSoftKeyboardTransport: Transport {
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onInputUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
     private(set) var sentPayloads: [Data] = []
+
+    func makeScreenReady() {
+        onHostHello?(HostHello(app: "Fixture", version: "1", hostname: "Mac", os: "macOS", audio: false, monitors: 1))
+        onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1))
+        onFirstVideoFrame?()
+    }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {}
 

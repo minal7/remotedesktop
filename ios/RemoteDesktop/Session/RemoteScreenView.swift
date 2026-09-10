@@ -151,6 +151,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var pinchStartScale: CGFloat = 1
     private var pinchAnchor: CGPoint = .zero
     private var panStartOffset: CGPoint = .zero
+    private var inputGeneration: UUID?
+    private var inputAvailable = false
+    private var scrollGenerations: [ObjectIdentifier: UUID] = [:]
 
     var interactionState: RemoteScreenInteractionState {
         RemoteScreenInteractionState(
@@ -237,7 +240,27 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     func bindSession(_ session: SessionModel?) {
         self.session = session
+        synchronizeInputAvailability()
         rebindRendererIfNeeded()
+    }
+
+    @discardableResult
+    private func synchronizeInputAvailability() -> Bool {
+        let generation = session?.remoteInputGeneration
+        let available = session?.hasInteractiveRemoteScreen == true
+        if generation != inputGeneration || available != inputAvailable {
+            inputGeneration = generation
+            inputAvailable = available
+            activeTouch = nil; touchStart = nil; isDragging = false; rightClickFired = false
+            isTrackingIndirectClick = false; lastPointerButtons = 0; lastSentPointer = nil
+            scrollGenerations.removeAll()
+            cursorLayer.hide()
+            // Reset recognizers even if a complete recovery occurred between
+            // SwiftUI updates. Cancel callbacks carry no current scroll lease.
+            for gesture: UIGestureRecognizer in [touchScroll, indirectScroll, hover, longPress] { gesture.isEnabled = false }
+            applyInteractionMode(moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+        }
+        return available
     }
 
     func bindZoomController(_ controller: RemoteScreenZoomController) {
@@ -284,6 +307,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var isTrackingIndirectClick = false
 
     @objc private func onHover(_ g: UIHoverGestureRecognizer) {
+        guard synchronizeInputAvailability() else { return }
         switch g.state {
         case .began, .changed:
             accessories?.noteIndirectPointer(active: true)
@@ -305,6 +329,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     // MARK: - Indirect scroll (trackpad / wheel)
 
     @objc private func onIndirectScroll(_ g: UIPanGestureRecognizer) {
+        guard acceptsScrollEvent(g) else { return }
         guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
             moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
             g.setTranslation(.zero, in: self)
@@ -334,6 +359,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var rightClickFired = false
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .began) {
             return
         }
@@ -361,6 +387,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .moved) {
             return
         }
@@ -377,6 +404,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .ended) {
             return
         }
@@ -398,6 +426,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .cancelled) {
             return
         }
@@ -447,6 +476,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             lastPointerButtons = buttons
             sendPointer(at: location, buttons: buttons)
         case .moved:
+            guard isTrackingIndirectClick else { return true }
             lastPointerButtons = buttons
             sendPointer(at: location, buttons: buttons)
         case .ended, .cancelled:
@@ -461,7 +491,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onLongPress(_ g: UILongPressGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true,
+        guard synchronizeInputAvailability(), activeTouch != nil,
+              accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
               g.state == .began,
@@ -473,7 +504,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onTouchScroll(_ g: UIPanGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true,
+        guard acceptsScrollEvent(g), accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else { return }
         let t = g.translation(in: self)
@@ -491,26 +522,42 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     // MARK: - UIGestureRecognizerDelegate
 
+    private func acceptsScrollEvent(_ gesture: UIPanGestureRecognizer) -> Bool {
+        guard synchronizeInputAvailability(), let inputGeneration else { return false }
+        let id = ObjectIdentifier(gesture)
+        switch gesture.state {
+        case .began:
+            scrollGenerations[id] = inputGeneration
+            return true
+        case .changed, .ended, .cancelled:
+            guard scrollGenerations[id] == inputGeneration else { return false }
+            if gesture.state != .changed { scrollGenerations[id] = nil }
+            return true
+        default: return false
+        }
+    }
+
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let available = synchronizeInputAvailability()
         if gestureRecognizer === zoomPan {
             return RemoteTouchRoutingPolicy.movesViewport(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false,
                 scale: zoomScale)
         }
         if gestureRecognizer === touchScroll {
-            return accessories?.hasIndirectPointer != true
+            return available && accessories?.hasIndirectPointer != true
                 && RemoteTouchRoutingPolicy.routesTouchesToComputer(
                     moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
         if gestureRecognizer === indirectScroll || gestureRecognizer === hover {
-            return RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            return available && RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
         if gestureRecognizer === pinch {
             return RemoteTouchRoutingPolicy.allowsViewportZoom(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
-        return true
+        return available
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -594,10 +641,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
                     phase: .end)
             }
         }
-        touchScroll.isEnabled = !moveScreenEnabled
-        longPress.isEnabled = !moveScreenEnabled
-        hover.isEnabled = !moveScreenEnabled
-        indirectScroll.isEnabled = !moveScreenEnabled
+        if moveScreenEnabled { scrollGenerations.removeAll() }
+        touchScroll.isEnabled = !moveScreenEnabled && inputAvailable
+        longPress.isEnabled = !moveScreenEnabled && inputAvailable
+        hover.isEnabled = !moveScreenEnabled && inputAvailable
+        indirectScroll.isEnabled = !moveScreenEnabled && inputAvailable
         pinch.isEnabled = moveScreenEnabled
         zoomPan.isEnabled = moveScreenEnabled
     }
@@ -658,19 +706,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var lastSentPointer: (Int, Int, UInt8)?
 
     private func sendPointer(at p: CGPoint, buttons: UInt8) {
+        guard synchronizeInputAvailability() else { return }
         let remote = geometry.localToRemote(p)
         let key = (remote.x, remote.y, buttons)
         if let last = lastSentPointer, last == key { return }   // dedup
         lastSentPointer = key
-        session?.send(.pointer(x: remote.x, y: remote.y, buttons: buttons))
+        session?.send(.pointer(x: remote.x, y: remote.y, buttons: buttons), expectedInputGeneration: inputGeneration)
     }
 
     private func sendScroll(at p: CGPoint, dx: CGFloat, dy: CGFloat, phase: InputScrollPhase) {
+        guard synchronizeInputAvailability() else { return }
         let ix = Int(dx.rounded()), iy = Int(dy.rounded())
         if ix == 0 && iy == 0 && phase == .changed { return }   // skip sub-pixel noise
         let remote = geometry.localToRemote(p)
         session?.send(.scroll(x: remote.x, y: remote.y,
-                              dx: ix, dy: iy, phase: phase))
+                              dx: ix, dy: iy, phase: phase), expectedInputGeneration: inputGeneration)
     }
 
     private var geometry: RemoteScreenGeometry {

@@ -40,6 +40,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onInputUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
@@ -58,11 +59,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var remoteVideoTrack: RTCVideoTrack?
     private var remoteAudioTrack: RTCAudioTrack?
     private var renderer: RTCVideoRenderer?
-    private lazy var firstVideoFrameProbe = FirstVideoFrameProbe { [weak self] in
-        Task { @MainActor [weak self] in
-            self?.onFirstVideoFrame?()
-        }
-    }
+    private var firstVideoFrameProbe: FirstVideoFrameProbe?
+    private var inputPresentation = RemoteInputPresentationState()
     private var pollTask: Task<Void, Never>?
     private var iceDeadlineTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
@@ -127,7 +125,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         inputHandshakeDeadlineTask?.cancel()
         inputHandshakeDeadlineTask = nil
         answerApplied = false
-        firstVideoFrameProbe.reset()
+        invalidateInputPresentation()
         connectionRecoveryTask?.cancel()
         connectionRecoveryTask = nil
         pendingRemoteICECandidates.removeAll()
@@ -239,7 +237,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         if let renderer {
             remoteVideoTrack?.remove(renderer)
         }
-        remoteVideoTrack?.remove(firstVideoFrameProbe)
+        invalidateInputPresentation()
         remoteAudioTrack?.isEnabled = false
         remoteVideoTrack = nil
         remoteAudioTrack = nil
@@ -425,6 +423,31 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
     }
 
+    private func invalidateInputPresentation() {
+        let hadPresentation = inputPresentation.invalidate()
+        if let firstVideoFrameProbe { remoteVideoTrack?.remove(firstVideoFrameProbe) }
+        firstVideoFrameProbe = nil
+        if hadPresentation { onInputUnavailable?() }
+    }
+
+    /// A fresh probe instance prevents an old decoder callback already queued
+    /// for MainActor from establishing frame readiness for a replacement scope.
+    private func installFrameProbe() {
+        if let firstVideoFrameProbe { remoteVideoTrack?.remove(firstVideoFrameProbe) }
+        firstVideoFrameProbe = nil
+        inputPresentation.retireProbe()
+        guard let track = remoteVideoTrack, let lease = inputPresentation.armProbe() else { return }
+        let probe = FirstVideoFrameProbe { [weak self, weak track] in
+            Task { @MainActor [weak self, weak track] in
+                guard let self, let track, self.remoteVideoTrack === track,
+                      self.inputPresentation.acceptsFrame(lease), self.directInputState.isReady else { return }
+                self.onFirstVideoFrame?()
+            }
+        }
+        firstVideoFrameProbe = probe
+        track.add(probe)
+    }
+
     private func scheduleConnectionRecoveryTimeout() {
         guard connectionRecoveryTask == nil else { return }
         log.warning("peer connection is disconnected; waiting for ICE recovery")
@@ -541,14 +564,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             return
         }
         if let current = remoteVideoTrack {
-            current.remove(firstVideoFrameProbe)
+            if let firstVideoFrameProbe { current.remove(firstVideoFrameProbe) }
             if let renderer {
                 current.remove(renderer)
             }
         }
         remoteVideoTrack = track
         log.info("adopting remote video track id=\(track.trackId, privacy: .public) rendererAttached=\(self.renderer != nil, privacy: .public)")
-        track.add(firstVideoFrameProbe)
+        installFrameProbe()
         if let renderer {
             track.add(renderer)
         }
@@ -598,11 +621,6 @@ private final class FirstVideoFrameProbe: NSObject, RTCVideoRenderer {
         }
     }
 
-    func reset() {
-        lock.lock()
-        didReport = false
-        lock.unlock()
-    }
 }
 
 extension WebRTCTransport: RTCAudioSessionDelegate {
@@ -641,6 +659,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                     finishDisconnect(reason: "The peer connection failed.")
                 }
             case .disconnected:
+                invalidateInputPresentation()
                 inputHandshakeDeadlineTask?.cancel()
                 inputHandshakeDeadlineTask = nil
                 guard directInputState.connectionChanged(connected: false) else {
@@ -757,9 +776,14 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 }
                 inputHandshakeDeadlineTask?.cancel()
                 inputHandshakeDeadlineTask = nil
+                if inputPresentation.matches(hello.inputSession) { return }
+                invalidateInputPresentation()
+                inputPresentation.begin(hello.inputSession)
+                installFrameProbe()
                 log.info("host acknowledged the WebRTC control channel")
                 onHostHello?(hello)
             case .display(let display):
+                guard directInputState.isReady, inputPresentation.matches(display.inputSession) else { return }
                 onDisplay?(display)
             case .bye(let reason):
                 finishDisconnect(reason: reason)

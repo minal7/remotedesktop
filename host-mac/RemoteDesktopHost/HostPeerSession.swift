@@ -654,7 +654,8 @@ final class HostPeerSession: NSObject {
             height: Int(frame.height.rounded()),
             scale: scale,
             seq: hostSeq,
-            ts: timestamp)
+            ts: timestamp,
+            inputSession: ready.wire)
         dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false))
     }
 

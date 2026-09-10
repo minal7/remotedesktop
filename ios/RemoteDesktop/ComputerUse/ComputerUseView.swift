@@ -203,6 +203,9 @@ struct ComputerUseView: View {
             remoteKeyboardOpen = false
             session.releaseSoftModifiers()
         }
+        .onChange(of: session.remoteInputGeneration) { _, _ in
+            remoteKeyboardOpen = false
+        }
     }
 
     private var header: some View {

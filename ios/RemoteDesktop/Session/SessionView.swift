@@ -29,7 +29,7 @@ struct SessionView: View {
 
     /// Whether the chrome overlay should be showing right now.
     private var shouldShowChrome: Bool {
-        chromeRevealed
+        chromeRevealed || !session.hasInteractiveRemoteScreen
     }
 
     private var specialKeysAttentive: Bool {
@@ -60,6 +60,20 @@ struct SessionView: View {
             RemoteScreenView(accessories: accessories, zoom: zoom)
                 .ignoresSafeArea()
 
+            if !session.hasInteractiveRemoteScreen {
+                ZStack {
+                    Color.black.ignoresSafeArea()
+                    VStack(spacing: 12) {
+                        ProgressView().tint(.white)
+                        Text(session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…")
+                            .foregroundStyle(.white)
+                    }
+                }
+                .allowsHitTesting(false)
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("remote-input-unavailable")
+            }
+
             // ── Disconnect swipe indicator ─────────────────────
             if disconnectDragOffset > 0 {
                 disconnectIndicator
@@ -81,6 +95,7 @@ struct SessionView: View {
 
             // ── Input controls (orientation-aware) ─────────────
             inputDock
+                .disabled(!session.hasInteractiveRemoteScreen)
 
             // Keep zoom and two-finger mode controls in the same predictable
             // top-left location on iPhone and iPad.
@@ -95,7 +110,7 @@ struct SessionView: View {
             }
 
             // ── Invisible soft-keyboard capture ────────────────
-            if softKeyboardOpen && !accessories.hasHardwareKeyboard {
+            if session.hasInteractiveRemoteScreen && softKeyboardOpen && !accessories.hasHardwareKeyboard {
                 SoftKeyboardCapture(isOpen: $softKeyboardOpen)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
@@ -103,7 +118,7 @@ struct SessionView: View {
             }
 
             // ── Hardware-keyboard capture ──────────────────────
-            if accessories.hasHardwareKeyboard {
+            if session.hasInteractiveRemoteScreen && accessories.hasHardwareKeyboard {
                 KeyboardCapture()
                     .frame(width: 0, height: 0)
             }
@@ -113,6 +128,10 @@ struct SessionView: View {
             }
         }
         .statusBarHidden(!shouldShowChrome)
+        .onChange(of: session.remoteInputGeneration) { _, _ in
+            softKeyboardOpen = false
+            restoreSoftKeyboardAfterHardwareDisconnect = false
+        }
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
         .animation(.easeInOut(duration: 0.25), value: zoom.isZoomed)

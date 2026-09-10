@@ -334,7 +334,8 @@
     "RemoteDesktopHostTests/ComputerUseTests/testNewInputHelloRetiresHoldsWithoutAllowingOldHelloOrDowngrade",
     "RemoteDesktopHostTests/ComputerUseTests/testClientInputHandshakeRejectsOldAcksAndKeepsDuplicateAckSequence",
     "RemoteDesktopHostTests/ComputerUseTests/testLegacyInputRequiresANewChannelAfterConnectionLoss",
-    "RemoteDesktopHostTests/ComputerUseTests/testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery"
+    "RemoteDesktopHostTests/ComputerUseTests/testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery",
+    "RemoteDesktopHostTests/ComputerUseTests/testDisplayEncodingBindsDimensionsToTheCurrentInputAcknowledgement"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
@@ -1754,6 +1755,7 @@
     "RemoteDesktopHostTests/ComputerUseTests/testDirectInputChannelReplacementRejectsForeignAndLateCallbacks",
     "RemoteDesktopHostTests/ComputerUseTests/testDirectInputRecordsBeforePostingAndKeepsHeldKeysAndButtonsUntilRelease",
     "RemoteDesktopHostTests/ComputerUseTests/testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput",
+    "RemoteDesktopHostTests/ComputerUseTests/testDisplayEncodingBindsDimensionsToTheCurrentInputAcknowledgement",
     "RemoteDesktopHostTests/ComputerUseTests/testHeldRemoteInputPreventsApprovalAcceptanceBeforeItsActorCallback",
     "RemoteDesktopHostTests/ComputerUseTests/testInputBeforeMCPApprovalAdmissionCancelsPreparedWorkAndKeepsTheTaskResumable",
     "RemoteDesktopHostTests/ComputerUseTests/testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery",

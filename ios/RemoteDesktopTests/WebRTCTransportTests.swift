@@ -429,6 +429,8 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertEqual(sidecar.state, .waitingForFreshFrame)
         XCTAssertFalse(sidecar.sendDirectInput(.text("without-display")))
         transport.onDisplay?(DisplayInfo(w: 1_920, h: 1_080, scale: 2))
+        XCTAssertEqual(sidecar.state, .waitingForFreshFrame)
+        transport.onFirstVideoFrame?()
         XCTAssertEqual(sidecar.state, .live)
         XCTAssertTrue(sidecar.sendDirectInput(.text("person-input")))
         XCTAssertEqual(transport.sentMessages.count, 2)
@@ -594,6 +596,137 @@ final class WebRTCTransportTests: XCTestCase {
         model.reset()
     }
 
+    func test_remoteSessionRecoveryRequiresCurrentHelloDisplayAndFrameAndRetiresInputGeneration() async throws {
+        let connected = expectation(description: "remote transport connected")
+        let transport = RecordingTargetTransport(connected: connected)
+        let model = SessionModel(transportFactory: { transport })
+        defer { model.reset() }
+        model.connect(code: "123456")
+        await fulfillment(of: [connected], timeout: 1)
+        transport.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); transport.onFirstVideoFrame?()
+        XCTAssertFalse(model.hasInteractiveRemoteScreen); XCTAssertNil(model.display)
+        model.send(.text("before hello")); model.toggleSoftModifier(.cmd)
+        XCTAssertTrue(transport.sentMessages.isEmpty); XCTAssertEqual(model.softModifierMask, 0)
+        transport.onHostHello?(compatibleComputerUseHello())
+        XCTAssertFalse(model.hasInteractiveRemoteScreen)
+        transport.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); transport.onFirstVideoFrame?()
+        XCTAssertTrue(model.hasInteractiveRemoteScreen)
+        let oldGeneration = model.remoteInputGeneration
+        model.toggleSoftModifier(.cmd); XCTAssertNotEqual(model.softModifierMask, 0)
+        let beforeLoss = transport.sentMessages.count
+        transport.onInputUnavailable?()
+        XCTAssertFalse(model.hasInteractiveRemoteScreen); XCTAssertFalse(model.hasReceivedVideoFrame)
+        XCTAssertNil(model.display); XCTAssertEqual(model.softModifierMask, 0)
+        XCTAssertNotEqual(model.remoteInputGeneration, oldGeneration)
+        XCTAssertEqual(transport.sentMessages.count, beforeLoss, "Loss discards local holds without posting a release")
+        transport.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); transport.onFirstVideoFrame?()
+        XCTAssertNil(model.display); XCTAssertFalse(model.hasReceivedVideoFrame)
+        model.send(.text("during recovery")); XCTAssertEqual(transport.sentMessages.count, beforeLoss)
+        transport.onHostHello?(compatibleComputerUseHello())
+        transport.onFirstVideoFrame?()
+        XCTAssertFalse(model.hasInteractiveRemoteScreen, "The new frame still needs its current display")
+        transport.onDisplay?(DisplayInfo(w: 1024, h: 768, scale: 2))
+        XCTAssertTrue(model.hasInteractiveRemoteScreen)
+        let afterHandshake = transport.sentMessages.count
+        model.send(.key(usage: 4, down: false, modifiers: 0), expectedInputGeneration: oldGeneration)
+        model.toggleSoftModifier(.cmd, expectedInputGeneration: oldGeneration)
+        XCTAssertEqual(model.softModifierMask, 0)
+        XCTAssertEqual(transport.sentMessages.count, afterHandshake)
+        model.send(.text("current input"), expectedInputGeneration: model.remoteInputGeneration)
+        XCTAssertEqual(transport.sentMessages.count, afterHandshake + 1)
+        XCTAssertEqual(model.softModifierMask, 0)
+    }
+
+    func test_sidecarTransientRecoveryKeepsPromptTransportAndClearsLocalControls() async throws {
+        let connected = expectation(description: "visual transport connected")
+        let visual = RecordingTargetTransport(connected: connected), channel = IdleComputerUseSessionChannel()
+        let model = SessionModel(computerUseVisualTransportFactory: { visual }, localAccountBindingValidator: { _ in },
+            localComputerUseChannelConnector: { _, _, _, _, _, _, _ in channel },
+            localPendingStore: EmptyComputerUsePendingPromptStore(), accountChangeNotificationCenter: NotificationCenter())
+        defer { model.reset() }
+        model.connect(code: "123456", experience: .computerUse, computerUseHostID: "HOST-B", hostName: "Mac",
+            localComputerUseEndpoint: LocalComputerUseEndpoint(host: "127.0.0.1", port: 443),
+            localCredentialID: String(repeating: "b", count: 64), localCloudAccountBinding: accountBinding)
+        await fulfillment(of: [connected], timeout: 1)
+        let promptSession = try XCTUnwrap(model.computerUseSession)
+        visual.onHostHello?(compatibleComputerUseHello()); visual.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); visual.onFirstVideoFrame?()
+        XCTAssertTrue(model.hasInteractiveRemoteScreen); XCTAssertTrue(model.isComputerUsePromptTransportReady)
+        model.toggleSoftModifier(.shift)
+        let oldGeneration = model.remoteInputGeneration, count = visual.sentMessages.count
+        visual.onInputUnavailable?()
+        XCTAssertEqual(model.computerUseVisualSidecarState, .connecting)
+        XCTAssertFalse(model.hasInteractiveRemoteScreen); XCTAssertEqual(model.softModifierMask, 0); XCTAssertNil(model.display)
+        XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertTrue(promptSession.isConnected)
+        XCTAssertTrue(model.isComputerUsePromptTransportReady); XCTAssertEqual(model.state, .connected)
+        model.send(.text("no fallback through TLS")); XCTAssertEqual(visual.sentMessages.count, count)
+        visual.onFirstVideoFrame?(); visual.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1))
+        XCTAssertEqual(model.computerUseVisualSidecarState, .connecting)
+        visual.onHostHello?(compatibleComputerUseHello()); visual.onDisplay?(DisplayInfo(w: 900, h: 700, scale: 1))
+        XCTAssertFalse(model.hasInteractiveRemoteScreen)
+        visual.onFirstVideoFrame?(); XCTAssertTrue(model.hasInteractiveRemoteScreen)
+        let readyCount = visual.sentMessages.count
+        model.send(.text("old keyboard callback"), expectedInputGeneration: oldGeneration)
+        XCTAssertEqual(visual.sentMessages.count, readyCount)
+        model.send(.text("current manual input"), expectedInputGeneration: model.remoteInputGeneration)
+        XCTAssertEqual(visual.sentMessages.count, readyCount + 1)
+        XCTAssertTrue(model.computerUseSession === promptSession); XCTAssertTrue(model.isComputerUsePromptTransportReady)
+    }
+
+    func test_presentationLeaseRejectsRetiredFramesAndReplacementProbeCallbacks() throws {
+        var presentation = RemoteInputPresentationState()
+        XCTAssertFalse(presentation.matches(nil)); XCTAssertNil(presentation.armProbe())
+        let hello = DirectInputHello(clientID: UUID(), revision: 1)
+        let first = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 1)
+        presentation.begin(first)
+        let oldFrame = try XCTUnwrap(presentation.armProbe())
+        XCTAssertTrue(presentation.matches(first)); XCTAssertTrue(presentation.acceptsFrame(oldFrame))
+        XCTAssertTrue(presentation.invalidate())
+        XCTAssertFalse(presentation.matches(first)); XCTAssertFalse(presentation.acceptsFrame(oldFrame))
+        let current = DirectInputAcknowledgement(hello: hello, hostID: UUID(), generation: 2)
+        presentation.begin(current)
+        let currentFrame = try XCTUnwrap(presentation.armProbe())
+        XCTAssertFalse(presentation.matches(first)); XCTAssertFalse(presentation.matches(nil))
+        XCTAssertTrue(presentation.matches(current)); XCTAssertFalse(presentation.acceptsFrame(oldFrame))
+        XCTAssertTrue(presentation.acceptsFrame(currentFrame))
+        presentation.retireProbe()
+        let replacementTrackFrame = try XCTUnwrap(presentation.armProbe())
+        XCTAssertFalse(presentation.acceptsFrame(currentFrame)); XCTAssertTrue(presentation.acceptsFrame(replacementTrackFrame))
+        XCTAssertTrue(presentation.matches(current), "Track probe ownership is distinct from wire handshake identity")
+        presentation.invalidate(); presentation.begin(nil)
+        XCTAssertTrue(presentation.matches(nil)); XCTAssertFalse(presentation.acceptsFrame(replacementTrackFrame))
+    }
+
+    func test_displayDecoderKeepsCurrentInputScopeAndRejectsMalformedMetadata() throws {
+        let ack = DirectInputAcknowledgement(hello: .init(clientID: UUID(), revision: 2), hostID: UUID(), generation: 3)
+        let bytes = try JSONSerialization.data(withJSONObject: ["t": "display", "w": 1920, "h": 1080, "scale": 2,
+            "inputSession": try XCTUnwrap(DirectInputWire.object(ack))])
+        guard case .display(let display) = HostMessage.decode(bytes) else { return XCTFail("Expected scoped display") }
+        XCTAssertEqual(display, DisplayInfo(w: 1920, h: 1080, scale: 2, inputSession: ack))
+        for metadata: Any in [NSNull(), "invalid", ["version": 1]] {
+            XCTAssertNil(HostMessage.decode(try JSONSerialization.data(withJSONObject: ["t": "display", "w": 1, "h": 1,
+                "inputSession": metadata])))
+        }
+        guard case .display(let legacy) = HostMessage.decode(Data(#"{"t":"display","w":800,"h":600,"scale":1}"#.utf8)) else { return XCTFail("Expected legacy display") }
+        XCTAssertNil(legacy.inputSession)
+    }
+
+    func test_replacedRemoteTransportCannotChangeTheNewScreenReadiness() async {
+        let firstConnected = expectation(description: "first"), secondConnected = expectation(description: "second")
+        let first = RecordingTargetTransport(connected: firstConnected), second = RecordingTargetTransport(connected: secondConnected)
+        var candidates = [first, second]
+        let model = SessionModel(transportFactory: { candidates.removeFirst() })
+        defer { model.reset() }
+        model.connect(code: "123456"); await fulfillment(of: [firstConnected], timeout: 1)
+        first.onHostHello?(compatibleComputerUseHello()); first.onDisplay?(DisplayInfo(w: 800, h: 600, scale: 1)); first.onFirstVideoFrame?()
+        model.reset(); model.connect(code: "654321"); await fulfillment(of: [secondConnected], timeout: 1)
+        second.onHostHello?(compatibleComputerUseHello()); second.onDisplay?(DisplayInfo(w: 1024, h: 768, scale: 2)); second.onFirstVideoFrame?()
+        let generation = model.remoteInputGeneration
+        first.onInputUnavailable?(); first.onHostHello?(compatibleComputerUseHello())
+        first.onDisplay?(DisplayInfo(w: 1, h: 1, scale: 1)); first.onFirstVideoFrame?(); first.onDisconnect?("old close")
+        XCTAssertTrue(model.hasInteractiveRemoteScreen); XCTAssertEqual(model.state, .connected)
+        XCTAssertEqual(model.display, DisplayInfo(w: 1024, h: 768, scale: 2)); XCTAssertEqual(model.remoteInputGeneration, generation)
+    }
+
     func test_wireInputSessionMetadataIsOnlyAttachedToItsMessageKind() throws {
         let hello = DirectInputHello(clientID: UUID(), revision: 3)
         let stamp = DirectInputStamp(hostID: UUID(), generation: 2, sequence: 7)
@@ -717,6 +850,7 @@ private final class RecordingTargetTransport: Transport {
 
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
+    var onInputUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 

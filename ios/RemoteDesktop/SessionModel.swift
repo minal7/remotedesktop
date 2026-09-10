@@ -60,6 +60,7 @@ final class SessionModel: ObservableObject {
     @Published private(set) var display: DisplayInfo?
     @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
+    @Published private(set) var remoteInputGeneration = UUID()
     @Published var error: String?
     @Published private(set) var experience: Experience = .remoteControl
     @Published private(set) var computerUseSession: ComputerUseSessionModel?
@@ -73,7 +74,7 @@ final class SessionModel: ObservableObject {
         guard !isCloudAccountRevalidationPending else { return false }
         guard experience == .computerUse,
               computerUseConnectionMode == .localPromptOnly else {
-            return true
+            return state == .connected && inputHelloReceived && display != nil && hasReceivedVideoFrame
         }
         return computerUseVisualSidecarState == .live
     }
@@ -105,6 +106,17 @@ final class SessionModel: ObservableObject {
     private var sessionAccountBinding: CloudKitAccountBinding?
     private var accountRevalidationGeneration: UInt64 = 0
     private var seq: UInt32 = 0
+    private var inputHelloReceived = false
+
+    private func invalidateRemoteInput() {
+        // Transport/host teardown owns release of the previous lifetime. Local
+        // controls discard their state instead of releasing into its successor.
+        inputHelloReceived = false
+        hasReceivedVideoFrame = false
+        display = nil
+        softModifierMask = 0
+        remoteInputGeneration = UUID()
+    }
 
     init(
         transportFactory: @escaping @MainActor () -> Transport = {
@@ -193,7 +205,7 @@ final class SessionModel: ObservableObject {
         invalidateAccountRevalidation(clearBinding: true)
         state = .connecting
         error = nil
-        hasReceivedVideoFrame = false
+        invalidateRemoteInput()
         self.experience = experience
         sessionAccountBinding = localCloudAccountBinding
         computerUseConnectionMode = .liveScreen
@@ -244,7 +256,7 @@ final class SessionModel: ObservableObject {
                     pairingCode: code,
                     expectedHostID: computerUseHostID)
             } catch {
-                guard self.state == .connecting else { return }
+                guard self.state == .connecting, self.transport === t else { return }
                 self.computerUseSession?.stop()
                 self.computerUseSession = nil
                 self.transport = nil
@@ -255,8 +267,14 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func send(_ message: ControlMessage) {
+    func send(_ message: ControlMessage, expectedInputGeneration: UUID? = nil) {
         guard !isCloudAccountRevalidationPending else { return }
+        switch message {
+        case .pointer, .scroll, .key, .text:
+            guard hasInteractiveRemoteScreen,
+                  expectedInputGeneration == nil || expectedInputGeneration == remoteInputGeneration else { return }
+        case .hello, .qos, .bye: break
+        }
         if experience == .computerUse,
            computerUseConnectionMode == .localPromptOnly {
             // Only fresh-frame-gated direct input belongs on the visual
@@ -300,7 +318,7 @@ final class SessionModel: ObservableObject {
         transport?.disconnect(reason: "user")
         transport = nil
         state = .ended("Disconnected")
-        hasReceivedVideoFrame = false
+        invalidateRemoteInput()
     }
 
     func reset() {
@@ -317,7 +335,7 @@ final class SessionModel: ObservableObject {
         error = nil
         hostName = nil
         display = nil
-        hasReceivedVideoFrame = false
+        invalidateRemoteInput()
         experience = .remoteControl
         computerUseConnectionMode = .liveScreen
         computerUseVisualSidecarState = .unavailable
@@ -384,7 +402,7 @@ final class SessionModel: ObservableObject {
         stopComputerUseVisualSidecar(preserveConfiguration: false)
         transport?.disconnect(reason: reason)
         transport = nil
-        hasReceivedVideoFrame = false
+        invalidateRemoteInput()
         error = reason
         state = .ended(reason)
     }
@@ -516,15 +534,9 @@ final class SessionModel: ObservableObject {
                       self.computerUseConnectionMode == .localPromptOnly else {
                     return
                 }
-                let wasLive = self.computerUseVisualSidecarState == .live
                 self.computerUseVisualSidecarState = newState
-                self.hasReceivedVideoFrame = newState == .live
-                if wasLive, newState != .live {
-                    // A closed WebRTC control channel releases host-side input.
-                    // Clear local latch state without attempting to write to a
-                    // failed or replacement generation.
-                    self.softModifierMask = 0
-                }
+                if newState == .live { self.hasReceivedVideoFrame = true }
+                else { self.invalidateRemoteInput() }
             }
             created.onDisplay = { [weak self] display in
                 guard let self,
@@ -552,13 +564,9 @@ final class SessionModel: ObservableObject {
         }
     }
 
-    func toggleSoftModifier(_ modifier: SoftModifier) {
-        guard !isCloudAccountRevalidationPending else { return }
-        if experience == .computerUse,
-           computerUseConnectionMode == .localPromptOnly,
-           !hasInteractiveRemoteScreen {
-            return
-        }
+    func toggleSoftModifier(_ modifier: SoftModifier, expectedInputGeneration: UUID? = nil) {
+        guard hasInteractiveRemoteScreen,
+              expectedInputGeneration == nil || expectedInputGeneration == remoteInputGeneration else { return }
         let wasLatched = isSoftModifierLatched(modifier)
         if wasLatched {
             softModifierMask &= ~modifier.mask
@@ -574,10 +582,17 @@ final class SessionModel: ObservableObject {
     }
 
     private func bind(_ t: Transport) {
-        t.onHostHello = { [weak self] h in
-            guard let self else { return }
-            guard self.state == .connecting,
+        t.onInputUnavailable = { [weak self, weak t] in
+            guard let self, let t, self.transport === t else { return }
+            self.invalidateRemoteInput()
+        }
+        t.onHostHello = { [weak self, weak t] h in
+            guard let self, let t, self.transport === t else { return }
+            guard (self.state == .connecting || self.state == .connected),
                   !self.isCloudAccountRevalidationPending else { return }
+            let isInitialHandshake = self.state == .connecting
+            self.invalidateRemoteInput()
+            self.inputHelloReceived = true
             self.hostName = h.hostname
             if self.experience == .computerUse,
                h.orderedComputerUseControls
@@ -591,27 +606,32 @@ final class SessionModel: ObservableObject {
                 return
             }
             self.state = .connected
-            self.computerUseSession?.start()
+            if isInitialHandshake { self.computerUseSession?.start() }
             self.send(.qos(
                 targetFps: DesktopVideoQuality.targetFramesPerSecond,
                 maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
                 prefer: "sharpness"))
         }
-        t.onDisplay = { [weak self] d in self?.display = d }
-        t.onFirstVideoFrame = { [weak self] in
-            guard let self,
+        t.onDisplay = { [weak self, weak t] d in
+            guard let self, let t, self.transport === t, self.inputHelloReceived,
+                  d.w > 0, d.h > 0, d.scale.isFinite, d.scale > 0 else { return }
+            self.display = d
+        }
+        t.onFirstVideoFrame = { [weak self, weak t] in
+            guard let self, let t, self.transport === t, self.inputHelloReceived,
                   self.state == .connected else { return }
             // Record decoded-frame readiness even while the account shield is
             // up. WebRTC reports this edge only once, while the pending flag
             // still keeps pixels hidden and outbound prompt/control disabled.
             self.hasReceivedVideoFrame = true
         }
-        t.onDisconnect = { [weak self] r in
-            self?.invalidateAccountRevalidation(clearBinding: true)
-            self?.computerUseSession?.stop()
-            self?.transport = nil
-            self?.hasReceivedVideoFrame = false
-            self?.state = .ended(r)
+        t.onDisconnect = { [weak self, weak t] r in
+            guard let self, let t, self.transport === t else { return }
+            self.invalidateAccountRevalidation(clearBinding: true)
+            self.computerUseSession?.stop()
+            self.transport = nil
+            self.invalidateRemoteInput()
+            self.state = .ended(r)
         }
     }
 
@@ -758,6 +778,13 @@ final class ComputerUseVisualSidecar {
     }
 
     private func bind(_ candidate: Transport, generation: UInt64) {
+        candidate.onInputUnavailable = { [weak self] in
+            guard let self, self.generation == generation else { return }
+            self.didReceiveCompatibleHostHello = false
+            self.didReceiveCurrentDisplay = false
+            self.didReceiveFreshFrame = false
+            self.transition(to: .connecting)
+        }
         candidate.onHostHello = { [weak self] hello in
             guard let self,
                   self.generation == generation else { return }
@@ -768,18 +795,16 @@ final class ComputerUseVisualSidecar {
                     disconnectTransport: true)
                 return
             }
+            self.didReceiveCurrentDisplay = false
+            self.didReceiveFreshFrame = false
             self.didReceiveCompatibleHostHello = true
             self.sendQualityPolicy(on: candidate)
-            if self.didReceiveFreshFrame,
-               self.didReceiveCurrentDisplay {
-                self.becomeLive(generation: generation)
-            } else {
-                self.transition(to: .waitingForFreshFrame)
-            }
+            self.transition(to: .waitingForFreshFrame)
         }
         candidate.onDisplay = { [weak self] display in
             guard let self,
-                  self.generation == generation else { return }
+                  self.generation == generation, self.didReceiveCompatibleHostHello,
+                  display.w > 0, display.h > 0, display.scale.isFinite, display.scale > 0 else { return }
             self.didReceiveCurrentDisplay = true
             self.onDisplay?(display)
             if self.didReceiveCompatibleHostHello,
@@ -789,9 +814,8 @@ final class ComputerUseVisualSidecar {
         }
         candidate.onFirstVideoFrame = { [weak self] in
             guard let self,
-                  self.generation == generation else { return }
+                  self.generation == generation, self.didReceiveCompatibleHostHello else { return }
             self.didReceiveFreshFrame = true
-            guard self.didReceiveCompatibleHostHello else { return }
             self.becomeLive(generation: generation)
         }
         candidate.onDisconnect = { [weak self] _ in

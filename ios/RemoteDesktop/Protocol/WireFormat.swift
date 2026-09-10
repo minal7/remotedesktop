@@ -101,6 +101,11 @@ struct DisplayInfo: Equatable {
     let w: Int
     let h: Int
     let scale: Double
+    let inputSession: DirectInputAcknowledgement?
+
+    init(w: Int, h: Int, scale: Double, inputSession: DirectInputAcknowledgement? = nil) {
+        self.w = w; self.h = h; self.scale = scale; self.inputSession = inputSession
+    }
 }
 
 enum HostMessage: Equatable {
@@ -147,10 +152,16 @@ enum HostMessage: Equatable {
                 inputSessions: inputSessions,
                 inputSession: inputSession))
         case "display":
+            var inputSession: DirectInputAcknowledgement?
+            if let metadata = obj["inputSession"] {
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), value.isValid else { return nil }
+                inputSession = value
+            }
             return .display(DisplayInfo(
                 w: int(obj["w"]),
                 h: int(obj["h"]),
-                scale: double(obj["scale"], default: 1.0)))
+                scale: double(obj["scale"], default: 1.0),
+                inputSession: inputSession))
         case "bye":
             return .bye(obj["reason"] as? String ?? "user")
         default:

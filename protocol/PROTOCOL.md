@@ -85,6 +85,17 @@ observed a disconnect. A phone hello requires acknowledgement within ten
 seconds in the current implementation; send failure or deadline expiry closes
 the transport instead of retrying possibly accepted input.
 
+A `display` sent with a scoped acknowledgement also includes that complete
+`inputSession` acknowledgement beside its dimensions. The phone accepts those
+dimensions only for its presented input session, arms a new decoder-frame probe
+after the current hello acknowledgement, and clears screen/input readiness on
+loss. Already-queued callbacks from retired probes cannot restore readiness.
+A post-handshake decoder callback does not prove post-handshake host capture;
+that media freshness boundary still needs native qualification. These display
+requirements are part of the unreleased `inputSessions: 1` extension and require
+the matching host and phone implementation. See the
+[presentation recovery review](../docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
+
 Each scoped input message carries a separate envelope, for example:
 
 ```json

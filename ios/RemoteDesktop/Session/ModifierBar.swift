@@ -16,11 +16,12 @@ struct ModifierBar: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
+        let generation = session.remoteInputGeneration
+        return HStack(spacing: 8) {
             ForEach(SoftModifier.allCases, id: \.self) { modifier in
                 Button(modifier.symbol) {
                     onInteraction()
-                    session.toggleSoftModifier(modifier)
+                    session.toggleSoftModifier(modifier, expectedInputGeneration: generation)
                 }
                 .buttonStyle(
                     ModifierButtonStyle(
@@ -47,6 +48,7 @@ struct ModifierBar: View {
                 radius: attentive ? 12 : 4,
                 y: attentive ? 4 : 1)
         .animation(.easeInOut(duration: 0.3), value: attentive)
+        .id(generation)
     }
 }
 

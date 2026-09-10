@@ -140,9 +140,10 @@ enum HostMessageEncoder {
         height: Int,
         scale: Double,
         seq: UInt32,
-        ts: UInt64
+        ts: UInt64,
+        inputSession: DirectInputAcknowledgement? = nil
     ) -> Data {
-        let obj: [String: Any] = [
+        var obj: [String: Any] = [
             "t": "display",
             "s": seq,
             "ts": ts,
@@ -150,6 +151,7 @@ enum HostMessageEncoder {
             "h": height,
             "scale": scale,
         ]
+        if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 }

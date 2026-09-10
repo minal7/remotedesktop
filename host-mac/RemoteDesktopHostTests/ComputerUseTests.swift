@@ -6473,6 +6473,16 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
+    func testDisplayEncodingBindsDimensionsToTheCurrentInputAcknowledgement() throws {
+        let acknowledgement = DirectInputAcknowledgement(hello: .init(clientID: UUID(), revision: 2), hostID: UUID(), generation: 3)
+        let bytes = HostMessageEncoder.display(width: 1920, height: 1080, scale: 2, seq: 4, ts: 5, inputSession: acknowledgement)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(object["w"] as? Int, 1920); XCTAssertEqual(object["h"] as? Int, 1080)
+        XCTAssertEqual(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputAcknowledgement.self), acknowledgement)
+        let legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: HostMessageEncoder.display(width: 800, height: 600, scale: 1, seq: 1, ts: 1)) as? [String: Any])
+        XCTAssertNil(legacy["inputSession"])
+    }
+
     func testInputWireMetadataDecodingRejectsMalformedOrUnversionedClaims() throws {
         let hello = DirectInputHello(clientID: UUID(), revision: 1)
         let helloObject = try XCTUnwrap(DirectInputWire.object(hello))
