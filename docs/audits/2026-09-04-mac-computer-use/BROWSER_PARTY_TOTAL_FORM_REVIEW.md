@@ -2,6 +2,8 @@
 
 Source checkpoint: 2026-09-09. Parent: `9dfd8aa`. Source repair and authored regressions only. Compilation, assertions, inference, app/browser execution and live qualification remain paused.
 
+Follow-up: the [normalized count-choice repair](BROWSER_NORMALIZED_COUNT_CHOICE_REVIEW.md) carries these counts through native selects while distinguishing semantic count from native choice identity. It preserves the separate category obligations and advances eligible form inputs to context 23/schema 18.
+
 ## First-principles finding
 
 “2 adults and 1 child” contains enough information to derive a total of three people. The preceding [party component repair](BROWSER_PARTY_CRITERION_COVERAGE_REVIEW.md) supplied only the two category values. A website offering a single People number field therefore had no supported native total to select. The model could not invent the number `3` through the literal-source path.

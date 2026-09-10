@@ -7,7 +7,15 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     enum Payload: Equatable, Sendable {
         case text(ComputerUseBrowserSearchQuery)
         case normalized(ComputerUseBrowserResearchFormInput.Normalization)
+        case normalizedChoice(id: String, value: ComputerUseBrowserResearchFormInput.Normalization)
         case choice(id: String, requirementIndex: Int)
+        var partyCriterion: ComputerUseBrowserFormPartyCriterion? {
+            switch self {
+            case .normalized(let value): return .init(value)
+            case .normalizedChoice(let id, let value): return .init(value, selectedChoiceID: id)
+            default: return nil
+            }
+        }
     }
     struct Edit: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
         let field: String
@@ -91,6 +99,12 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                           (normalized.kind == .date && field.control.kind == "date")
                             || ([.partySize, .ticketCount].contains(normalized.kind) && field.control.kind == "number") else { throw invalid }
                     payload = .normalized(normalized)
+                } else if Set(item.keys) == ["field", "choice", "normalized"] {
+                    guard input.hasNormalizedChoices, field.control.kind == "select",
+                          case .string(let id)? = item["choice"], let option = field.control.options.first(where: { $0.id == id }),
+                          case .string(let valueID)? = item["normalized"], let value = input.normalizations.first(where: { $0.id == valueID }),
+                          value.matchesChoice(option) else { throw invalid }
+                    payload = .normalizedChoice(id: id, value: value)
                 } else if Set(item.keys) == ["field", "choice", "requirement"] {
                     guard field.control.kind == "select", case .string(let id)? = item["choice"],
                           field.control.options.contains(where: { $0.id == id && !$0.disabled && !$0.hidden }),
@@ -105,6 +119,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                     switch payload {
                     case .text(let query): indices = try query.requirementIndices(in: input.interpretation)
                     case .normalized(let value): indices = value.requirementIndices
+                    case .normalizedChoice(_, let value): indices = value.requirementIndices
                     case .choice(_, let index): indices = [index]
                     }
                     guard Set(indices) == Set(expected) else { throw invalid }
@@ -163,6 +178,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
         case .text(let query):
             indices = try query.requirementIndices(in: input.interpretation)
         case .normalized(let value): indices = value.requirementIndices
+        case .normalizedChoice(_, let value): indices = value.requirementIndices
         case .choice(_, let index): indices = [index]
         }
         var sources: [ComputerUseBrowserFormSource] = []
@@ -211,6 +227,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
                 return .enterText(.init(targetID: targetID, mode: .replaceAll, text: text))
             case .normalized(let value): return .enterText(.init(targetID: targetID, mode: .replaceAll, text: value.value))
             case .choice(let id, _): return .selectChoice(targetID: targetID, choiceID: id)
+            case .normalizedChoice(let id, _): return .selectChoice(targetID: targetID, choiceID: id)
             }
         }
         let fields = input.evidence.fields.map(\.editable)

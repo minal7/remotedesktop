@@ -1525,11 +1525,26 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         let unit: QuantityUnit?
         let explicitComparison: Bool
     }
+    private static let quantityWords: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
+    /// Complete option-label arithmetic only. A numeric choice does not prove
+    /// the field's category meaning, provider ages or available inventory.
+    static func exactQuantityChoiceLabel(_ source: String) -> (count: Int64, unit: QuantityUnit?)? {
+        let parts = source.split(whereSeparator: \.isWhitespace)
+        guard (1...2).contains(parts.count) else { return nil }
+        let number = String(parts[0]), count: Int64
+        if number.utf8.count <= 4, number.utf8.allSatisfy({ (48...57).contains($0) }), let value = Int64(number) {
+            count = value
+        } else if let value = quantityWords[number.lowercased()] { count = value }
+        else { return nil }
+        guard (0...1998).contains(count) else { return nil }
+        if parts.count == 1 { return (count, nil) }
+        guard let unit = QuantityUnit.literal(String(parts[1])) else { return nil }
+        return (count, unit)
+    }
     private static func quantityParts(_ source: String) -> QuantityParts? {
         let pattern = #"^(?:for\s+)?(?:(at least|at most|more than|fewer than|exactly)\s+)?([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+("# + QuantityUnit.literalPattern + #"))?$"#
         guard let values = groups(pattern, source), let comparison = comparison(values[0]) else { return nil }
-        let words: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
-        guard let count = Int64(values[1]) ?? words[values[1].lowercased()] else { return nil }
+        guard let count = Int64(values[1]) ?? quantityWords[values[1].lowercased()] else { return nil }
         return .init(comparison: comparison, count: count, unit: values[2].isEmpty ? nil : QuantityUnit.literal(values[2]), explicitComparison: !values[0].isEmpty)
     }
     private static func quantityAnswer(_ answer: String) -> ClarificationBinding.Parameter? {
@@ -1571,8 +1586,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
     static func partyLiteral(_ source: String) -> PartyComposition? {
         guard let parts = groups(partyPattern, source),
               let firstUnit = QuantityUnit.literal(parts[1]), let secondUnit = QuantityUnit.literal(parts[3]), firstUnit != secondUnit else { return nil }
-        let words: [String: Int64] = ["one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10]
-        guard let first = Int64(parts[0]) ?? words[parts[0].lowercased()], let second = Int64(parts[2]) ?? words[parts[2].lowercased()] else { return nil }
+        guard let first = Int64(parts[0]) ?? quantityWords[parts[0].lowercased()], let second = Int64(parts[2]) ?? quantityWords[parts[2].lowercased()] else { return nil }
         return .init(adults: firstUnit == .adults ? first : second, children: firstUnit == .children ? first : second)
     }
     private static func price(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {

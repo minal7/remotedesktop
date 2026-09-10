@@ -4,6 +4,159 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserFormPlannerTests: XCTestCase {
+    func testPartyChoiceCoverageComparesCountAndNativeChoiceIdentitySeparately() throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        let values = ComputerUseBrowserResearchFormInput.normalizations(for: goal)
+        let adultValue = try XCTUnwrap(values.first { $0.unit == "adults" }), childValue = try XCTUnwrap(values.first { $0.unit == "children" })
+        func option(_ label: String, disabled: Bool = false, hidden: Bool = false) -> ComputerUseBrowserPageSnapshot.Control.Option {
+            .init(id: "native-choice", label: label, value: "private-provider-code", disabled: disabled, hidden: hidden, groupLabel: "Unverified provider category")
+        }
+        for label in ["2", "02", "two adults", "2 Adults"] { XCTAssertTrue(adultValue.matchesChoice(option(label)), label) }
+        for label in ["2 children", "2 people", "2 tickets", "2+", "2 adults aged 12+", "3 adults"] { XCTAssertFalse(adultValue.matchesChoice(option(label)), label) }
+        XCTAssertFalse(adultValue.matchesChoice(option("2 adults", disabled: true)))
+        XCTAssertFalse(adultValue.matchesChoice(option("2 adults", hidden: true)))
+        let total = try XCTUnwrap(values.first(where: \.isPartyTotal))
+        XCTAssertTrue(total.matchesChoice(option("3 people")))
+        XCTAssertNil(ComputerUseBrowserFormProposal.Payload.normalizedChoice(id: "total-choice", value: total).partyCriterion)
+        let tickets = ComputerUseBrowserResearchFormInput.Normalization(id: "tickets", requirementIndex: 1, kind: .ticketCount, value: "2", unit: "tickets")
+        XCTAssertTrue(tickets.matchesChoice(option("2 tickets"))); XCTAssertFalse(tickets.matchesChoice(option("2 people")))
+        XCTAssertNil(ComputerUseBrowserFormProposal.Payload.normalizedChoice(id: "ticket-choice", value: tickets).partyCriterion)
+        let adult = try XCTUnwrap(ComputerUseBrowserFormPartyCriterion(adultValue, selectedChoiceID: "native-adult-choice"))
+        let child = try XCTUnwrap(ComputerUseBrowserFormPartyCriterion(childValue, selectedChoiceID: "native-child-choice"))
+        XCTAssertEqual(adult.value, "2"); XCTAssertEqual(adult.nativeValue, "native-adult-choice")
+        let numeric = try XCTUnwrap(ComputerUseBrowserFormPartyCriterion(adultValue))
+        XCTAssertNotEqual(adult.identity, numeric.identity)
+        let alternate = try XCTUnwrap(ComputerUseBrowserFormPartyCriterion(adultValue, selectedChoiceID: "other-adult-choice"))
+        XCTAssertNotEqual(adult.identity, alternate.identity)
+        func coverage(_ native: String, changed: Set<String> = []) -> ComputerUseBrowserFormPartyCoverage? {
+            ComputerUseBrowserFormPartyCoverage.collect(normalizations: values, records: ["adult":adult, "child":child],
+                values: ["adult":native, "child":"native-child-choice"], changedTargets: changed).first
+        }
+        XCTAssertEqual(coverage("native-adult-choice")?.allComponentsRecorded, true)
+        for native in ["2", "other-adult-choice"] { XCTAssertEqual(coverage(native)?.components.map(\.state), [.changed, .recorded]) }
+        XCTAssertEqual(coverage("native-adult-choice", changed: ["adult"])?.components.map(\.state), [.changed, .recorded])
+        let publicRecord = adult.context(partyAlias: "party1")
+        XCTAssertEqual(Set(publicRecord.keys), ["party", "unit", "value"])
+        XCTAssertFalse(try ResearchAnswerFixture.json(publicRecord).contains(adult.nativeValue))
+    }
+
+    func testCountLinkedChoiceDecoderRequiresTheObservedOptionAndCompleteNormalization() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category")]
+            + ["2", " adults and ", "1", " child. "].map { row($0, field: "quantity") }
+            + [row("on 2026-10-17.", field: "date")])
+        let body = countChoiceForm() + "<label>Other<input type='number' value='1'></label>"
+        let fixture = try await FormPlannerFixture(goal: goal, body: body)
+        defer { fixture.close() }
+        let input = fixture.input, adult = input.evidence.fields[0], child = input.evidence.fields[1]
+        let choice = try XCTUnwrap(adult.control.options.first { $0.label == "2 adults" && !$0.disabled && !$0.hidden })
+        let childChoice = try XCTUnwrap(child.control.options.first { $0.label == "1 child" })
+        let accepted = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "choice":choice.id, "normalized":"value2-adults"]]), input: input)
+        let edit = try XCTUnwrap(accepted.edits.first), contract = try XCTUnwrap(accepted.textContract(for: input))
+        XCTAssertTrue(input.hasNormalizedChoices); XCTAssertTrue(contract.steps[0].isChoiceSelection)
+        XCTAssertEqual(contract.steps[0].after, choice.id)
+        XCTAssertEqual(try accepted.sources(for: edit).flatMap { try $0.indices(in: goal) }, [1, 2])
+        XCTAssertEqual(edit.payload.partyCriterion?.nativeValue, choice.id); XCTAssertEqual(edit.payload.partyCriterion?.value, "2")
+        let context = try object(Data(input.contextJSON.utf8))
+        XCTAssertEqual(context["version"] as? Int, 23); XCTAssertNotNil(context["date_terms"])
+        XCTAssertFalse(input.contextJSON.contains("private-adult-two"))
+        let request = try local(FormPlannerTransport(content: "{}")).makeRequest(input)
+        let requestBody = try object(XCTUnwrap(request.httpBody))
+        let format = try XCTUnwrap(requestBody["response_format"] as? [String: Any])
+        let schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        XCTAssertEqual(schema["name"] as? String, "browser_form_plan_v18")
+        let root = try XCTUnwrap(schema["schema"] as? [String: Any]), alternatives = try XCTUnwrap(root["oneOf"] as? [[String: Any]])
+        let properties = try XCTUnwrap(alternatives.first?["properties"] as? [String: Any])
+        let editSchema = try XCTUnwrap(properties["edits"] as? [String: Any]), items = try XCTUnwrap(editSchema["items"] as? [String: Any])
+        let variants = try XCTUnwrap(items["oneOf"] as? [[String: Any]])
+        XCTAssertTrue(variants.contains { Set($0["required"] as? [String] ?? []) == ["field", "choice", "normalized"] })
+        let generic = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "choice":choice.id, "requirement":1]]), input: input)
+        XCTAssertNil(generic.edits.first?.payload.partyCriterion)
+        let invalid: [[String: Any]] = [
+            ["field":"field1", "choice":childChoice.id, "normalized":"value2-adults"],
+            ["field":"field1", "choice":"private-adult-two", "normalized":"value2-adults"],
+            ["field":"field1", "choice":choice.id, "normalized":"value2-children"],
+            ["field":"field1", "choice":choice.id, "normalized":"value2-people"],
+            ["field":"field1", "choice":choice.id, "normalized":"value6"],
+            ["field":"field1", "normalized":"value2-adults"],
+            ["field":"field3", "choice":choice.id, "normalized":"value2-adults"],
+            ["field":"field1", "choice":choice.id, "normalized":"value2-adults", "requirement":1]]
+        for row in invalid { XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([row]), input: input)) }
+        for option in adult.control.options where option.disabled || option.hidden {
+            XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "choice":option.id, "normalized":"value2-adults"]]), input: input))
+        }
+    }
+
+    func testNormalizedPassengerChoicesKeepBothCategoriesThroughNativeExecutionAndQuery() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        for ready in [0, 1, 2] {
+            var edits = 0
+            let fixture = try await FormPlannerFixture(goal: goal, body: countChoiceForm(ready: ready),
+                additionalRoutes: ["/results?adults=private-adult-two&children=private-child-one":.init(body: "<p>Preliminary result</p>")],
+                domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let owner = fixture.owner(journalDirectory: directory)
+            defer { owner.retire() }
+            _ = try await owner.interpretGoal()
+            let input = try await owner.prepareFormInput()
+            let adult = try XCTUnwrap(input.evidence.fields[0].control.options.first { $0.label == "2 adults" && !$0.disabled && !$0.hidden })
+            let child = try XCTUnwrap(input.evidence.fields[1].control.options.first { $0.label == "1 child" })
+            let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([
+                ["field":"field1", "choice":adult.id, "normalized":"value2-adults"],
+                ["field":"field2", "choice":child.id, "normalized":"value2-children"]]), input: input)
+            let receipt = try await owner.executeForm(proposed, input: input)
+            let next = try await owner.prepareFormInput(), continuation = try XCTUnwrap(next.previous)
+            XCTAssertEqual(receipt.editCount, 2 - ready); XCTAssertEqual(receipt.verifiedWithoutInputCount, ready)
+            XCTAssertEqual(edits, 2 - ready); XCTAssertEqual(continuation.inputOperationIDs.count, edits)
+            XCTAssertEqual(continuation.stateProofsByTarget.count, ready)
+            XCTAssertEqual(continuation.partyCoverage.first?.allComponentsRecorded, true)
+            XCTAssertEqual(Set(continuation.partyCriteria.values.map(\.nativeValue)), [adult.id, child.id])
+            XCTAssertEqual(Set(continuation.partyCriteria.values.map(\.value)), ["2", "1"])
+            let control = try XCTUnwrap(next.evidence.page.page.controls.first { $0.kind == "submit" })
+            _ = try await owner.openFormQuery(after: receipt, controlID: control.id, evidence: next.evidence.page)
+            XCTAssertEqual(fixture.server.count("/results?adults=private-adult-two&children=private-child-one"), 1)
+            XCTAssertEqual(owner.confirmedFormHistory, [receipt]); XCTAssertEqual(owner.input, goal.input)
+            let action = try await owner.planNextAction(using: PartyCoverageActionFixture())
+            let context = try object(Data(action.input.contextJSON.utf8)), rows = try XCTUnwrap(context["form_history"] as? [[String: Any]])
+            let snapshot = try XCTUnwrap(rows.first?["party_criteria_at_stage"] as? [String: Any])
+            let party = try XCTUnwrap((snapshot["parties"] as? [[String: Any]])?.first)
+            XCTAssertEqual(party["current_native_requirement"] as? String, "same_counts")
+            XCTAssertEqual((party["components_at_stage"] as? [[String: Any]])?.compactMap { $0["state"] as? String }, ["recorded", "recorded"])
+            XCTAssertEqual(snapshot["current_field_verification"] as? Bool, false)
+        }
+    }
+
+    func testChangedCountOptionLabelCannotUseAnEarlierNormalizedChoiceProposal() async throws {
+        let goal = try proposal(rows: [row("Find concerts. ", role: "outcome", field: "category"), row("2 adults and 1 child.", field: "quantity")])
+        let body = countChoiceForm() + "<script>fetch('/signal').then(()=>{document.getElementById('adult-two').textContent='3 adults';fetch('/changed');});</script>"
+        var edits = 0
+        let fixture = try await FormPlannerFixture(goal: goal, body: body, heldSignal: true,
+            domScriptDidDispatch: { if $0 == .edit { edits += 1 } })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let owner = fixture.owner(journalDirectory: directory)
+        defer { owner.retire() }
+        _ = try await owner.interpretGoal()
+        let input = try await owner.prepareFormInput()
+        let choice = try XCTUnwrap(input.evidence.fields[0].control.options.first { $0.label == "2 adults" && !$0.disabled && !$0.hidden })
+        let proposed = try ComputerUseBrowserFormProposal.decode(content: plan([["field":"field1", "choice":choice.id, "normalized":"value2-adults"]]), input: input)
+        try await fixture.wait { fixture.server.count("/signal") == 1 }; fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { _ = try await owner.executeForm(proposed, input: input); XCTFail("Changed option meaning must invalidate the native proposal") }
+        catch { }
+        XCTAssertEqual(edits, 0); XCTAssertTrue(owner.confirmedFormHistory.isEmpty); XCTAssertTrue(owner.formPartyHistory.isEmpty)
+    }
+
+    private func countChoiceForm(ready: Int = 0) -> String {
+        """
+        <form action='/results'><label>Adults<select name='adults'><option value='private-adult-one'>1 adult</option>
+        <option id='adult-two' value='private-adult-two' \(ready > 0 ? "selected" : "")>2 adults</option>
+        <option disabled value='private-disabled-two'>2 adults</option><option hidden value='private-hidden-two'>2 adults</option></select></label>
+        <label>Children<select name='children'><option value='private-child-zero'>0 children</option>
+        <option value='private-child-one' \(ready > 1 ? "selected" : "")>1 child</option></select></label><button>Search</button></form>
+        """
+    }
+
     func testPartyTotalsUseWholeSourceGroupsWithoutCombiningSeparateParties() throws {
         let outcome = row("Find concerts in Montréal. ", role: "outcome", field: "category")
         for (parts, expected) in [(["2", " adults and ", "1", " child."], "3"),

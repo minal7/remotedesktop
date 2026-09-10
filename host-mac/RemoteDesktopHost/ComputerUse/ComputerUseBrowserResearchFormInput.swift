@@ -72,11 +72,15 @@ struct ComputerUseBrowserFormPartyCriterion: Equatable, Sendable, CustomStringCo
     let partySourceID: String
     let unit: String
     let value: String
-    init?(_ normalized: ComputerUseBrowserResearchFormInput.Normalization) {
+    /// Numeric inputs retain a numeral; selects retain an opaque native
+    /// choice identity. Neither encoding replaces the semantic count above.
+    let nativeValue: String
+    init?(_ normalized: ComputerUseBrowserResearchFormInput.Normalization, selectedChoiceID: String? = nil) {
         guard normalized.isPartyComponent, let source = normalized.partySourceID else { return nil }
         partySourceID = source; unit = normalized.unit; value = normalized.value
+        nativeValue = selectedChoiceID ?? normalized.value
     }
-    var identity: [String] { [partySourceID, unit, value] }
+    var identity: [String] { ["browser-party-criterion-v2", partySourceID, unit, value, nativeValue] }
     func context(partyAlias: String) -> [String: Any] { ["party":partyAlias, "unit":unit, "value":value] }
     var description: String { "BrowserFormPartyCriterion" }
     var debugDescription: String { description }
@@ -120,7 +124,7 @@ struct ComputerUseBrowserFormPartyCoverage: Equatable, Sendable {
                 if targets.isEmpty { state = .missing }
                 else if targets.count != 1 { state = .ambiguous }
                 else if let target = targets.first, let record = records[target], !changedTargets.contains(target),
-                        record.value.utf8.elementsEqual(value.value.utf8), values[target]?.utf8.elementsEqual(value.value.utf8) == true { state = .recorded }
+                        record.value.utf8.elementsEqual(value.value.utf8), values[target]?.utf8.elementsEqual(record.nativeValue.utf8) == true { state = .recorded }
                 else { state = .changed }
                 return .init(unit: value.unit, value: value.value, state: state, targetIDs: targets)
             }
@@ -165,6 +169,12 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         /// either category in native criterion accounting.
         var isPartyComponent: Bool { kind == .partySize && partySourceID != nil && ["adults", "children"].contains(unit) }
         var isPartyTotal: Bool { kind == .partySize && partySourceID != nil && unit == "people" }
+        func matchesChoice(_ option: ComputerUseBrowserPageSnapshot.Control.Option) -> Bool {
+            guard [.partySize, .ticketCount].contains(kind), !option.disabled, !option.hidden,
+                  let label = ComputerUseBrowserScalarRequirements.exactQuantityChoiceLabel(option.label),
+                  Int64(value) == label.count else { return false }
+            return label.unit == nil || label.unit?.rawValue == unit
+        }
         init(id: String, requirementIndex: Int, kind: Kind, value: String, unit: String, requirementIndices: [Int]? = nil, partySourceID: String? = nil) {
             self.id = id; self.requirementIndex = requirementIndex; self.kind = kind; self.value = value; self.unit = unit
             self.requirementIndices = requirementIndices ?? [requirementIndex]
@@ -174,6 +184,7 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
         var debugDescription: String { description }
     }
     let normalizations: [Normalization]
+    let hasNormalizedChoices: Bool
 
     /// Only exact dates and explicit party/ticket counts have a scalar
     /// representation for these native input kinds. Ranges, maxima and counts
@@ -346,6 +357,10 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
                 "relation":requirement.relation.rawValue, "values":requirement.values]
         }
         let normalized = Self.normalizations(for: interpretation)
+        let normalizedChoices = zip(aliases, evidence.fields).contains { alias, field in
+            editable.contains(alias) && field.control.kind == "select"
+                && field.control.options.contains { option in normalized.contains { $0.matchesChoice(option) } }
+        }
         let partyCoverage = ComputerUseBrowserFormPartyCoverage.collect(normalizations: normalized, records: previous?.partyCriteria ?? [:],
             values: Dictionary(uniqueKeysWithValues: evidence.fields.map { ($0.editable.snapshot.targetID, $0.editable.snapshot.value) }))
         let partyAliases = ComputerUseBrowserFormPartyCoverage.aliases(for: partyCoverage, records: previous?.partyCriteria ?? [:])
@@ -432,9 +447,11 @@ struct ComputerUseBrowserResearchFormInput: Equatable, Sendable, CustomStringCon
             context["date_terms"] = dates
         }
         if normalized.contains(where: \.isPartyTotal) { context["version"] = 22 }
+        if normalizedChoices { context["version"] = 23 }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         self.interpretation = interpretation; self.evidence = evidence; fieldAliases = aliases
         normalizations = normalized; editableFieldAliases = editable; self.selectedFormID = selectedFormID
+        hasNormalizedChoices = normalizedChoices
         requiredPreservation = preserved
         requiredRepairFieldAliases = repairs
         pendingEditAliases = pendingAliases

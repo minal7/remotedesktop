@@ -145,7 +145,7 @@ struct ComputerUseBrowserResearchFormContinuation: Equatable, Sendable, CustomSt
         for edit in verifiedEdits {
             let targetID = try input.field(for: edit.field).editable.snapshot.targetID
             sources[targetID] = try stage.proposal.resolvedSources(for: edit)
-            if case .normalized(let value) = edit.payload, let criterion = ComputerUseBrowserFormPartyCriterion(value) {
+            if let criterion = edit.payload.partyCriterion {
                 partyRecords[targetID] = criterion
             } else { partyRecords.removeValue(forKey: targetID) }
             if actualEdits.contains(targetID) { editedSources[targetID] = sources[targetID]; proofs.removeValue(forKey: targetID) }

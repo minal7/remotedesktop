@@ -5,6 +5,19 @@ import XCTest
 final class ComputerUseBrowserScalarRequirementsTests: XCTestCase {
     private typealias Scalar = ComputerUseBrowserScalarRequirements
 
+    func testQuantityChoiceLabelsRequireOneCompleteExactCountAndOptionalUnit() {
+        let cases: [(String, Int64, Scalar.QuantityUnit?)] = [("2", 2, nil), ("  two  adults  ", 2, .adults),
+            ("1 child", 1, .children), ("0 children", 0, .children), ("03 tickets", 3, .tickets), ("1998 people", 1998, .people)]
+        for (label, count, unit) in cases {
+            let value = Scalar.exactQuantityChoiceLabel(label)
+            XCTAssertEqual(value?.count, count, label); XCTAssertEqual(value?.unit, unit, label)
+        }
+        for label in ["", "-1", "+2", "2.0", "2+", "2–3", "at most 2", "exactly 2", "for 2", "2 adults and 1 child",
+                      "2 adults aged 12+", "2 tickets $99", "2 packages", "1999 people", "999999999999999999999"] {
+            XCTAssertNil(Scalar.exactQuantityChoiceLabel(label), label)
+        }
+    }
+
     func testPartyMeaningAndComponentSourcesSurviveEverySupportedRowBoundary() throws {
         let partitions: [([String], [[Int]])] = [(["2 adults and 1 child."], [[1], [1]]),
             (["2 adults ", "and ", "1 child."], [[1], [3]]), (["2", " adults and ", "1", " child."], [[1, 2], [3, 4]]),
