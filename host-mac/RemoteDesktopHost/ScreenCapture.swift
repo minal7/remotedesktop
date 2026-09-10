@@ -1,9 +1,81 @@
 import AVFoundation
 import CoreMedia
+import CoreGraphics
 import Darwin
 import Foundation
 import ScreenCaptureKit
 import os
+
+/// One native display snapshot, independent of AppKit's key-window screen.
+/// Integer logical bounds make the wire-to-global transform exact.
+struct CaptureDisplayState: Equatable, Sendable {
+    let displayID: CGDirectDisplayID
+    let originX: Int
+    let originY: Int
+    let width: Int
+    let height: Int
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let rotation: Double
+
+    init?(displayID: CGDirectDisplayID, bounds: CGRect, pixelWidth: Int, pixelHeight: Int, rotation: Double) {
+        guard displayID != kCGNullDirectDisplay,
+              let x = Int32(exactly: bounds.origin.x), let y = Int32(exactly: bounds.origin.y),
+              let width = Int32(exactly: bounds.width), let height = Int32(exactly: bounds.height),
+              width > 0, height > 0, pixelWidth > 0, pixelHeight > 0,
+              pixelWidth <= Int(Int32.max), pixelHeight <= Int(Int32.max),
+              rotation.isFinite, [0.0, 90, 180, 270].contains(rotation) else { return nil }
+        self.displayID = displayID
+        originX = Int(x); originY = Int(y); self.width = Int(width); self.height = Int(height)
+        self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.rotation = rotation
+    }
+
+    static func read(_ displayID: CGDirectDisplayID) -> Self? {
+        guard CGDisplayIsOnline(displayID) != 0, let mode = CGDisplayCopyDisplayMode(displayID) else { return nil }
+        return Self(displayID: displayID, bounds: CGDisplayBounds(displayID),
+                    pixelWidth: mode.pixelWidth, pixelHeight: mode.pixelHeight, rotation: CGDisplayRotation(displayID))
+    }
+}
+
+struct CaptureDisplayGeometry: Equatable, Sendable {
+    /// One descriptor instance per native attempt, even if a later display
+    /// has identical dimensions. Late invalidation cannot retire that successor.
+    let id = UUID()
+    let state: CaptureDisplayState
+    let backingScale: Double
+    let backingWidth: Int
+    let backingHeight: Int
+
+    init?(state: CaptureDisplayState, contentSizeInPoints: CGSize, backingScale: Double) {
+        guard contentSizeInPoints.width == CGFloat(state.width), contentSizeInPoints.height == CGFloat(state.height),
+              backingScale.isFinite, (1...4).contains(backingScale) else { return nil }
+        let width = Double(state.width) * backingScale, height = Double(state.height) * backingScale
+        guard width <= Double(Int32.max), height <= Double(Int32.max) else { return nil }
+        self.state = state; self.backingScale = backingScale
+        backingWidth = Int(width.rounded()); backingHeight = Int(height.rounded())
+    }
+
+    func matches(_ current: CaptureDisplayState?) -> Bool { current == state }
+
+    /// The phone sends coordinates within the advertised logical display.
+    /// Native rotation is already reflected in the global logical bounds.
+    func map(_ message: ControlMessage) -> ControlMessage? {
+        switch message {
+        case .pointer(let x, let y, let buttons):
+            guard contains(x: x, y: y) else { return nil }
+            return .pointer(x: state.originX + x, y: state.originY + y, buttons: buttons)
+        case .scroll(let x, let y, let dx, let dy, let phase):
+            guard contains(x: x, y: y) else { return nil }
+            return .scroll(x: state.originX + x, y: state.originY + y, dx: dx, dy: dy, phase: phase)
+        case .key, .text: return message
+        case .hello, .qos, .bye: return nil
+        }
+    }
+
+    private func contains(x: Int, y: Int) -> Bool {
+        x >= 0 && x < state.width && y >= 0 && y < state.height
+    }
+}
 
 /// Capture-clock evidence stays separate from delivery time and media time.
 /// The display ticks are supplied by WindowServer, not sampled when a queued
@@ -375,6 +447,25 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 
     @discardableResult
+    func withRunningStream(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease, Stream) -> Void) -> Bool {
+        locked {
+            guard self.owner == owner, let active, active.running, let stream = active.stream else { return false }
+            body(active.id, stream)
+            return true
+        }
+    }
+
+    /// A lookup is not admission. Consumers must recheck the returned object
+    /// through withStream/streamStopped before acting on its context.
+    func stream(matching predicate: (Stream) -> Bool) -> Stream? {
+        locked {
+            guard let active, active.owner == owner, let stream = active.stream,
+                  predicate(stream) else { return nil }
+            return stream
+        }
+    }
+
+    @discardableResult
     func withStream(_ stream: Stream, _ body: (Context, CaptureAttemptLease) -> Void) -> Bool {
         locked {
             guard let active, active.owner == owner, active.stream === stream,
@@ -525,6 +616,16 @@ struct CaptureRecoveryEpisode {
 /// Not `@MainActor`: callbacks fire on the capture queue and we don't
 /// want a per-frame actor hop at 30 fps.
 final class ScreenCapture: NSObject, @unchecked Sendable {
+    private final class NativeStream: @unchecked Sendable {
+        let stream: SCStream
+        let filter: SCContentFilter
+        let configuration: SCStreamConfiguration
+        let display: CaptureDisplayGeometry
+        init(stream: SCStream, filter: SCContentFilter, configuration: SCStreamConfiguration, display: CaptureDisplayGeometry) {
+            self.stream = stream; self.filter = filter; self.configuration = configuration; self.display = display
+        }
+    }
+
     private let videoQueue = DispatchQueue(
         label: "com.threadmark.remotedesktop.host.capture.video",
         qos: .userInteractive)
@@ -545,8 +646,8 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let onStopped: @Sendable (CaptureStopReceipt, Error) -> Void
     }
 
-    private let lifecycle = CaptureStreamLifecycle<SCStream, Callbacks> { stream in
-        do { try await stream.stopCapture() }
+    private let lifecycle = CaptureStreamLifecycle<NativeStream, Callbacks> { native in
+        do { try await native.stream.stopCapture() }
         catch {
             guard !ScreenCapture.isAlreadyStopped(error) else { return }
             Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
@@ -569,13 +670,30 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func withRunningSession(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease, Bool) -> Void) -> Bool {
-        lifecycle.withRunningOwner(owner) { attempt in
-            body(attempt, videoAvailability.isAvailable(for: attempt))
+    func withRunningSession(_ owner: CaptureOwnerLease, _ body: (CaptureAttemptLease, Bool, CaptureDisplayGeometry) -> Void) -> Bool {
+        lifecycle.withRunningStream(owner) { attempt, native in
+            guard native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else {
+                retireChangedDisplay(native, attempt: attempt)
+                return
+            }
+            body(attempt, videoAvailability.isAvailable(for: attempt), native.display)
         }
     }
 
-    enum CaptureError: Error { case noDisplay, outputStopped }
+    /// Also called before direct-input admission. Posting independently
+    /// resamples this same display, without acquiring the capture gate.
+    func invalidateChangedDisplay(for owner: CaptureOwnerLease) {
+        withRunningSession(owner) { _, _, _ in }
+    }
+
+    func invalidateDisplay(for owner: CaptureOwnerLease, matching display: CaptureDisplayGeometry) {
+        lifecycle.withRunningStream(owner) { attempt, native in
+            guard native.display == display else { return }
+            retireChangedDisplay(native, attempt: attempt)
+        }
+    }
+
+    enum CaptureError: Error { case noDisplay, invalidDisplayGeometry, displayChanged, outputStopped }
 
     /// Picks the display containing the menu bar and starts capturing
     /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
@@ -588,14 +706,14 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let task = try lifecycle.start(for: owner, prepare: { [self] in
             try await makeStream(audioEnabled: audioEnabled,
                                  maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
-        }, startStream: { stream in
-            try await stream.startCapture()
+        }, startStream: { native in
+            try await native.stream.startCapture()
         })
         try await task.value
         guard lifecycle.isRunning(for: owner) else { throw CancellationError() }
     }
 
-    private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int) async throws -> SCStream {
+    private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int) async throws -> NativeStream {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
         try Task.checkCancellation()
@@ -609,10 +727,12 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
             excludingApplications: [],
             exceptingWindows: [])
         let contentInfo = SCShareableContent.info(for: filter)
-        let sourceSize = CaptureSizing.backingPixelSize(
-            widthInPoints: Double(contentInfo.contentRect.width),
-            heightInPoints: Double(contentInfo.contentRect.height),
-            pointPixelScale: Double(contentInfo.pointPixelScale))
+        guard let state = CaptureDisplayState.read(display.displayID),
+              let geometry = CaptureDisplayGeometry(state: state, contentSizeInPoints: contentInfo.contentRect.size,
+                                                     backingScale: Double(contentInfo.pointPixelScale)) else {
+            throw CaptureError.invalidDisplayGeometry
+        }
+        let sourceSize = CaptureSizing.normalized(width: geometry.backingWidth, height: geometry.backingHeight)
         let captureSize = CaptureSizing.encoderSafe(
             width: sourceSize.width,
             height: sourceSize.height,
@@ -631,7 +751,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
         log.info(
             "capture configured points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
-        return s
+        return NativeStream(stream: s, filter: filter, configuration: config, display: geometry)
     }
 
     func stop() async {
@@ -673,9 +793,14 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
-        lifecycle.withStream(stream) { callbacks, attempt in
+        guard let native = lifecycle.stream(matching: { $0.stream === stream }) else { return }
+        lifecycle.withStream(native) { callbacks, attempt in
             switch type {
             case .screen:
+                guard native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else {
+                    retireChangedDisplay(native, attempt: attempt)
+                    return
+                }
                 let observedAt = mach_absolute_time()
                 switch CaptureVideoStatus.read(sampleBuffer: sampleBuffer) {
                 case .idle: return
@@ -690,13 +815,15 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                 case .stopped:
                     log.warning("capture output reported stopped")
                     _ = videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: observedAt)
-                    lifecycle.streamStopped(stream) { callbacks, receipt in
+                    lifecycle.streamStopped(native) { callbacks, receipt in
                         callbacks.onStopped(receipt, CaptureError.outputStopped)
                     }
                     return
                 case .complete: break
                 }
-                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt) else {
+                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt),
+                      frame.metadata.width == native.configuration.width,
+                      frame.metadata.height == native.configuration.height else {
                     reportVideoUnavailable(attempt, observedAtHostTime: observedAt, callbacks: callbacks)
                     return
                 }
@@ -726,6 +853,13 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         }
     }
 
+    private func retireChangedDisplay(_ native: NativeStream, attempt: CaptureAttemptLease) {
+        _ = videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: mach_absolute_time())
+        lifecycle.streamStopped(native) { callbacks, receipt in
+            callbacks.onStopped(receipt, CaptureError.displayChanged)
+        }
+    }
+
     private func reportVideoUnavailable(_ attempt: CaptureAttemptLease,
                                         observedAtHostTime: UInt64, callbacks: Callbacks) {
         guard videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: observedAtHostTime) else { return }
@@ -734,7 +868,8 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        lifecycle.streamStopped(stream) { callbacks, receipt in
+        guard let native = lifecycle.stream(matching: { $0.stream === stream }) else { return }
+        lifecycle.streamStopped(native) { callbacks, receipt in
             _ = videoAvailability.recordUnavailable(from: receipt.attempt, observedAtHostTime: mach_absolute_time())
             if Self.isSystemStopped(error) {
                 log.warning("stream stopped by the system: \(String(describing: error), privacy: .public)")
@@ -755,7 +890,12 @@ extension ScreenCapture {
     }
 
     static func isRecoverableStop(_ error: Error) -> Bool {
-        if let captureError = error as? CaptureError, case .outputStopped = captureError { return true }
+        if let captureError = error as? CaptureError {
+            switch captureError {
+            case .outputStopped, .displayChanged: return true
+            case .noDisplay, .invalidDisplayGeometry: return false
+            }
+        }
         return isSystemStopped(error)
     }
 

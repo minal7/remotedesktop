@@ -154,6 +154,12 @@ enum HostMessageEncoder {
         return (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
     }
 
+    static func display(_ geometry: CaptureDisplayGeometry, seq: UInt32, ts: UInt64,
+                        inputSession: DirectInputAcknowledgement? = nil) -> Data {
+        display(width: geometry.state.width, height: geometry.state.height,
+                scale: geometry.backingScale, seq: seq, ts: ts, inputSession: inputSession)
+    }
+
     static func display(
         width: Int,
         height: Int,

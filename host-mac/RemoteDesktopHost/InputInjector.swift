@@ -26,6 +26,7 @@ final class InputInjector: @unchecked Sendable {
     private let eventPoster: @Sendable (CGEvent) -> Void
     private let uptime: @Sendable () -> TimeInterval
     private let physicalInputState: @Sendable () -> PhysicalInputState
+    private let displayState: @Sendable (CGDirectDisplayID) -> CaptureDisplayState?
 
     // Track the most recent button state so transitions can be
     // synthesized as the right CGEventType.
@@ -37,8 +38,10 @@ final class InputInjector: @unchecked Sendable {
     private var heldInputIsDirect = false
     struct DirectInputSession: Equatable, Sendable {
         fileprivate let id: UUID
+        let display: CaptureDisplayGeometry?
     }
     private var directInputSession: DirectInputSession?
+    private var displayInvalidation: (session: DirectInputSession, display: CaptureDisplayGeometry)?
     private var lastClickButton: CGMouseButton?
     private var lastClickPosition = CGPoint.zero
     private var lastClickUptime: TimeInterval = -.infinity
@@ -52,10 +55,12 @@ final class InputInjector: @unchecked Sendable {
         uptime: @escaping @Sendable () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         },
-        physicalInputState: (@Sendable () -> PhysicalInputState)? = nil
+        physicalInputState: (@Sendable () -> PhysicalInputState)? = nil,
+        displayState: @escaping @Sendable (CGDirectDisplayID) -> CaptureDisplayState? = { CaptureDisplayState.read($0) }
     ) {
         self.eventPoster = eventPoster
         self.uptime = uptime
+        self.displayState = displayState
         // Ordinary deterministic XCTest fixtures must not depend on whatever
         // the person is pressing on the test Mac. Native qualification must
         // explicitly inject readCurrentPhysicalInputState instead.
@@ -125,10 +130,10 @@ final class InputInjector: @unchecked Sendable {
 
     /// A new authenticated peer/channel lifetime retires any older manual
     /// holds. An old session can neither dispatch input nor release its successor.
-    func beginDirectInputSession() -> DirectInputSession {
+    func beginDirectInputSession(display: CaptureDisplayGeometry? = nil) -> DirectInputSession {
         lock.withLock {
             if heldInputIsDirect { releaseHeldInputLocked() }
-            let session = DirectInputSession(id: UUID())
+            let session = DirectInputSession(id: UUID(), display: display)
             directInputSession = session
             return session
         }
@@ -139,6 +144,17 @@ final class InputInjector: @unchecked Sendable {
             guard directInputSession == session else { return }
             directInputSession = nil
             if heldInputIsDirect { releaseHeldInputLocked() }
+        }
+    }
+
+    /// One pending native-layout observation, scoped to the exact failed
+    /// input session and captured descriptor. Read outside the posting lock
+    /// before requesting capture teardown; unchanged geometry cannot erase it.
+    func takeDisplayInvalidation(for session: DirectInputSession) -> CaptureDisplayGeometry? {
+        lock.withLock {
+            guard let pending = displayInvalidation, pending.session == session else { return nil }
+            displayInvalidation = nil
+            return pending.display
         }
     }
 
@@ -155,7 +171,12 @@ final class InputInjector: @unchecked Sendable {
         case .hello, .qos, .bye: return false
         }
         lock.lock()
-        guard directInputSession == session else { lock.unlock(); return false }
+        guard admitDirectInputLocked(session) else { lock.unlock(); return false }
+        let mapped: ControlMessage
+        if let display = session.display {
+            guard let value = display.map(message) else { lock.unlock(); return false }
+            mapped = value
+        } else { mapped = message }
         directInputTransactions += 1
         let interrupted = interruptAutomation()
         if interrupted || !heldInputIsDirect { releaseHeldAutomationInputLocked() }
@@ -166,14 +187,28 @@ final class InputInjector: @unchecked Sendable {
             directInputTransactions -= 1
             lock.unlock()
         }
-        if case .text(let text) = message {
-            return injectText(text, ifAllowed: { directInputSession == session },
+        if case .text(let text) = mapped {
+            return injectText(text, ifAllowed: { admitDirectInputLocked(session) },
                 releaseOnDenial: false, afterGrapheme: afterTextGrapheme)
         }
         lock.lock()
         defer { lock.unlock() }
+        guard admitDirectInputLocked(session) else { return false }
+        applyNonTextLocked(mapped)
+        return true
+    }
+
+    /// Caller holds the posting lock. Native layout sampling must not acquire
+    /// capture/peer locks. A changed display permanently retires this session;
+    /// its old holds are released at their recorded global coordinates.
+    private func admitDirectInputLocked(_ session: DirectInputSession) -> Bool {
         guard directInputSession == session else { return false }
-        applyNonTextLocked(message)
+        if let display = session.display, !display.matches(displayState(display.state.displayID)) {
+            displayInvalidation = (session, display)
+            directInputSession = nil
+            if heldInputIsDirect { releaseHeldInputLocked() }
+            return false
+        }
         return true
     }
 
@@ -219,8 +254,8 @@ final class InputInjector: @unchecked Sendable {
         switch message {
         case .pointer(let x, let y, let buttons):
             injectPointer(x: x, y: y, buttons: buttons)
-        case .scroll(_, _, let dx, let dy, _):
-            injectScroll(dx: dx, dy: dy)
+        case .scroll(let x, let y, let dx, let dy, _):
+            injectScroll(x: x, y: y, dx: dx, dy: dy)
         case .key(let usage, let down, let modifiers):
             injectKey(usage: usage, down: down, modifiers: modifiers)
         case .text:
@@ -338,7 +373,7 @@ final class InputInjector: @unchecked Sendable {
 
     // MARK: - Scroll
 
-    private func injectScroll(dx: Int, dy: Int) {
+    private func injectScroll(x: Int, y: Int, dx: Int, dy: Int) {
         guard dx != 0 || dy != 0 else { return }
         // wheel1 is vertical (pixel-delta), wheel2 is horizontal.
         guard let e = CGEvent(
@@ -348,6 +383,7 @@ final class InputInjector: @unchecked Sendable {
             wheel1: Int32(clamping: dy),
             wheel2: Int32(clamping: dx),
             wheel3: 0) else { return }
+        e.location = CGPoint(x: x, y: y)
         post(e)
     }
 

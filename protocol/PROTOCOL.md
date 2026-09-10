@@ -209,7 +209,7 @@ scale, monitor switch).
 
 ```jsonc
 { "t": "display", "s": …, "ts": …,
-  "w": 2560, "h": 1440,                 // logical pixel size of active monitor
+  "w": 2560, "h": 1440,                 // logical size of the captured display
   "scale": 2.0,                         // HiDPI backing scale
   "monitors": [
     { "id": 0, "w": 2560, "h": 1440, "x": 0, "y": 0, "primary": true }
@@ -219,8 +219,21 @@ scale, monitor switch).
 
 ### `pointer` (client → host)
 
-Absolute pointer position in the host's logical pixel space, plus button
-state. Coalesce at the sender — don't send more than one per WebRTC frame.
+Absolute position within the captured display's logical coordinate space,
+plus button state. The top-left corner is `(0, 0)` and valid positions are
+`0 <= x < w`, `0 <= y < h` from the scoped `display` message. The Mac host
+maps these coordinates through the captured display's global origin before
+posting input. The phone must not add an origin from another display or infer
+one from the host's focused window. Coalesce at the sender — don't send more
+than one per WebRTC frame.
+
+The host binds this layout to its native capture attempt and local input
+session. A detected display identity, bounds, mode or rotation change retires
+the old input scope through the negotiated capture-loss invalidation path;
+older clients reconnect. A new hello alone cannot remap an existing capture
+descriptor. Actual encoded content padding, presentation evidence and native
+multi-display behavior remain qualification requirements; this coordinate
+contract does not establish that every rendered frame has that geometry.
 
 ```jsonc
 { "t": "pointer", "s": …, "ts": …,
@@ -233,6 +246,9 @@ state. Coalesce at the sender — don't send more than one per WebRTC frame.
 
 Wheel / trackpad scroll. Deltas are in host-logical pixels; positive `dy`
 means "content moves up" (natural scrolling is handled by the host).
+The `x` and `y` fields use the same captured-display coordinates as `pointer`.
+The host maps the event location to global coordinates while preserving the
+deltas; the Mac implementation sets that location on the scroll event.
 
 ```jsonc
 { "t": "scroll", "s": …, "ts": …,

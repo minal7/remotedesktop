@@ -6473,10 +6473,146 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
+    private func makeCaptureDisplay(id: UInt32 = 17, bounds: CGRect = CGRect(x: -1600, y: 120, width: 1600, height: 900)) throws -> CaptureDisplayGeometry {
+        let state = try XCTUnwrap(CaptureDisplayState(displayID: id, bounds: bounds,
+            pixelWidth: Int(bounds.width) * 2, pixelHeight: Int(bounds.height) * 2, rotation: 0))
+        return try XCTUnwrap(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: 2))
+    }
+
+    func testCaptureInputRequiresDisplayGeometryAndEncodesItsExactLayout() throws {
+        let display = try makeCaptureDisplay(), events = CapturedCGEventStore()
+        let probe = CaptureDisplayStateProbe(display.state)
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
+        let channel = NSObject(), id = ObjectIdentifier(channel)
+        authority.openChannel(id); authority.connectionChanged(connected: true)
+        authority.acceptHello(channel: id, orderedControls: 1,
+            inputHello: .init(clientID: UUID(), revision: 1), inputInvalidation: 1)
+        XCTAssertNil(authority.readyAcknowledgement(for: id), "Production requires geometry even if an initial available flag is passed")
+        XCTAssertEqual(authority.captureChanged(available: true), .unchanged)
+        XCTAssertNil(authority.readyAcknowledgement(for: id))
+        XCTAssertEqual(authority.captureChanged(available: true, display: display), .available)
+        let ready = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+        XCTAssertEqual(ready.session.display, display)
+        let wire = HostMessageEncoder.display(display, seq: 2, ts: 3, inputSession: ready.wire)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+        XCTAssertEqual(object["w"] as? Int, 1600); XCTAssertEqual(object["h"] as? Int, 900)
+        XCTAssertEqual(object["scale"] as? Double, 2)
+        XCTAssertEqual(DirectInputWire.decode(try XCTUnwrap(object["inputSession"]), as: DirectInputAcknowledgement.self), ready.wire)
+        XCTAssertEqual(authority.captureChanged(available: true, display: display), .unchanged)
+        XCTAssertEqual(authority.readyAcknowledgement(for: id)?.wire, ready.wire)
+        authority.close()
+    }
+
+    func testCapturedDisplayCoordinatesReachPointerAndScrollEvents() throws {
+        let display = try makeCaptureDisplay(), events = CapturedCGEventStore()
+        let probe = CaptureDisplayStateProbe(display.state)
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let session = injector.beginDirectInputSession(display: display)
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 100, y: 200, buttons: 1), session: session) { false })
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 100, y: 200, buttons: 0), session: session) { false })
+        let clicks = events.values().filter { $0.type == .leftMouseDown || $0.type == .leftMouseUp }
+        XCTAssertEqual(clicks.map(\.location), [CGPoint(x: -1500, y: 320), CGPoint(x: -1500, y: 320)])
+        XCTAssertTrue(injector.applyDirectInput(.scroll(x: 50, y: 60, dx: -8, dy: 90, phase: .begin), session: session) { false })
+        let scroll = try XCTUnwrap(events.values().last)
+        XCTAssertEqual(scroll.type, .scrollWheel); XCTAssertEqual(scroll.location, CGPoint(x: -1550, y: 180))
+        XCTAssertEqual(scroll.horizontalScrollDelta, -8); XCTAssertEqual(scroll.verticalScrollDelta, 90)
+        let count = events.values().count
+        XCTAssertFalse(injector.applyDirectInput(.pointer(x: 1600, y: 0, buttons: 1), session: session) {
+            XCTFail("An out-of-display coordinate cannot interrupt automation"); return false
+        })
+        XCTAssertEqual(events.values().count, count)
+        XCTAssertFalse(probe.requestedIDs.isEmpty)
+        XCTAssertTrue(probe.requestedIDs.allSatisfy { $0 == 17 }, "Sample the captured display, not a focus-dependent display")
+        injector.endDirectInputSession(session)
+        injector.apply(.pointer(x: -20, y: 40, buttons: 0))
+        XCTAssertEqual(events.values().last?.location, CGPoint(x: -20, y: 40), "AI/global injection is not remapped through the phone descriptor")
+    }
+
+    func testCapturedDisplayChangeAtPostingReleasesOldHoldsAndRetiresSession() throws {
+        let display = try makeCaptureDisplay()
+        let changed = try makeCaptureDisplay(bounds: CGRect(x: 0, y: 0, width: 1600, height: 900))
+        let probe = CaptureDisplayStateProbe(display.state), events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let session = injector.beginDirectInputSession(display: display)
+        injector.applyDirectInput(.key(usage: 4, down: true, modifiers: 0), session: session) { false }
+        injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 1), session: session) { false }
+        XCTAssertFalse(injector.applyDirectInput(.pointer(x: 400, y: 500, buttons: 1), session: session) {
+            probe.set(changed.state); return false
+        })
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        let releases = events.values().filter { $0.type == .leftMouseUp }
+        XCTAssertEqual(releases.map(\.location), [CGPoint(x: -1580, y: 150)], "Release at the old recorded global point")
+        let count = events.values().count
+        probe.set(display.state)
+        XCTAssertEqual(injector.takeDisplayInvalidation(for: session), display)
+        XCTAssertNil(injector.takeDisplayInvalidation(for: session), "The loss receipt is consumed once")
+        XCTAssertFalse(injector.applyDirectInput(.text("stale"), session: session) {
+            XCTFail("Matching geometry later cannot revive a retired local session"); return false
+        })
+        injector.endDirectInputSession(session)
+        XCTAssertEqual(events.values().count, count)
+    }
+
+    func testCapturedDisplayChangeDuringTextStopsBeforeNextGraphemeAndProtectsReplacement() throws {
+        let old = try makeCaptureDisplay(), next = try makeCaptureDisplay(id: 22, bounds: CGRect(x: 1600, y: 0, width: 1200, height: 800))
+        let probe = CaptureDisplayStateProbe(old.state), events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let oldSession = injector.beginDirectInputSession(display: old)
+        XCTAssertFalse(injector.applyDirectInput(.text("A🙂B"), session: oldSession,
+            afterTextGrapheme: { probe.set(nil) }, interruptAutomation: { false }))
+        XCTAssertEqual(events.values().compactMap(\.unicodeText), ["A", "A"])
+        probe.set(next.state)
+        let replacement = injector.beginDirectInputSession(display: next)
+        XCTAssertNil(injector.takeDisplayInvalidation(for: replacement), "A successor cannot consume its predecessor's receipt")
+        XCTAssertEqual(injector.takeDisplayInvalidation(for: oldSession), old)
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 10, y: 20, buttons: 1), session: replacement) { false })
+        let count = events.values().count
+        XCTAssertFalse(injector.applyDirectInput(.pointer(x: 10, y: 20, buttons: 0), session: oldSession) {
+            XCTFail("Old input cannot release replacement controls"); return false
+        })
+        injector.endDirectInputSession(oldSession)
+        XCTAssertEqual(events.values().count, count)
+        injector.endDirectInputSession(replacement)
+        XCTAssertEqual(events.values().last?.type, .leftMouseUp)
+        XCTAssertEqual(events.values().last?.location, CGPoint(x: 1610, y: 20))
+    }
+
+    func testCapturedDisplayReplacementRequiresInvalidationBeforeANewScope() throws {
+        let old = try makeCaptureDisplay(), next = try makeCaptureDisplay(bounds: CGRect(x: 0, y: 0, width: 1600, height: 900))
+        for invalidateFirst in [false, true] {
+            let probe = CaptureDisplayStateProbe(old.state), events = CapturedCGEventStore()
+            let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let id = ObjectIdentifier(channel)
+            authority.openChannel(id); authority.connectionChanged(connected: true)
+            authority.acceptHello(channel: id, orderedControls: 1, inputHello: .init(clientID: UUID(), revision: 1), inputInvalidation: 1)
+            _ = authority.captureChanged(available: true, display: old)
+            let previous = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+            let oldAck = try XCTUnwrap(previous.wire)
+            if invalidateFirst {
+                XCTAssertEqual(authority.captureChanged(available: false), .unavailable(oldAck))
+                probe.set(next.state)
+                XCTAssertEqual(authority.captureChanged(available: true, display: next), .available)
+                let ready = try XCTUnwrap(authority.readyAcknowledgement(for: id))
+                XCTAssertEqual(ready.session.display, next)
+                XCTAssertGreaterThan(try XCTUnwrap(ready.wire).generation, oldAck.generation)
+                XCTAssertNil(authority.admitInput(channel: id, stamp: .init(hostID: oldAck.hostID, generation: oldAck.generation, sequence: 1)))
+                XCTAssertTrue(injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 0), session: ready.session) { false })
+                XCTAssertEqual(events.values().last?.location, CGPoint(x: 20, y: 30))
+            } else {
+                XCTAssertEqual(authority.captureChanged(available: true, display: next), .reconnect)
+                XCTAssertTrue(authority.isClosed); XCTAssertNil(authority.readyAcknowledgement(for: id))
+            }
+            XCTAssertFalse(injector.applyDirectInput(.text("old"), session: previous.session) { XCTFail("Retired scope"); return false })
+            authority.close()
+        }
+    }
+
     func testCaptureAvailabilityIsIndependentOfHelloAndConnectionReadiness() throws {
         let states = PeerInputStateProbe()
         let injector = InputInjector(eventPoster: { _ in })
-        let authority = HostPeerInputAuthorization(injector: injector, onChange: { states.append($0) })
+        let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false, onChange: { states.append($0) })
         let channel = NSObject(), id = ObjectIdentifier(channel)
         let hello = DirectInputHello(clientID: UUID(), revision: 1)
         authority.openChannel(id); authority.connectionChanged(connected: true)
@@ -6495,7 +6631,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testCaptureLossReleasesHeldInputAndBlocksHelloOrConnectionFromReopeningIt() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false), channel = NSObject()
         let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
@@ -6527,7 +6663,7 @@ final class ComputerUseTests: XCTestCase {
     func testCaptureRecoveryCannotOverrideDisconnectedOrClosedTransport() throws {
         for terminal in [false, true] {
             let injector = InputInjector(eventPoster: { _ in })
-            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false), channel = NSObject()
             let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
             authority.openChannel(id); authority.connectionChanged(connected: true)
             authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
@@ -6547,7 +6683,7 @@ final class ComputerUseTests: XCTestCase {
     func testCaptureLossRequiresReconnectWhenTheClientCannotInvalidateItsScreen() throws {
         for scoped in [false, true] {
             let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false), channel = NSObject()
             let id = ObjectIdentifier(channel)
             authority.openChannel(id); authority.connectionChanged(connected: true)
             authority.acceptHello(channel: id, orderedControls: 1,
@@ -6577,7 +6713,7 @@ final class ComputerUseTests: XCTestCase {
         let packet = try XCTUnwrap(ControlPacket.decode(JSONSerialization.data(withJSONObject: ["t": "hello", "inputSession": metadata,
             "caps": ["inputInvalidation": 1]])))
         XCTAssertEqual(packet.inputInvalidation, 1)
-        let authority = HostPeerInputAuthorization(injector: InputInjector(eventPoster: { _ in })), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: InputInjector(eventPoster: { _ in }), requiresCaptureDisplay: false), channel = NSObject()
         let id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         XCTAssertTrue(authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1))
@@ -6592,7 +6728,7 @@ final class ComputerUseTests: XCTestCase {
     func testCaptureInvalidationClientAndHostRejectBufferedInputInEitherRecoveryOrder() throws {
         for restoreFirst in [false, true] {
             let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-            let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+            let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false), channel = NSObject()
             let id = ObjectIdentifier(channel)
             var client = DirectInputClientState()
             client.connectionChanged(connected: true)
@@ -6636,7 +6772,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testCurrentCaptureStopRevokesInputBeforeItsDeferredHandlerWhileOldStreamsCannot() async throws {
         let injector = InputInjector(eventPoster: { _ in })
-        let authority = HostPeerInputAuthorization(injector: injector), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, requiresCaptureDisplay: false), channel = NSObject()
         let id = ObjectIdentifier(channel), hello = DirectInputHello(clientID: UUID(), revision: 1)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         authority.acceptHello(channel: id, orderedControls: 1, inputHello: hello, inputInvalidation: 1)
@@ -6700,7 +6836,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testWireInputReplayCannotPostOrReleaseReplacementInput() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false)
         let channel = NSObject(), id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         let hello = DirectInputHello(clientID: UUID(), revision: 1)
@@ -6734,7 +6870,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testNewInputHelloRetiresHoldsWithoutAllowingOldHelloOrDowngrade() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false, onChange: { states.append($0) })
         let channel = NSObject(), id = ObjectIdentifier(channel), clientID = UUID()
         authority.openChannel(id); authority.connectionChanged(connected: true)
         let first = DirectInputHello(clientID: clientID, revision: 1)
@@ -6789,7 +6925,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testLegacyInputRequiresANewChannelAfterConnectionLoss() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false), channel = NSObject()
         let id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
         authority.acceptHello(channel: id, orderedControls: 0)
@@ -6810,7 +6946,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testInputClientAndHostRejectBufferedTextAcrossOneSidedRecovery() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true), channel = NSObject()
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false), channel = NSObject()
         let id = ObjectIdentifier(channel)
         var client = DirectInputClientState()
         authority.openChannel(id); authority.connectionChanged(connected: true); client.connectionChanged(connected: true)
@@ -6903,7 +7039,7 @@ final class ComputerUseTests: XCTestCase {
         for helloFirst in [false, true] {
             let injector = InputInjector(eventPoster: { _ in XCTFail("Authorization cannot post input") })
             let states = PeerInputStateProbe()
-            let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
+            let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false, onChange: { states.append($0) })
             let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
             let channel = NSObject(), channelID = ObjectIdentifier(channel)
             XCTAssertNil(authority.inputSession(for: channelID))
@@ -6937,7 +7073,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testDirectInputChannelReplacementRejectsForeignAndLateCallbacks() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, onChange: { states.append($0) })
+        let states = PeerInputStateProbe(), authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false, onChange: { states.append($0) })
         let first = NSObject(), second = NSObject()
         let firstID = ObjectIdentifier(first), secondID = ObjectIdentifier(second)
         XCTAssertTrue(authority.connectionChanged(connected: true))
@@ -6994,7 +7130,7 @@ final class ComputerUseTests: XCTestCase {
 
     func testDirectTextRevocationStopsAtACompleteGraphemeAndPreservesReplacementInput() throws {
         let events = CapturedCGEventStore(), injector = InputInjector(eventPoster: { events.append($0) })
-        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false)
         let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let channel = NSObject(), id = ObjectIdentifier(channel)
         authority.openChannel(id); authority.connectionChanged(connected: true)
@@ -7030,7 +7166,7 @@ final class ComputerUseTests: XCTestCase {
         let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
-        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true)
+        let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false)
         let wireHello = DirectInputHello(clientID: UUID(), revision: 1)
         let nativeChannel = NSObject(), channelID = ObjectIdentifier(nativeChannel)
         authority.openChannel(channelID); authority.connectionChanged(connected: true); authority.acceptHello(channel: channelID, orderedControls: 1, inputHello: wireHello)
@@ -12019,6 +12155,18 @@ private final class PhysicalInputStateProbe: @unchecked Sendable {
     init(_ state: InputInjector.PhysicalInputState) { self.state = state }
     func set(_ state: InputInjector.PhysicalInputState) { lock.withLock { self.state = state } }
     func read() -> InputInjector.PhysicalInputState { lock.withLock { state } }
+}
+
+private final class CaptureDisplayStateProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var state: CaptureDisplayState?
+    private var ids: [CGDirectDisplayID] = []
+    init(_ state: CaptureDisplayState?) { self.state = state }
+    func set(_ state: CaptureDisplayState?) { lock.withLock { self.state = state } }
+    func read(_ id: CGDirectDisplayID) -> CaptureDisplayState? {
+        lock.withLock { ids.append(id); return state?.displayID == id ? state : nil }
+    }
+    var requestedIDs: [CGDirectDisplayID] { lock.withLock { ids } }
 }
 
 private final class CapturedCGEventStore: @unchecked Sendable {

@@ -5,6 +5,86 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureDisplayGeometryRejectsUnrepresentableOrInconsistentNativeDimensions() throws {
+        let bounds = CGRect(x: -1920, y: 120, width: 1920, height: 1080)
+        let state = try XCTUnwrap(CaptureDisplayState(displayID: 17, bounds: bounds,
+            pixelWidth: 3840, pixelHeight: 2160, rotation: 0))
+        let geometry = try XCTUnwrap(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: 2))
+        XCTAssertEqual(geometry.backingWidth, 3840); XCTAssertEqual(geometry.backingHeight, 2160)
+        for invalid in [CGRect(x: .nan, y: 0, width: 10, height: 10),
+                        CGRect(x: 0, y: .infinity, width: 10, height: 10),
+                        CGRect(x: 0, y: 0, width: 0, height: 10),
+                        CGRect(x: 0, y: 0, width: 10.5, height: 10),
+                        CGRect(x: 0, y: 0, width: CGFloat(Int64.max), height: 10)] {
+            XCTAssertNil(CaptureDisplayState(displayID: 17, bounds: invalid, pixelWidth: 20, pixelHeight: 20, rotation: 0))
+        }
+        XCTAssertNil(CaptureDisplayState(displayID: 0, bounds: bounds, pixelWidth: 3840, pixelHeight: 2160, rotation: 0))
+        XCTAssertNil(CaptureDisplayState(displayID: 17, bounds: bounds, pixelWidth: 0, pixelHeight: 2160, rotation: 0))
+        XCTAssertNil(CaptureDisplayState(displayID: 17, bounds: bounds, pixelWidth: 3840, pixelHeight: 2160, rotation: 45))
+        for scale in [Double.nan, .infinity, 0, 0.5, 5] {
+            XCTAssertNil(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: scale))
+        }
+        XCTAssertNil(CaptureDisplayGeometry(state: state, contentSizeInPoints: CGSize(width: 3840, height: 2160), backingScale: 2))
+        let enormous = try XCTUnwrap(CaptureDisplayState(displayID: 17,
+            bounds: CGRect(x: 0, y: 0, width: CGFloat(Int32.max), height: 2),
+            pixelWidth: Int(Int32.max), pixelHeight: 2, rotation: 0))
+        XCTAssertNil(CaptureDisplayGeometry(state: enormous,
+            contentSizeInPoints: CGSize(width: CGFloat(Int32.max), height: 2), backingScale: 4))
+    }
+
+    func test_captureDisplayGeometryMapsScreenLocalCornersAndScrollToGlobalCoordinates() throws {
+        let bounds = CGRect(x: -1200, y: 1080, width: 1200, height: 1920)
+        let state = try XCTUnwrap(CaptureDisplayState(displayID: 22, bounds: bounds,
+            pixelWidth: 2400, pixelHeight: 3840, rotation: 90))
+        let geometry = try XCTUnwrap(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: 2))
+        XCTAssertEqual(geometry.map(.pointer(x: 0, y: 0, buttons: 1)), .pointer(x: -1200, y: 1080, buttons: 1))
+        XCTAssertEqual(geometry.map(.pointer(x: 1199, y: 1919, buttons: 0)), .pointer(x: -1, y: 2999, buttons: 0))
+        XCTAssertEqual(geometry.map(.scroll(x: 600, y: 960, dx: -8, dy: 90, phase: .changed)),
+                       .scroll(x: -600, y: 2040, dx: -8, dy: 90, phase: .changed))
+        XCTAssertEqual(geometry.map(.text("hello")), .text("hello"))
+        XCTAssertEqual(geometry.map(.key(usage: 4, down: true, modifiers: 8)), .key(usage: 4, down: true, modifiers: 8))
+        for point in [(-1, 0), (0, -1), (1200, 0), (0, 1920), (Int.max, Int.min)] {
+            XCTAssertNil(geometry.map(.pointer(x: point.0, y: point.1, buttons: 0)))
+            XCTAssertNil(geometry.map(.scroll(x: point.0, y: point.1, dx: 0, dy: 1, phase: .begin)))
+        }
+    }
+
+    func test_captureDisplayGeometryRejectsIdentityBoundsModeRotationAndOfflineChanges() throws {
+        let bounds = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let original = try XCTUnwrap(CaptureDisplayState(displayID: 17, bounds: bounds,
+            pixelWidth: 3840, pixelHeight: 2160, rotation: 0))
+        let geometry = try XCTUnwrap(CaptureDisplayGeometry(state: original, contentSizeInPoints: bounds.size, backingScale: 2))
+        XCTAssertTrue(geometry.matches(original))
+        let changed: [CaptureDisplayState?] = [
+            nil,
+            CaptureDisplayState(displayID: 18, bounds: bounds, pixelWidth: 3840, pixelHeight: 2160, rotation: 0),
+            CaptureDisplayState(displayID: 17, bounds: bounds.offsetBy(dx: -1920, dy: 0), pixelWidth: 3840, pixelHeight: 2160, rotation: 0),
+            CaptureDisplayState(displayID: 17, bounds: CGRect(x: 0, y: 0, width: 1280, height: 720), pixelWidth: 3840, pixelHeight: 2160, rotation: 0),
+            CaptureDisplayState(displayID: 17, bounds: bounds, pixelWidth: 1920, pixelHeight: 1080, rotation: 0),
+            CaptureDisplayState(displayID: 17, bounds: bounds, pixelWidth: 3840, pixelHeight: 2160, rotation: 180)
+        ]
+        for current in changed { XCTAssertFalse(geometry.matches(current)) }
+        XCTAssertTrue(ScreenCapture.isRecoverableStop(ScreenCapture.CaptureError.displayChanged))
+        XCTAssertFalse(ScreenCapture.isRecoverableStop(ScreenCapture.CaptureError.invalidDisplayGeometry))
+    }
+
+    func test_captureNativeResourceLookupCannotAdmitARetiredWrapperOrOwner() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: "old display")
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        let lookup = try XCTUnwrap(lifecycle.stream(matching: { $0 === old }))
+        XCTAssertTrue(lifecycle.withRunningStream(owner) { _, resource in XCTAssertTrue(resource === lookup) })
+        let successor = lifecycle.beginOwner(context: "new display")
+        try await lifecycle.start(for: successor, prepare: { next }, startStream: { _ in }).value
+        XCTAssertNil(lifecycle.stream(matching: { $0 === old }))
+        XCTAssertFalse(lifecycle.withStream(lookup) { _, _ in XCTFail("Lookup is not retained admission") })
+        XCTAssertFalse(lifecycle.streamStopped(lookup) { _, _ in XCTFail("Old callback cannot retire replacement") })
+        XCTAssertFalse(lifecycle.withRunningStream(owner) { _, _ in XCTFail("Old owner cannot borrow replacement resources") })
+        XCTAssertTrue(lifecycle.withRunningStream(successor) { _, resource in XCTAssertTrue(resource === next) })
+        await lifecycle.endAll().value
+    }
+
     func test_captureInitialDeadlineCanRetireDiscoveryBeforeNativeReturn() async throws {
         // Manually evaluate the production budget and retire the fake native
         // owner. This fixture does not execute the peer's scheduled watchdog.

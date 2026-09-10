@@ -38,6 +38,8 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     private var inputGeneration: UInt32 = 0
     private var lastInputSequence: UInt32 = 0
     private var captureAvailable: Bool
+    private var captureDisplay: CaptureDisplayGeometry?
+    private let requiresCaptureDisplay: Bool
     private var inputInvalidation: Int?
     private var hasAuthorizedInput = false
 
@@ -45,10 +47,11 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
         case unchanged, available, unavailable(DirectInputAcknowledgement?), reconnect
     }
 
-    init(injector: InputInjector, initialCaptureAvailable: Bool = false,
+    init(injector: InputInjector, initialCaptureAvailable: Bool = false, requiresCaptureDisplay: Bool = true,
          onChange: @escaping @Sendable (State) -> Void = { _ in }) {
         self.injector = injector; self.onChange = onChange
-        captureAvailable = initialCaptureAvailable
+        self.requiresCaptureDisplay = requiresCaptureDisplay
+        captureAvailable = initialCaptureAvailable && !requiresCaptureDisplay
     }
 
     @discardableResult
@@ -108,10 +111,20 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
 
     /// Capture is independent of transport connectivity. Retire the posting
     /// session and release its holds before returning the scope to notify.
-    func captureChanged(available: Bool) -> CaptureChange {
+    func captureChanged(available: Bool, display: CaptureDisplayGeometry? = nil) -> CaptureChange {
         lock.withLock {
-            guard !closed, captureAvailable != available else { return .unchanged }
+            guard !closed, !available || display != nil || !requiresCaptureDisplay else { return .unchanged }
+            if captureAvailable, available, captureDisplay != display {
+                // A replacement layout needs an explicit loss/new scope.
+                // Never silently remap an already authorized generation.
+                closed = true; connected = false; channelID = nil; helloCapabilities = nil
+                captureAvailable = false; captureDisplay = nil
+                reconcileLocked()
+                return .reconnect
+            }
+            guard captureAvailable != available else { return .unchanged }
             captureAvailable = available
+            captureDisplay = available ? display : nil
             if available {
                 reconcileLocked(publishWhenUnauthorized: false)
                 return .available
@@ -193,7 +206,7 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
                     publishLocked(); return
                 }
                 inputGeneration += 1
-                session = injector.beginDirectInputSession()
+                session = injector.beginDirectInputSession(display: captureDisplay)
                 hasAuthorizedInput = true
                 if let inputHello {
                     acknowledgement = .init(hello: inputHello, hostID: UUID(), generation: inputGeneration)
@@ -691,7 +704,7 @@ final class HostPeerSession: NSObject {
 
     private func refreshCaptureInputAvailability() {
         guard let (owner, _) = try? captureStartParameters() else { return }
-        capture.withRunningSession(owner) { runningAttempt, videoAvailable in
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable, display in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
             guard !ended, videoAvailable, lastVideoAttempt == runningAttempt else { return }
@@ -700,15 +713,18 @@ final class HostPeerSession: NSObject {
                                            at: ContinuousClock.now) else { return }
                 completeCaptureRecoveryLocked()
             }
-            restoreCaptureInputLocked()
+            restoreCaptureInputLocked(display: display)
         }
     }
 
     /// Called under the current capture gate and peer lock, after current
     /// source output is available. This is not remote presentation proof.
-    private func restoreCaptureInputLocked() {
-        guard inputAuthorization.captureChanged(available: true) == .available else { return }
-        sendHelloAckAndDisplay()
+    private func restoreCaptureInputLocked(display: CaptureDisplayGeometry) {
+        switch inputAuthorization.captureChanged(available: true, display: display) {
+        case .available: sendHelloAckAndDisplay()
+        case .reconnect: scheduleCaptureTerminalFailure("The screen layout changed without a new input session. Reconnect to restore control.")
+        case .unchanged, .unavailable: break
+        }
     }
 
     /// Called synchronously inside the unavailable or retired stream's capture gate.
@@ -755,7 +771,7 @@ final class HostPeerSession: NSObject {
     private func settleCaptureRestart(_ worker: UUID, episode: UUID) -> CaptureStartDisposition {
         guard let (owner, _) = try? captureStartParameters() else { return .retired }
         var result = CaptureStartDisposition.retry
-        capture.withRunningSession(owner) { runningAttempt, videoAvailable in
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable, display in
             closeStateLock.lock()
             defer { closeStateLock.unlock() }
             guard !ended, captureRestartID == worker, let recovery = captureRecovery,
@@ -764,7 +780,7 @@ final class HostPeerSession: NSObject {
             if videoAvailable, recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
                                                      at: ContinuousClock.now) {
                 completeCaptureRecoveryLocked()
-                restoreCaptureInputLocked()
+                restoreCaptureInputLocked(display: display)
                 result = .restored
             } else {
                 captureRestartID = nil
@@ -913,6 +929,11 @@ final class HostPeerSession: NSObject {
               let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
             return
         }
+        guard let captureDisplay = ready.session.display else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The captured screen layout is unavailable. Reconnect to restore control.")
+            return
+        }
 
         let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
         hostSeq &+= 1
@@ -932,13 +953,9 @@ final class HostPeerSession: NSObject {
             return
         }
 
-        let frame = NSScreen.main?.frame ?? .zero
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         hostSeq &+= 1
         let display = HostMessageEncoder.display(
-            width: Int(frame.width.rounded()),
-            height: Int(frame.height.rounded()),
-            scale: scale,
+            captureDisplay,
             seq: hostSeq,
             ts: timestamp,
             inputSession: ready.wire)
@@ -947,6 +964,11 @@ final class HostPeerSession: NSObject {
             scheduleCaptureTerminalFailure("The screen layout could not be sent. Reconnect to restore control.")
             return
         }
+    }
+
+    private func invalidateChangedCaptureDisplay() {
+        guard let (owner, _) = try? captureStartParameters() else { return }
+        capture.invalidateChangedDisplay(for: owner)
     }
 
     private func iceCandidate(from payload: [String: String]) -> RTCIceCandidate? {
@@ -1154,6 +1176,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
         let message = packet.message
         switch message {
         case .hello(let proto, let orderedComputerUseControls):
+            invalidateChangedCaptureDisplay()
             guard proto == HostConfig.protocolVersion else {
                 if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
                     close(reason: "protocol")
@@ -1171,12 +1194,20 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 onEnded(reason)
             }
         case .pointer, .scroll, .key, .text:
+            invalidateChangedCaptureDisplay()
             guard let session = inputAuthorization.admitInput(channel: ObjectIdentifier(dataChannel), stamp: packet.inputStamp),
                   Self.acceptsDirectInput(message, helloAuthenticated: true) else {
                 log.warning("dropping remote input without a current authorized input session")
                 return
             }
-            injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput)
+            if !injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput) {
+                if let display = injector.takeDisplayInvalidation(for: session),
+                   let (owner, _) = try? captureStartParameters() {
+                    // Preserve a layout loss observed at posting even if the
+                    // display has already returned to its previous bounds.
+                    capture.invalidateDisplay(for: owner, matching: display)
+                }
+            }
         case let .qos(targetFps, maxBitrateKbps, prefer):
             guard inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil else {
                 log.warning("dropping video quality request received before authenticated hello")
