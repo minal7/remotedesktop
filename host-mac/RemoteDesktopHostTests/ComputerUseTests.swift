@@ -6473,10 +6473,59 @@ final class ComputerUseTests: XCTestCase {
         return receipt
     }
 
-    private func makeCaptureDisplay(id: UInt32 = 17, bounds: CGRect = CGRect(x: -1600, y: 120, width: 1600, height: 900)) throws -> CaptureDisplayGeometry {
+    private func makeCaptureDisplay(id: UInt32 = 17, bounds: CGRect = CGRect(x: -1600, y: 120, width: 1600, height: 900),
+                                    configuration: UUID? = nil) throws -> CaptureDisplayGeometry {
         let state = try XCTUnwrap(CaptureDisplayState(displayID: id, bounds: bounds,
-            pixelWidth: Int(bounds.width) * 2, pixelHeight: Int(bounds.height) * 2, rotation: 0))
+            pixelWidth: Int(bounds.width) * 2, pixelHeight: Int(bounds.height) * 2, rotation: 0,
+            configuration: configuration))
         return try XCTUnwrap(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: 2))
+    }
+
+    func testCapturedDisplayEpochChangeBeforePostingReleasesHoldsWithoutRevival() throws {
+        let old = try makeCaptureDisplay(configuration: UUID()), restored = try makeCaptureDisplay(configuration: UUID())
+        let probe = CaptureDisplayStateProbe(old.state), events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let session = injector.beginDirectInputSession(display: old)
+        XCTAssertTrue(injector.applyDirectInput(.key(usage: 4, down: true, modifiers: 0), session: session) { false })
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 20, y: 30, buttons: 1), session: session) { false })
+        XCTAssertFalse(injector.applyDirectInput(.pointer(x: 400, y: 500, buttons: 1), session: session) {
+            probe.set(restored.state); return false
+        })
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 1)
+        XCTAssertEqual(events.values().filter { $0.type == .leftMouseUp }.map(\.location), [CGPoint(x: -1580, y: 150)])
+        XCTAssertEqual(injector.takeDisplayInvalidation(for: session), old)
+        XCTAssertNil(injector.takeDisplayInvalidation(for: session))
+        let count = events.values().count
+        probe.set(old.state)
+        XCTAssertFalse(injector.applyDirectInput(.text("stale"), session: session) {
+            XCTFail("Even a stale provider response cannot revive the retired local session"); return false
+        })
+        injector.endDirectInputSession(session)
+        XCTAssertEqual(events.values().count, count)
+    }
+
+    func testCapturedDisplayEpochChangeBetweenGraphemesPreservesReplacement() throws {
+        let old = try makeCaptureDisplay(configuration: UUID()), next = try makeCaptureDisplay(configuration: UUID())
+        let probe = CaptureDisplayStateProbe(old.state), events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) }, displayState: { probe.read($0) })
+        let oldSession = injector.beginDirectInputSession(display: old)
+        XCTAssertFalse(injector.applyDirectInput(.text("A🙂B"), session: oldSession,
+            afterTextGrapheme: { probe.set(next.state) }, interruptAutomation: { false }))
+        XCTAssertEqual(events.values().compactMap(\.unicodeText), ["A", "A"],
+                       "A token change alone stops before the next complete grapheme")
+        let replacement = injector.beginDirectInputSession(display: next)
+        XCTAssertNil(injector.takeDisplayInvalidation(for: replacement))
+        XCTAssertEqual(injector.takeDisplayInvalidation(for: oldSession), old)
+        XCTAssertTrue(injector.applyDirectInput(.pointer(x: 10, y: 20, buttons: 1), session: replacement) { false })
+        let count = events.values().count
+        XCTAssertFalse(injector.applyDirectInput(.pointer(x: 10, y: 20, buttons: 0), session: oldSession) {
+            XCTFail("Retired input cannot release replacement holds at identical coordinates"); return false
+        })
+        injector.endDirectInputSession(oldSession)
+        XCTAssertEqual(events.values().count, count)
+        injector.endDirectInputSession(replacement)
+        XCTAssertEqual(events.values().last?.type, .leftMouseUp)
+        XCTAssertEqual(events.values().last?.location, CGPoint(x: -1590, y: 140))
     }
 
     func testCaptureInputRequiresDisplayGeometryAndEncodesItsExactLayout() throws {

@@ -6,6 +6,107 @@ import Foundation
 import ScreenCaptureKit
 import os
 
+/// A reported configuration change is a boundary even when native dimensions
+/// later return to their old values. Native getters run outside this lock.
+final class CaptureDisplayChangeFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var registered = false
+    private var failed = false
+    private var generation = UUID()
+    private var changingDisplays: Set<CGDirectDisplayID> = []
+    private static let maximumPendingDisplays = 64
+
+    func completeRegistration(succeeded: Bool) {
+        lock.withLock {
+            guard !registered, !failed else { return }
+            registered = succeeded; failed = !succeeded
+            generation = UUID()
+        }
+    }
+
+    func record(display: CGDirectDisplayID, flags: CGDisplayChangeSummaryFlags) {
+        lock.withLock {
+            guard !failed else { return }
+            generation = UUID()
+            guard display != kCGNullDirectDisplay else { failed = true; return }
+            if flags.contains(.beginConfigurationFlag) {
+                guard changingDisplays.contains(display) || changingDisplays.count < Self.maximumPendingDisplays else {
+                    failed = true; changingDisplays.removeAll(); return
+                }
+                changingDisplays.insert(display)
+            } else { changingDisplays.remove(display) }
+        }
+    }
+
+    var current: UUID? {
+        lock.withLock { registered && !failed && changingDisplays.isEmpty ? generation : nil }
+    }
+
+    func isCurrent(_ expected: UUID) -> Bool { current == expected }
+
+    func sample<Value>(_ read: (UUID) -> Value?) -> Value? {
+        guard let before = current, let value = read(before), isCurrent(before) else { return nil }
+        return value
+    }
+}
+
+private let captureDisplayReconfigurationCallback: CGDisplayReconfigurationCallBack = { display, flags, context in
+    guard let context else { return }
+    Unmanaged<CaptureDisplayChangeMonitor>.fromOpaque(context).takeUnretainedValue()
+        .record(display: display, flags: flags)
+}
+
+/// One process-lifetime registration keeps the C callback context alive. Each
+/// capturer owns only a removable weak subscription. Delivery is coalesced and
+/// never calls capture/injection code on the native reconfiguration callback.
+private final class CaptureDisplayChangeMonitor: @unchecked Sendable {
+    static let shared = CaptureDisplayChangeMonitor()
+    let fence = CaptureDisplayChangeFence()
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.threadmark.remotedesktop.host.display-change")
+    private var observers: [UUID: @Sendable () -> Void] = [:]
+    private var deliveryScheduled = false
+
+    private init() {
+        let result = CGDisplayRegisterReconfigurationCallback(captureDisplayReconfigurationCallback,
+            Unmanaged.passUnretained(self).toOpaque())
+        fence.completeRegistration(succeeded: result == .success)
+    }
+
+    final class Observation {
+        private let monitor: CaptureDisplayChangeMonitor
+        private let id: UUID
+        fileprivate init(monitor: CaptureDisplayChangeMonitor, id: UUID) { self.monitor = monitor; self.id = id }
+        deinit { monitor.remove(id) }
+    }
+
+    func observe(_ callback: @escaping @Sendable () -> Void) -> Observation {
+        let id = UUID()
+        lock.withLock { observers[id] = callback }
+        return Observation(monitor: self, id: id)
+    }
+
+    private func remove(_ id: UUID) { _ = lock.withLock { observers.removeValue(forKey: id) } }
+
+    func record(display: CGDirectDisplayID, flags: CGDisplayChangeSummaryFlags) {
+        fence.record(display: display, flags: flags)
+        let schedule = lock.withLock {
+            guard !deliveryScheduled else { return false }
+            deliveryScheduled = true
+            return true
+        }
+        if schedule { queue.async { [self] in deliver() } }
+    }
+
+    private func deliver() {
+        let pending = lock.withLock {
+            deliveryScheduled = false
+            return Array(observers.values)
+        }
+        for callback in pending { callback() }
+    }
+}
+
 /// One native display snapshot, independent of AppKit's key-window screen.
 /// Integer logical bounds make the wire-to-global transform exact.
 struct CaptureDisplayState: Equatable, Sendable {
@@ -17,8 +118,10 @@ struct CaptureDisplayState: Equatable, Sendable {
     let pixelWidth: Int
     let pixelHeight: Int
     let rotation: Double
+    let configuration: UUID?
 
-    init?(displayID: CGDirectDisplayID, bounds: CGRect, pixelWidth: Int, pixelHeight: Int, rotation: Double) {
+    init?(displayID: CGDirectDisplayID, bounds: CGRect, pixelWidth: Int, pixelHeight: Int, rotation: Double,
+          configuration: UUID? = nil) {
         guard displayID != kCGNullDirectDisplay,
               let x = Int32(exactly: bounds.origin.x), let y = Int32(exactly: bounds.origin.y),
               let width = Int32(exactly: bounds.width), let height = Int32(exactly: bounds.height),
@@ -28,12 +131,16 @@ struct CaptureDisplayState: Equatable, Sendable {
         self.displayID = displayID
         originX = Int(x); originY = Int(y); self.width = Int(width); self.height = Int(height)
         self.pixelWidth = pixelWidth; self.pixelHeight = pixelHeight; self.rotation = rotation
+        self.configuration = configuration
     }
 
     static func read(_ displayID: CGDirectDisplayID) -> Self? {
-        guard CGDisplayIsOnline(displayID) != 0, let mode = CGDisplayCopyDisplayMode(displayID) else { return nil }
-        return Self(displayID: displayID, bounds: CGDisplayBounds(displayID),
-                    pixelWidth: mode.pixelWidth, pixelHeight: mode.pixelHeight, rotation: CGDisplayRotation(displayID))
+        CaptureDisplayChangeMonitor.shared.fence.sample { configuration in
+            guard CGDisplayIsOnline(displayID) != 0, let mode = CGDisplayCopyDisplayMode(displayID) else { return nil }
+            return Self(displayID: displayID, bounds: CGDisplayBounds(displayID),
+                        pixelWidth: mode.pixelWidth, pixelHeight: mode.pixelHeight, rotation: CGDisplayRotation(displayID),
+                        configuration: configuration)
+        }
     }
 }
 
@@ -466,6 +573,15 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 
     @discardableResult
+    func withCurrentStream(_ body: (Context, CaptureAttemptLease, Stream) -> Void) -> Bool {
+        locked {
+            guard let active, active.owner == owner, let stream = active.stream, let context else { return false }
+            body(context, active.id, stream)
+            return true
+        }
+    }
+
+    @discardableResult
     func withStream(_ stream: Stream, _ body: (Context, CaptureAttemptLease) -> Void) -> Bool {
         locked {
             guard let active, active.owner == owner, active.stream === stream,
@@ -637,6 +753,18 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     private var loggedFirstAudioAttempt: CaptureAttemptLease?
     private var videoFrameOrder = CaptureVideoFrameOrder()
     private var videoAvailability = CaptureVideoAvailability()
+    private var displayObservation: CaptureDisplayChangeMonitor.Observation?
+
+    override init() {
+        super.init()
+        // Ordinary host-session fixtures must not register desktop observers.
+        // Actual native capture still requires the native fence in read().
+        if !HostRuntimeContext.isRunningUnitTests {
+            displayObservation = CaptureDisplayChangeMonitor.shared.observe { [weak self] in
+                self?.handleDisplayConfigurationChange()
+            }
+        }
+    }
 
     struct Callbacks: Sendable {
         /// Synchronous consumers run inside the stream ownership gate.
@@ -707,6 +835,9 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
             try await makeStream(audioEnabled: audioEnabled,
                                  maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
         }, startStream: { native in
+            guard native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else {
+                throw CaptureError.displayChanged
+            }
             try await native.stream.startCapture()
         })
         try await task.value
@@ -714,9 +845,12 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int) async throws -> NativeStream {
+        let fence = CaptureDisplayChangeMonitor.shared.fence
+        guard let configuration = fence.current else { throw CaptureError.invalidDisplayGeometry }
         let content = try await SCShareableContent.excludingDesktopWindows(
             false, onScreenWindowsOnly: false)
         try Task.checkCancellation()
+        guard fence.isCurrent(configuration) else { throw CaptureError.displayChanged }
         guard let display = content.displays.first(where: {
             $0.displayID == CGMainDisplayID()
         }) ?? content.displays.first else {
@@ -727,7 +861,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
             excludingApplications: [],
             exceptingWindows: [])
         let contentInfo = SCShareableContent.info(for: filter)
-        guard let state = CaptureDisplayState.read(display.displayID),
+        guard let state = CaptureDisplayState.read(display.displayID), state.configuration == configuration,
               let geometry = CaptureDisplayGeometry(state: state, contentSizeInPoints: contentInfo.contentRect.size,
                                                      backingScale: Double(contentInfo.pointPixelScale)) else {
             throw CaptureError.invalidDisplayGeometry
@@ -857,6 +991,15 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         _ = videoAvailability.recordUnavailable(from: attempt, observedAtHostTime: mach_absolute_time())
         lifecycle.streamStopped(native) { callbacks, receipt in
             callbacks.onStopped(receipt, CaptureError.displayChanged)
+        }
+    }
+
+    private func handleDisplayConfigurationChange() {
+        lifecycle.withCurrentStream { _, attempt, native in
+            // A queued notification rechecks the latest token. It cannot
+            // retire a replacement already prepared under that configuration.
+            guard !native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else { return }
+            retireChangedDisplay(native, attempt: attempt)
         }
     }
 

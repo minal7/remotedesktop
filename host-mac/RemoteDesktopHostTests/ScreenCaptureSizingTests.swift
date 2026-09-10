@@ -5,6 +5,158 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    func test_captureDisplayFenceRequiresOneSuccessfulRegistration() throws {
+        let fence = CaptureDisplayChangeFence()
+        XCTAssertNil(fence.current)
+        let unavailable: Int? = fence.sample { _ in XCTFail("No native reads before registration"); return 1 }
+        XCTAssertNil(unavailable)
+        // A callback may arrive inside registration, before it returns.
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        fence.completeRegistration(succeeded: true)
+        XCTAssertNil(fence.current)
+        fence.record(display: 17, flags: .setModeFlag)
+        let current = try XCTUnwrap(fence.current)
+        fence.completeRegistration(succeeded: true)
+        XCTAssertEqual(fence.current, current, "Registration completion is one-shot")
+
+        let failed = CaptureDisplayChangeFence()
+        failed.completeRegistration(succeeded: false)
+        failed.completeRegistration(succeeded: true)
+        failed.record(display: 17, flags: .setModeFlag)
+        XCTAssertNil(failed.current, "Later calls cannot disguise a failed native registration")
+    }
+
+    func test_captureDisplayFenceWaitsForEveryChangingDisplay() throws {
+        let fence = CaptureDisplayChangeFence()
+        fence.completeRegistration(succeeded: true)
+        let before = try XCTUnwrap(fence.current)
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        fence.record(display: 22, flags: .beginConfigurationFlag)
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        XCTAssertFalse(fence.isCurrent(before))
+        fence.record(display: 17, flags: .movedFlag)
+        XCTAssertNil(fence.current, "The other display is still changing")
+        fence.record(display: 22, flags: .removeFlag)
+        let after = try XCTUnwrap(fence.current)
+        XCTAssertNotEqual(before, after)
+        fence.record(display: 30, flags: .addFlag)
+        XCTAssertNotEqual(fence.current, after, "Post-change notifications without a seen begin also retire old tokens")
+        XCTAssertNotNil(fence.current)
+    }
+
+    func test_captureDisplayFenceDiscardsSamplesCrossingAConfigurationBoundary() throws {
+        let fence = CaptureDisplayChangeFence()
+        fence.completeRegistration(succeeded: true)
+        let before = try XCTUnwrap(fence.current)
+        let crossed: String? = fence.sample { configuration in
+            XCTAssertEqual(configuration, before)
+            fence.record(display: 17, flags: .beginConfigurationFlag)
+            fence.record(display: 17, flags: .setModeFlag)
+            return "numerically unchanged bounds"
+        }
+        XCTAssertNil(crossed, "A completed change during native reads still invalidates the sample")
+        let stable = fence.sample { Optional($0) }
+        XCTAssertEqual(stable, fence.current)
+        XCTAssertNotEqual(stable, before)
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        let pending: String? = fence.sample { _ in XCTFail("Do not sample a changing configuration"); return "stale" }
+        XCTAssertNil(pending)
+        fence.record(display: 17, flags: .setModeFlag)
+        let absent: String? = fence.sample { _ in nil }
+        XCTAssertNil(absent, "An unavailable native display remains unavailable in a stable configuration")
+    }
+
+    func test_captureDisplayFenceBoundsInvalidAndUnbalancedNotifications() throws {
+        let invalid = CaptureDisplayChangeFence()
+        invalid.completeRegistration(succeeded: true)
+        invalid.record(display: 0, flags: .beginConfigurationFlag)
+        invalid.record(display: 17, flags: .setModeFlag)
+        XCTAssertNil(invalid.current, "An unidentifiable change cannot establish a stable configuration")
+
+        let bounded = CaptureDisplayChangeFence()
+        bounded.completeRegistration(succeeded: true)
+        for display: UInt32 in 1...64 { bounded.record(display: display, flags: .beginConfigurationFlag) }
+        for display: UInt32 in 1...64 { bounded.record(display: display, flags: .setModeFlag) }
+        XCTAssertNotNil(bounded.current, "The bounded pending set can drain normally")
+        for display: UInt32 in 1...65 { bounded.record(display: display, flags: .beginConfigurationFlag) }
+        for display: UInt32 in 1...65 { bounded.record(display: display, flags: .setModeFlag) }
+        XCTAssertNil(bounded.current, "Overflow cannot evict evidence and reopen admission")
+    }
+
+    func test_captureDisplayGeometryRejectsRestoredDimensionsFromAnOlderConfiguration() throws {
+        let fence = CaptureDisplayChangeFence()
+        fence.completeRegistration(succeeded: true)
+        let bounds = CGRect(x: -1600, y: 120, width: 1600, height: 900)
+        let sample = { fence.sample { configuration in
+            CaptureDisplayState(displayID: 17, bounds: bounds, pixelWidth: 3200, pixelHeight: 1800,
+                                rotation: 0, configuration: configuration)
+        } }
+        let old = try XCTUnwrap(sample())
+        let geometry = try XCTUnwrap(CaptureDisplayGeometry(state: old, contentSizeInPoints: bounds.size, backingScale: 2))
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        XCTAssertFalse(geometry.matches(sample()))
+        fence.record(display: 17, flags: .setModeFlag)
+        let restored = try XCTUnwrap(sample())
+        XCTAssertEqual(restored.originX, old.originX); XCTAssertEqual(restored.width, old.width)
+        XCTAssertEqual(restored.pixelWidth, old.pixelWidth)
+        XCTAssertNotEqual(restored.configuration, old.configuration)
+        XCTAssertFalse(geometry.matches(restored), "Restoring dimensions does not restore the old capture lifetime")
+    }
+
+    func test_captureDisplayNotificationCanRetireAnInstalledStartingStream() async throws {
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, String> { _ in }
+        let owner = lifecycle.beginOwner(context: "starting")
+        let stream = CaptureLifecycleTestStream()
+        let entered = expectation(description: "native start entered")
+        let release = CaptureLifecycleTestLatch()
+        let start = try lifecycle.start(for: owner, prepare: { stream }, startStream: { _ in
+            entered.fulfill(); await release.wait()
+        })
+        defer { Task { await release.open(); await lifecycle.endAll().value } }
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertFalse(lifecycle.isRunning(for: owner))
+        var stopped: CaptureStopReceipt?
+        XCTAssertTrue(lifecycle.withCurrentStream { context, attempt, current in
+            XCTAssertEqual(context, "starting"); XCTAssertTrue(current === stream)
+            XCTAssertTrue(lifecycle.streamStopped(current) { _, receipt in
+                XCTAssertEqual(receipt.attempt, attempt); stopped = receipt
+            })
+        })
+        XCTAssertNotNil(stopped)
+        XCTAssertFalse(lifecycle.withCurrentStream { _, _, _ in XCTFail("Retired startup has no current native resource") })
+        await release.open()
+        do { try await start.value; XCTFail("A delayed native success cannot restore the old configuration") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(lifecycle.consumeStop(try XCTUnwrap(stopped)))
+        await lifecycle.endAll().value
+    }
+
+    func test_captureDelayedDisplayNotificationPreservesTheLatestReplacement() async throws {
+        let fence = CaptureDisplayChangeFence()
+        fence.completeRegistration(succeeded: true)
+        let lifecycle = CaptureStreamLifecycle<CaptureLifecycleTestStream, UUID> { _ in }
+        let old = CaptureLifecycleTestStream(), next = CaptureLifecycleTestStream()
+        let owner = lifecycle.beginOwner(context: try XCTUnwrap(fence.current))
+        try await lifecycle.start(for: owner, prepare: { old }, startStream: { _ in }).value
+        fence.record(display: 17, flags: .beginConfigurationFlag)
+        fence.record(display: 17, flags: .setModeFlag)
+        // Model queued observer delivery using the production current-resource
+        // gate and latest fence. No native observer is registered by this fixture.
+        XCTAssertTrue(lifecycle.withCurrentStream { configuration, _, current in
+            XCTAssertFalse(fence.isCurrent(configuration)); XCTAssertTrue(current === old)
+            XCTAssertTrue(lifecycle.streamStopped(current) { _, _ in })
+        })
+        let replacement = lifecycle.beginOwner(context: try XCTUnwrap(fence.current))
+        try await lifecycle.start(for: replacement, prepare: { next }, startStream: { _ in }).value
+        XCTAssertTrue(lifecycle.withCurrentStream { configuration, _, current in
+            XCTAssertTrue(fence.isCurrent(configuration)); XCTAssertTrue(current === next)
+        })
+        XCTAssertTrue(lifecycle.isRunning(for: replacement))
+        XCTAssertFalse(lifecycle.streamStopped(old) { _, _ in XCTFail("A delayed old stream callback cannot retire its replacement") })
+        await lifecycle.endAll().value
+        XCTAssertFalse(lifecycle.withCurrentStream { _, _, _ in XCTFail("Closed owners cannot receive queued notifications") })
+    }
+
     func test_captureDisplayGeometryRejectsUnrepresentableOrInconsistentNativeDimensions() throws {
         let bounds = CGRect(x: -1920, y: 120, width: 1920, height: 1080)
         let state = try XCTUnwrap(CaptureDisplayState(displayID: 17, bounds: bounds,
