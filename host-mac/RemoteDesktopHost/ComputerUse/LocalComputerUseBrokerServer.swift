@@ -223,13 +223,33 @@ final class LocalComputerUseBrokerServer {
         let envelopes = try await channel.pollForClient(
             authenticatedSenderID: request.senderID,
             sessionID: request.sessionID)
-        return LocalComputerUseRPCResponse(
-            requestID: request.requestID,
-            senderID: hostID,
-            targetID: request.senderID,
-            envelopes: Array(envelopes.prefix(
-                LocalComputerUseRPCLimits.maximumEnvelopesPerFrame)),
-            acceptedEnvelopeIDs: accepted)
+        return try Self.boundedResponse(to: request, envelopes: envelopes, acceptedEnvelopeIDs: accepted)
+    }
+
+    /// Count alone cannot bound JSON frames containing complete questions.
+    /// Select an ordered prefix by its actual encoded size; polling does not
+    /// remove any messages. Only a later authenticated acknowledgement does.
+    static func boundedResponse(to request: LocalComputerUseRPCRequest, envelopes: [ComputerUseEnvelope],
+                                acceptedEnvelopeIDs: [String]) throws -> LocalComputerUseRPCResponse {
+        func response(_ messages: [ComputerUseEnvelope]) -> LocalComputerUseRPCResponse {
+            .init(requestID: request.requestID, senderID: request.targetID, targetID: request.senderID,
+                envelopes: messages, acceptedEnvelopeIDs: acceptedEnvelopeIDs)
+        }
+        var selected = response([])
+        _ = try LocalComputerUseRPCCodec.encode(selected)
+        for envelope in envelopes.prefix(LocalComputerUseRPCLimits.maximumEnvelopesPerFrame) {
+            let candidate = response(selected.envelopes + [envelope])
+            do {
+                _ = try LocalComputerUseRPCCodec.encode(candidate)
+                selected = candidate
+            } catch LocalComputerUseRPCValidationError.frameTooLarge {
+                // A message that cannot fit by itself is an error, not a
+                // successful empty poll that would conceal a stuck queue.
+                guard !selected.envelopes.isEmpty else { throw LocalComputerUseRPCValidationError.frameTooLarge }
+                break
+            }
+        }
+        return selected
     }
 
     private static func isValidPeerID(_ value: String) -> Bool {

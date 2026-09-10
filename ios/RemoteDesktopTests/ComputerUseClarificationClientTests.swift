@@ -46,6 +46,25 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertNotEqual(first.id, answer.id); XCTAssertNotEqual(answer.id, final.id)
     }
 
+    func testFullScopedQuestionReachesPhoneAndItsAnswerKeepsTheOriginalReference() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
+        let original = try await fixture.channel.prompt(at: 0)
+        let question = "Which location?\n\nI'm asking about the part inside ⟦ ⟧.\n\n⟦"
+            + String(repeating: "e\u{301}😀 ", count: 4_000) + "⟧"
+        XCTAssertGreaterThan(question.count, 8_000)
+        let reference = try await fixture.question(for: original, text: question)
+        XCTAssertTrue(try XCTUnwrap(fixture.model.messages.last?.text).utf8.elementsEqual(question.utf8))
+        let exact = "  Paris e\u{301} 😀\n  "
+        XCTAssertTrue(fixture.model.sendPrompt(exact))
+        let sent = try await fixture.channel.prompt(at: 1)
+        let answer = try ComputerUsePromptRequest.decodeBody(sent.body)
+        XCTAssertEqual(answer.clarification, reference)
+        XCTAssertTrue(answer.prompt.utf8.elementsEqual(exact.utf8)); XCTAssertTrue(answer.conversation.isEmpty)
+        XCTAssertNotEqual(sent.id, original.id)
+    }
+
     func testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry() async throws {
         var now = Date()
         let fixture = ClarificationClientFixture(now: { now })

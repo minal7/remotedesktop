@@ -741,6 +741,34 @@ final class ComputerUseTests: XCTestCase {
                                          promptBody: "Find tickets"), .completed(ComputerUseTaskLedger.stoppedResponse))
     }
 
+    func test_managerDeliversFullQuestionForMaximumLengthPhoneRequestAndContinuesItsOwner() async throws {
+        let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
+        executor.planner.useSourceReferences = true
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        let beginning = "Find concert tickets. "
+        let original = beginning + String(repeating: "x", count: ComputerUsePromptRequest.maximumPromptLength - beginning.count)
+        let prompt = makeEnvelope(id: "maximum-phone-request", kind: .prompt,
+            body: try ComputerUsePromptRequest(prompt: original, supportsApprovedActionEvidence: true).encodedBody())
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        let first = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
+        XCTAssertGreaterThan(first.text.count, 8_000)
+        XCTAssertTrue(first.text.contains("⟦\(original)⟧"))
+        let reference = try XCTUnwrap(first.clarification), owner = try XCTUnwrap(executor.owner)
+        let clock = owner.input.rootDateContext
+        let answer = makeEnvelope(id: "maximum-phone-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Paris", supportsApprovedActionEvidence: true).encodedBody())
+        XCTAssertTrue(fixture.manager.handle(answer, channel: fixture.channel))
+        let second = try await clarificationUpdate(taskID: answer.id, channel: fixture.channel)
+        XCTAssertTrue(second.text.contains("⟦\(original)⟧")); XCTAssertEqual(second.clarification?.taskID, answer.id)
+        XCTAssertTrue(executor.owner === owner)
+        XCTAssertEqual(owner.input.userTurns, [original, "Paris"])
+        XCTAssertEqual(owner.input.rootDateContext, clock)
+        XCTAssertEqual(executor.ordinaryPrompts, [original]); XCTAssertEqual(executor.continued.map(\.taskID), [answer.id])
+    }
+
     func test_managerBrowserQuestionsPreserveRootAcrossExactAnswersLocalPauseAndDurableReplay() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

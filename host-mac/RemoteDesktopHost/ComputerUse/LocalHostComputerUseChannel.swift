@@ -5,6 +5,7 @@ import Foundation
 /// identity to that connection before the existing host manager can see it.
 actor LocalHostComputerUseChannel: HostComputerUseChannel {
     static let maximumBodyBytes = 96 * 1_024
+    static let maximumResponseBodyBytes = LocalComputerUseRPCLimits.maximumBodyBytes
     static let maximumSessionIDBytes = 256
     static let maximumQueuedEnvelopesPerDirection = 256
     static let maximumTrackedOutboundPeerSessions = 64
@@ -81,7 +82,7 @@ actor LocalHostComputerUseChannel: HostComputerUseChannel {
                   envelope.targetID == hostID,
                   envelope.pairingCode == pairingCode,
                   envelope.sessionID == sessionID,
-                  Self.isValidEnvelope(envelope) else {
+                  Self.isValidEnvelope(envelope, bodyLimit: Self.maximumBodyBytes) else {
                 throw SignalingError.transport(
                     "The local AI request failed authenticated routing validation.")
             }
@@ -180,7 +181,7 @@ actor LocalHostComputerUseChannel: HostComputerUseChannel {
               Self.isValidPeerID(targetID),
               let sessionID = explicitSessionID,
               Self.isValidSessionID(sessionID),
-              body.utf8.count <= Self.maximumBodyBytes else {
+              body.utf8.count <= Self.maximumResponseBodyBytes else {
             throw SignalingError.transport(
                 "The local AI response exceeded its authenticated session bounds.")
         }
@@ -192,9 +193,16 @@ actor LocalHostComputerUseChannel: HostComputerUseChannel {
             sessionID: sessionID,
             kind: kind,
             body: body)
-        guard Self.isValidEnvelope(envelope) else {
+        guard Self.isValidEnvelope(envelope, bodyLimit: Self.maximumResponseBodyBytes) else {
             throw SignalingError.transport("The local AI response was invalid.")
         }
+        // JSON escaping can make a byte-admitted body too large even as a
+        // single reply. Reject it before queue mutation, reserving the maximum
+        // escaped request/acknowledgement metadata for a later poll.
+        let maximumIdentifier = String(repeating: "\\", count: LocalComputerUseRPCLimits.maximumIdentifierBytes)
+        _ = try LocalComputerUseRPCCodec.encode(LocalComputerUseRPCResponse(requestID: maximumIdentifier,
+            senderID: hostID, targetID: targetID, envelopes: [envelope],
+            acceptedEnvelopeIDs: Array(repeating: maximumIdentifier, count: LocalComputerUseRPCLimits.maximumAcknowledgementsPerFrame)))
 
         let peer = PeerSession(senderID: targetID, sessionID: sessionID)
         let timestamp = now()
@@ -340,14 +348,15 @@ actor LocalHostComputerUseChannel: HostComputerUseChannel {
     }
 
     private static func isValidEnvelope(
-        _ envelope: ComputerUseEnvelope
+        _ envelope: ComputerUseEnvelope,
+        bodyLimit: Int
     ) -> Bool {
         isValidMessageID(envelope.id)
             && isValidPeerID(envelope.senderID)
             && isValidPeerID(envelope.targetID)
             && envelope.pairingCode.utf8.count <= 64
             && isValidSessionID(envelope.sessionID)
-            && envelope.body.utf8.count <= maximumBodyBytes
+            && envelope.body.utf8.count <= bodyLimit
             && envelope.createdAt.timeIntervalSinceNow < 5 * 60
             && envelope.createdAt.timeIntervalSinceNow > -(24 * 60 * 60)
     }

@@ -8,8 +8,8 @@ import Foundation
 final class ComputerUseTaskLedger {
     /// A retained question must reach the person exactly. This character
     /// limit matches ComputerUseTaskUpdate's outgoing text bound.
-    static let maximumClarificationCharacters = 8_000
-    static let maximumClarificationUTF8Bytes = 32 * 1_024
+    static let maximumClarificationCharacters = ComputerUseClarificationText.maximumCharacters
+    static let maximumClarificationUTF8Bytes = ComputerUseClarificationText.maximumUTF8Bytes
     enum Claim: Equatable {
         case new
         case accepted
@@ -578,9 +578,7 @@ final class ComputerUseTaskLedger {
         }
         let retainedQuestion = outcome == .userInterventionRequired && clarification?.taskID == taskID ? clarification : nil
         if retainedQuestion != nil {
-            guard !response.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  response.count <= Self.maximumClarificationCharacters,
-                  response.utf8.count <= Self.maximumClarificationUTF8Bytes else { throw LedgerError.invalidClarification }
+            guard ComputerUseClarificationText.isValid(response) else { throw LedgerError.invalidClarification }
         }
         record.response = retainedQuestion == nil ? String(response.prefix(4_000)) : response
         record.outcome = outcome

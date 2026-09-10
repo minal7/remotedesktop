@@ -486,6 +486,63 @@ final class LocalComputerUseTransportTests: XCTestCase {
             try endpoint("172.32.0.1")))
     }
 
+    func testLargeQuestionsBatchByEncodedFrameAndRemainQueuedUntilAcknowledged() async throws {
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let request = LocalComputerUseRPCRequest(requestID: "large-question-poll", senderID: peerID, targetID: hostID, sessionID: sessionID)
+        let text = "Which location?\n" + String(repeating: "␁", count: 40_000)
+        var sent: [ComputerUseEnvelope] = []
+        for index in 0..<12 {
+            let reference = try ComputerUseClarificationReference(taskID: "large-task-\(index)", expiresAt: Date().addingTimeInterval(600))
+            let body = try ComputerUseTaskUpdate(taskID: reference.taskID, text: text,
+                outcome: .userInterventionRequired, clarification: reference).encodedBody()
+            XCTAssertGreaterThan(body.utf8.count, LocalHostComputerUseChannel.maximumBodyBytes)
+            sent.append(try await channel.send(kind: .assistant, body: body, to: peerID, sessionID: sessionID,
+                messageID: String(format: "large-question-%02d", index)))
+        }
+        var receivedIDs: [String] = [], batches = 0
+        for _ in 0..<12 {
+            let pending = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+            if pending.isEmpty { break }
+            let response = try LocalComputerUseBrokerServer.boundedResponse(to: request, envelopes: pending,
+                acceptedEnvelopeIDs: ["accepted-prompt"])
+            XCTAssertFalse(response.envelopes.isEmpty)
+            XCTAssertEqual(response.envelopes.map(\.id), Array(pending.prefix(response.envelopes.count)).map(\.id))
+            XCTAssertEqual(response.acceptedEnvelopeIDs, ["accepted-prompt"])
+            let encoded = try LocalComputerUseRPCCodec.encode(response)
+            XCTAssertLessThanOrEqual(encoded.count, LocalComputerUseRPCLimits.maximumFrameBytes)
+            let replay = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+            XCTAssertEqual(replay, pending, "Selecting a bounded reply cannot drop the unsent suffix or acknowledge the sent prefix")
+            for envelope in try LocalComputerUseRPCCodec.decodeResponse(encoded).envelopes {
+                let update = try ComputerUseTaskUpdate.decodeBody(envelope.body)
+                XCTAssertTrue(update.text.utf8.elementsEqual(text.utf8)); XCTAssertNotNil(update.clarification)
+            }
+            let ids = response.envelopes.map(\.id)
+            _ = try await channel.applyClientFrame(envelopes: [], acknowledgedEnvelopeIDs: ids,
+                authenticatedSenderID: peerID, sessionID: sessionID)
+            receivedIDs += ids; batches += 1
+        }
+        XCTAssertGreaterThan(batches, 1); XCTAssertEqual(receivedIDs, sent.map(\.id))
+        let remaining = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testUnencodableSingleResponseIsRejectedBeforeItCanBlockTheLocalQueue() async throws {
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        // JSON escapes each control byte to six bytes; the body alone fits its
+        // byte cap, but no legal local response frame can carry this message.
+        let body = String(repeating: "\u{1}", count: LocalHostComputerUseChannel.maximumResponseBodyBytes)
+        do {
+            _ = try await channel.send(kind: .assistant, body: body, to: peerID, sessionID: sessionID, messageID: "cannot-fit")
+            XCTFail("A permanently undeliverable message must not enter the queue")
+        } catch { XCTAssertEqual(error as? LocalComputerUseRPCValidationError, .frameTooLarge) }
+        let pending = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+        XCTAssertTrue(pending.isEmpty)
+        let valid = try await channel.send(kind: .assistant, body: "Which location?", to: peerID, sessionID: sessionID, messageID: "fits")
+        let request = LocalComputerUseRPCRequest(requestID: "poll", senderID: peerID, targetID: hostID, sessionID: sessionID)
+        let response = try LocalComputerUseBrokerServer.boundedResponse(to: request, envelopes: [valid], acceptedEnvelopeIDs: [])
+        XCTAssertEqual(response.envelopes, [valid])
+    }
+
     func testTLSPSKBrokerCarriesPromptResultAndAcknowledgementEndToEnd() async throws {
         let credential = try LocalComputerUseCredential(
             rawKey: Data(repeating: 0x5A, count: 32))

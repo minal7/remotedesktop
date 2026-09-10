@@ -1703,7 +1703,8 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
         XCTAssertEqual(try reopened.claim(taskID: original.taskID, senderID: "phone", sessionID: "session", promptBody: original.prompt), .completed(question.text))
         XCTAssertEqual(try reopened.complete(taskID: original.taskID, response: String(repeating: "x", count: 8_001),
             outcome: .userInterventionRequired, clarification: reference).response, question.text, "The first terminal still wins")
-        for (index, invalid) in ["", " \n ", String(repeating: "x", count: 8_001), "e" + String(repeating: "\u{301}", count: 16_384)].enumerated() {
+        for (index, invalid) in ["", " \n ", String(repeating: "x", count: ComputerUseClarificationText.maximumCharacters + 1),
+            "e" + String(repeating: "\u{301}", count: ComputerUseClarificationText.maximumUTF8Bytes / 2)].enumerated() {
             let task = "invalid-question-\(index)"
             _ = try ledger.claim(taskID: task, senderID: "phone", sessionID: "session", promptBody: "Find tickets")
             let scope = try ComputerUseClarificationReference(taskID: task, expiresAt: question.expiresAt)
@@ -1718,6 +1719,82 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
                 outcome: .userInterventionRequired, clarification: task == "foreign-question-reference" ? reference : nil)
             XCTAssertEqual(terminal.response.count, 4_000)
             XCTAssertNil(terminal.clarification)
+        }
+    }
+
+    func testLargeReferencedScopesSurviveClarificationLedgerAndLocalRPCWithoutTruncation() throws {
+        let parts = ["Find " + String(repeating: "x", count: 4_089) + " ",
+            "Find " + String(repeating: "\u{1}", count: 4_089) + " ",
+            "Find " + String(repeating: "e\u{301}😀", count: 584) + " "]
+        for (variant, part) in parts.enumerated() {
+            let sources = Array(repeating: part, count: 8)
+            let original = try input(sources.joined(), taskID: "large-question-\(variant)")
+            let catalogue = ComputerUseBrowserGoalSourceCatalogue(original)
+            var endpoint = 0
+            let rows: [[String: Any]] = try sources.map { source in
+                endpoint += source.utf8.count
+                var bytes = 0
+                let through = try XCTUnwrap(catalogue.turns[0].indices.first { index in
+                    bytes += catalogue.turns[0][index].utf8.count; return bytes == endpoint
+                })
+                return ["turn":0, "through":through, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]]
+            }
+            let data = try JSONSerialization.data(withJSONObject: ["disposition":"clarification", "requirements":rows,
+                "question":["topic":"location", "requirements":Array(0..<8)]])
+            let proposal = try ComputerUseBrowserGoalProposal.decodeReferences(content: String(decoding: data, as: UTF8.self), catalogue: catalogue)
+            let state = Clarification(input: original), owner = try context()
+            let question = try state.issue(proposal: proposal, topic: .location, requirementIDs: proposal.requirements.map(\.id), context: owner)
+            XCTAssertGreaterThan(question.text.count, 8_000)
+            XCTAssertTrue(ComputerUseClarificationText.isValid(question.text))
+            for (scope, source) in zip(question.scope, sources) { XCTAssertTrue(scope.source.utf8.elementsEqual(source.utf8)) }
+            if variant == 1 { XCTAssertTrue(question.text.contains("␁")); XCTAssertFalse(question.text.contains("\u{1}")) }
+
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let url = directory.appendingPathComponent("ledger.json"), ledger = ComputerUseTaskLedger(fileURL: url)
+            _ = try ledger.claim(taskID: original.taskID, senderID: "phone", sessionID: "session", promptBody: original.prompt)
+            let reference = try ComputerUseClarificationReference(taskID: original.taskID, expiresAt: question.expiresAt)
+            let terminal = try ledger.complete(taskID: original.taskID, response: question.text, outcome: .userInterventionRequired, clarification: reference)
+            let body = try ComputerUseTaskUpdate(taskID: original.taskID, text: terminal.response,
+                outcome: terminal.outcome, clarification: terminal.clarification).encodedBody()
+            let envelope = ComputerUseEnvelope(id: "question-envelope", senderID: "host", targetID: "phone", pairingCode: "123456",
+                sessionID: "session", kind: .assistant, body: body)
+            let frame = try LocalComputerUseRPCCodec.encode(LocalComputerUseRPCResponse(requestID: "poll-question",
+                senderID: "host", targetID: "phone", envelopes: [envelope]))
+            XCTAssertLessThanOrEqual(frame.count, LocalComputerUseRPCLimits.maximumFrameBytes)
+            let delivered = try XCTUnwrap(LocalComputerUseRPCCodec.decodeResponse(frame).envelopes.first)
+            let update = try ComputerUseTaskUpdate.decodeBody(delivered.body)
+            XCTAssertTrue(update.text.utf8.elementsEqual(question.text.utf8)); XCTAssertEqual(update.clarification, reference)
+            let reopened = ComputerUseTaskLedger(fileURL: url)
+            XCTAssertEqual(try reopened.claim(taskID: original.taskID, senderID: "phone", sessionID: "session", promptBody: original.prompt), .completed(question.text))
+            let continued = try state.consume(questionID: question.id, answerTaskID: "location-answer", answer: "Paris", context: owner)
+            XCTAssertTrue(continued.prompt.utf8.elementsEqual(original.prompt.utf8))
+            XCTAssertEqual(continued.userTurns.last, "Paris"); XCTAssertEqual(continued.rootDateContext, original.rootDateContext)
+        }
+    }
+
+    func testQuestionWireEnforcesSharedBoundsWithoutSilentlyShorteningAReference() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "wire-question", expiresAt: Date().addingTimeInterval(600))
+        let valid = ComputerUseTaskUpdate(taskID: reference.taskID, text: String(repeating: "x", count: ComputerUseClarificationText.maximumCharacters),
+            outcome: .userInterventionRequired, clarification: reference)
+        XCTAssertEqual(try ComputerUseTaskUpdate.decodeBody(valid.encodedBody()).text, valid.text)
+        let byteBound = "ee" + String(repeating: "\u{301}", count: ComputerUseClarificationText.maximumUTF8Bytes / 2 - 1)
+        XCTAssertEqual(byteBound.utf8.count, ComputerUseClarificationText.maximumUTF8Bytes)
+        let byteUpdate = ComputerUseTaskUpdate(taskID: reference.taskID, text: byteBound, outcome: .userInterventionRequired, clarification: reference)
+        XCTAssertTrue(try ComputerUseTaskUpdate.decodeBody(byteUpdate.encodedBody()).text.utf8.elementsEqual(byteBound.utf8))
+        let template = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(valid.encodedBody().utf8)) as? [String: Any])
+        for text in ["", " \n ", String(repeating: "x", count: ComputerUseClarificationText.maximumCharacters + 1),
+                     "e" + String(repeating: "\u{301}", count: ComputerUseClarificationText.maximumUTF8Bytes / 2)] {
+            let update = ComputerUseTaskUpdate(taskID: reference.taskID, text: text, outcome: .userInterventionRequired, clarification: reference)
+            XCTAssertTrue(update.text.utf8.elementsEqual(text.utf8), "A constructor must not pair a shortened question with the original reference")
+            XCTAssertThrowsError(try update.encodedBody())
+            var invalid = template; invalid["text"] = text
+            let body = String(decoding: try JSONSerialization.data(withJSONObject: invalid), as: UTF8.self)
+            XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(body))
+        }
+        for (taskID, outcome) in [(reference.taskID, ComputerUseTerminalOutcome.unableToComplete), ("different-task", .userInterventionRequired)] {
+            let ordinary = ComputerUseTaskUpdate(taskID: taskID, text: valid.text, outcome: outcome, clarification: reference)
+            XCTAssertEqual(ordinary.text.count, 8_000); XCTAssertNil(ordinary.clarification)
         }
     }
 

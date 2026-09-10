@@ -453,18 +453,25 @@ final class BrowserResearchGoalFixture: ComputerUseBrowserGoalPlanning {
     var replacement: ComputerUseBrowserGoalInput?
     var beforeReply: (@MainActor () async -> Void)?
     var questionTopic: ComputerUseBrowserClarificationTopic?
+    var useSourceReferences = false
     func propose(_ input: ComputerUseBrowserGoalInput) async throws -> ComputerUseBrowserGoalProposal {
         inputs.append(input)
         if let beforeReply { await beforeReply() } // Deliberately ignores cancellation until the fixture is released.
         let goal = replacement ?? input
+        let catalogue = useSourceReferences ? ComputerUseBrowserGoalSourceCatalogue(goal) : nil
         let rows: [[String: Any]] = goal.userTurns.enumerated().map { index, source in
-            ["turn":index, "source":source, "role":index == 0 ? "outcome" : "condition",
+            var row: [String: Any] = ["turn":index, "role":index == 0 ? "outcome" : "condition",
                 "field":index == 0 ? "category" : "other", "relation":"unspecified", "values":[]]
+            if let catalogue { row["through"] = catalogue.turns[index].count - 1 }
+            else { row["source"] = source }
+            return row
         }
         let question: [String: Any] = ["topic":questionTopic?.rawValue ?? "none", "requirements":questionTopic == nil ? [] : [0]]
         let data = try JSONSerialization.data(withJSONObject: ["disposition":questionTopic == nil ? "research" : "clarification",
             "question":question, "requirements":rows])
-        return try .decode(content: String(decoding: data, as: UTF8.self), input: goal)
+        let content = String(decoding: data, as: UTF8.self)
+        if let catalogue { return try .decodeReferences(content: content, catalogue: catalogue) }
+        return try .decode(content: content, input: goal)
     }
 }
 
