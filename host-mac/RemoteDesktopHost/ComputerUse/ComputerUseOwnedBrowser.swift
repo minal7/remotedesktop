@@ -1965,7 +1965,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               let controls = taskControls else { return nil }
         // WebKit must supply the configuration and perform the initial load:
         // replacing either breaks opener/postMessage and the shared session.
+        let sessionID = browserSessionID, epoch = ownershipEpoch
         let child = WKWebView(frame: NSRect(x: 0, y: 0, width: 640, height: 720), configuration: configuration)
+        guard browser === webView, browserSessionID == sessionID, ownershipEpoch == epoch,
+              taskID == controls.taskID, taskControls?.ownerID == controls.ownerID, canOpenSignInWindow else { return nil }
         child.navigationDelegate = self
         child.uiDelegate = self
         signInScope = (controls.taskID, controls.ownerID)
@@ -1974,14 +1977,32 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         navigationDispatchLog?.recordControl(phase: .signInWindowOpened, parentSessionID: browserSessionID,
             ownershipEpoch: ownershipEpoch, generation: generation, url: navigationAction.request.url,
             handback: nil, workflowOperationID: nil, nativeOperationID: nil, signInWindowID: signInInstanceID)
+        let instanceID = signInInstanceID
+        func retainsCreation() -> Bool {
+            // The parent may navigate during login. Retain the child/session
+            // owner, not a document generation or the parent's source policy.
+            guard signInBrowser === child, signInInstanceID == instanceID,
+                  browser === webView, browserSessionID == sessionID, ownershipEpoch == epoch,
+                  taskID == controls.taskID, signInScope?.taskID == controls.taskID,
+                  signInScope?.ownerID == controls.ownerID, canNavigateSignInWindow else {
+                // Only this exact child can be retired by an abandoned setup.
+                if signInBrowser === child { closeSignInWindow(restoreParent: false) }
+                return false
+            }
+            return true
+        }
         signInSite = ComputerUseBrowserSite.displayName(for: navigationAction.request.url)
+        guard retainsCreation() else { return nil }
         signInDetail = "You control this window. AI is paused."
-        signInURLObservation = child.observe(\.url, options: [.new]) { [weak self] child, _ in
+        guard retainsCreation() else { return nil }
+        let observation = child.observe(\.url, options: [.new]) { [weak self] child, _ in
             Task { @MainActor [weak self, weak child] in
                 guard let self, let child, signInBrowser === child else { return }
                 signInSite = ComputerUseBrowserSite.displayName(for: child.url)
             }
         }
+        guard retainsCreation() else { return nil }
+        signInURLObservation = observation
         if presentsWindow {
             let popup = NSWindow(contentRect: child.bounds, styleMask: [.titled, .closable, .resizable],
                                  backing: .buffered, defer: false)
@@ -1999,8 +2020,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 frame.origin = NSPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2)
                 popup.setFrame(frame, display: false)
             }
+            guard retainsCreation() else {
+                popup.delegate = nil
+                popup.contentView = nil
+                popup.close()
+                return nil
+            }
             signInWindow = popup
             popup.makeKeyAndOrderFront(nil)
+            guard retainsCreation(), signInWindow === popup else { return nil }
         }
         return child
     }
@@ -2014,7 +2042,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func closeSignInWindow(restoreParent: Bool) {
         guard let child = signInBrowser else { return }
-        let wasKey = signInWindow?.isKeyWindow == true
+        let popup = signInWindow, parent = browser, parentWindow = window
+        let controlsOwner = taskControls?.ownerID
+        let wasKey = popup?.isKeyWindow == true
         navigationDispatchLog?.recordControl(phase: .signInWindowClosed, parentSessionID: browserSessionID,
             ownershipEpoch: ownershipEpoch, generation: generation, url: child.url,
             handback: nil, workflowOperationID: nil, nativeOperationID: nil, signInWindowID: signInInstanceID)
@@ -2024,16 +2054,23 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         signInInstanceID = nil
         signInScope = nil
         signInURLObservation = nil
+        signInWindow = nil
+        let closed = parent.flatMap { navigationCallbackScope(in: $0) }
+        func retainsParent() -> Bool {
+            isCurrentNavigationCallback(closed) && taskControls?.ownerID == controlsOwner
+        }
         child.navigationDelegate = nil
         child.uiDelegate = nil
         child.stopLoading()
-        signInWindow?.delegate = nil
-        signInWindow?.close()
-        signInWindow?.contentView = nil
-        signInWindow = nil
+        popup?.delegate = nil
+        popup?.close()
+        popup?.contentView = nil
+        guard retainsParent() else { return }
         signInSite = nil
+        guard retainsParent() else { return }
         detail = "Sign-in window closed — choose Let AI continue when you are ready"
-        if restoreParent, wasKey { window?.makeKeyAndOrderFront(nil) }
+        guard retainsParent(), window === parentWindow else { return }
+        if restoreParent, wasKey { parentWindow?.makeKeyAndOrderFront(nil) }
         // Closing is not handback, a login assertion, or a navigation receipt.
     }
 

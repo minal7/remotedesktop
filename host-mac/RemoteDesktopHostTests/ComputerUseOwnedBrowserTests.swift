@@ -6,6 +6,140 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testSignInCreationPublicationCannotReturnARetiredChild() async throws {
+        for publication in ["site", "detail"] {
+            for ending in ["child", "owner"] {
+                let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: """
+                    <script>fetch('/signal').then(() => {
+                        const child = window.open('/provider');
+                        fetch('/attempted?child=' + (child ? 'yes' : 'no'));
+                    });</script>
+                    """), "/signal": .init(held: true)])
+                let base = try await server.start()
+                defer { server.stop() }
+                var allowed = true, interrupted = false, lateResets = 0
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+                defer { browser.close() }
+                _ = try browser.prepareWorkflowSession(taskID: "creation")
+                let original = try await browser.navigate(taskID: "creation", operationID: "login", to: base.appendingPathComponent("login"))
+                try await waitUntil { server.count("/signal") == 1 }
+                let controls = ComputerUseBrowserTaskControls(taskID: "creation", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true)
+                allowed = false
+                browser.updateTaskControls(controls, handler: { _, _ in })
+                let interrupt: () -> Void = {
+                    guard !interrupted else { return }
+                    interrupted = true
+                    if ending == "child" { browser.closeSignInWindow() }
+                    else {
+                        browser.updateTaskControls(.init(taskID: "creation", scopeID: UUID(), presentationID: UUID(),
+                            phase: .paused, canResume: true, ownerID: UUID()), handler: { _, _ in })
+                    }
+                }
+                let detailSubscription = browser.$signInDetail.dropFirst().sink { _ in
+                    if interrupted { lateResets += 1 }
+                }
+                let subscription: AnyCancellable
+                if publication == "site" { subscription = browser.$signInSite.dropFirst().sink { if $0 != nil { interrupt() } } }
+                else { subscription = browser.$signInDetail.dropFirst().sink { _ in interrupt() } }
+                defer { subscription.cancel(); detailSubscription.cancel() }
+                server.releaseHeldResponses()
+                try await waitUntil { server.count("/attempted?child=no") + server.count("/attempted?child=yes") == 1 }
+                XCTAssertTrue(interrupted)
+                XCTAssertFalse(browser.hasOpenSignInWindow)
+                XCTAssertEqual(server.count("/attempted?child=no"), 1, "Abandoned setup must return no child to WebKit")
+                XCTAssertEqual(server.count("/provider"), 0)
+                if publication == "site" { XCTAssertEqual(lateResets, 0, "Old setup cannot publish another sign-in status") }
+                allowed = true
+                XCTAssertEqual(browser.currentDocument(taskID: "creation"), original)
+                XCTAssertEqual(server.count("/login"), 1)
+            }
+        }
+    }
+
+    func testSignInClosurePublicationPreservesReplacementParentAndControlOwner() async throws {
+        for ending in ["stop", "close", "reclaim", "controls"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/provider-ready');</script>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, interrupted = false
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "parent")
+            _ = try await browser.navigate(taskID: "parent", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            allowed = false
+            browser.updateTaskControls(.init(taskID: "parent", scopeID: UUID(), presentationID: UUID(), phase: .paused, canResume: true), handler: { _, _ in })
+            server.releaseHeldResponses()
+            try await waitUntil { browser.hasOpenSignInWindow && server.count("/provider-ready") == 1 }
+            var expectedDetail: String?
+            var replacement: ComputerUseBrowserHandbackRequirement?
+            let subscription = browser.$signInSite.dropFirst().sink { site in
+                guard site == nil, !interrupted else { return }
+                interrupted = true; allowed = true
+                if ending == "close" { browser.close() }
+                else if ending != "controls" { browser.stop() }
+                if ending == "reclaim" {
+                    do { replacement = try browser.prepareWorkflowSession(taskID: "replacement") }
+                    catch { XCTFail("Cannot retain replacement parent: \(error)") }
+                } else if ending == "controls" {
+                    browser.updateTaskControls(.init(taskID: "parent", scopeID: UUID(), presentationID: UUID(),
+                        phase: .paused, canResume: true, ownerID: UUID()), handler: { _, _ in })
+                }
+                expectedDetail = browser.detail
+            }
+            defer { subscription.cancel() }
+            browser.closeSignInWindow()
+            XCTAssertTrue(interrupted)
+            XCTAssertFalse(browser.hasOpenSignInWindow)
+            XCTAssertEqual(browser.detail, try XCTUnwrap(expectedDetail), "Old closure cannot publish guidance in a replacement parent/control scope")
+            if let replacement { XCTAssertEqual(browser.handbackRequirement(taskID: "replacement", required: true), replacement) }
+            _ = try browser.prepareWorkflowSession(taskID: "next")
+            let next = try await browser.navigate(taskID: "next", operationID: "next", to: base.appendingPathComponent("next"))
+            XCTAssertTrue(browser.validate(next))
+            XCTAssertEqual(server.count("/login"), 1); XCTAssertEqual(server.count("/provider"), 1); XCTAssertEqual(server.count("/next"), 1)
+        }
+    }
+
+    func testSignInCreationKeepsSameOwnerDuringEarlyResumePublication() async throws {
+        for publication in ["site", "detail"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/login": .init(body: "<script>fetch('/signal').then(() => window.open('/provider'));</script>"),
+                "/signal": .init(held: true), "/provider": .init(body: "<script>fetch('/provider-ready');</script>")])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true, resumed = false
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { allowed })
+            defer { browser.close() }
+            let session = try browser.prepareWorkflowSession(taskID: "early-resume")
+            let original = try await browser.navigate(taskID: "early-resume", operationID: "login", to: base.appendingPathComponent("login"))
+            try await waitUntil { server.count("/signal") == 1 }
+            let ownerID = UUID()
+            allowed = false
+            browser.updateTaskControls(.init(taskID: "early-resume", scopeID: UUID(), presentationID: UUID(),
+                phase: .paused, canResume: true, ownerID: ownerID), handler: { _, _ in })
+            let resume: () -> Void = {
+                guard !resumed else { return }
+                resumed = true; allowed = true
+                browser.updateTaskControls(.init(taskID: "early-resume", scopeID: UUID(), presentationID: UUID(),
+                    phase: .working, canResume: false, ownerID: ownerID), handler: { _, _ in })
+            }
+            let subscription: AnyCancellable
+            if publication == "site" { subscription = browser.$signInSite.dropFirst().sink { if $0 != nil { resume() } } }
+            else { subscription = browser.$signInDetail.dropFirst().sink { _ in resume() } }
+            defer { subscription.cancel() }
+            server.releaseHeldResponses()
+            try await waitUntil { resumed && server.count("/provider-ready") == 1 }
+            XCTAssertTrue(browser.hasOpenSignInWindow)
+            XCTAssertFalse(browser.hasOwnership(taskID: "early-resume"))
+            XCTAssertEqual(browser.handbackRequirement(taskID: "early-resume", required: true), session)
+            do { try await browser.reacquireAfterUserControl(taskID: "early-resume", requirement: session); XCTFail("The unfinished child still blocks AI handback") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .signInWindowOpen) }
+            browser.closeSignInWindow()
+            XCTAssertEqual(browser.currentDocument(taskID: "early-resume"), original)
+            XCTAssertEqual(server.count("/login"), 1); XCTAssertEqual(server.count("/provider"), 1)
+        }
+    }
+
     func testCompletedNavigationPublicationCannotOverwriteStoppedOrReclaimedStatus() async throws {
         for ending in ["stop", "reclaim", "close"] {
             let server = try OwnedBrowserHTTPFixture()

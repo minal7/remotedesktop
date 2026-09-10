@@ -1,0 +1,24 @@
+{
+  "selectors": [
+    "RemoteDesktopHostTests/ComputerUseBrowserSourcePolicyTests/testSourcePolicyAllowsManualLoginOutsideScopeButOnlyUsesAllowedResultsAfterHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testClosingSignInPopupDoesNotAssertAuthenticationSucceeded",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInClosurePublicationPreservesReplacementParentAndControlOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationKeepsSameOwnerDuringEarlyResumePublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationPublicationCannotReturnARetiredChild",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupPreservesOpenerSessionAndRequiresExplicitHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRequiresPausedTaskAndRejectsExtraAndNestedWindows",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRetainsOwnerThroughResumeButRetiresOnStopCloseOrReplacement",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ],
+  "expectedTests": [
+    "RemoteDesktopHostTests/ComputerUseBrowserSourcePolicyTests/testSourcePolicyAllowsManualLoginOutsideScopeButOnlyUsesAllowedResultsAfterHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testClosingSignInPopupDoesNotAssertAuthenticationSucceeded",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInClosurePublicationPreservesReplacementParentAndControlOwner",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationKeepsSameOwnerDuringEarlyResumePublication",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInCreationPublicationCannotReturnARetiredChild",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupPreservesOpenerSessionAndRequiresExplicitHandback",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRequiresPausedTaskAndRejectsExtraAndNestedWindows",
+    "RemoteDesktopHostTests/ComputerUseOwnedBrowserTests/testSignInPopupRetainsOwnerThroughResumeButRetiresOnStopCloseOrReplacement",
+    "RemoteDesktopHostTests/ComputerUseTests/test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal"
+  ]
+}
