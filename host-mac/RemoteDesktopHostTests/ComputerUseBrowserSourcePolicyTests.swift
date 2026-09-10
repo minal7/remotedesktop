@@ -4,6 +4,134 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
+    func testBlankClaimsRecordExactRetirementWithoutCreatingBrowserOrControlAuthority() throws {
+        var allowed = true, calls = 0
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { calls += 1; return allowed })
+        defer { browser.close() }
+        let input = try goal()
+        try browser.claim(taskID: input.taskID)
+        let first = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(first.claimEvents.map(\.phase), [.claimed]); XCTAssertNil(first.claimEvents.first?.parentSessionID)
+        XCTAssertFalse(browser.hasSession)
+        try browser.claim(taskID: input.taskID)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: input.taskID), first)
+        allowed = false
+        XCTAssertThrowsError(try browser.claim(taskID: "foreign"))
+        let priorCalls = calls
+        browser.stop(); browser.stop()
+        XCTAssertEqual(calls, priorCalls, "Retirement records facts without asking the action gate")
+        XCTAssertThrowsError(try browser.navigationDispatchHistory(taskID: input.taskID))
+        allowed = true; try browser.claim(taskID: input.taskID)
+        let second = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(second.claimEvents.map(\.phase), [.claimed, .retired, .claimed])
+        XCTAssertEqual(second.claimEvents[1].retirement, .stopped)
+        XCTAssertEqual(second.claimEvents[0].ownershipEpoch, second.claimEvents[1].ownershipEpoch)
+        XCTAssertNotEqual(second.claimEvents[0].ownershipEpoch, second.claimEvents[2].ownershipEpoch)
+        XCTAssertEqual(first.claimEvents, Array(second.claimEvents.prefix(1)))
+        let assessment = ComputerUseBrowserResultAssessment.ClaimHistory(history: second)
+        XCTAssertEqual(assessment.claimCount, 2); XCTAssertEqual(assessment.retiredClaimCount, 1)
+        XCTAssertEqual(assessment.openClaimCount, 1); XCTAssertEqual(assessment.createdSessionCount, 0)
+        XCTAssertTrue(assessment.gaps.isEmpty); XCTAssertTrue(second.hasClaimBoundary)
+        XCTAssertFalse(browser.hasSession); XCTAssertTrue(second.attempts.isEmpty); XCTAssertTrue(second.controlEvents.isEmpty)
+        browser.close(); try browser.claim(taskID: input.taskID)
+        let third = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(third.claimEvents.filter { $0.phase == .retired }.map(\.retirement), [.stopped, .closed])
+    }
+
+    func testClaimScopeDiagnosticRejectsMissingReorderedAndReusedLifetimesAndForeignRecords() throws {
+        typealias Check = ComputerUseBrowserResultAssessment.ClaimHistory
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal(), session = try browser.prepareWorkflowSession(taskID: input.taskID)
+        browser.recordWorkflowControl(.workflowPaused, requirement: session)
+        browser.stop(); try browser.claim(taskID: input.taskID)
+        let history = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let control = try XCTUnwrap(history.controlEvents.first), retired = try XCTUnwrap(history.claimEvents.first { $0.phase == .retired })
+        let record = Check.ScopedRecord(order: control.order, sessionID: control.parentSessionID, ownershipEpoch: control.ownershipEpoch, generation: control.generation)
+        func check(_ events: [ComputerUseBrowserNavigationDispatchHistory.ClaimEvent], _ records: [Check.ScopedRecord]? = nil) -> Check {
+            .init(events: events, records: records ?? [record])
+        }
+        XCTAssertTrue(check(history.claimEvents).gaps.isEmpty)
+        XCTAssertEqual(check(history.claimEvents).matchedRecordCount, 1)
+        XCTAssertTrue(check([]).gaps.contains(.claimHistoryUnavailable))
+        XCTAssertTrue(check(Array(history.claimEvents.dropFirst())).gaps.contains(.recordOutsideClaim))
+        XCTAssertTrue(check(Array(history.claimEvents.reversed())).gaps.contains(.outOfOrderEvents))
+        XCTAssertTrue(check([history.claimEvents[0]] + history.claimEvents).gaps.contains(.reusedClaim))
+        XCTAssertTrue(check(history.claimEvents.filter { $0.phase != .retired }).gaps.contains(.overlappingClaims))
+        XCTAssertTrue(check(history.claimEvents.filter { $0.phase != .sessionCreated }).gaps.contains(.recordBeforeSession))
+        XCTAssertTrue(check(history.claimEvents + [retired]).gaps.contains(.unmatchedRetirement))
+        let created = try XCTUnwrap(history.claimEvents.first { $0.phase == .sessionCreated })
+        XCTAssertTrue(check(history.claimEvents + [created]).gaps.contains(.unmatchedSessionCreation))
+        XCTAssertTrue(Check(events: history.claimEvents, records: [record], recordOverflow: true).gaps.contains(.recordOverflow))
+        XCTAssertTrue(check(history.claimEvents, [record, record]).gaps.contains(.recordOrderCollision))
+        let after = Check.ScopedRecord(order: try XCTUnwrap(history.claimEvents.last).order + 1, sessionID: record.sessionID,
+            ownershipEpoch: record.ownershipEpoch, generation: record.generation)
+        let foreign = Check.ScopedRecord(order: record.order, sessionID: UUID(), ownershipEpoch: record.ownershipEpoch, generation: record.generation)
+        let future = Check.ScopedRecord(order: record.order, sessionID: record.sessionID, ownershipEpoch: record.ownershipEpoch, generation: retired.generation + 1)
+        XCTAssertTrue(check(history.claimEvents, [after]).gaps.contains(.recordOutsideClaim))
+        XCTAssertTrue(check(history.claimEvents, [foreign]).gaps.contains(.recordSessionMismatch))
+        XCTAssertTrue(check(history.claimEvents, [future]).gaps.contains(.recordGenerationMismatch))
+        let projected = try ResearchAnswerFixture.json(Check(history: history).plannerContext)
+        for hidden in [input.taskID, history.contextID, history.identity, record.sessionID.uuidString, record.ownershipEpoch.uuidString] {
+            XCTAssertFalse(projected.contains(hidden)); XCTAssertFalse(String(reflecting: history.claimEvents).contains(hidden))
+        }
+    }
+
+    func testClaimHistoryBoundsRepeatedBlankClaimsAndInvalidatesSnapshotsAfterOverflow() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal()
+        try browser.claim(taskID: input.taskID)
+        for _ in 0..<63 { browser.stop(); try browser.claim(taskID: input.taskID) }
+        let before = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(before.claimEvents.count, 127); XCTAssertFalse(before.claimEventsOverflowed)
+        browser.stop(); try browser.claim(taskID: input.taskID)
+        let full = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(full.claimEvents.count, 128); XCTAssertTrue(full.claimEventsOverflowed)
+        XCTAssertEqual(Array(full.claimEvents.prefix(127)), before.claimEvents)
+        browser.stop(); try browser.claim(taskID: input.taskID)
+        let later = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(later.claimEvents, full.claimEvents); XCTAssertNotEqual(later.identity, full.identity)
+        let assessment = ComputerUseBrowserResultAssessment.ClaimHistory(history: later)
+        XCTAssertTrue(assessment.gaps.contains(.claimOverflow))
+        XCTAssertFalse(browser.hasSession); XCTAssertTrue(later.attempts.isEmpty)
+        let proposal = try ComputerUseBrowserGoalProposal.decode(content: ResearchAnswerFixture.json([
+            "disposition":"research", "requirements":[["turn":0, "source":input.prompt, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]]],
+            "question":["topic":"none", "requirements":[]]]), input: input)
+        let diagnostic = ComputerUseBrowserResultAssessment.NavigationHistory(history: later,
+            sources: ComputerUseBrowserSourceRequirements(proposal: proposal), contextID: browser.contextID, ownerVisits: [])
+        XCTAssertTrue(diagnostic.gaps.contains(.claimOverflow)); XCTAssertTrue(diagnostic.gaps.contains(.claimScopesUnreconciled))
+        XCTAssertTrue(diagnostic.gaps.contains(.platformCoverageUnqualified))
+    }
+
+    func testStoppedPendingDispatchEndsBeforeItsClaimRetiresAndCannotMoveIntoTheReclaim() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/held":.init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let input = try goal()
+        try browser.claim(taskID: input.taskID)
+        let work = Task { try await browser.navigate(taskID: input.taskID, operationID: "stopped-claim", to: base.appendingPathComponent("held")) }
+        try await waitUntil { server.count("/held") == 1 }
+        let before = try browser.navigationDispatchHistory(taskID: input.taskID)
+        XCTAssertEqual(before.attempts.first?.outcome, .pending)
+        browser.stop()
+        do { _ = try await work.value; XCTFail("Stopped dispatch cannot complete") } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+        try browser.claim(taskID: input.taskID)
+        let after = try browser.navigationDispatchHistory(taskID: input.taskID)
+        let attempt = try XCTUnwrap(after.attempts.first), end = try XCTUnwrap(after.claimEvents.first { $0.phase == .retired })
+        XCTAssertEqual(attempt.outcome, .ownershipLost); XCTAssertEqual(attempt.ownershipEpoch, end.ownershipEpoch)
+        XCTAssertLessThan(try XCTUnwrap(attempt.terminalOrder), end.order)
+        XCTAssertLessThan(end.order, try XCTUnwrap(after.claimEvents.last).order)
+        XCTAssertNil(browser.receipt(taskID: input.taskID, operationID: attempt.operationID))
+        let check = ComputerUseBrowserResultAssessment.ClaimHistory(events: after.claimEvents, records: [
+            .init(order: attempt.order, sessionID: attempt.sessionID, ownershipEpoch: attempt.ownershipEpoch, generation: attempt.generation),
+            .init(order: try XCTUnwrap(attempt.terminalOrder), sessionID: attempt.sessionID, ownershipEpoch: attempt.ownershipEpoch, generation: attempt.generation)])
+        XCTAssertEqual(check.matchedRecordCount, 2); XCTAssertTrue(check.gaps.isEmpty)
+        XCTAssertEqual(before.attempts.first?.outcome, .pending, "Earlier snapshots retain their actual observed state")
+    }
+
     func testPairedWorkflowFailureCanBeFollowedByAValidResumeWithoutErasingTheFailure() async throws {
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
         defer { browser.close() }
@@ -115,6 +243,10 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let matched = assess(visits)
         XCTAssertEqual(matched.ownerVisitCount, 3); XCTAssertEqual(matched.matchedOwnerVisitCount, 3)
         XCTAssertFalse(matched.gaps.contains(.ownerVisitsUnreconciled))
+        let claims = try XCTUnwrap(matched.claimHistory)
+        XCTAssertEqual(claims.claimCount, 1); XCTAssertEqual(claims.openClaimCount, 1)
+        XCTAssertEqual(claims.retainedRecordCount, claims.matchedRecordCount); XCTAssertTrue(claims.gaps.isEmpty)
+        XCTAssertFalse(matched.gaps.contains(.claimScopesUnreconciled))
         XCTAssertTrue(matched.gaps.contains(.platformCoverageUnqualified))
         XCTAssertTrue(assess(nil).gaps.contains(.ownerHistoryUnavailable))
         XCTAssertNil(assess(nil).ownerVisitCount)
@@ -156,7 +288,8 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         let restored = try browser.navigationDispatchHistory(taskID: input.taskID)
         XCTAssertEqual(restored.policyInstallations.map(\.policy), [original, replacement, original])
         XCTAssertEqual(restored.policyInstallations.map(\.previousPolicy), [nil, original, replacement])
-        XCTAssertEqual(restored.policyInstallations.map(\.order), [0, 1, 2])
+        XCTAssertEqual(restored.claimEvents.map(\.phase), [.claimed, .sessionCreated])
+        XCTAssertEqual(restored.policyInstallations.map(\.order), [2, 3, 4])
         XCTAssertEqual(Set(restored.policyInstallations.map(\.parentSessionID)).count, 1)
         XCTAssertEqual(Set(restored.policyInstallations.map(\.ownershipEpoch)).count, 1)
         XCTAssertNotEqual(restored.identity, first.identity)
@@ -354,6 +487,7 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertLessThan(finish.order, terminalOrder)
         let orders = [attempt.order, terminalOrder] + history.observations.map(\.order)
             + history.controlEvents.map(\.order) + history.policyInstallations.map(\.order) + history.pageObservationEvents.map(\.order)
+            + history.claimEvents.map(\.order)
         XCTAssertEqual(orders.sorted(), Array(0..<orders.count), "Retained native records share one ordered sequence")
     }
 
@@ -603,6 +737,12 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         XCTAssertEqual(Array(reopened.attempts.prefix(2)), reclaimed.attempts)
         XCTAssertNotEqual(reopened.attempts[1].sessionID, reopened.attempts[2].sessionID)
         XCTAssertNotEqual(reopened.identity, reclaimed.identity)
+        XCTAssertEqual(reopened.claimEvents.map(\.phase), [.claimed, .sessionCreated, .retired, .claimed, .retired, .claimed, .sessionCreated])
+        XCTAssertEqual(reopened.claimEvents.filter { $0.phase == .retired }.map(\.retirement), [.stopped, .closed])
+        let claims = ComputerUseBrowserResultAssessment.ClaimHistory(history: reopened)
+        XCTAssertEqual(claims.claimCount, 3); XCTAssertEqual(claims.createdSessionCount, 2)
+        XCTAssertEqual(claims.retiredClaimCount, 2); XCTAssertEqual(claims.openClaimCount, 1)
+        XCTAssertEqual(claims.retainedRecordCount, claims.matchedRecordCount); XCTAssertTrue(claims.gaps.isEmpty)
     }
 
     func testDispatchHistoryMakesDiscardedOtherClaimHistoryExplicit() async throws {
@@ -617,6 +757,8 @@ final class ComputerUseBrowserSourcePolicyTests: XCTestCase {
         browser.stop(); try browser.claim(taskID: "another-task")
         let other = try browser.navigationDispatchHistory(taskID: "another-task")
         XCTAssertTrue(other.beganAfterAnotherClaim); XCTAssertTrue(other.attempts.isEmpty)
+        XCTAssertEqual(other.claimEvents.map(\.phase), [.claimed])
+        XCTAssertTrue(ComputerUseBrowserResultAssessment.ClaimHistory(history: other).gaps.contains(.discardedClaimHistory))
         XCTAssertNotEqual(other.identity, original.identity)
         XCTAssertThrowsError(try browser.navigationDispatchHistory(taskID: input.taskID))
         browser.stop(); try browser.claim(taskID: input.taskID)

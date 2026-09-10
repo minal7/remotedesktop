@@ -41,6 +41,8 @@ Six changed Swift files passed `swiftc -frontend -parse`. Source inventories sel
 
 Source follow-up: [navigation-episode reconciliation](BROWSER_NAVIGATION_EPISODE_RECONCILIATION_REVIEW.md) now separates exact callback identities and native commit bases, including cached history paths. Observed-page adoption, response/redirect association, temporal scopes and platform qualification remain open.
 
+Further source follow-up: [claim-lifetime reconciliation](BROWSER_CLAIM_LIFETIME_REVIEW.md) adds ordered native claim/session/retirement records and checks retained activity against those intervals. Workflow/manual actor attribution, policy lineage and qualification remain open; the counts above describe this earlier checkpoint.
+
 1. Reconcile navigation callback episodes with dispatches and recorded control intervals. A matched owner Resume does not upgrade a pending-slot observation into an exact navigation identity or identify who initiated a script.
 2. Give claim/retirement and unrecorded workflow scopes precise temporal semantics, and reconcile source-policy/goal lineage across manual login and legitimate clarification/replacement.
 3. Qualify supported macOS/WebKit callback coverage and lifecycle behavior before replacing the navigation-source completion gate with affirmative evidence. Late changes must continue invalidating current use of old readings.

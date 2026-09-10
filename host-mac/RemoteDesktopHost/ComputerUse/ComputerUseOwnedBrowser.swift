@@ -216,6 +216,27 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         case nativeReacquisitionStarted, nativeReacquisitionFinished, nativeReacquisitionFailed
         case signInWindowOpened, signInWindowClosed
     }
+    /// Native claim lifetime, separate from workflow Pause/Resume and from
+    /// the browser session that may be allocated only after the claim starts.
+    struct ClaimEvent: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        enum Phase: String, Sendable { case claimed, sessionCreated, retired }
+        enum Retirement: String, Sendable { case stopped, closed, replaced }
+        let order: Int
+        let phase: Phase
+        let parentSessionID: UUID?
+        let ownershipEpoch: UUID
+        let generation: UInt64
+        let retirement: Retirement?
+
+        fileprivate init(order: Int, phase: Phase, parentSessionID: UUID?, ownershipEpoch: UUID,
+                         generation: UInt64, retirement: Retirement?) {
+            self.order = order; self.phase = phase; self.parentSessionID = parentSessionID
+            self.ownershipEpoch = ownershipEpoch; self.generation = generation
+            self.retirement = phase == .retired ? retirement : nil
+        }
+        var description: String { "BrowserClaimEvent(phase: \(phase.rawValue))" }
+        var debugDescription: String { description }
+    }
     /// Native acceptance of an observed page, not an automation receipt or
     /// evidence that its load was initiated by a person rather than a script.
     struct PageObservation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
@@ -391,11 +412,13 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     fileprivate(set) var policyInstallationsOverflowed = false
     fileprivate(set) var pageObservationEvents: [PageObservationEvent] = []
     fileprivate(set) var pageObservationEventsOverflowed = false
+    fileprivate(set) var claimEvents: [ClaimEvent] = []
+    fileprivate(set) var claimEventsOverflowed = false
     private let ledgerID = UUID()
     private var revision = UUID()
     /// Ordinals cover retained records only. With 64 attempts, 64 terminal
     /// outcomes, 512 observations, 128 control events, 64 installations and
-    /// 128 page-observation events
+    /// 128 page-observation events and 128 claim events
     /// this cannot overflow.
     /// Omitted activity is represented by the separate overflow markers.
     private var nextOrder = 0
@@ -404,12 +427,17 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
         self.taskID = taskID; self.contextID = contextID; self.beganAfterAnotherClaim = beganAfterAnotherClaim
     }
     var identity: String {
-        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v7", taskID, contextID,
+        ComputerUseTaskContract.digest(["browser-navigation-dispatch-history-v8", taskID, contextID,
             ledgerID.uuidString, revision.uuidString])
     }
-    fileprivate mutating func recordClaimBoundary() {
-        hasClaimBoundary = true
+    fileprivate mutating func recordClaim(phase: ClaimEvent.Phase, parentSessionID: UUID?, ownershipEpoch: UUID,
+                                          generation: UInt64, retirement: ClaimEvent.Retirement? = nil) {
+        if phase == .retired || (phase == .claimed && !claimEvents.isEmpty) { hasClaimBoundary = true }
         advanceRevision()
+        guard claimEvents.count < 128 else { claimEventsOverflowed = true; return }
+        let order = takeOrder()
+        claimEvents.append(.init(order: order, phase: phase, parentSessionID: parentSessionID,
+            ownershipEpoch: ownershipEpoch, generation: generation, retirement: retirement))
     }
     fileprivate mutating func recordPolicyInstallation(parentSessionID: UUID, ownershipEpoch: UUID, generation: UInt64,
                                                        previousPolicy: ComputerUseBrowserSourcePolicy?, policy: ComputerUseBrowserSourcePolicy) {
@@ -693,9 +721,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard mayAct(), !taskID.isEmpty else { throw ComputerUseBrowserError.ownershipLost }
         if self.taskID != taskID {
             retirePageObservations(.claimChanged)
-            if navigationDispatchLog?.taskID == taskID {
-                navigationDispatchLog?.recordClaimBoundary()
-            } else {
+            if self.taskID != nil {
+                navigationDispatchLog?.recordClaim(phase: .retired, parentSessionID: browser == nil ? nil : browserSessionID,
+                    ownershipEpoch: ownershipEpoch, generation: generation, retirement: .replaced)
+            }
+            if navigationDispatchLog?.taskID != taskID {
                 navigationDispatchLog = .init(taskID: taskID, contextID: contextID,
                     beganAfterAnotherClaim: navigationDispatchLog != nil)
             }
@@ -709,6 +739,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             navigationAttemptIDs.removeAll()
             retiredNavigationOperations.removeAll()
             observedNavigationAttempts.removeAll()
+            navigationDispatchLog?.recordClaim(phase: .claimed, parentSessionID: browser == nil ? nil : browserSessionID,
+                ownershipEpoch: ownershipEpoch, generation: generation)
         }
     }
 
@@ -1702,13 +1734,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    func stop() {
+    func stop() { stop(retirement: .stopped) }
+
+    private func stop(retirement: NavigationHistory.ClaimEvent.Retirement) {
         closeSignInWindow(restoreParent: false)
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
         if let pendingDOM { interruptDOM(id: pendingDOM.id, error: ComputerUseBrowserError.ownershipLost) }
         endObservedNavigation(.stopped)
         retirePageObservations(.stopped)
-        if taskID != nil { navigationDispatchLog?.recordClaimBoundary() }
+        if taskID != nil {
+            navigationDispatchLog?.recordClaim(phase: .retired, parentSessionID: browser == nil ? nil : browserSessionID,
+                ownershipEpoch: ownershipEpoch, generation: generation, retirement: retirement)
+        }
         taskID = nil
         sourcePolicy = nil
         ownershipEpoch = UUID()
@@ -1722,7 +1759,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func close() {
         endObservedNavigation(.closed)
         retirePageObservations(.closed)
-        stop()
+        stop(retirement: .closed)
         window?.delegate = nil
         window?.close()
         window?.contentView = nil
@@ -1758,7 +1795,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let closingWindow = notification.object as? NSWindow,
               closingWindow === window else { return }
         if let controls = taskControls { requestTaskControl(.stop, displayed: controls) }
-        stop()
+        stop(retirement: .closed)
         window?.contentView = nil
         window = nil
         releaseBrowser()
@@ -1768,6 +1805,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func makeBrowser() -> WKWebView {
         if let browser { return browser }
         browserSessionID = UUID()
+        if taskID != nil {
+            navigationDispatchLog?.recordClaim(phase: .sessionCreated, parentSessionID: browserSessionID,
+                ownershipEpoch: ownershipEpoch, generation: generation)
+        }
         sessionHasNavigationActivity = false
         locationRevision = 0
         let configuration = WKWebViewConfiguration()

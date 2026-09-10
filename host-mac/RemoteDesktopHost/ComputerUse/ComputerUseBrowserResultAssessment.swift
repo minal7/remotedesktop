@@ -5,6 +5,115 @@ import Foundation
 /// or whole-goal fulfillment. No completion flag or answer text is produced.
 struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     typealias Scalars = ComputerUseBrowserScalarRequirements
+    /// Temporal correspondence of recorded native activity only. An open
+    /// retained claim is not proof of current ownership or workflow permission.
+    struct ClaimHistory: Equatable, Sendable {
+        typealias History = ComputerUseBrowserNavigationDispatchHistory
+        typealias Event = History.ClaimEvent
+        enum Gap: String, CaseIterable, Hashable, Sendable {
+            case claimHistoryUnavailable, claimOverflow, recordOverflow, discardedClaimHistory
+            case outOfOrderEvents, reusedClaim, overlappingClaims, unmatchedSessionCreation, unmatchedRetirement
+            case malformedEvent, recordOrderCollision, recordOutsideClaim, recordBeforeSession
+            case recordSessionMismatch, recordGenerationMismatch
+        }
+        struct ScopedRecord: Equatable, Sendable {
+            let order: Int
+            let sessionID: UUID
+            let ownershipEpoch: UUID
+            let generation: UInt64
+        }
+        private struct Interval {
+            let start: Event
+            var sessionID: UUID?
+            var sessionOrder: Int
+            var sessionGeneration: UInt64
+            var end: Event?
+        }
+        let claimCount: Int
+        let retiredClaimCount: Int
+        let openClaimCount: Int
+        let createdSessionCount: Int
+        let retainedRecordCount: Int
+        let matchedRecordCount: Int
+        let gaps: [Gap]
+
+        init(history: History) {
+            var records = history.attempts.flatMap { attempt -> [ScopedRecord] in
+                ([attempt.order] + (attempt.terminalOrder.map { [$0] } ?? [])).map {
+                    .init(order: $0, sessionID: attempt.sessionID, ownershipEpoch: attempt.ownershipEpoch, generation: attempt.generation)
+                }
+            }
+            records += history.observations.map { .init(order: $0.order, sessionID: $0.parentSessionID, ownershipEpoch: $0.ownershipEpoch, generation: $0.generation) }
+            records += history.controlEvents.map { .init(order: $0.order, sessionID: $0.parentSessionID, ownershipEpoch: $0.ownershipEpoch, generation: $0.generation) }
+            records += history.policyInstallations.map { .init(order: $0.order, sessionID: $0.parentSessionID, ownershipEpoch: $0.ownershipEpoch, generation: $0.generation) }
+            records += history.pageObservationEvents.map { .init(order: $0.order, sessionID: $0.parentSessionID, ownershipEpoch: $0.ownershipEpoch, generation: $0.generation) }
+            self.init(events: history.claimEvents, records: records, claimOverflow: history.claimEventsOverflowed,
+                recordOverflow: history.overflowed || history.observationsOverflowed || history.controlEventsOverflowed
+                    || history.policyInstallationsOverflowed || history.pageObservationEventsOverflowed,
+                discardedClaimHistory: history.beganAfterAnotherClaim)
+        }
+
+        /// Pure diagnostic input. Supplying records cannot mint native
+        /// history, receipts, current control or source-completion evidence.
+        init(events: [Event], records: [ScopedRecord], claimOverflow: Bool = false,
+             recordOverflow: Bool = false, discardedClaimHistory: Bool = false) {
+            var found: Set<Gap> = []
+            if events.isEmpty { found.insert(.claimHistoryUnavailable) }
+            if claimOverflow { found.insert(.claimOverflow) }
+            if recordOverflow { found.insert(.recordOverflow) }
+            if discardedClaimHistory { found.insert(.discardedClaimHistory) }
+            var intervals: [UUID: Interval] = [:], active: UUID?
+            var lastOrder: Int?, orders: Set<Int> = [], sessions = 0
+            for event in events {
+                if event.order < 0 || lastOrder.map({ event.order <= $0 }) == true { found.insert(.outOfOrderEvents) }
+                lastOrder = event.order
+                if !orders.insert(event.order).inserted { found.insert(.recordOrderCollision) }
+                switch event.phase {
+                case .claimed:
+                    guard event.retirement == nil else { found.insert(.malformedEvent); continue }
+                    guard intervals[event.ownershipEpoch] == nil else { found.insert(.reusedClaim); continue }
+                    if active != nil { found.insert(.overlappingClaims) }
+                    intervals[event.ownershipEpoch] = .init(start: event, sessionID: event.parentSessionID,
+                        sessionOrder: event.order, sessionGeneration: event.generation)
+                    active = event.ownershipEpoch
+                case .sessionCreated:
+                    guard active == event.ownershipEpoch, var interval = intervals[event.ownershipEpoch], interval.end == nil,
+                          interval.sessionID == nil, let session = event.parentSessionID,
+                          event.order > interval.start.order, event.generation >= interval.start.generation,
+                          event.retirement == nil else { found.insert(.unmatchedSessionCreation); continue }
+                    interval.sessionID = session; interval.sessionOrder = event.order; interval.sessionGeneration = event.generation
+                    intervals[event.ownershipEpoch] = interval; sessions += 1
+                case .retired:
+                    guard active == event.ownershipEpoch, var interval = intervals[event.ownershipEpoch], interval.end == nil,
+                          event.parentSessionID == interval.sessionID, event.order > interval.sessionOrder,
+                          event.generation >= interval.sessionGeneration, event.retirement != nil else {
+                        found.insert(.unmatchedRetirement); continue
+                    }
+                    interval.end = event; intervals[event.ownershipEpoch] = interval; active = nil
+                }
+            }
+            var matched = 0
+            for record in records {
+                guard record.order >= 0, orders.insert(record.order).inserted else { found.insert(.recordOrderCollision); continue }
+                guard let interval = intervals[record.ownershipEpoch], record.order > interval.start.order,
+                      interval.end.map({ record.order < $0.order }) ?? true else { found.insert(.recordOutsideClaim); continue }
+                guard record.order > interval.sessionOrder, interval.sessionID != nil else { found.insert(.recordBeforeSession); continue }
+                guard record.sessionID == interval.sessionID else { found.insert(.recordSessionMismatch); continue }
+                guard record.generation >= interval.sessionGeneration,
+                      interval.end.map({ record.generation <= $0.generation }) ?? true else { found.insert(.recordGenerationMismatch); continue }
+                matched += 1
+            }
+            claimCount = intervals.count; retiredClaimCount = intervals.values.filter { $0.end != nil }.count
+            openClaimCount = intervals.values.filter { $0.end == nil }.count; createdSessionCount = sessions
+            retainedRecordCount = records.count; matchedRecordCount = matched
+            gaps = Gap.allCases.filter(found.contains)
+        }
+        var plannerContext: [String: Any] {
+            ["claim_count":claimCount, "retired_claim_count":retiredClaimCount, "open_claim_count":openClaimCount,
+             "created_session_count":createdSessionCount, "retained_record_count":retainedRecordCount,
+             "matched_record_count":matchedRecordCount, "gaps":gaps.map(\.rawValue)]
+        }
+    }
     /// Reconcile recorded control episodes only. Even a complete pair does
     /// not prove authentication, callback coverage or authority to act now.
     struct ControlHistory: Equatable, Sendable {
@@ -469,13 +578,13 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         enum Gap: String, CaseIterable, Hashable, Sendable {
             case historyUnavailable, foreignContext, unresolvedSourceRequirements
             case discardedClaimHistory, claimBoundary
-            case attemptOverflow, observationOverflow, controlOverflow, policyInstallationOverflow
+            case attemptOverflow, observationOverflow, controlOverflow, policyInstallationOverflow, claimOverflow
             case unconfiguredDispatch, mismatchedPolicy, earlierGoalPolicy, foreignGoalPolicy
             case pendingDispatch, unsuccessfulDispatch, unknownDispatchOrigin
             case weakObservationBinding, unattributedObservation, unorderedObservation
             case ownerHistoryUnavailable, ownerVisitBindingMismatch, duplicateOwnerVisit, ownerVisitOrderMismatch
             case unclaimedCommittedDispatch
-            case controlEpisodesUnreconciled, ownerVisitsUnreconciled, navigationEpisodesUnreconciled, pageObservationsUnreconciled, platformCoverageUnqualified
+            case claimScopesUnreconciled, controlEpisodesUnreconciled, ownerVisitsUnreconciled, navigationEpisodesUnreconciled, pageObservationsUnreconciled, platformCoverageUnqualified
         }
         let attemptCount: Int
         let observationCount: Int
@@ -484,6 +593,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
         let ownerVisitCount: Int?
         let matchedOwnerVisitCount: Int
         let controlHistory: ControlHistory?
+        let claimHistory: ClaimHistory?
         let navigationEpisodes: NavigationEpisodes?
         let pageObservationHistory: PageObservationHistory?
         /// Callback count, not distinct requests and not proof of a violation:
@@ -498,6 +608,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             blockedSourceObservationCount = history?.observations.filter { $0.policyCheck == .blocked }.count ?? 0
             ownerVisitCount = ownerVisits?.count
             controlHistory = history.map { ControlHistory(history: $0) }
+            claimHistory = history.map { ClaimHistory(history: $0) }
             navigationEpisodes = history.map { NavigationEpisodes(history: $0) }
             pageObservationHistory = history.map { PageObservationHistory(history: $0) }
             var found: Set<Gap> = [.platformCoverageUnqualified]
@@ -511,6 +622,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                 if history.observationsOverflowed { found.insert(.observationOverflow) }
                 if history.controlEventsOverflowed { found.insert(.controlOverflow) }
                 if history.policyInstallationsOverflowed { found.insert(.policyInstallationOverflow) }
+                if history.claimEventsOverflowed { found.insert(.claimOverflow) }
                 for attempt in history.attempts {
                     if attempt.policy == nil { found.insert(.unconfiguredDispatch) }
                     if attempt.outcome == .pending { found.insert(.pendingDispatch) }
@@ -532,6 +644,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
                     if observation.phase == .unorderedLocationChange { found.insert(.unorderedObservation) }
                 }
                 if controlHistory?.gaps.isEmpty == false { found.insert(.controlEpisodesUnreconciled) }
+                if claimHistory?.gaps.isEmpty == false { found.insert(.claimScopesUnreconciled) }
                 if navigationEpisodes?.gaps.isEmpty == false { found.insert(.navigationEpisodesUnreconciled) }
                 if pageObservationHistory?.gaps.isEmpty == false { found.insert(.pageObservationsUnreconciled) }
                 if let ownerVisits {
@@ -572,6 +685,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              "retained_policy_installation_count":policyInstallationCount,
              "owner_visit_count":ownerVisitCount.map { $0 as Any } ?? NSNull(), "matched_owner_visit_count":matchedOwnerVisitCount,
              "control_history":controlHistory.map { $0.plannerContext as Any } ?? NSNull(),
+             "claim_history":claimHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "navigation_episodes":navigationEpisodes.map { $0.plannerContext as Any } ?? NSNull(),
              "page_observations":pageObservationHistory.map { $0.plannerContext as Any } ?? NSNull(),
              "blocked_source_observation_count":blockedSourceObservationCount]
@@ -849,7 +963,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
             || candidates.contains { $0.requirements.contains { $0.status == .navigationHistoryUnverified } }
         let policyAssessment = requirements.contains { $0.field == .answerSource }
             || candidates.contains { $0.requirements.contains { $0.status == .sourcePolicyMismatch } }
-        var context: [String: Any] = ["version":navigationAssessment ? 12 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
+        var context: [String: Any] = ["version":navigationAssessment ? 14 : (policyAssessment ? 5 : (candidates.contains { $0.quotes.contains { !$0.controlIDs.isEmpty } } ? 4 : 3)),
          "requirements":requirements.enumerated().map { index, value in
              ["index":index, "turn":value.turn, "sourceByteOffset":value.sourceByteOffset, "sourceByteCount":value.sourceByteCount,
               "role":value.role.rawValue, "field":value.field.rawValue, "relation":value.relation.rawValue,
@@ -862,7 +976,7 @@ struct ComputerUseBrowserResultAssessment: Equatable, Sendable, CustomStringConv
              }, "requirements":candidate.requirements.map(\.status.rawValue)] as [String: Any]
          }]
         if let navigationHistory { context["navigation_history_at_reading"] = navigationHistory.plannerContext }
-        if !dateReplacements.isEmpty { context["version"] = 13; context["date_replacements"] = dateReplacements.map(\.context) }
+        if !dateReplacements.isEmpty { context["version"] = navigationAssessment ? 14 : 13; context["date_replacements"] = dateReplacements.map(\.context) }
         return context
     }
 
