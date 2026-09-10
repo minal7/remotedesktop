@@ -673,6 +673,29 @@ public enum ComputerUseClarificationText {
     }
 }
 
+/// Advisory input rules for this one question. The host still validates the
+/// retained request and answer; these fields never grant continuation authority.
+public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable {
+    public enum Rejection: Equatable, Sendable { case blank, tooLong }
+    public let maximumUTF8Bytes: Int
+    public let requiresNonblank: Bool
+
+    public init(maximumUTF8Bytes: Int, requiresNonblank: Bool) throws {
+        guard (1...(32 * 1_024)).contains(maximumUTF8Bytes) else { throw ComputerUsePayloadError.invalidClarification }
+        self.maximumUTF8Bytes = maximumUTF8Bytes; self.requiresNonblank = requiresNonblank
+    }
+    public func rejection(of text: String) -> Rejection? {
+        if requiresNonblank && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
+        return text.utf8.count > maximumUTF8Bytes ? .tooLong : nil
+    }
+    private enum CodingKeys: String, CodingKey { case maximumUTF8Bytes, requiresNonblank }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(maximumUTF8Bytes: values.decode(Int.self, forKey: .maximumUTF8Bytes),
+            requiresNonblank: values.decode(Bool.self, forKey: .requiresNonblank))
+    }
+}
+
 /// Correlates assistant/status traffic with the stable privileged prompt ID.
 /// A delayed lifecycle replay cannot replace a newer task, while optional
 /// action evidence can still annotate its original request.
@@ -692,6 +715,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     /// peers that only understand the existing text and status prefix.
     public let outcome: ComputerUseTerminalOutcome?
     public let clarification: ComputerUseClarificationReference?
+    public let clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy?
     public let approvedActionEvidence: ComputerUseApprovedActionEvidence?
     /// Carried in a status envelope. It updates historical evidence only and
     /// cannot acknowledge controls, finish a task or open an approval flow.
@@ -706,6 +730,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         hostControlEpoch: UInt64? = nil,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
+        clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy? = nil,
         approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
         researchProgress: ComputerUseResearchProgress? = nil
@@ -717,6 +742,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         self.hostControlEpoch = hostControlEpoch
         self.outcome = outcome
         self.clarification = question
+        self.clarificationAnswerPolicy = clarificationAnswerPolicy
         self.approvedActionEvidence = approvedActionEvidence
         self.isApprovedActionEvidenceOnly = isApprovedActionEvidenceOnly
         self.researchProgress = researchProgress
@@ -729,6 +755,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case hostControlEpoch
         case outcome
         case clarification
+        case clarificationAnswerPolicy
         case approvedActionEvidence
         case isApprovedActionEvidenceOnly
         case researchProgress
@@ -755,6 +782,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         }
         let reference = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
         clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
+        clarificationAnswerPolicy = try values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .clarificationAnswerPolicy)
         approvedActionEvidence = try values.decodeIfPresent(ComputerUseApprovedActionEvidence.self, forKey: .approvedActionEvidence)
         isApprovedActionEvidenceOnly = try values.decodeIfPresent(Bool.self, forKey: .isApprovedActionEvidenceOnly) ?? false
         researchProgress = try values.decodeIfPresent(ComputerUseResearchProgress.self, forKey: .researchProgress)
@@ -776,12 +804,14 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         try values.encodeIfPresent(hostControlEpoch, forKey: .hostControlEpoch)
         try values.encodeIfPresent(outcome?.rawValue, forKey: .outcome)
         try values.encodeIfPresent(clarification, forKey: .clarification)
+        try values.encodeIfPresent(clarificationAnswerPolicy, forKey: .clarificationAnswerPolicy)
         try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
         if isApprovedActionEvidenceOnly { try values.encode(true, forKey: .isApprovedActionEvidenceOnly) }
         try values.encodeIfPresent(researchProgress, forKey: .researchProgress)
     }
 
     private func validatePayloadUse() throws {
+        if clarificationAnswerPolicy != nil && clarification == nil { throw ComputerUsePayloadError.invalidClarification }
         if clarification != nil, !ComputerUseClarificationText.isValid(text) {
             throw ComputerUsePayloadError.invalidClarification
         }

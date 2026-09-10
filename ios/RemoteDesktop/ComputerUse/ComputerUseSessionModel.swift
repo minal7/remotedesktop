@@ -109,6 +109,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var promptRefreshTask: Task<Void, Never>?
     private var controlRetryTask: Task<Void, Never>?
     private var clarificationExpiryTask: Task<Void, Never>?
+    private var clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy?
     private var outboundTasks: [UUID: Task<Void, Never>] = [:]
     /// Monotonically identifies the newest local intent or authoritative host
     /// state. An older CloudKit completion may arrive after a person resumes,
@@ -402,6 +403,12 @@ final class ComputerUseSessionModel: ObservableObject {
         guard value.count <= ComputerUsePromptRequest.maximumPromptLength, value.utf8.count <= 32 * 1_024 else {
             return "This text is too long. Shorten it before sending."
         }
+        if case .answer = composerMode, let rejection = clarificationAnswerPolicy?.rejection(of: value) {
+            switch rejection {
+            case .blank: return "Enter an answer with some text for this question."
+            case .tooLong: return "This answer is too long for this question. Shorten it before sending."
+            }
+        }
         return nil
     }
 
@@ -419,6 +426,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private func resetComposerMode() {
         clarificationExpiryTask?.cancel()
         clarificationExpiryTask = nil
+        clarificationAnswerPolicy = nil
         composerMode = .request
     }
 
@@ -428,11 +436,12 @@ final class ComputerUseSessionModel: ObservableObject {
         statusText = "This question is no longer active. Start a new request."
     }
 
-    private func awaitClarification(_ reference: ComputerUseClarificationReference) {
+    private func awaitClarification(_ reference: ComputerUseClarificationReference, answerPolicy: ComputerUseClarificationAnswerPolicy?) {
         resetComposerMode()
         let current = now(), deadline = min(reference.expiresAt, current.addingTimeInterval(600))
         guard deadline > current else { expireClarification(); return }
         composerMode = .answer(reference, validUntil: deadline)
+        clarificationAnswerPolicy = answerPolicy
         statusText = "Answer the question to continue the original request"
         clarificationExpiryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(deadline.timeIntervalSince(current))) } catch { return }
@@ -891,7 +900,8 @@ final class ComputerUseSessionModel: ObservableObject {
                     author: .assistant,
                     text: assistantText,
                     createdAt: envelope.createdAt))
-                applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification)
+                applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification,
+                    answerPolicy: update?.clarificationAnswerPolicy)
             case .status:
                 if let update = try? ComputerUseTaskUpdate.decodeBody(envelope.body) {
                     consumeActionEvidence(update, from: envelope)
@@ -1284,7 +1294,8 @@ final class ComputerUseSessionModel: ObservableObject {
     private func applyAssistantOutcome(
         _ outcome: ComputerUseTerminalOutcome?,
         text: String,
-        clarification: ComputerUseClarificationReference?
+        clarification: ComputerUseClarificationReference?,
+        answerPolicy: ComputerUseClarificationAnswerPolicy?
     ) {
         let acceptsAnswer = lastControlKind != .cancel && pendingControlIntent?.kind != .cancel
         let reference = acceptsAnswer && outcome == .userInterventionRequired
@@ -1313,7 +1324,7 @@ final class ComputerUseSessionModel: ObservableObject {
         }
         clearActivePrompt()
         if let reference {
-            awaitClarification(reference)
+            awaitClarification(reference, answerPolicy: answerPolicy)
         } else if acceptsAnswer, outcome == nil || outcome == .userInterventionRequired,
                   text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") {
             composerMode = .legacyAnswer

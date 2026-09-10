@@ -74,6 +74,13 @@ final class ComputerUseBrowserClarificationTransport {
 
     func matches(_ reference: ComputerUseClarificationReference) -> Bool { pending?.reference == reference }
 
+    /// Derive presentation limits only from the same live native question.
+    /// The opaque answer reference is unchanged for older controller versions.
+    func answerPolicy(for reference: ComputerUseClarificationReference?, envelope: ComputerUseEnvelope) -> ComputerUseClarificationAnswerPolicy? {
+        guard retains(reference, for: envelope), let pending else { return nil }
+        return try? ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: pending.owner.input.nextAnswerByteLimit, requiresNonblank: true)
+    }
+
     func consume(_ reference: ComputerUseClarificationReference, answer: String, for envelope: ComputerUseEnvelope,
                  retainedOwner: (String) -> ComputerUseBrowserResearchTask?) throws -> Continuation {
         guard envelope.kind == .prompt, let pending, pending.reference == reference, pending.belongs(to: envelope),

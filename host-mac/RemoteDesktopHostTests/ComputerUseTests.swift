@@ -756,6 +756,8 @@ final class ComputerUseTests: XCTestCase {
         let first = try await clarificationUpdate(taskID: prompt.id, channel: fixture.channel)
         XCTAssertGreaterThan(first.text.count, 8_000)
         XCTAssertTrue(first.text.contains("⟦\(original)⟧"))
+        XCTAssertEqual(first.clarificationAnswerPolicy?.maximumUTF8Bytes, ComputerUseBrowserGoalInput.maximumAnswerBytes)
+        XCTAssertEqual(first.clarificationAnswerPolicy?.requiresNonblank, true)
         let reference = try XCTUnwrap(first.clarification), owner = try XCTUnwrap(executor.owner)
         let clock = owner.input.rootDateContext
         let answer = makeEnvelope(id: "maximum-phone-answer", kind: .prompt,

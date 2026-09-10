@@ -7083,7 +7083,9 @@ final class HostComputerUseManager: ObservableObject {
                     taskID: envelope.id),
                 hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
                 outcome: needsIdentityRecovery && kind == .assistant ? .unableToComplete : outcome,
-                clarification: needsIdentityRecovery ? nil : clarification, approvedActionEvidence: evidence,
+                clarification: needsIdentityRecovery ? nil : clarification,
+                clarificationAnswerPolicy: needsIdentityRecovery ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
+                approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
         default:

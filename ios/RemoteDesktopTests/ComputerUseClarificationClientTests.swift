@@ -3,6 +3,47 @@ import XCTest
 
 @MainActor
 final class ComputerUseClarificationClientTests: XCTestCase {
+    func testQuestionPolicyRejectsByteOverflowAndBlankAnswersWithoutLosingTheQuestion() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let original = try await fixture.channel.prompt(at: 0)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 7, requiresNonblank: true)
+        let reference = try await fixture.question(for: original, answerPolicy: policy)
+        for answer in [" \n ", "😀éaa"] {
+            XCTAssertNotNil(fixture.model.promptValidationMessage(answer))
+            XCTAssertFalse(fixture.model.sendPrompt(answer))
+            guard case .answer(let retained, _) = fixture.model.composerMode else { return XCTFail("Invalid input must keep the question") }
+            XCTAssertEqual(retained, reference)
+        }
+        let count = await fixture.channel.promptCount()
+        XCTAssertEqual(count, 1); XCTAssertEqual(fixture.model.messages.filter { $0.author == .user }.count, 1)
+        let exact = "😀éa"
+        XCTAssertTrue(fixture.model.sendPrompt(exact))
+        let envelope = try await fixture.channel.prompt(at: 1), answer = try ComputerUsePromptRequest.decodeBody(envelope.body)
+        XCTAssertTrue(answer.prompt.utf8.elementsEqual(exact.utf8)); XCTAssertEqual(answer.clarification, reference)
+        let next = try await fixture.question(for: envelope, answerPolicy: ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 2, requiresNonblank: false))
+        XCTAssertTrue(fixture.model.sendPrompt("  "))
+        let literal = try ComputerUsePromptRequest.decodeBody(await fixture.channel.prompt(at: 2).body)
+        XCTAssertEqual(literal.prompt, "  "); XCTAssertEqual(literal.clarification, next)
+    }
+
+    func testNewRequestAndLegacyQuestionDoNotInheritAnEarlierAnswerPolicy() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let original = try await fixture.channel.prompt(at: 0)
+        _ = try await fixture.question(for: original, answerPolicy: ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 1, requiresNonblank: true))
+        XCTAssertTrue(fixture.model.startNewRequest())
+        XCTAssertNil(fixture.model.promptValidationMessage("Put text in Notes."))
+        XCTAssertTrue(fixture.model.sendPrompt("Put text in Notes."))
+        let newRequest = try await fixture.channel.prompt(at: 1)
+        let reference = try await fixture.question(for: newRequest)
+        XCTAssertTrue(fixture.model.sendPrompt("   "))
+        let answer = try ComputerUsePromptRequest.decodeBody(await fixture.channel.prompt(at: 2).body)
+        XCTAssertEqual(answer.clarification, reference); XCTAssertEqual(answer.prompt, "   ")
+    }
+
     func testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior() async throws {
         let fixture = ClarificationClientFixture()
         defer { fixture.model.stop() }
@@ -410,9 +451,11 @@ private final class ClarificationClientFixture {
         model = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID", sessionID: "session-1",
             pendingStore: store, channel: channel, now: now)
     }
-    func question(for request: ComputerUseEnvelope, text: String = "Which field?", lifetime: TimeInterval = 300) async throws -> ComputerUseClarificationReference {
+    func question(for request: ComputerUseEnvelope, text: String = "Which field?", lifetime: TimeInterval = 300,
+                  answerPolicy: ComputerUseClarificationAnswerPolicy? = nil) async throws -> ComputerUseClarificationReference {
         let reference = try ComputerUseClarificationReference(taskID: request.id, expiresAt: Date().addingTimeInterval(lifetime))
-        await channel.deliver(try ComputerUseTaskUpdate(taskID: request.id, text: text, outcome: .userInterventionRequired, clarification: reference).encodedBody())
+        await channel.deliver(try ComputerUseTaskUpdate(taskID: request.id, text: text, outcome: .userInterventionRequired,
+            clarification: reference, clarificationAnswerPolicy: answerPolicy).encodedBody())
         try await wait {
             guard case .answer(let received, _) = self.model.composerMode else { return false }
             return received == reference

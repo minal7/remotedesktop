@@ -12,6 +12,8 @@
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testInvalidOrUnsavedAnswerKeepsTheQuestionAndSendsNoTruncatedText",
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testLegacyQuestionRetainsItsExistingConversationAndMailPrivacyBehavior",
     "RemoteDesktopTests/ComputerUseClarificationClientTests/testMalformedAndUnrelatedResponsesCannotSelectAContinuation",
-    "RemoteDesktopTests/ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay"
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testNewRequestAndLegacyQuestionDoNotInheritAnEarlierAnswerPolicy",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testNewRequestDiscardsScopedOrLegacyQuestionAndIgnoresLateReplay",
+    "RemoteDesktopTests/ComputerUseClarificationClientTests/testQuestionPolicyRejectsByteOverflowAndBlankAnswersWithoutLosingTheQuestion"
   ]
 }

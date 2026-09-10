@@ -1,8 +1,61 @@
+import Foundation
 import XCTest
 @testable import RemoteDesktopHost
 
 @MainActor
 final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
+    func testAnswerPolicyUsesRemainingNativeBytesAndOnlyTheLiveQuestion() async throws {
+        let beginning = "Find concert tickets. "
+        for remaining in [ComputerUseBrowserGoalInput.maximumAnswerBytes, 7] {
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
+            defer { browser.close() }
+            planner.useSourceReferences = true
+            let prompt = remaining == 7 ? beginning + String(repeating: "x", count: ComputerUseBrowserGoalInput.maximumUserBytes - remaining - beginning.utf8.count) : beginning
+            let owner = try makeOwner(browser, planner: planner, prompt: prompt), original = owner.input
+            let bridge = ComputerUseBrowserClarificationTransport(), envelope = request(original.taskID)
+            let proposal = try await owner.interpretGoal().proposal
+            let issued = try bridge.issue(.init(taskID: original.taskID, inputDigest: original.digest, topic: .location,
+                requirementIDs: [proposal.requirements[0].id]), owner: owner, for: envelope)
+            let policy = try XCTUnwrap(bridge.answerPolicy(for: issued.reference, envelope: envelope))
+            XCTAssertEqual(policy.maximumUTF8Bytes, remaining); XCTAssertTrue(policy.requiresNonblank)
+            XCTAssertEqual(policy.rejection(of: " \n "), .blank)
+            let foreign = try ComputerUseClarificationReference(taskID: issued.reference.taskID, expiresAt: issued.reference.expiresAt)
+            XCTAssertNil(bridge.answerPolicy(for: foreign, envelope: envelope))
+            XCTAssertNil(bridge.answerPolicy(for: issued.reference, envelope: request(envelope.id, sender: "foreign")))
+            if remaining == 7 {
+                XCTAssertEqual(policy.rejection(of: "😀éaa"), .tooLong)
+                XCTAssertThrowsError(try bridge.consume(issued.reference, answer: "😀éaa", for: request("oversized-answer"), retainedOwner: { _ in owner }))
+                XCTAssertEqual(owner.input, original)
+                XCTAssertEqual(bridge.answerPolicy(for: issued.reference, envelope: envelope), policy)
+            }
+            XCTAssertNil(policy.rejection(of: "😀éa"))
+            _ = try bridge.consume(issued.reference, answer: "😀éa", for: request("accepted-answer"), retainedOwner: { _ in owner })
+            XCTAssertEqual(owner.input.userTurns, [prompt, "😀éa"])
+            XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
+            XCTAssertNil(bridge.answerPolicy(for: issued.reference, envelope: envelope))
+        }
+    }
+
+    func testAnswerPolicyWireIsBoundedScopedAndLeavesTheOpaqueReferenceUnchanged() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "root", expiresAt: Date().addingTimeInterval(600))
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 7, requiresNonblank: true)
+        let update = ComputerUseTaskUpdate(taskID: "root", text: "Which location?", outcome: .userInterventionRequired,
+            clarification: reference, clarificationAnswerPolicy: policy)
+        let body = try update.encodedBody(), decoded = try ComputerUseTaskUpdate.decodeBody(body)
+        XCTAssertEqual(decoded.clarificationAnswerPolicy, policy); XCTAssertEqual(decoded.clarification, reference)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(root["clarification"] as? [String: Any]).keys), ["taskID", "nonce", "expiresAt"])
+        let answer = try ComputerUseExecutionPromptDecoder.decode(ComputerUsePromptRequest.answering(reference, text: "Paris").encodedBody())
+        XCTAssertEqual(answer.clarification, reference); XCTAssertEqual(answer.prompt, "Paris")
+        for limit in ([0, -1, 32 * 1_024 + 1, 7.5, "7", true] as [Any]) {
+            root["clarificationAnswerPolicy"] = ["maximumUTF8Bytes":limit, "requiresNonblank":true]
+            XCTAssertThrowsError(try ComputerUseTaskUpdate.decodeBody(String(decoding: JSONSerialization.data(withJSONObject: root), as: UTF8.self)))
+        }
+        XCTAssertThrowsError(try ComputerUseTaskUpdate(taskID: "root", text: "Unscoped", clarificationAnswerPolicy: policy).encodedBody())
+        let legacy = ComputerUseTaskUpdate(taskID: "root", text: "Which field?", outcome: .userInterventionRequired, clarification: reference)
+        XCTAssertNil(try ComputerUseTaskUpdate.decodeBody(legacy.encodedBody()).clarificationAnswerPolicy)
+    }
+
     func testBrowserReferenceUsesExistingWireAndRetainsRootClockAndExactAnswers() async throws {
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true }), planner = BrowserResearchGoalFixture()
         defer { browser.close() }
@@ -119,8 +172,9 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     }
 
     private func makeOwner(_ browser: ComputerUseOwnedBrowser, planner: BrowserResearchGoalFixture,
+                           prompt: String = "Find concert tickets.",
                            now: @escaping () -> Date = Date.init) throws -> ComputerUseBrowserResearchTask {
-        let input = try ComputerUseBrowserGoalInput(taskID: "root", prompt: "Find concert tickets.",
+        let input = try ComputerUseBrowserGoalInput(taskID: "root", prompt: prompt,
             referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")
         return .init(input: input, browser: browser, goalPlanner: planner, resultPlanner: BrowserResearchResultFixture(), mayAct: { true }, now: now)
     }
