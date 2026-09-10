@@ -682,38 +682,82 @@ public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable
             switch self {
             case .blank: return "Enter an answer with some text for this question."
             case .tooLong: return "This answer is too long for this question. Shorten it before sending."
-            case .formatMismatch: return "Enter one exact count for the category in this question."
+            case .formatMismatch: return "Use the answer format shown in this question."
             }
         }
     }
     /// Native admission and scalar compilation use this same bounded grammar.
     /// It consumes the complete answer; extra requirements are never discarded.
     public enum Format: String, Codable, Equatable, Sendable {
-        case adultCount, childCount
+        case adultCount, childCount, partyCounts
         public var instruction: String {
             switch self {
             case .adultCount: return "Enter only an adult count from 0 to 999, such as 3 adults."
             case .childCount: return "Enter only a child count from 0 to 999, such as 0 children."
+            case .partyCounts: return "Enter both adult and child counts from 0 to 999, such as 3 adults and 0 children."
+            }
+        }
+        public func accepts(_ answer: String) -> Bool {
+            guard answer.utf8.count <= 32 * 1_024 else { return false }
+            switch self {
+            case .adultCount, .childCount: return count(in: answer) != nil
+            case .partyCounts: return Self.partyLiteral(in: Self.answerSource(answer)) != nil
             }
         }
         public func count(in answer: String) -> Int64? {
-            guard answer.utf8.count <= 32 * 1_024 else { return nil }
-            var source = answer.trimmingCharacters(in: .whitespacesAndNewlines)
-            if source.lowercased().hasPrefix("and ") { source = String(source.dropFirst(4)) }
-            if let last = source.last, ".,;".contains(last) { source.removeLast() }
-            source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard self != .partyCounts, answer.utf8.count <= 32 * 1_024 else { return nil }
+            let source = Self.answerSource(answer)
             let category = self == .adultCount ? "adults?" : "(?:children|child)"
-            let pattern = #"(?:exactly\s+)?([0-9]{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s+"# + category
-            let fullRange = NSRange(source.startIndex..., in: source)
-            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
-                  let match = expression.firstMatch(in: source, range: fullRange), match.range == fullRange,
+            let pattern = #"(?:exactly\s+)?"# + Self.numberPattern + #"\s+"# + category
+            guard let match = Self.completeMatch(pattern, source: source),
                   let numberRange = Range(match.range(at: 1), in: source) else { return nil }
-            let number = String(source[numberRange]).lowercased()
-            if let count = Int64(number) { return count }
+            return Self.number(String(source[numberRange]))
+        }
+        /// Shared with native source partitioning, so a recognized party and
+        /// its category spans cannot use different literal grammars.
+        public static let partyComponentPattern = numberPattern + #"\s+(adults?|children|child)"#
+        public static var partyLiteralPattern: String {
+            let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
+            return #"(?:for\s+)?(?:exactly\s+)?"# + partyComponentPattern + separator + partyComponentPattern
+        }
+        public static func partyLiteral(in source: String) -> PartyCounts? {
+            guard source.utf8.count <= 32 * 1_024,
+                  let match = completeMatch(partyLiteralPattern, source: source) else { return nil }
+            let captures = (1...4).compactMap { index -> String? in
+                guard let range = Range(match.range(at: index), in: source) else { return nil }
+                return String(source[range])
+            }
+            guard captures.count == 4, let first = number(captures[0]), let second = number(captures[2]) else { return nil }
+            let firstIsAdult = captures[1].lowercased().hasPrefix("adult")
+            let secondIsAdult = captures[3].lowercased().hasPrefix("adult")
+            guard firstIsAdult != secondIsAdult else { return nil }
+            return PartyCounts(adults: firstIsAdult ? first : second, children: firstIsAdult ? second : first)
+        }
+        private static let numberPattern = #"([0-9]{1,3}|zero|one|two|three|four|five|six|seven|eight|nine|ten)"#
+        private static func number(_ source: String) -> Int64? {
+            if let count = Int64(source), (0...999).contains(count) { return count }
             return ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"]
-                .firstIndex(of: number).map { Int64($0) }
+                .firstIndex(of: source.lowercased()).map { Int64($0) }
+        }
+        private static func completeMatch(_ pattern: String, source: String) -> NSTextCheckingResult? {
+            let range = NSRange(source.startIndex..., in: source)
+            guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+                  let match = expression.firstMatch(in: source, range: range), match.range == range else { return nil }
+            return match
+        }
+        private static func answerSource(_ answer: String) -> String {
+            var source = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if source.lowercased().hasPrefix("and ") { source = String(source.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines) }
+            if let last = source.last, ".,;".contains(last) { source.removeLast() }
+            return source.trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
+    public struct PartyCounts: Equatable, Sendable {
+        public let adults: Int64
+        public let children: Int64
+        fileprivate init(adults: Int64, children: Int64) { self.adults = adults; self.children = children }
+    }
+
     public let maximumUTF8Bytes: Int
     public let requiresNonblank: Bool
     public let supportsRetry: Bool
@@ -727,26 +771,36 @@ public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable
     public func rejection(of text: String) -> Rejection? {
         if requiresNonblank && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .blank }
         if text.utf8.count > maximumUTF8Bytes { return .tooLong }
-        if let format, format.count(in: text) == nil { return .formatMismatch }
+        if let format, !format.accepts(text) { return .formatMismatch }
         return nil
     }
     public func message(for rejection: Rejection) -> String {
         rejection == .formatMismatch ? (format?.instruction ?? rejection.message) : rejection.message
     }
-    private enum CodingKeys: String, CodingKey { case maximumUTF8Bytes, requiresNonblank, supportsRetry, format }
+    private enum CodingKeys: String, CodingKey { case maximumUTF8Bytes, requiresNonblank, supportsRetry, format, extendedFormat }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        let legacy = try values.decodeIfPresent(Format.self, forKey: .format)
+        let extended = try values.decodeIfPresent(String.self, forKey: .extendedFormat)
+        guard legacy != .partyCounts, legacy == nil || extended == nil,
+              extended.map({ !$0.isEmpty && $0.utf8.count <= 64 && $0.utf8.allSatisfy { (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) } }) ?? true else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
+        // New format kinds use a separate advisory field. Earlier phones can
+        // read the complete question while ignoring a format they do not know.
+        // Unknown future kinds are not advertised as supported in an answer.
+        let format: Format? = extended == "partyCounts" ? .partyCounts : legacy
         try self.init(maximumUTF8Bytes: values.decode(Int.self, forKey: .maximumUTF8Bytes),
             requiresNonblank: values.decode(Bool.self, forKey: .requiresNonblank),
-            supportsRetry: values.decodeIfPresent(Bool.self, forKey: .supportsRetry) ?? false,
-            format: values.decodeIfPresent(Format.self, forKey: .format))
+            supportsRetry: values.decodeIfPresent(Bool.self, forKey: .supportsRetry) ?? false, format: format)
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(maximumUTF8Bytes, forKey: .maximumUTF8Bytes)
         try values.encode(requiresNonblank, forKey: .requiresNonblank)
         if supportsRetry { try values.encode(true, forKey: .supportsRetry) }
-        try values.encodeIfPresent(format, forKey: .format)
+        if format == .partyCounts { try values.encode("partyCounts", forKey: .extendedFormat) }
+        else { try values.encodeIfPresent(format, forKey: .format) }
     }
 }
 

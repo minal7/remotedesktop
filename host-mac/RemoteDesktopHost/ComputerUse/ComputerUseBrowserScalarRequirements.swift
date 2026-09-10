@@ -1814,7 +1814,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return (comparison == nil || comparison == expectedComparison)
             && (count == nil || count == expectedCount) && (unit == nil || unit == expectedUnit)
     }
-    private static let partyComponentPattern = #"([0-9]{1,3}|one|two|three|four|five|six|seven|eight|nine|ten)\s+(adults?|children|child)"#
+    private static let partyComponentPattern = ComputerUseClarificationAnswerPolicy.Format.partyComponentPattern
     private static func partyComponentReplacementAnswer(_ answer: String, topic: ComputerUseBrowserClarificationTopic) -> Int64? {
         switch topic {
         case .replaceAdults: return ComputerUseClarificationAnswerPolicy.Format.adultCount.count(in: answer)
@@ -1822,10 +1822,7 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         default: return nil
         }
     }
-    private static var partyPattern: String {
-        let separator = #"(?:\s*,?\s+and\s+|\s*,\s*|\s*&\s*|\s+)"#
-        return #"^(?:for\s+)?(?:exactly\s+)?"# + partyComponentPattern + separator + partyComponentPattern + "$"
-    }
+    private static var partyPattern: String { ComputerUseClarificationAnswerPolicy.Format.partyLiteralPattern }
     private static func partyComponentRanges(_ source: String) -> [QuantityUnit: Range<Int>]? {
         guard let expression = try? NSRegularExpression(pattern: partyPattern, options: [.caseInsensitive]),
               let match = expression.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
@@ -1839,10 +1836,8 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return ranges
     }
     static func partyLiteral(_ source: String) -> PartyComposition? {
-        guard let parts = groups(partyPattern, source),
-              let firstUnit = QuantityUnit.literal(parts[1]), let secondUnit = QuantityUnit.literal(parts[3]), firstUnit != secondUnit else { return nil }
-        guard let first = Int64(parts[0]) ?? quantityWords[parts[0].lowercased()], let second = Int64(parts[2]) ?? quantityWords[parts[2].lowercased()] else { return nil }
-        return .init(adults: firstUnit == .adults ? first : second, children: firstUnit == .children ? first : second)
+        guard let counts = ComputerUseClarificationAnswerPolicy.Format.partyLiteral(in: source) else { return nil }
+        return .init(adults: counts.adults, children: counts.children)
     }
     private static func price(_ source: String) -> Result<(Predicate, ComputerUseBrowserGoalProposal.Relation), BindingFailure> {
         let pattern = #"^(under|below|less than|at most|no more than|over|above|more than|at least|exactly)\s+((?:USD|EUR|GBP|CAD|AUD|JPY)|[$€£¥])\s*((?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]{1,2})?)(?:\s+(total|per person|per ticket))?(?:\s+(including fees|excluding fees))?$"#

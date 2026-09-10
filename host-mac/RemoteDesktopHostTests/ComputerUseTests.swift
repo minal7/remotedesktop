@@ -983,9 +983,20 @@ final class ComputerUseTests: XCTestCase {
     }
 
     func test_managerNegotiatesComponentFormatRecoveryWithoutConsumingInvalidAnswers() async throws {
+        try await verifyFormattedAnswerRecovery(topic: .replaceChildren, format: .childCount,
+            invalidAnswer: "3 adults and 2 children", correctedAnswer: "zero children")
+    }
+
+    func test_managerRecoversWholePartyAnswersOnlyWithNegotiatedFormatSupport() async throws {
+        try await verifyFormattedAnswerRecovery(topic: .replaceParty, format: .partyCounts,
+            invalidAnswer: "3 adults", correctedAnswer: "3 adults and zero children")
+    }
+
+    private func verifyFormattedAnswerRecovery(topic: ComputerUseBrowserClarificationTopic,
+        format: ComputerUseClarificationAnswerPolicy.Format, invalidAnswer: String, correctedAnswer: String) async throws {
         for (basicRetry, formatRetry) in [(false, false), (true, false), (true, true)] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
-            executor.initialQuestionTopic = .replaceChildren; executor.pauseFirstAnswer = true
+            executor.initialQuestionTopic = topic; executor.pauseFirstAnswer = true
             executor.planner.questionRequirementIndices = [1]
             executor.planner.requirementRows = [
                 ["source":"Find concerts. ", "turn":0, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
@@ -999,10 +1010,10 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertTrue(fixture.manager.handle(root, channel: fixture.channel))
             let question = try await clarificationUpdate(taskID: root.id, channel: fixture.channel)
             let reference = try XCTUnwrap(question.clarification), owner = try XCTUnwrap(executor.owner), original = owner.input
-            XCTAssertEqual(question.clarificationAnswerPolicy?.format, .childCount)
+            XCTAssertEqual(question.clarificationAnswerPolicy?.format, format)
             let native = try XCTUnwrap(owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID))
             let attempt = makeEnvelope(id: "invalid-format", kind: .prompt,
-                body: try ComputerUsePromptRequest.answering(reference, text: "3 adults and 2 children", supportsClarificationRetry: basicRetry,
+                body: try ComputerUsePromptRequest.answering(reference, text: invalidAnswer, supportsClarificationRetry: basicRetry,
                     supportsClarificationFormatRetry: formatRetry).encodedBody())
             XCTAssertTrue(fixture.manager.handle(attempt, channel: fixture.channel))
             let rejected = try await clarificationUpdate(taskID: attempt.id, channel: fixture.channel)
@@ -1020,12 +1031,12 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertEqual(try owner.pendingQuestion(controllerID: root.senderID, controllerSessionID: root.sessionID), native)
             XCTAssertTrue(executor.continued.isEmpty); XCTAssertEqual(executor.planner.inputs.count, 1)
             let correction = makeEnvelope(id: "corrected-format", kind: .prompt,
-                body: try ComputerUsePromptRequest.answering(reference, text: "zero children", supportsClarificationRetry: basicRetry,
+                body: try ComputerUsePromptRequest.answering(reference, text: correctedAnswer, supportsClarificationRetry: basicRetry,
                     supportsClarificationFormatRetry: formatRetry).encodedBody())
             XCTAssertTrue(fixture.manager.handle(correction, channel: fixture.channel))
             await waitUntil { executor.continued.count == 1 }
             XCTAssertEqual(executor.continued.first?.taskID, correction.id)
-            XCTAssertEqual(owner.input.userTurns, [original.prompt, "zero children"])
+            XCTAssertEqual(owner.input.userTurns, [original.prompt, correctedAnswer])
             XCTAssertEqual(owner.input.rootDateContext, original.rootDateContext)
         }
     }

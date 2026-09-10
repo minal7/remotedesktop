@@ -137,6 +137,7 @@ final class ComputerUseBrowserGoalClarification {
             switch topic {
             case .replaceAdults: return .adultCount
             case .replaceChildren: return .childCount
+            case .replaceParty: return .partyCounts
             default: return nil
             }
         }
@@ -279,7 +280,7 @@ final class ComputerUseBrowserGoalClarification {
         guard acceptedAt >= question.issuedAt else { throw Failure.inputLimit }
         guard question.context == context else { throw Failure.contextChanged }
         guard Context.validIdentifier(answerTaskID) else { throw Failure.inputLimit }
-        if let format = question.answerFormat, format.count(in: answer) == nil { throw Failure.invalidAnswer }
+        if let format = question.answerFormat, !format.accepts(answer) { throw Failure.invalidAnswer }
         let dateContext = try ComputerUseBrowserGoalInput.DateContext(referenceDate: acceptedAt, timeZoneIdentifier: input.timeZoneIdentifier)
         let turn = ComputerUseBrowserGoalClarificationTurn(question: question, answerTaskID: answerTaskID, answer: answer, dateContext: dateContext)
         let continued: ComputerUseBrowserGoalInput

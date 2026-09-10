@@ -509,6 +509,52 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertNil(next.clarification); XCTAssertTrue(next.conversation.isEmpty)
     }
 
+    func testWholePartyQuestionRetainsAnIncompleteDraftAndSendsBothCountsUnderTheOriginalReference() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets for 2 adults and 1 child."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true, format: .partyCounts)
+        let reference = try await fixture.question(for: root, text: "What adult and child counts should replace this party?",
+            answerPolicy: policy, supportsRecovery: true)
+        let mode = fixture.model.composerMode, draft = "  3 adults.\n"
+        fixture.model.updateQuestionDraft(draft)
+        XCTAssertFalse(fixture.model.sendPrompt(draft)); XCTAssertEqual(fixture.model.composerMode, mode)
+        XCTAssertEqual(fixture.model.statusText, policy.format?.instruction)
+        try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft == draft }
+        let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        XCTAssertEqual(saved.answerPolicy, policy); XCTAssertEqual(saved.reference, reference)
+        let correctedText = "zero children and 3 adults"
+        XCTAssertTrue(fixture.model.sendPrompt(correctedText))
+        let corrected = try await fixture.channel.prompt(at: 1), request = try ComputerUsePromptRequest.decodeBody(corrected.body)
+        XCTAssertEqual(request.prompt, correctedText); XCTAssertEqual(request.clarification, reference)
+        XCTAssertTrue(request.supportsClarificationRetry); XCTAssertTrue(request.supportsClarificationFormatRetry)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.clarificationValidUntil, saved.validUntil)
+    }
+
+    func testUnknownExtendedAnswerFormatKeepsTheQuestionReadableWithoutNegotiatingFormatSupport() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find tickets."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let reference = try ComputerUseClarificationReference(taskID: root.id, expiresAt: Date().addingTimeInterval(300))
+        let question = "Give both counts for this future question."
+        let update = ComputerUseTaskUpdate(taskID: root.id, text: question, outcome: .userInterventionRequired, clarification: reference,
+            clarificationAnswerPolicy: try .init(maximumUTF8Bytes: 256, requiresNonblank: true, supportsRetry: true), supportsClarificationRecovery: true)
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(update.encodedBody().utf8)) as? [String: Any])
+        var policy = try XCTUnwrap(fields["clarificationAnswerPolicy"] as? [String: Any]); policy["extendedFormat"] = "futureQuantity"
+        fields["clarificationAnswerPolicy"] = policy
+        await fixture.channel.deliver(String(decoding: try JSONSerialization.data(withJSONObject: fields), as: UTF8.self))
+        try await fixture.channel.waitForDelivery()
+        guard case .answer(let actual, _) = fixture.model.composerMode else { return XCTFail("Unknown advisory format must not erase its question") }
+        XCTAssertEqual(actual, reference)
+        XCTAssertEqual(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.text, question)
+        XCTAssertTrue(fixture.model.sendPrompt("3 adults and 0 children"))
+        let attempt = try await fixture.channel.prompt(at: 1), request = try ComputerUsePromptRequest.decodeBody(attempt.body)
+        XCTAssertTrue(request.supportsClarificationRetry); XCTAssertFalse(request.supportsClarificationFormatRetry)
+        XCTAssertEqual(request.clarification, reference)
+    }
+
     func testCountQuestionRejectsExtraInstructionsLocallyAndKeepsTheSavedDraftForCorrection() async throws {
         let fixture = ClarificationClientFixture()
         defer { fixture.model.stop() }
