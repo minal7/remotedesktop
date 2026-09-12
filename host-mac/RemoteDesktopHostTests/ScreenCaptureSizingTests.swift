@@ -60,6 +60,35 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertTrue(floating.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 2))
     }
 
+    func test_nativePresentationAdmissionWaitsForSmallLeadWithoutAcceptingFutureEvidence() {
+        let start = displayTicks(seconds: 43)
+        let lead = CaptureVideoPresentationAdmission.maximumLeadTicks
+        for offset in [UInt64(1), lead] {
+            var clock = start
+            var waits: [UInt64] = []
+            XCTAssertEqual(CaptureVideoPresentationAdmission.observationTime(
+                displayTimeHostTicks: start + offset, now: { clock }, waitUntil: { deadline in
+                    waits.append(deadline); clock = deadline; return true
+                }), start + offset)
+            XCTAssertEqual(waits, [start + offset])
+        }
+        XCTAssertEqual(CaptureVideoPresentationAdmission.observationTime(
+            displayTimeHostTicks: start - 1, now: { start }, waitUntil: { _ in
+                XCTFail("Already displayed frames must not wait"); return false
+            }), start)
+        for invalid in [UInt64(0), start + lead + 1, UInt64.max] {
+            XCTAssertNil(CaptureVideoPresentationAdmission.observationTime(
+                displayTimeHostTicks: invalid, now: { start }, waitUntil: { _ in
+                    XCTFail("Invalid timestamps must not block the queue"); return true
+                }))
+        }
+        for waitSucceeded in [false, true] {
+            XCTAssertNil(CaptureVideoPresentationAdmission.observationTime(
+                displayTimeHostTicks: start + 1, now: { start }, waitUntil: { _ in waitSucceeded }),
+                "Interrupted or premature waits cannot admit a future frame")
+        }
+    }
+
     func test_capturePlacementRejectsMissingMalformedAndNonfiniteMetadata() {
         let valid = placementAttachments()
         for key: SCStreamFrameInfo in [.contentRect, .scaleFactor, .contentScale] {
@@ -97,6 +126,19 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertFalse(placement.coversFullDisplaySurface(width: 1920, height: 1080, displayScale: 1))
         if #available(macOS 14.2, *) {
             var attachments = placementAttachments()
+            attachments[.presenterOverlayContentRect] = CGRect.null.dictionaryRepresentation
+            let absentOverlay = try XCTUnwrap(CaptureVideoPlacement.read(attachments))
+            XCTAssertNil(absentOverlay.presenterOverlayRect)
+            XCTAssertTrue(absentOverlay.coversFullDisplaySurface(width: 2, height: 2, displayScale: 2))
+            for invalid: [String: Any] in [
+                ["X": Double.infinity, "Y": Double.infinity, "Width": 1, "Height": 0],
+                ["X": -Double.infinity, "Y": Double.infinity, "Width": 0, "Height": 0],
+                ["X": Double.infinity, "Y": Double.nan, "Width": 0, "Height": 0],
+                ["X": Double.infinity, "Y": Double.infinity, "Width": false, "Height": 0]
+            ] {
+                attachments[.presenterOverlayContentRect] = invalid
+                XCTAssertNil(CaptureVideoPlacement.read(attachments))
+            }
             attachments[.presenterOverlayContentRect] = CGRect.zero.dictionaryRepresentation
             XCTAssertTrue(try XCTUnwrap(CaptureVideoPlacement.read(attachments))
                 .coversFullDisplaySurface(width: 2, height: 2, displayScale: 2))
@@ -1418,16 +1460,41 @@ private final class NativeCaptureMetadataProbe: NSObject, SCStreamOutput {
         lock.lock(); defer { lock.unlock() }
         guard captured == nil else { return }
         let observedAt = mach_absolute_time()
-        let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt)
+        let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer)
+        let admittedAt = mach_absolute_time()
         let rows = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
         let metadata = rows?.first ?? [:]
-        var values = ["frameAccepted": String(frame != nil), "observedAtHostTicks": String(observedAt),
+        var values = ["frameAccepted": String(frame != nil), "observedAtHostTicks": String(admittedAt),
+            "callbackHostTicks": String(observedAt),
             "displayScale": String(displayScale), "fullDisplayPlacementAccepted": "false"]
+        values["sampleValid"] = String(sampleBuffer.isValid)
+        values["dataReady"] = String(CMSampleBufferDataIsReady(sampleBuffer))
+        values["placementAccepted"] = String(CaptureVideoPlacement.read(metadata) != nil)
+        values["contentRectType"] = metadata[.contentRect].map { String(reflecting: Swift.type(of: $0)) }
+        values["presentationTime"] = String(describing: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        for (key, raw) in metadata where key != .dirtyRects {
+            values["type:" + key.rawValue] = String(reflecting: Swift.type(of: raw))
+            if #available(macOS 14.2, *), key == .presenterOverlayContentRect {
+                values[key.rawValue] = String(describing: raw)
+            }
+        }
+        if let rect = metadata[.contentRect] as? [String: Any] {
+            for (key, raw) in rect {
+                values["rect:" + key] = String(reflecting: Swift.type(of: raw)) + ": " + String(describing: raw)
+                if let number = raw as? NSNumber { values["rectCFType:" + key] = String(CFGetTypeID(number)) }
+            }
+            values["rectParsed"] = String(describing: CGRect(dictionaryRepresentation: rect as CFDictionary))
+        }
         for key in [SCStreamFrameInfo.status, .displayTime, .contentRect, .contentScale, .scaleFactor] {
             values[key.rawValue] = metadata[key].map { String(describing: $0) } ?? "missing"
         }
         if let image = CMSampleBufferGetImageBuffer(sampleBuffer) {
             values["width"] = String(CVPixelBufferGetWidth(image)); values["height"] = String(CVPixelBufferGetHeight(image))
+            values["clockMetadataAccepted"] = String(CaptureVideoFrameMetadata.read(
+                status: metadata[.status] as? Int, displayTimeHostTicks: metadata[.displayTime] as? UInt64,
+                presentationTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                width: CVPixelBufferGetWidth(image), height: CVPixelBufferGetHeight(image),
+                observedAtHostTime: admittedAt) != nil)
         }
         if let frame {
             values["fullDisplayPlacementAccepted"] = String(frame.placement.coversFullDisplaySurface(

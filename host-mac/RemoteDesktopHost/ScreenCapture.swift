@@ -239,8 +239,12 @@ struct CaptureVideoPlacement: Equatable {
               let contentScale = number(attachments[.contentScale]), contentScale > 0 else { return nil }
         var overlay: CGRect?
         if #available(macOS 14.2, *), let raw = attachments[.presenterOverlayContentRect] {
-            guard let value = rectangle(raw), value.size.width >= 0, value.size.height >= 0 else { return nil }
-            overlay = value
+            // ScreenCaptureKit uses CGRect.null when no presenter overlay is
+            // present. Its infinite origin is a sentinel, not content geometry.
+            if !isNullRectangle(raw) {
+                guard let value = rectangle(raw), value.size.width >= 0, value.size.height >= 0 else { return nil }
+                overlay = value
+            }
         }
         return Self(contentRect: rect, scaleFactor: scale, contentScale: contentScale, presenterOverlayRect: overlay)
     }
@@ -278,12 +282,40 @@ struct CaptureVideoPlacement: Equatable {
               rect.size.width.isFinite, rect.size.height.isFinite else { return nil }
         return rect
     }
+
+    private static func isNullRectangle(_ raw: Any) -> Bool {
+        guard let dictionary = raw as? [String: Any],
+              Set(dictionary.keys) == Set(["X", "Y", "Width", "Height"]) else { return false }
+        let values = ["X", "Y", "Width", "Height"].compactMap { key -> Double? in
+            guard let value = dictionary[key] as? NSNumber,
+                  CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
+            return value.doubleValue
+        }
+        return values == [Double.infinity, Double.infinity, 0, 0]
+    }
 }
 
 struct CapturedVideoFrame {
     let imageBuffer: CVPixelBuffer
     let metadata: CaptureVideoFrameMetadata
     let placement: CaptureVideoPlacement
+
+    /// A complete native sample can arrive just before its WindowServer
+    /// display time. Wait on the serial capture queue until that time instead
+    /// of accepting future evidence or discarding the only initial frame.
+    init?(sampleBuffer: CMSampleBuffer) {
+        guard CaptureVideoStatus.read(sampleBuffer: sampleBuffer) == .complete,
+              let rows = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false)
+                as? [[SCStreamFrameInfo: Any]],
+              let raw = rows.first?[.displayTime] as? NSNumber,
+              CFGetTypeID(raw) != CFBooleanGetTypeID(),
+              let displayTime = raw as? UInt64, raw == NSNumber(value: displayTime),
+              let observedAt = CaptureVideoPresentationAdmission.observationTime(
+                displayTimeHostTicks: displayTime,
+                now: { mach_absolute_time() },
+                waitUntil: { mach_wait_until($0) == KERN_SUCCESS }) else { return nil }
+        self.init(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt)
+    }
 
     init?(sampleBuffer: CMSampleBuffer, observedAtHostTime: UInt64) {
         guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer),
@@ -305,6 +337,25 @@ struct CapturedVideoFrame {
         self.imageBuffer = imageBuffer
         self.metadata = metadata
         self.placement = placement
+    }
+}
+
+enum CaptureVideoPresentationAdmission {
+    // At most one 60 Hz display interval. This bounds queue blocking; it does
+    // not allow the existing metadata validator to accept a future timestamp.
+    static let maximumLeadTicks = CMClockConvertHostTimeToSystemUnits(CMTime(value: 1, timescale: 60))
+
+    static func observationTime(displayTimeHostTicks: UInt64, now: () -> UInt64,
+                                waitUntil: (UInt64) -> Bool) -> UInt64? {
+        guard displayTimeHostTicks > 0 else { return nil }
+        let arrivedAt = now()
+        if displayTimeHostTicks > arrivedAt {
+            guard displayTimeHostTicks - arrivedAt <= maximumLeadTicks,
+                  waitUntil(displayTimeHostTicks) else { return nil }
+        }
+        let observedAt = now()
+        guard observedAt >= arrivedAt, displayTimeHostTicks <= observedAt else { return nil }
+        return observedAt
     }
 }
 
@@ -1023,7 +1074,7 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                     return
                 case .complete: break
                 }
-                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt),
+                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer),
                       frame.metadata.width == native.configuration.width,
                       frame.metadata.height == native.configuration.height,
                       frame.placement.coversFullDisplaySurface(width: frame.metadata.width,
