@@ -11553,6 +11553,48 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertGreaterThan(snapshot.aggregateResidentMemoryBytes, 0)
     }
 
+    func testOptInNativeProcessTerminationReleasesItsExactLifetimeLease() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SINGLE_PROCESS_PROBE"] == "1" else {
+            throw XCTSkip("Opt in to one task-owned sleeping process; no model is loaded")
+        }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("local-runtime-process-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("sleep-probe")
+        // Compile Fixtures/runtime_sleep_probe.c separately, then pass its
+        // path explicitly. A private copy confines exact-path cleanup to us.
+        let probePath = try XCTUnwrap(ProcessInfo.processInfo.environment["REPAIR_SLEEP_PROBE_BINARY"])
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: probePath), to: executable)
+        let process = Process()
+        process.executableURL = executable
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        defer {
+            if process.isRunning { process.terminate() }
+            else { try? FileManager.default.removeItem(at: directory) }
+        }
+        let lease = try await OSAtlasLlamaServerLifetimeLease.acquire(executableURL: executable,
+            lockDirectoryURL: directory, retryDelay: .milliseconds(5))
+        do { try process.run() }
+        catch { lease.release(); throw error }
+        let inspector = DarwinOSAtlasProcessInspector()
+        let identity = try XCTUnwrap(inspector.identity(processID: process.processIdentifier))
+        XCTAssertTrue(process.isRunning)
+        let server = FoundationOSAtlasLlamaServerProcess(process: process, rootIdentity: identity,
+            executableURL: executable, lifetimeLease: lease,
+            maximumResidentMemoryBytes: 128 * 1_024 * 1_024, maximumProcessCount: 1)
+        let started = ContinuousClock.now
+        await server.terminate()
+        try await server.waitUntilExit()
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(2), "Shutdown must precede the helper's ten-second natural exit")
+        XCTAssertFalse(process.isRunning)
+        XCTAssertEqual(process.terminationReason, .uncaughtSignal)
+        XCTAssertEqual(process.terminationStatus, SIGTERM)
+        XCTAssertNil(try inspector.identity(processID: identity.processIdentifier))
+        let replacement = try await OSAtlasLlamaServerLifetimeLease.acquire(executableURL: executable,
+            lockDirectoryURL: directory, retryDelay: .milliseconds(5))
+        replacement.release()
+    }
+
     func testProcessTreeCleanupSignalsChildrenBeforeRouterRoot() throws {
         let inspector = FakeOSAtlasProcessTreeInspector(snapshotValue:
             OSAtlasProcessTreeSnapshot(
