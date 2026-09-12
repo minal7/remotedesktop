@@ -112,6 +112,7 @@ final class ComputerUseTaskExecutionTests: XCTestCase {
             gate.finish(true)
             do { try await running.value; XCTFail("Cancellation cannot become completion after the gate returns") }
             catch { XCTAssertTrue(error is CancellationError, stage) }
+            await fulfillment(of: [gate.returned], timeout: 1)
             let effectsAtStop = fixture.effects.count
             XCTAssertEqual(effectsAtStop, stage == "observation" ? 0 : stage == "outcome" ? 4 : 1)
             var latest = try competitorStore.load(taskID: fixture.contract.taskID)
