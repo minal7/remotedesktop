@@ -7,6 +7,24 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserTests: XCTestCase {
+    func testClosingAnUnusedHiddenSessionPreservesTheOriginalError() throws {
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        func failAndClose() throws {
+            defer { browser.close() }
+            _ = try browser.prepareWorkflowSession(taskID: "cleanup-error-probe")
+            throw ComputerUseBrowserError.windowNotActive
+        }
+        do {
+            try failAndClose()
+            XCTFail("Expected the original operation error")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBrowserError, .windowNotActive)
+            XCTAssertEqual(error.localizedDescription, ComputerUseBrowserError.windowNotActive.errorDescription)
+        }
+        XCTAssertFalse(browser.hasSession)
+        XCTAssertNil(browser.taskID)
+    }
+
     func testSignInNavigationRequiresCurrentNativeIdentity() {
         let state = ComputerUseSignInNavigation<NSObject>()
         let first = NSObject(), foreign = NSObject(), replacement = NSObject()

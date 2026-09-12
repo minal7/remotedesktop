@@ -893,7 +893,7 @@ struct ResearchAnswerFixture {
                      navigationLimit: Int = 8) async throws -> Self {
         let transport = ResearchAnswerTransport(followCount: multiPage ? 2 : 1, recall: multiPage ? 1 : nil, historyRoute: historyRoute)
         let local = try ComputerUseLocalBrowserLinkPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
-            bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport)
+            bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: transport)
         let planner = ResearchAnswerRecordingPlanner(local: local)
         let reader = ResearchAnswerReader(omitDetailLinks: omitDetailLinks)
         let reviewed = ComputerUseReviewedBrowserResultPlanner(reader: reader,

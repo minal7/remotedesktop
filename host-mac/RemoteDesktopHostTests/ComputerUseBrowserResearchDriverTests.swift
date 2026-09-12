@@ -509,12 +509,24 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         let result = try await fixture.start()
         guard case .browserResearchProgress? = result else { return XCTFail("A searched page is not a verified answer") }
         let owner = try fixture.owner(), original = owner.input
-        XCTAssertEqual(fixture.actions.inputs.count, 3); XCTAssertEqual(fixture.forms.inputs.count, 1)
+        let stages = fixture.actions.steps.map { step in
+            switch step {
+            case .editForm: return "select form"
+            case .reviewControls: return "review controls"
+            case .planFields: return "plan fields"
+            case .openQuery: return "open query"
+            case .readResults: return "read results"
+            default: return "unexpected action"
+            }
+        }
+        XCTAssertEqual(stages, ["select form", "review controls", "plan fields", "open query", "read results"])
+        XCTAssertEqual(fixture.forms.inputs.count, 1)
         XCTAssertEqual(fixture.forms.inputs.first?.interpretation.input, original)
         XCTAssertNotNil(fixture.forms.inputs.first?.selectedFormID)
         XCTAssertEqual(fixture.results.inputs, [original], "The initial form page must not first be interpreted as a result set")
         XCTAssertTrue(fixture.actions.inputs.allSatisfy { $0.interpretation.input == original })
-        XCTAssertEqual(fixture.actions.inputs[1].queryReceipt, owner.confirmedFormHistory.first)
+        let queryInput = try XCTUnwrap(fixture.actions.inputs.first { !$0.queryControlIDs.isEmpty })
+        XCTAssertEqual(queryInput.queryReceipt, owner.confirmedFormHistory.first)
         XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .formQuery])
         XCTAssertEqual(fixture.goal.inputs, [original]); XCTAssertEqual(fixture.search.inputs.map(\.input), [original])
         XCTAssertEqual(fixture.server.count("/filtered?q=concerts"), 1)
@@ -1122,10 +1134,13 @@ final class BrowserResearchActionFixture: ComputerUseBrowserActionPlanning {
     var select: ((ComputerUseBrowserActionInput) throws -> String)?
     var beforeReply: (@MainActor () async throws -> Void)?
     private(set) var inputs: [ComputerUseBrowserActionInput] = []
+    private(set) var steps: [ComputerUseBrowserActionProposal.Step] = []
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
         inputs.append(input)
         if let beforeReply { try await beforeReply() }
-        return try .decode(content: select?(input) ?? #"{"read_results":true}"#, input: input)
+        let proposal = try ComputerUseBrowserActionProposal.decode(content: select?(input) ?? #"{"read_results":true}"#, input: input)
+        steps.append(proposal.step)
+        return proposal
     }
 }
 @MainActor
