@@ -7,6 +7,87 @@ import XCTest
 /// Kept separate from both stubbed wire tests and live desktop qualification.
 @MainActor
 final class ComputerUseLocalTextProposalAcceptanceTests: XCTestCase {
+    func testOptInSingleManagedNativeTextProposal() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_SINGLE_MANAGED_TEXT_PROPOSAL"] == "1" else {
+            throw XCTSkip("Opt-in: one fictional proposal, 45-second planning deadline, managed shutdown, no effects")
+        }
+        let corpusPath = try XCTUnwrap(environment["COMPUTER_USE_TEXT_PROPOSAL_CORPUS"])
+        let data = try Data(contentsOf: URL(fileURLWithPath: corpusPath))
+        guard data.count <= 1_024 * 1_024,
+              let corpus = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cases = corpus["cases"] as? [[String: Any]], cases.count == 1,
+              cases[0]["fault"] == nil else { throw CorpusError.invalidCorpus }
+        let connectionFile = try XCTUnwrap(environment["COMPUTER_USE_TEXT_MODEL_CONNECTION_FILE"])
+        let connection = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: connectionFile))) as? [String: String])
+        guard connection["runtimeOwner"] == "1" else { throw CorpusError.invalidCorpus }
+        let inputs = ComputerUseNativeTextRuntimeInputs(
+            modelURL: URL(fileURLWithPath: try XCTUnwrap(connection["modelPath"])),
+            llamaServerURL: URL(fileURLWithPath: try XCTUnwrap(connection["serverPath"])))
+        let runtime = OSAtlasLlamaRuntime()
+        let planner = SingleManagedProposalPlanner(
+            base: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
+            shutdown: {
+                await runtime.shutdown()
+                guard try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty else {
+                    throw SingleProposalFailure.processStillRunning
+                }
+            })
+        try await runCorpus(corpusPath, environment: environment, planner: planner)
+    }
+
+    func testSingleProposalDeadlineCancelsStalledActivationAndAwaitsCleanup() async throws {
+        let gate = ComputerUsePlanningTestGate<ComputerUseTextGoalProposal>(
+            started: expectation(description: "activation or proposal started"),
+            returned: expectation(description: "stalled proposal returned"))
+        defer { gate.finish(.unsupported) }
+        let cleanup = expectation(description: "cleanup invoked")
+        let start = ContinuousClock.now
+        do {
+            _ = try await withManagedProposalDeadline(timeout: 0.2, operation: { await gate.wait() }, shutdown: {
+                cleanup.fulfill()
+                gate.finish(.unsupported)
+            })
+            XCTFail("A late proposal cannot replace the deadline failure")
+        } catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .timedOut) }
+        await fulfillment(of: [gate.started, cleanup, gate.returned], timeout: 1, enforceOrder: true)
+        XCTAssertLessThan(ContinuousClock.now - start, .seconds(2))
+    }
+
+    func testSingleProposalSuccessFailureAndCancellationWaitForCleanup() async throws {
+        for mode in ["success", "planner-failure", "cancel-during-cleanup"] {
+            let cleanup = ComputerUsePlanningTestGate<Bool>(
+                started: expectation(description: mode + " cleanup started"),
+                returned: expectation(description: mode + " cleanup returned"))
+            defer { cleanup.finish(true) }
+            var delivered = false
+            let call = Task { () -> Result<ComputerUseTextGoalProposal, Error> in
+                defer { delivered = true }
+                do {
+                    return .success(try await withManagedProposalDeadline(timeout: 1, operation: {
+                        if mode == "planner-failure" { throw SingleProposalFailure.fixturePlannerFailure }
+                        return .unsupported
+                    }, shutdown: { _ = await cleanup.wait() }))
+                } catch { return .failure(error) }
+            }
+            defer { call.cancel() }
+            await fulfillment(of: [cleanup.started], timeout: 1)
+            XCTAssertFalse(delivered, "The probe cannot report a result while cleanup is pending")
+            if mode == "cancel-during-cleanup" { call.cancel() }
+            cleanup.finish(true)
+            let result = await call.value
+            await fulfillment(of: [cleanup.returned], timeout: 1)
+            switch (mode, result) {
+            case ("success", .success(let proposal)): XCTAssertEqual(proposal, .unsupported)
+            case ("planner-failure", .failure(let error)):
+                XCTAssertEqual(error as? SingleProposalFailure, .fixturePlannerFailure)
+            case ("cancel-during-cleanup", .failure(let error)): XCTAssertTrue(error is CancellationError)
+            default: XCTFail("Unexpected \(mode) result: \(result)")
+            }
+        }
+    }
+
     func testOptInLocalTextProposalCorpus() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard let corpusPath = environment["COMPUTER_USE_TEXT_PROPOSAL_CORPUS"],
@@ -116,4 +197,36 @@ final class ComputerUseLocalTextProposalAcceptanceTests: XCTestCase {
     }
 
     private enum CorpusError: Error { case invalidCorpus }
+}
+
+private enum SingleProposalFailure: Error, Equatable {
+    case processStillRunning, fixturePlannerFailure
+}
+
+/// The only timed work is a proposal, including its runtime activation.
+/// Cleanup joins outside that deadline and must succeed before any result is
+/// returned to the corpus validator. No effect adapter is available here.
+private func withManagedProposalDeadline(
+    timeout: TimeInterval,
+    operation: @escaping @Sendable () async throws -> ComputerUseTextGoalProposal,
+    shutdown: @escaping @Sendable () async throws -> Void
+) async throws -> ComputerUseTextGoalProposal {
+    let worker = ComputerUsePlanningWorker()
+    let result: Result<ComputerUseTextGoalProposal, Error>
+    do { result = .success(try await worker.perform(timeout: timeout, operation)) }
+    catch { result = .failure(error) }
+    try await shutdown()
+    try Task.checkCancellation()
+    return try result.get()
+}
+
+private struct SingleManagedProposalPlanner: ComputerUseTextGoalPlanning {
+    let base: any ComputerUseTextGoalPlanning
+    let shutdown: @Sendable () async throws -> Void
+
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        try await withManagedProposalDeadline(timeout: 45, operation: {
+            try await base.propose(prompt: prompt, fields: fields)
+        }, shutdown: shutdown)
+    }
 }
