@@ -520,6 +520,21 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             }
         }
         XCTAssertEqual(stages, ["select form", "review controls", "plan fields", "open query", "read results"])
+        XCTAssertEqual(fixture.actions.inputs.map(\.usesFormHistoryContext), [false, false, false, true, true],
+            "History guidance starts when there is real form history, and survives leaving the form")
+        if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let planner = ComputerUseLocalBrowserActionPlanner(connection: try .init(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+                bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: URLSessionOSAtlasTransport())
+            // Serialize synthetic fixture requests only; neither tokenization
+            // nor completion is sent to this transport.
+            for (index, input) in fixture.actions.inputs.enumerated() {
+                let body = try XCTUnwrap(planner.makeRequest(input).httpBody)
+                try body.write(to: directory.appendingPathComponent("action-\(index).json"), options: .atomic)
+            }
+        }
         XCTAssertEqual(fixture.forms.inputs.count, 1)
         XCTAssertEqual(fixture.forms.inputs.first?.interpretation.input, original)
         XCTAssertNotNil(fixture.forms.inputs.first?.selectedFormID)
