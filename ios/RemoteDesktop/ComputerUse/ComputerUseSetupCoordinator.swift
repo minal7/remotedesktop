@@ -1,20 +1,6 @@
 import CloudKit
 import Foundation
 
-protocol ComputerUseSetupChannel: Sendable {
-    @discardableResult
-    func send(
-        kind: ComputerUseEnvelope.Kind,
-        body: String,
-        to explicitTargetID: String?,
-        sessionID explicitSessionID: String?,
-        messageID explicitMessageID: String?
-    ) async throws -> ComputerUseEnvelope
-
-    func poll() async throws -> [ComputerUseEnvelope]
-    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws
-}
-
 extension CloudKitComputerUseChannel: ComputerUseSetupChannel {}
 
 private actor UnavailableComputerUseSetupChannel:

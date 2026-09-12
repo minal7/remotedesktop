@@ -1,5 +1,19 @@
 import Foundation
 
+protocol ComputerUseSetupChannel: Sendable {
+    @discardableResult
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope
+
+    func poll() async throws -> [ComputerUseEnvelope]
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws
+}
+
 /// iOS side of the TLS-PSK LAN broker. It implements the same small channel
 /// contracts as CloudKit, so prompt recovery, lifecycle controls, approvals,
 /// and typed terminal outcomes retain their existing semantics.

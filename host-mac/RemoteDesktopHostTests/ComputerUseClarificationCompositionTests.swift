@@ -12,6 +12,126 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testShippedClientCompletesLocalBrowserWorkflowThroughTLSLoginHandback() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/form": .init(body: """
+                <input id='password' type='password' value='private-fixture-password'>
+                <form method='get' action='/results'><label>Destination<input id='q' name='q' value='old'></label><button>Search</button></form>
+                <script>
+                document.getElementById('q').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value), { keepalive: true }));
+                fetch('/release-login').then(() => {
+                    document.getElementById('password').remove(); sessionStorage.fixtureAccount = 'retained';
+                    history.replaceState({}, '', '/account'); fetch('/logged-in');
+                });
+                </script>
+                """),
+            "/release-login": .init(held: true),
+            "/results?q=Paris": .init(body: """
+                <p>Paris results</p><a id='event'>Event details</a><script>
+                document.getElementById('event').href = sessionStorage.fixtureAccount === 'retained' ? '/event?session=retained' : '/event?session=lost';
+                </script>
+                """),
+            "/event?session=retained": .init(body: "<p>Event details visible</p>"),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        var fallbackEntries = 0
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            fallbackEntries += 1
+            XCTFail("This controlled explicit workflow must never invoke a model or desktop fallback")
+            return .unableToComplete("Unexpected fallback")
+        })
+        var ownedBrowser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct)
+                ownedBrowser = browser
+                return .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
+            }, allowsExternalServices: true, channelFactory: { _ in channel })
+        let browser = try XCTUnwrap(ownedBrowser)
+        defer { manager.stop(); browser.close() }
+        XCTAssertTrue(HostRuntimeContext.isRunningUnitTests)
+        let key = Data(repeating: 0x6D, count: 32)
+        let broker = LocalComputerUseBrokerServer(
+            credential: try RemoteDesktopHost.LocalComputerUseCredential(rawKey: key), hostID: hostID, channel: channel,
+            authorizePeer: { peer in manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in manager.revokePeerAuthorization() })
+        let port = try await broker.start()
+        defer { broker.stop() }
+        manager.start(pairingCode: pairingCode, additionalChannels: [channel], includeDefaultChannel: false)
+        let clientChannel = RemoteDesktopClientCore.LocalComputerUseBrokerClient(
+            endpoint: .init(host: "127.0.0.1", port: port),
+            credential: try RemoteDesktopClientCore.LocalComputerUseCredential(rawKey: key),
+            pairingCode: pairingCode, sessionID: sessionID, senderID: clientID, targetID: hostID)
+        try await clientChannel.handshake()
+        let pendingStore = CompositionPendingStore()
+        let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
+            pendingStore: pendingStore, channel: clientChannel, promptRefreshInterval: .seconds(600))
+        defer { client.stop() }
+        // Both production polling loops run themselves. The fixture controls only
+        // the local page's simulated login response; it never pumps a mailbox,
+        // creates a Resume envelope, or calls the host's handle method.
+        func reach(_ stage: String, _ condition: () -> Bool) async throws {
+            let deadline = ContinuousClock.now + .seconds(8)
+            while !condition() {
+                guard ContinuousClock.now < deadline else {
+                    throw CompositionFailure.incomplete("\(stage): client=\(client.state), status=\(client.statusText), host=\(manager.activity)")
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        client.start()
+        let prompt = "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open the form query using \"Search\" then open the link \"Event details\""
+        XCTAssertTrue(client.sendPrompt(prompt))
+        let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+        let admitted = try RemoteDesktopHost.ComputerUseExecutionPromptDecoder.decode(pending.exactWireBody)
+        XCTAssertEqual(admitted.prompt, prompt)
+        XCTAssertTrue(admitted.supportsApprovedActionEvidence)
+        try await reach("login pause") {
+            client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+        }
+        XCTAssertTrue(client.hasActivePrompt)
+        XCTAssertEqual(client.latestTerminalOutcome, .userInterventionRequired)
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 0)
+        let store = try ComputerUseTaskJournalStore(directory: directory.appendingPathComponent("browser/Workflows"))
+        let paused = try XCTUnwrap(store.load(taskID: pending.messageID))
+        XCTAssertEqual(paused.statuses, [.verified, .attempted, .planned, .planned])
+        XCTAssertEqual(paused.promptDigest, ComputerUseTextTaskContract.digest(prompt))
+        server.releaseHeldResponses()
+        try await reach("simulated login return") { server.count("/logged-in") == 1 && browser.hasPageAwaitingHandback }
+        client.resumeAI()
+        try await reach("client completion") {
+            !client.hasActivePrompt && client.latestTerminalOutcome == .taskCompleted && manager.activity == .idle
+        }
+        XCTAssertEqual(client.state, .ready)
+        XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+        XCTAssertEqual(fallbackEntries, 0)
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edited?value=Paris"), 1)
+        XCTAssertEqual(server.count("/results?q=Paris"), 1)
+        XCTAssertEqual(server.count("/event?session=retained"), 1)
+        XCTAssertEqual(server.count("/event?session=lost"), 0)
+        let completed = try XCTUnwrap(store.load(taskID: pending.messageID))
+        XCTAssertEqual(completed.statuses, Array(repeating: .verified, count: 4))
+        XCTAssertEqual(completed.stepIDs, paused.stepIDs)
+        XCTAssertEqual(completed.contractDigest, paused.contractDigest)
+        XCTAssertEqual(completed.promptDigest, paused.promptDigest)
+        XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
+        let serialized = String(decoding: try JSONEncoder().encode(completed), as: UTF8.self)
+        for privateValue in ["Paris", "Destination", "private-fixture-password", base.absoluteString] {
+            XCTAssertFalse(serialized.contains(privateValue))
+        }
+        let evidence = XCTAttachment(string: "Shipped client session and LAN broker → real TLS → automatic host polling → hidden WebKit; paused for simulated login, resumed through client.resumeAI(), one field edit/query/link and four verified journal stages; client received taskCompleted and cleared pending recovery.")
+        evidence.name = "Client-to-host controlled workflow"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+    }
+
     func testShippedClientRecoversSavedBrowserQuestionThroughSerializedProbeWithoutReexecutingOriginalPrompt() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

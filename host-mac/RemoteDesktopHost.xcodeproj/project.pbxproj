@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */; };
 		E4FF598034094C418706CA54 /* ComputerUseSignInNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */; };
 		1ED3C4F4D709486CB8A3185F /* ComputerUseBrowserPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */; };
 		FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */; };
@@ -291,6 +292,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
 		B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSignInNavigation.swift; sourceTree = "<group>"; };
 		E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserPresentation.swift; sourceTree = "<group>"; };
 		154E7F0EDA005E7A53ABC0F2 /* ComputerUseBrowserGoalPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserGoalPlanner.swift; sourceTree = "<group>"; };
@@ -609,6 +611,7 @@
 		703538B84D9689FF38BA134E /* ComputerUse */ = {
 			isa = PBXGroup;
 			children = (
+				B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */,
 				95E159D4B4BE5D410AC80ACD /* ComputerUsePendingPromptStore.swift */,
 				31B6128CD23689A80D1872D8 /* ComputerUseSessionModel.swift */,
 			);
@@ -1312,6 +1315,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */,
 				DCCFB4ED9C5371A6985971E0 /* CloudKitComputerUseChannel.swift in Sources */,
 				2C84B8552294904C28B88A11 /* CloudKitLocalComputerUsePairing.swift in Sources */,
 				CB2A90ECC2A231DD704DCD9B /* CloudKitSignalingClient.swift in Sources */,
