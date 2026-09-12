@@ -1726,6 +1726,7 @@ final class ComputerUseTests: XCTestCase {
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         approvalTargetProvider: ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil,
+        allowsExternalServices: Bool = false,
         injector: InputInjector = InputInjector()) throws
         -> (manager: HostComputerUseManager, browser: ComputerUseOwnedBrowser,
             channel: FakeHostComputerUseChannel, ledger: ComputerUseTaskLedger) {
@@ -1738,7 +1739,7 @@ final class ComputerUseTests: XCTestCase {
                 browser = owned
                 return ComputerUseBrowserNavigationTask(browser: owned,
                     journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("browser"))
-            }, allowsExternalServices: false, approvalTargetProvider: approvalTargetProvider, actionPerformer: actionPerformer,
+            }, allowsExternalServices: allowsExternalServices, approvalTargetProvider: approvalTargetProvider, actionPerformer: actionPerformer,
             channelFactory: { _ in channel })
         return (manager, try XCTUnwrap(browser), channel, ledger)
     }
@@ -1774,7 +1775,8 @@ final class ComputerUseTests: XCTestCase {
             XCTFail("A selected workflow cannot fall through to an unrelated whole-form or desktop planner")
             return .unableToComplete("Unexpected fallback")
         })
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        XCTAssertTrue(HostRuntimeContext.isRunningUnitTests, "The hosted test must suppress global input monitors")
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url, allowsExternalServices: true)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let hostID = UUID().uuidString, peerID = UUID().uuidString, sessionID = "workflow-tls-session"
         let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: "123456")
@@ -1784,6 +1786,7 @@ final class ComputerUseTests: XCTestCase {
             revokePeer: { _ in fixture.manager.revokePeerAuthorization() })
         let port = try await broker.start()
         defer { broker.stop() }
+        fixture.manager.start(pairingCode: "123456", additionalChannels: [channel], includeDefaultChannel: false)
         var messages: [ComputerUseEnvelope] = []
         func exchange(_ envelopes: [ComputerUseEnvelope] = [], acknowledging ids: [String] = []) async throws -> LocalComputerUseRPCResponse {
             let response = try await LocalComputerUseRPCTransport.call(
@@ -1793,22 +1796,19 @@ final class ComputerUseTests: XCTestCase {
             messages.append(contentsOf: response.envelopes)
             return response
         }
-        // Drive the production mailbox/handler boundary explicitly. This test
-        // does not start the app's external-service polling lifecycle.
+        // The production polling loop must dispatch and acknowledge requests.
+        // No direct handle() or mailbox mutation stands in for that lifecycle.
         func deliver(_ envelope: ComputerUseEnvelope) async throws {
             let accepted = try await exchange([envelope])
             XCTAssertEqual(accepted.acceptedEnvelopeIDs, [envelope.id])
-            let queued = try await channel.poll()
-            XCTAssertEqual(queued.map(\.id), [envelope.id])
-            for message in queued { XCTAssertTrue(fixture.manager.handle(message, channel: channel)) }
-            try await channel.acknowledge(queued)
         }
         func receive(_ outcome: ComputerUseTerminalOutcome) async throws -> ComputerUseTaskUpdate {
-            for _ in 0..<200 {
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline {
                 let response = try await exchange()
                 if let update = response.envelopes.compactMap({ try? ComputerUseTaskUpdate.decodeBody($0.body) })
                     .first(where: { $0.taskID == "workflow-login" && $0.outcome == outcome }) { return update }
-                try await Task.sleep(for: .milliseconds(10))
+                try await Task.sleep(for: .milliseconds(100))
             }
             return try XCTUnwrap(Optional<ComputerUseTaskUpdate>.none, "No expected workflow response arrived over TLS")
         }
@@ -1856,6 +1856,8 @@ final class ComputerUseTests: XCTestCase {
         try await deliver(prompt)
         let replayed = try await receive(.taskCompleted)
         XCTAssertEqual(replayed.text, delivered.text)
+        let unacknowledgedRequests = try await channel.poll()
+        XCTAssertTrue(unacknowledgedRequests.isEmpty, "The host polling loop must acknowledge handled requests")
         XCTAssertEqual(server.count("/form"), 1)
         XCTAssertEqual(server.count("/edited?value=Paris"), 1)
         XCTAssertFalse(messages.contains { $0.body.contains("private-fixture-password") })
