@@ -131,7 +131,7 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
         XCTAssertNil(body["tools"])
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         XCTAssertEqual(messages[1]["content"], input.contextJSON)
-        XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserResultReviewPlanner.instructions)
+        XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserResultReviewPlanner.instructions(for: input))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any]), contract = try XCTUnwrap(format["json_schema"] as? [String: Any])
         XCTAssertEqual(contract["name"] as? String, "browser_result_review_v1")
         let goal = try F.goal(), page = try ComputerUseBrowserResultPageInput(page: F.page())

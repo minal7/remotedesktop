@@ -752,6 +752,9 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         let calls = await fixture.modelCalls()
         XCTAssertEqual(calls.counts.count, 2); XCTAssertEqual(calls.completions.count, 2)
         XCTAssertEqual(calls.counts.map(\.httpBody), calls.completions.map(\.httpBody))
+        if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+            try fixture.exportRequests(to: path, links: calls.completions)
+        }
         for request in calls.completions {
             let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
             let format = try XCTUnwrap(body["response_format"] as? [String: Any])
@@ -881,6 +884,35 @@ struct ResearchAnswerFixture {
     let source: ResearchDriverFixture
     private let planner: ResearchAnswerRecordingPlanner
     private let transport: ResearchAnswerTransport
+    private let reader: ResearchAnswerReader
+    private let reviewer: ResearchAnswerReviewer
+    func exportRequests(to path: String, links: [URLRequest]) throws {
+        let directory = URL(fileURLWithPath: path, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let connection = try ComputerUseTextModelConnection(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+            bearerToken: "fixture-token-value", modelAlias: "fixture-model")
+        let transport = URLSessionOSAtlasTransport()
+        let localReader = ComputerUseLocalBrowserResultPlanner(connection: connection, transport: transport)
+        let localReviewer = ComputerUseLocalBrowserResultReviewPlanner(connection: connection, transport: transport)
+        func write(_ request: URLRequest, name: String) throws {
+            try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent(name + ".json"), options: .atomic)
+        }
+        // Pure serialization only. Review partitioning matches the production
+        // planner; no tokenization/completion is sent to these transports.
+        for (index, input) in reader.inputs.enumerated() {
+            try write(localReader.makeRequest(goal: input.0, page: input.1), name: "reading-\(index)")
+        }
+        for (index, input) in reviewer.inputs.enumerated() {
+            if try ComputerUseBrowserReviewPart.wholeOutputFits(input) {
+                try write(localReviewer.makeRequest(input), name: "review-\(index)")
+            } else {
+                for (partIndex, part) in try ComputerUseBrowserReviewPart.plan(input).enumerated() {
+                    try write(localReviewer.makeRequest(input, part: part), name: "review-\(index)-\(partIndex)")
+                }
+            }
+        }
+        for (index, request) in links.enumerated() { try write(request, name: "link-\(index)") }
+    }
     var inputs: [ComputerUseBrowserLinkSelectionInput] { planner.inputs }
     func modelCalls() async -> (counts: [URLRequest], completions: [URLRequest]) { await transport.calls }
     static func make(count: Int = 1, requested: Int? = nil, price: String = "USD 40", duplicate: Bool = false,
@@ -896,8 +928,8 @@ struct ResearchAnswerFixture {
             bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: transport)
         let planner = ResearchAnswerRecordingPlanner(local: local)
         let reader = ResearchAnswerReader(omitDetailLinks: omitDetailLinks)
-        let reviewed = ComputerUseReviewedBrowserResultPlanner(reader: reader,
-            reviewer: ResearchAnswerReviewer(quantityPolicy: quantityPolicy, controlRelationships: controlRelationships))
+        let reviewer = ResearchAnswerReviewer(quantityPolicy: quantityPolicy, controlRelationships: controlRelationships)
+        let reviewed = ComputerUseReviewedBrowserResultPlanner(reader: reader, reviewer: reviewer)
         var rows: [[String: Any]] = [row("Find concerts. ", "outcome", "category"), row("Under USD 50. ", "condition", "price")]
         if let requested { rows.append(row("\(requested) options. ", "condition", "quantity")) }
         if inventory != nil { rows.append(row("2 tickets. ", "condition", "quantity")) }
@@ -932,7 +964,7 @@ struct ResearchAnswerFixture {
             detailsBodyHTML: historyRoute ? alpha + "<p>Alpha conditions apply</p>" : nil,
             betaBodyHTML: historyRoute ? beta + "<p>Beta conditions apply</p>" : nil)
         source.goal.select = { _ in try json(["disposition":"research", "requirements":rows, "question":["topic":"none", "requirements":[]]]) }
-        return .init(source: source, planner: planner, transport: transport)
+        return .init(source: source, planner: planner, transport: transport, reader: reader, reviewer: reviewer)
     }
     private static func row(_ text: String, _ role: String, _ field: String) -> [String: Any] {
         ["turn":0, "source":text, "role":role, "field":field, "relation":"unspecified", "values":[]]
@@ -955,9 +987,11 @@ private final class ResearchAnswerRecordingPlanner: ComputerUseBrowserLinkPlanni
 private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
     let omitDetailLinks: Bool
     private var calls = 0
+    private(set) var inputs: [(ComputerUseBrowserGoalInput, ComputerUseBrowserResultPageInput)] = []
     init(omitDetailLinks: Bool) { self.omitDetailLinks = omitDetailLinks }
     func propose(goal: ComputerUseBrowserGoalInput, page: ComputerUseBrowserResultPageInput) async throws -> ComputerUseBrowserResultProposal {
         calls += 1
+        inputs.append((goal, page))
         let context = try ResearchAnswerFixture.object(Data(page.contextJSON.utf8)), records = try XCTUnwrap(context["records"] as? [[String: Any]])
         func belongs(_ record: [String: Any], to group: String) -> Bool {
             var current = record["group"] as? String
@@ -998,10 +1032,16 @@ private final class ResearchAnswerReader: ComputerUseBrowserResultPlanning {
     }
 }
 
-private struct ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
+@MainActor
+private final class ResearchAnswerReviewer: ComputerUseBrowserResultReviewPlanning {
     let quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning?
     let controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]?
+    private(set) var inputs: [ComputerUseBrowserResultReviewInput] = []
+    init(quantityPolicy: ComputerUseBrowserResultReview.QuantityMeaning?, controlRelationships: [ComputerUseBrowserControlRelevance.Relationship]?) {
+        self.quantityPolicy = quantityPolicy; self.controlRelationships = controlRelationships
+    }
     func propose(_ input: ComputerUseBrowserResultReviewInput) async throws -> ComputerUseBrowserResultReview {
+        inputs.append(input)
         let candidates: [[String: Any]] = (0..<input.candidateCount).map { candidate in
             var value: [String: Any] = ["association":"singleOffer", "fields":(0..<input.fieldCounts[candidate]).map { index in
                 let kind = input.fieldKind(candidate: candidate, field: index)

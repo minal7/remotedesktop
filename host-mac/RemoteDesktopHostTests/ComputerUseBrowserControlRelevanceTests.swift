@@ -100,15 +100,20 @@ final class ComputerUseBrowserControlRelevanceTests: XCTestCase {
 
     func testLocalRequestIncludesBoundedControlReviewWithoutInvokingTransport() throws {
         let input = try input(), planner = try ComputerUseLocalBrowserResultReviewPlanner(connection: .init(
-            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let parts = try ComputerUseBrowserReviewPart.plan(input)
-        for part in [nil, parts.first, parts.last] {
+        for (index, part) in [nil, parts.first, parts.last].enumerated() {
             let request = try planner.makeRequest(input, part: part), body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
             let format = try XCTUnwrap(body["response_format"] as? [String: Any]), schema = try XCTUnwrap(format["json_schema"] as? [String: Any])
             XCTAssertEqual(schema["name"] as? String, part == nil ? "browser_result_review_v6" : "browser_result_review_part_v5")
             XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(request.timeoutInterval, 30)
             let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
             XCTAssertEqual(messages[1]["content"], try part?.contextJSON ?? input.contextJSON)
+            if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+                let directory = URL(fileURLWithPath: path, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("unread-control-\(index).json"), options: .atomic)
+            }
         }
     }
 

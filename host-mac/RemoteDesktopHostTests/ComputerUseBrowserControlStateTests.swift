@@ -113,11 +113,25 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
         }
         XCTAssertThrowsError(try review("availableQuantity"))
         XCTAssertEqual(try review("selectedQuantity").candidates[0].fields[1].quantity, .selectedQuantity)
-        let planner = try ComputerUseLocalBrowserResultPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+        let connection = try ComputerUseTextModelConnection(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
+            bearerToken: "fixture-token-value", modelAlias: "fixture-model")
+        let planner = ComputerUseLocalBrowserResultPlanner(connection: connection, transport: ControlStateUnusedTransport())
         let request = try planner.makeRequest(goal: goal, page: input), body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
         XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_candidates_v2")
         XCTAssertEqual(try object(reviewInput.contextJSON)["version"] as? Int, 5)
+        if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("control-reading.json"), options: .atomic)
+            let reviewer = ComputerUseLocalBrowserResultReviewPlanner(connection: connection, transport: ControlStateUnusedTransport())
+            let parts: [ComputerUseBrowserReviewPart?] = try ComputerUseBrowserReviewPart.wholeOutputFits(reviewInput)
+                ? [nil] : ComputerUseBrowserReviewPart.plan(reviewInput).map { Optional($0) }
+            for (index, part) in parts.enumerated() {
+                let request = try reviewer.makeRequest(reviewInput, part: part)
+                try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("control-review-\(index).json"), options: .atomic)
+            }
+        }
     }
 
     func testDriverUsesTheSelectedDateAndReportsControlObservationsSeparatelyFromQuotes() async throws {

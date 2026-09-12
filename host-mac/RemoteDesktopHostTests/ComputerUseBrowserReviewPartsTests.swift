@@ -200,7 +200,7 @@ private enum ReviewPartsFixture {
     static func json(_ value: Any) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), as: UTF8.self) }
     static func object(_ data: Data) throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any]) }
     static func planner(_ transport: any ComputerUseTextModelTransport, budget: Duration = .seconds(30)) throws -> ComputerUseLocalBrowserResultReviewPlanner {
-        try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token", modelAlias: "fixture-model"), transport: transport, budget: budget)
+        try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: transport, budget: budget)
     }
 }
 
