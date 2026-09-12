@@ -525,14 +525,28 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
             let directory = URL(fileURLWithPath: path, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let planner = ComputerUseLocalBrowserActionPlanner(connection: try .init(
+            let connection = try ComputerUseTextModelConnection(
                 baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
-                bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: URLSessionOSAtlasTransport())
+                bearerToken: "fixture-token-value", modelAlias: "fixture-model")
+            let transport = URLSessionOSAtlasTransport()
+            let planner = ComputerUseLocalBrowserActionPlanner(connection: connection, transport: transport)
             // Serialize synthetic fixture requests only; neither tokenization
             // nor completion is sent to this transport.
             for (index, input) in fixture.actions.inputs.enumerated() {
                 let body = try XCTUnwrap(planner.makeRequest(input).httpBody)
                 try body.write(to: directory.appendingPathComponent("action-\(index).json"), options: .atomic)
+            }
+            let goalPlanner = ComputerUseLocalBrowserGoalPlanner(connection: connection, transport: transport)
+            let searchPlanner = ComputerUseLocalBrowserSearchPlanner(connection: connection, transport: transport)
+            let formPlanner = ComputerUseLocalBrowserFormPlanner(connection: connection, transport: transport)
+            for (kind, requests) in [
+                ("goal", try fixture.goal.inputs.map(goalPlanner.makeRequest)),
+                ("search", try fixture.search.inputs.map(searchPlanner.makeRequest)),
+                ("form", try fixture.forms.inputs.map(formPlanner.makeRequest))
+            ] {
+                for (index, request) in requests.enumerated() {
+                    try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("\(kind)-\(index).json"), options: .atomic)
+                }
             }
         }
         XCTAssertEqual(fixture.forms.inputs.count, 1)
@@ -1000,6 +1014,7 @@ struct ResearchDriverFixture {
         let server = try OwnedBrowserHTTPFixture(routes: ["/signal": .init(held: heldSignal), "/before": .init(body: card("/old")),
             "/search?q=concerts": .init(body: searchBodyHTML ?? card("/details") + form), "/details": .init(body: detailsBodyHTML ?? card("/offers")),
             "/filtered?q=concerts": .init(body: card("/more")),
+            "/filtered?q=concerts&category=concerts": .init(body: card("/more")),
             "/offers": .init(body: offersBodyHTML ?? card("/more")), "/account": .init(body: "<label>Password<input type=password></label>"),
             "/account-ready": .init(body: card("/logged-in-offer")), "/logged-in-offer": .init(body: card("/more")),
             "/beta": .init(body: betaBodyHTML ?? card("/more"))])

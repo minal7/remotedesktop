@@ -1390,7 +1390,14 @@ final class ComputerUseBrowserFormPlannerTests: XCTestCase {
             let request = try XCTUnwrap(requests.first), body = try object(XCTUnwrap(request.httpBody))
             let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
             XCTAssertEqual(messages[1]["content"], fixture.input.contextJSON)
-            XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserFormPlanner.instructions)
+            XCTAssertEqual(messages[0]["content"], ComputerUseLocalBrowserFormPlanner.instructions(for: fixture.input))
+            if count == 3_008, let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+                let directory = URL(fileURLWithPath: path, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                // The transport above is in-memory; export only the synthetic
+                // request body for an optional vocabulary-only size probe.
+                try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("form-mixed-0.json"), options: .atomic)
+            }
             XCTAssertEqual(request.timeoutInterval, 30); XCTAssertEqual(request.url?.host, "127.0.0.1")
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-token-value")
             XCTAssertEqual(body["max_tokens"] as? Int, 1_024); XCTAssertEqual(body["cache_prompt"] as? Bool, false)

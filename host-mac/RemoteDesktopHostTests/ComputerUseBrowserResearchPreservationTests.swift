@@ -4068,8 +4068,13 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             XCTAssertThrowsError(try ComputerUseBrowserFormProposal.decode(content: content, input: input))
         }
         let planner = try ComputerUseLocalBrowserFormPlanner(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
-            bearerToken: "fixture", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
+            bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: ControlStateUnusedTransport())
         let request = try planner.makeRequest(input)
+        if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
+            let directory = URL(fileURLWithPath: path, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try XCTUnwrap(request.httpBody).write(to: directory.appendingPathComponent("form-retain-0.json"), options: .atomic)
+        }
         let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
         let response = try XCTUnwrap(body["response_format"] as? [String: Any])
         let schema = try XCTUnwrap(response["json_schema"] as? [String: Any])
@@ -4226,11 +4231,26 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
         _ = try await prepareRetainOnly(fixture)
         let owner = try fixture.owner()
         configureMixed(fixture, editing: [], retaining: ["Query","Category"], querying: true)
+        let formDecision = try XCTUnwrap(fixture.actions.select)
+        var resultReadings = 0
+        fixture.actions.select = { input in
+            // The query leaves the form. The result page needs a reading,
+            // not another attempt to select its now-absent Query field.
+            if input.formIDs.isEmpty && input.queryReceipt == nil {
+                XCTAssertEqual(fixture.server.count("/filtered?q=concerts&category=concerts"), 1)
+                resultReadings += 1
+                return #"{"read_results":true}"#
+            }
+            return try formDecision(input)
+        }
         fixture.forms.select = { input in
             XCTAssertTrue(input.isRetainOnly)
             return #"{"retain":true}"#
         }
-        _ = try await fixture.resume()
+        guard case .browserResearchProgress = try await fixture.resume() else {
+            return XCTFail("A retained query must continue to result assessment, not complete the task")
+        }
+        XCTAssertEqual(resultReadings, 1)
         XCTAssertEqual(owner.confirmedFormHistory.map(\.retainedCriterionCount), [0,2])
         XCTAssertEqual(fixture.forms.inputs.count, 1)
         XCTAssertEqual(fixture.state.commands.filter { $0 == .edit }.count, 2)
