@@ -1776,11 +1776,48 @@ final class ComputerUseTests: XCTestCase {
         })
         let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
-        let prompt = makeEnvelope(id: "workflow-login", kind: .prompt,
+        let hostID = UUID().uuidString, peerID = UUID().uuidString, sessionID = "workflow-tls-session"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: "123456")
+        let credential = try LocalComputerUseCredential(rawKey: Data(repeating: 0x6D, count: 32))
+        let broker = LocalComputerUseBrokerServer(credential: credential, hostID: hostID, channel: channel,
+            authorizePeer: { peer in fixture.manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in fixture.manager.revokePeerAuthorization() })
+        let port = try await broker.start()
+        defer { broker.stop() }
+        var messages: [ComputerUseEnvelope] = []
+        func exchange(_ envelopes: [ComputerUseEnvelope] = [], acknowledging ids: [String] = []) async throws -> LocalComputerUseRPCResponse {
+            let response = try await LocalComputerUseRPCTransport.call(
+                endpoint: .init(host: "127.0.0.1", port: port), credential: credential,
+                request: .init(requestID: UUID().uuidString, senderID: peerID, targetID: hostID,
+                    sessionID: sessionID, envelopes: envelopes, acknowledgedEnvelopeIDs: ids))
+            messages.append(contentsOf: response.envelopes)
+            return response
+        }
+        // Drive the production mailbox/handler boundary explicitly. This test
+        // does not start the app's external-service polling lifecycle.
+        func deliver(_ envelope: ComputerUseEnvelope) async throws {
+            let accepted = try await exchange([envelope])
+            XCTAssertEqual(accepted.acceptedEnvelopeIDs, [envelope.id])
+            let queued = try await channel.poll()
+            XCTAssertEqual(queued.map(\.id), [envelope.id])
+            for message in queued { XCTAssertTrue(fixture.manager.handle(message, channel: channel)) }
+            try await channel.acknowledge(queued)
+        }
+        func receive(_ outcome: ComputerUseTerminalOutcome) async throws -> ComputerUseTaskUpdate {
+            for _ in 0..<200 {
+                let response = try await exchange()
+                if let update = response.envelopes.compactMap({ try? ComputerUseTaskUpdate.decodeBody($0.body) })
+                    .first(where: { $0.taskID == "workflow-login" && $0.outcome == outcome }) { return update }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            return try XCTUnwrap(Optional<ComputerUseTaskUpdate>.none, "No expected workflow response arrived over TLS")
+        }
+        let prompt = ComputerUseEnvelope(id: "workflow-login", senderID: peerID, targetID: hostID,
+            pairingCode: "123456", sessionID: sessionID, kind: .prompt,
             body: "Open \(base.appendingPathComponent("form").absoluteString) then set \"Destination\" to \"Paris\" then open the form query using \"Search\" then open the link \"Event details\"")
-        fixture.manager.authorizePeer(senderID: prompt.senderID)
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        try await deliver(prompt)
         await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .paused && server.count("/release-login") == 1 }
+        let intervention = try await receive(.userInterventionRequired)
         XCTAssertEqual(fallbackEntries, 0)
         XCTAssertEqual(server.count("/form"), 1)
         XCTAssertEqual(server.count("/edited?value=Paris"), 0)
@@ -1792,9 +1829,12 @@ final class ComputerUseTests: XCTestCase {
         for privateValue in ["Paris", "Destination", "private-fixture-password", base.absoluteString] { XCTAssertFalse(encoded.contains(privateValue)) }
         server.releaseHeldResponses()
         await waitUntil(timeoutIterations: 1_000) { server.count("/logged-in") == 1 && fixture.browser.hasPageAwaitingHandback }
-        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume,
-            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        let resume = ComputerUseEnvelope(senderID: peerID, targetID: hostID, pairingCode: "123456", sessionID: sessionID,
+            kind: .resume, body: try ComputerUseControlRequest(taskID: prompt.id, revision: 1,
+                observedHostControlEpoch: intervention.hostControlEpoch).encodedBody())
+        try await deliver(resume)
         await waitUntil(timeoutIterations: 1_000) { fixture.manager.activity == .idle && server.count("/event?session=retained") == 1 }
+        let delivered = try await receive(.taskCompleted)
         XCTAssertEqual(fallbackEntries, 0)
         XCTAssertEqual(fixture.browser.taskID, prompt.id)
         XCTAssertEqual(server.count("/form"), 1, "Resume must skip the already confirmed initial page opening")
@@ -1807,11 +1847,17 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(completed.stepIDs, paused.stepIDs)
         XCTAssertEqual(completed.promptDigest, paused.promptDigest)
         XCTAssertEqual(completed.contractDigest, paused.contractDigest)
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-        await Task.yield()
+        let pending = try await exchange()
+        let acknowledged = try await exchange(acknowledging: pending.envelopes.map(\.id))
+        XCTAssertFalse(acknowledged.envelopes.contains { message in
+            guard let update = try? ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
+            return update.taskID == prompt.id && update.outcome == .taskCompleted
+        }, "Replay must be delivered again after the original terminal was acknowledged")
+        try await deliver(prompt)
+        let replayed = try await receive(.taskCompleted)
+        XCTAssertEqual(replayed.text, delivered.text)
         XCTAssertEqual(server.count("/form"), 1)
         XCTAssertEqual(server.count("/edited?value=Paris"), 1)
-        let messages = await fixture.channel.sentMessages()
         XCTAssertFalse(messages.contains { $0.body.contains("private-fixture-password") })
         XCTAssertTrue(messages.contains { message in
             guard message.kind == .assistant, let update = try? ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
