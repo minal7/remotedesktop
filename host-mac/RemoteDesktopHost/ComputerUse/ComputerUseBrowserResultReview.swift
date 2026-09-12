@@ -216,7 +216,7 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
                     }
                     requirements = try evaluations.enumerated().map { requirementIndex, value in
                         guard case .object(let item) = value, Set(item.keys) == ["requirement", "judgment", "texts"],
-                              case .number(let number)? = item["requirement"], Int(exactly: number) == requirementIndex,
+                              item["requirement"]?.exactInteger == requirementIndex,
                               case .string(let name)? = item["judgment"], let judgment = Judgment(rawValue: name),
                               case .array(let references)? = item["texts"], references.count <= 8 else {
                             throw ComputerUseBrowserResultReviewError.invalidProposal
@@ -278,15 +278,28 @@ struct ComputerUseBrowserResultReview: Equatable, Sendable, CustomStringConverti
     /// Native candidate identity includes the entire review. The private
     /// input is separately compared exactly before attaching the review.
     var digest: String {
-        ComputerUseTaskContract.digest([!input.unobservedControlIDs.isEmpty ? "browser-result-review-v6" : (input.hasControlSources ? "browser-result-review-v5" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1"))), input.contextJSON, String(candidates.count)]
-            + candidates.flatMap { candidate in
-                [candidate.association.rawValue, String(candidate.fields.count)] + candidate.fields.flatMap {
-                    [$0.scope.rawValue, $0.price.rawValue, String($0.qualifierTextIDs.count)] + $0.qualifierTextIDs
-                        + ($0.quantity.map { ["quantity", $0.rawValue] } ?? [])
-                } + (candidate.requirements.map { ["requirements", String($0.count)] + $0.flatMap {
-                    [$0.judgment.rawValue, String($0.textIDs.count)] + $0.textIDs
-                } } ?? []) + candidate.controls.flatMap { [$0.controlID, $0.relationship.rawValue, String($0.evidenceIDs.count)] + $0.evidenceIDs }
-            })
+        let version = !input.unobservedControlIDs.isEmpty ? "browser-result-review-v6" : (input.hasControlSources ? "browser-result-review-v5" : (input.hasQuantityFields ? "browser-result-review-v3" : (hasRequirementMapping ? "browser-result-review-v2" : "browser-result-review-v1")))
+        var identity = [version, input.contextJSON, String(candidates.count)]
+        for candidate in candidates {
+            identity += [candidate.association.rawValue, String(candidate.fields.count)]
+            for field in candidate.fields {
+                identity += [field.scope.rawValue, field.price.rawValue, String(field.qualifierTextIDs.count)]
+                identity += field.qualifierTextIDs
+                if let quantity = field.quantity { identity += ["quantity", quantity.rawValue] }
+            }
+            if let requirements = candidate.requirements {
+                identity += ["requirements", String(requirements.count)]
+                for requirement in requirements {
+                    identity += [requirement.judgment.rawValue, String(requirement.textIDs.count)]
+                    identity += requirement.textIDs
+                }
+            }
+            for control in candidate.controls {
+                identity += [control.controlID, control.relationship.rawValue, String(control.evidenceIDs.count)]
+                identity += control.evidenceIDs
+            }
+        }
+        return ComputerUseTaskContract.digest(identity)
     }
     /// Indices follow the immutable reading's candidate and field order.
     var plannerContext: [[String: Any]] {

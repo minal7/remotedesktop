@@ -1,10 +1,53 @@
 import CoreMedia
 import CoreVideo
+import CoreGraphics
+import Darwin
 import ScreenCaptureKit
 import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    /// One passive initial-frame observation; no pixels are saved or encoded.
+    /// This tests native metadata admission, not stationary recovery or remote presentation.
+    func test_optInNativeInitialFrameMetadata() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SINGLE_CAPTURE_METADATA"] == "1" else {
+            throw XCTSkip("Opt-in: one passive display frame, no audio, input or inference")
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            return XCTFail("The test host needs Screen Recording permission for this experiment")
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        let display = try XCTUnwrap(content.displays.first { $0.displayID == CGMainDisplayID() })
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let info = SCShareableContent.info(for: filter)
+        let source = CaptureSizing.normalized(width: Int(info.contentRect.width * CGFloat(info.pointPixelScale)),
+            height: Int(info.contentRect.height * CGFloat(info.pointPixelScale)))
+        // A modest output size exercises the production downscaling/placement contract.
+        let size = CaptureSizing.encoderSafe(width: source.width, height: source.height, maximumMacroblocksPerFrame: 3_600)
+        let config = ScreenCapture.streamConfiguration(width: size.width, height: size.height, audioEnabled: false)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        let received = expectation(description: "A complete initial frame arrives within five seconds")
+        let probe = NativeCaptureMetadataProbe(received: received, displayScale: Double(info.pointPixelScale))
+        let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+        try stream.addStreamOutput(probe, type: .screen, sampleHandlerQueue: DispatchQueue(label: "repair.capture-metadata"))
+        do {
+            try await stream.startCapture()
+            await fulfillment(of: [received], timeout: 5)
+            try await stream.stopCapture()
+        } catch {
+            try? await stream.stopCapture()
+            throw error
+        }
+        let report = try XCTUnwrap(probe.report)
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted]), as: UTF8.self)
+        let attachment = XCTAttachment(string: json)
+        attachment.name = "Initial capture metadata"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertEqual(report["frameAccepted"], "true", json)
+        XCTAssertEqual(report["fullDisplayPlacementAccepted"], "true", json)
+    }
+
     func test_capturePlacementConvertsSurfacePointsWithoutApplyingContentScaleTwice() throws {
         let placement = try XCTUnwrap(CaptureVideoPlacement.read(placementAttachments(
             rect: CGRect(x: 0, y: 0, width: 960, height: 540), scale: 2, contentScale: 0.5)))
@@ -33,7 +76,7 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(contentScale: 0)))
         XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(contentScale: -1)))
         for rect in [CGRect.zero, CGRect(x: 0, y: 0, width: -1, height: 2),
-                     CGRect(x: .infinity, y: 0, width: 2, height: 2)] {
+                     CGRect(x: CGFloat.infinity, y: 0, width: 2, height: 2)] {
             XCTAssertNil(CaptureVideoPlacement.read(placementAttachments(rect: rect)))
         }
         var booleanRect = valid
@@ -249,8 +292,8 @@ final class ScreenCaptureSizingTests: XCTestCase {
             pixelWidth: 3840, pixelHeight: 2160, rotation: 0))
         let geometry = try XCTUnwrap(CaptureDisplayGeometry(state: state, contentSizeInPoints: bounds.size, backingScale: 2))
         XCTAssertEqual(geometry.backingWidth, 3840); XCTAssertEqual(geometry.backingHeight, 2160)
-        for invalid in [CGRect(x: .nan, y: 0, width: 10, height: 10),
-                        CGRect(x: 0, y: .infinity, width: 10, height: 10),
+        for invalid in [CGRect(x: CGFloat.nan, y: 0, width: 10, height: 10),
+                        CGRect(x: 0, y: CGFloat.infinity, width: 10, height: 10),
                         CGRect(x: 0, y: 0, width: 0, height: 10),
                         CGRect(x: 0, y: 0, width: 10.5, height: 10),
                         CGRect(x: 0, y: 0, width: CGFloat(Int64.max), height: 10)] {
@@ -1078,7 +1121,7 @@ final class ScreenCaptureSizingTests: XCTestCase {
         var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMTime(value: 7, timescale: 2), decodeTimeStamp: .invalid)
         var sample: CMSampleBuffer?
         XCTAssertEqual(CMSampleBufferCreateForImageBuffer(allocator: kCFAllocatorDefault,
-            imageBuffer: imageBuffer, dataReady: dataReady, makeDataReadyCallback: nil, makeDataReadyRefcon: nil,
+            imageBuffer: imageBuffer, dataReady: dataReady, makeDataReadyCallback: nil, refcon: nil,
             formatDescription: try XCTUnwrap(format), sampleTiming: &timing,
             sampleBufferOut: &sample), noErr)
         let result = try XCTUnwrap(sample)
@@ -1356,5 +1399,43 @@ private final class CaptureLifecycleTrace: @unchecked Sendable {
     var values: [String] {
         lock.lock(); defer { lock.unlock() }
         return entries
+    }
+}
+
+private final class NativeCaptureMetadataProbe: NSObject, SCStreamOutput {
+    private let lock = NSLock()
+    private let received: XCTestExpectation
+    private let displayScale: Double
+    private var captured: [String: String]?
+    var report: [String: String]? { lock.withLock { captured } }
+
+    init(received: XCTestExpectation, displayScale: Double) {
+        self.received = received; self.displayScale = displayScale
+    }
+
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, CaptureVideoStatus.read(sampleBuffer: sampleBuffer) == .complete else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard captured == nil else { return }
+        let observedAt = mach_absolute_time()
+        let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer, observedAtHostTime: observedAt)
+        let rows = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
+        let metadata = rows?.first ?? [:]
+        var values = ["frameAccepted": String(frame != nil), "observedAtHostTicks": String(observedAt),
+            "displayScale": String(displayScale), "fullDisplayPlacementAccepted": "false"]
+        for key in [SCStreamFrameInfo.status, .displayTime, .contentRect, .contentScale, .scaleFactor] {
+            values[key.rawValue] = metadata[key].map { String(describing: $0) } ?? "missing"
+        }
+        if let image = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            values["width"] = String(CVPixelBufferGetWidth(image)); values["height"] = String(CVPixelBufferGetHeight(image))
+        }
+        if let frame {
+            values["fullDisplayPlacementAccepted"] = String(frame.placement.coversFullDisplaySurface(
+                width: frame.metadata.width, height: frame.metadata.height, displayScale: displayScale))
+            values["captureTimeNanoseconds"] = String(frame.metadata.captureTimeNanoseconds)
+            values["presentationTimeNanoseconds"] = frame.metadata.presentationTimeNanoseconds.map(String.init) ?? "missing"
+        }
+        captured = values
+        received.fulfill()
     }
 }

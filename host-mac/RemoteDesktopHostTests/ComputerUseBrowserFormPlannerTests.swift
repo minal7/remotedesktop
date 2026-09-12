@@ -2011,7 +2011,7 @@ private struct IntroducedDateActionFixture: ComputerUseBrowserActionPlanning {
     var preservationIndex: Int? = nil
     var fieldLabel: String = "Departure"
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
-        if let review = try FormEffectScopeFixture.response(input, editing: [fieldLabel:indices],
+        if let review = try await FormEffectScopeFixture.response(input, editing: [fieldLabel:indices],
             preserving: preservationIndex.map { ["Reference":$0] } ?? [:]) {
             return try .decode(content: review, input: input)
         }
@@ -2024,7 +2024,7 @@ private struct ReplacementFormActionFixture: ComputerUseBrowserActionPlanning {
     let editing: [String: [Int]]
     let preservation: Int
     func propose(_ input: ComputerUseBrowserActionInput) async throws -> ComputerUseBrowserActionProposal {
-        if let review = try FormEffectScopeFixture.response(input, editing: editing, preserving: ["Reference":preservation]) {
+        if let review = try await FormEffectScopeFixture.response(input, editing: editing, preserving: ["Reference":preservation]) {
             return try .decode(content: review, input: input)
         }
         let form = try XCTUnwrap(input.formIDs.first)

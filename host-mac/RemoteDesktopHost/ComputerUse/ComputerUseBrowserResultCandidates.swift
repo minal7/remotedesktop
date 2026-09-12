@@ -381,12 +381,18 @@ struct ComputerUseBrowserResultCandidates: Sendable, CustomStringConvertible, Cu
             includedTexts.formUnion(texts.map(\.id)); includedLinks.formUnion(links.map(\.id))
             includedControls.formUnion(controls.map(\.id))
             let assigned = Set(selection.fields.flatMap(\.textIDs))
-            let identity = ["browser-result-candidate-v2", goal.digest, evidence.document.contextID,
+            var identity: [String] = ["browser-result-candidate-v2", goal.digest, evidence.document.contextID,
                 String(evidence.document.generation), evidence.documentID, page.id, selection.containerID]
-                + selection.fields.flatMap { [$0.kind.rawValue, String($0.textIDs.count)] + $0.textIDs + [String($0.controlIDs.count)] + $0.controlIDs }
-                + [String(selection.linkIDs.count)] + selection.linkIDs
-                + (answerPolicy.map { ["answer-source-policy", $0.digest] } ?? [])
-                + (proposal.review.map { ["semantic-review", $0.digest] } ?? [])
+            for field in selection.fields {
+                identity += [field.kind.rawValue, String(field.textIDs.count)]
+                identity += field.textIDs
+                identity.append(String(field.controlIDs.count))
+                identity += field.controlIDs
+            }
+            identity.append(String(selection.linkIDs.count))
+            identity += selection.linkIDs
+            if let answerPolicy { identity += ["answer-source-policy", answerPolicy.digest] }
+            if let review = proposal.review { identity += ["semantic-review", review.digest] }
             return Candidate(id: ComputerUseTaskContract.digest(identity), containerID: selection.containerID, fields: selection.fields,
                 texts: texts.map(text), links: links.map(link), controls: controls.map(control), selectedLinkIDs: selection.linkIDs,
                 unclassifiedTextIDs: texts.filter { !assigned.contains($0.id) }.map(\.id),
@@ -480,13 +486,17 @@ struct ComputerUseBrowserLinkSelectionInput: Equatable, Sendable, CustomStringCo
         }
         contextJSON = String(decoding: try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]), as: UTF8.self)
         let nativeEvidence = candidates.evidence
-        bindingDigest = ComputerUseTaskContract.digest(["browser-link-selection-input-v1", goal.digest,
+        var binding: [String] = ["browser-link-selection-input-v1", goal.digest,
             nativeEvidence.document.contextID, String(nativeEvidence.document.generation), nativeEvidence.documentID, nativeEvidence.page.id, contextJSON]
-            + choices.flatMap { [$0.candidateID, String($0.links.count)] + $0.links }
-            + (candidates.answerSourcePolicy.map { ["answer-source-policy", $0.digest] } ?? [])
-            + (assessment.map { ["requirement-assessment", $0.interpretationDigest] } ?? [])
-            + (evidence.map { ["research-evidence", $0.digest] } ?? [])
-            + history.flatMap { [$0.operationID, $0.goalRevision, $0.kind.rawValue] })
+        for choice in choices {
+            binding += [choice.candidateID, String(choice.links.count)]
+            binding += choice.links
+        }
+        if let policy = candidates.answerSourcePolicy { binding += ["answer-source-policy", policy.digest] }
+        if let assessment { binding += ["requirement-assessment", assessment.interpretationDigest] }
+        if let evidence { binding += ["research-evidence", evidence.digest] }
+        for entry in history { binding += [entry.operationID, entry.goalRevision, entry.kind.rawValue] }
+        bindingDigest = ComputerUseTaskContract.digest(binding)
     }
 
     func resolve(candidate: Int, link: String) throws -> ComputerUseBrowserResearchTask.LinkChoice? {

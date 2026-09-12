@@ -155,7 +155,7 @@ struct ComputerUseBrowserSearchQuery: Equatable, Sendable, CustomStringConvertib
                 continue
             }
             guard Set(item.keys) == ["requirement", "text"],
-                  case .number(let number)? = item["requirement"], let index = Int(exactly: number),
+                  let index = item["requirement"]?.exactInteger,
                   interpretation.requirements.indices.contains(index), index >= previousRequirement,
                   case .string(let text)? = item["text"], !text.isEmpty, text.unicodeScalars.count <= 256, text.utf8.count <= 1_024,
                   text.utf8.elementsEqual(text.trimmingCharacters(in: .whitespacesAndNewlines).utf8),

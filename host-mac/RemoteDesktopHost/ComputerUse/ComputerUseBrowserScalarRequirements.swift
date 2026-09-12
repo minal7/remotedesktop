@@ -1604,9 +1604,14 @@ struct ComputerUseBrowserScalarRequirements: Sendable, CustomStringConvertible, 
         return coversScalarSpan(ranges, span: span, input: input)
     }
     private static func coversQuantityAnswer(_ ranges: [Range<Int>], turn: Int, input: ComputerUseBrowserGoalInput) -> Bool {
-        guard input.userTurns.indices.contains(turn),
-              quantityAnswer(input.userTurns[turn]) != nil || quantityReplacementAnswer(input.userTurns[turn]) != nil,
-              let span = answerSpan(input.userTurns[turn], turn: turn) else { return false }
+        guard input.userTurns.indices.contains(turn) else { return false }
+        let answer = input.userTurns[turn]
+        // Coverage must recognize every answer admitted by the scoped component
+        // question, including "zero children", without broadening generic quantities.
+        let componentAnswer = input.clarifications.indices.contains(turn - 1)
+            && partyComponentReplacementAnswer(answer, topic: input.clarifications[turn - 1].topic) != nil
+        guard componentAnswer || quantityAnswer(answer) != nil || quantityReplacementAnswer(answer) != nil,
+              let span = answerSpan(answer, turn: turn) else { return false }
         return coversScalarSpan(ranges, span: span, input: input)
     }
     private static func coversScalarSpan(_ ranges: [Range<Int>], span: ScalarSpan, input: ComputerUseBrowserGoalInput) -> Bool {

@@ -502,7 +502,7 @@ fileprivate final class CaptureOwnerRetirement: @unchecked Sendable {
 struct CaptureAttemptLease: Equatable, Sendable { fileprivate let id = UUID(); init() {} }
 struct CaptureStopReceipt: Equatable, Sendable {
     fileprivate let owner: CaptureOwnerLease
-    fileprivate let attempt: CaptureAttemptLease
+    let attempt: CaptureAttemptLease
 }
 
 struct CaptureStreamTeardownFailure: Error {

@@ -153,8 +153,7 @@ final class ComputerUseBrowserGoalClarification {
             self.issuedAt = issuedAt; self.expiresAt = expiresAt; self.context = context
             var retainedCount = ""
             if topic.isPartyComponentReplacement {
-                let ledger = ComputerUseBrowserScalarRequirements(proposal: .init(input: input, disposition: .research,
-                    requirements: proposal.requirements, question: nil))
+                let ledger = proposal.clarificationScalarRequirements
                 guard let party = ledger.currentParty(requirementIDs: scope.map(\.requirementID)) else { throw Failure.invalidProposal }
                 retainedCount = topic == .replaceAdults ? "\n\nThe child count will remain \(party.children)."
                     : "\n\nThe adult count will remain \(party.adults)."

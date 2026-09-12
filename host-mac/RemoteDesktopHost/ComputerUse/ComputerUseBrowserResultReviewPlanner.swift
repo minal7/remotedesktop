@@ -109,11 +109,15 @@ struct ComputerUseLocalBrowserResultReviewPlanner: ComputerUseBrowserResultRevie
             "fields":["type":"array", "minItems":1, "maxItems":16, "items":field]]
         var required = ["association", "fields"]
         if input.interpretation != nil {
+            let maximumTextReferences: Int = min(8, input.textIDs.count)
+            let textItems: [String: Any] = input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)
+            let textReferences: [String: Any] = ["type":"array", "maxItems":maximumTextReferences, "items":textItems]
+            let requirementIndex: [String: Any] = ["type":"integer", "minimum":0, "maximum":input.requirementCount - 1]
+            let judgments = input.permitsOfferAssertions ? ComputerUseBrowserResultReview.Judgment.allCases.map(\.rawValue) : ["conflicts", "unknown"]
+            let requirementProperties: [String: Any] = ["requirement":requirementIndex,
+                "judgment":enumeration(judgments), "texts":textReferences]
             let requirement: [String: Any] = ["type":"object", "additionalProperties":false,
-                "properties":["requirement":["type":"integer", "minimum":0, "maximum":input.requirementCount - 1],
-                    "judgment":enumeration(input.permitsOfferAssertions ? ComputerUseBrowserResultReview.Judgment.allCases.map(\.rawValue) : ["conflicts", "unknown"]),
-                    "texts":["type":"array", "maxItems":min(8, input.textIDs.count),
-                        "items":input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)]],
+                "properties":requirementProperties,
                 "required":["requirement", "judgment", "texts"]]
             properties["requirements"] = ["type":"array", "minItems":input.requirementCount, "maxItems":input.requirementCount, "items":requirement]
             required.append("requirements")

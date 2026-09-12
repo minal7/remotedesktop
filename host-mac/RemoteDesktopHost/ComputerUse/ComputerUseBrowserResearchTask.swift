@@ -981,7 +981,7 @@ final class ComputerUseBrowserResearchTask {
         let captured = input
         latestCandidates = nil; latestForm = nil; latestAction = nil
         return try await operate { [self] in
-            func check() throws {
+            @MainActor func check() throws {
                 try self.checkCurrent(captured)
                 guard self.formPreparation === preparation else { throw Failure.formUnavailable }
             }

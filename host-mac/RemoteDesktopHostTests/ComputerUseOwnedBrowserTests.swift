@@ -389,7 +389,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         XCTAssertFalse(browser.hasOwnership(taskID: "queued-urls")); XCTAssertNil(browser.currentDocument(taskID: "queued-urls"))
         XCTAssertTrue(browser.isLoadingPage)
         XCTAssertFalse(browser.validate(document))
-        XCTAssertThrowsError(try browser.claim(taskID: "replacement")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+        do { try browser.claim(taskID: "replacement"); XCTFail("An occupied browser cannot be claimed") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
         do { _ = try await browser.navigate(taskID: "queued-urls", operationID: "blocked", to: base.appendingPathComponent("blocked")); XCTFail("Unprocessed changes cannot dispatch a request") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
         XCTAssertFalse(browser.hasNavigationAttempt(operationID: "blocked")); XCTAssertEqual(server.count("/blocked"), 0)
@@ -567,7 +568,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 deferredEvents += recorded
             } catch { XCTFail("Record arrival before callback state replay: \(error)") }
             XCTAssertTrue(owner.isLoadingPage)
-            XCTAssertThrowsError(try owner.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+            do { try owner.claim(taskID: "premature"); XCTFail("An occupied browser cannot be claimed") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
         }, mayAct: { true })
         owner = browser
         defer { browser.close() }
@@ -598,7 +600,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 owner.webView(view, didStartProvisionalNavigation: navigation)
                 owner.webView(view, didFinish: navigation)
                 if close { owner.close() } else { owner.stop() }
-                XCTAssertThrowsError(try owner.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+                do { try owner.claim(taskID: "premature"); XCTFail("An occupied browser cannot be claimed") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
             }, mayAct: { true })
             owner = browser
             defer { browser.close() }
@@ -790,9 +793,8 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
                 guard command == .pageSnapshot, !stopped, let owner else { return }
                 stopped = true
                 owner.stop()
-                XCTAssertThrowsError(try owner.claim(taskID: "replacement")) {
-                    XCTAssertEqual($0 as? ComputerUseBrowserError, .busy, "Stop cannot release an unfinished native DOM slot")
-                }
+                do { try owner.claim(taskID: "replacement"); XCTFail("Stop cannot release an unfinished native DOM slot") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
                 if close {
                     owner.close()
                     do { replacement = try owner.prepareWorkflowSession(taskID: "replacement") }
@@ -3740,7 +3742,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
             interrupted = true
             owner.webViewWebContentProcessDidTerminate(view)
             XCTAssertEqual(owner.taskID, "failed-dom")
-            XCTAssertThrowsError(try owner.claim(taskID: "replacement")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+            do { try owner.claim(taskID: "replacement"); XCTFail("An occupied browser cannot be claimed") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
         }, mayAct: { true })
         owner = browser
         defer { browser.close() }
@@ -3861,7 +3864,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
             let subscription = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: popup).sink { _ in
                 notifications += 1
                 browser.webViewWebContentProcessDidTerminate(parent)
-                XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+                do { try browser.claim(taskID: "premature"); XCTFail("An occupied browser cannot be claimed") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
                 if ending == "stop" { browser.stop() }
                 if ending == "close" { browser.close() }
             }
@@ -3910,7 +3914,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
             XCTAssertEqual(displayed, controls)
             requests.append(action)
             XCTAssertNil(browser.taskID); XCTAssertFalse(browser.hasSession)
-            XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+            do { try browser.claim(taskID: "premature"); XCTFail("An occupied browser cannot be claimed") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
             browser.close(); browser.stop()
         })
         parent.performClose(nil)
@@ -3958,7 +3963,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
             var notifications = 0
             let subscription = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification, object: child ?? parent).sink { _ in
                 notifications += 1
-                XCTAssertThrowsError(try browser.claim(taskID: "premature")) { XCTAssertEqual($0 as? ComputerUseBrowserError, .busy) }
+                do { try browser.claim(taskID: "premature"); XCTFail("An occupied browser cannot be claimed") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .busy) }
                 browser.close() // Upgrades an in-progress parent Stop when the child is closing.
                 browser.stop()
             }
@@ -3978,6 +3984,8 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: presents only local fixture browser and sign-in windows")
         }
+        var checkpoint = "configure local fixture"
+        defer { print("Visible sign-in final checkpoint: \(checkpoint)") }
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
@@ -3992,7 +4000,15 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
         defer { browser.close() }
         try browser.claim(taskID: "visible-popup")
-        let original = try await browser.navigate(taskID: "visible-popup", operationID: "login", to: base.appendingPathComponent("login"))
+        checkpoint = "load parent login page"
+        let original: ComputerUseBrowserDocument
+        do {
+            original = try await browser.navigate(taskID: "visible-popup", operationID: "login", to: base.appendingPathComponent("login"))
+        } catch {
+            print("Parent navigation failed before cleanup: \(type(of: error)): \(error); active: \(NSApp.isActive), presentation: \(browser.hasRequiredPresentation)")
+            throw error
+        }
+        checkpoint = "open child sign-in window"
         let requirement = try XCTUnwrap(browser.handbackRequirement(taskID: "visible-popup", required: true))
         let parent = try XCTUnwrap(NSApp.windows.first { $0.title == "AI Browser — Remote Desktop" })
         let controls = ComputerUseBrowserTaskControls(taskID: "visible-popup", scopeID: UUID(),
@@ -4010,6 +4026,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         }
         XCTAssertEqual(server.count("/ready"), 1)
         let child = try XCTUnwrap(NSApp.windows.first { $0.title == "Sign-in window — AI Browser" })
+        checkpoint = "verify and close child sign-in window"
         XCTAssertTrue(child.isVisible)
         XCTAssertTrue(NSApp.keyWindow === child)
         XCTAssertFalse(child.isRestorable)
@@ -4028,9 +4045,11 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         XCTAssertEqual(browser.taskControls, controls)
         XCTAssertNil(browser.currentDocument(taskID: "visible-popup"))
         allowed = true
+        checkpoint = "reacquire parent after child close"
         try await browser.reacquireAfterUserControl(taskID: "visible-popup", requirement: requirement)
         XCTAssertEqual(browser.currentDocument(taskID: "visible-popup"), original)
         XCTAssertEqual(server.count("/login"), 1)
+        checkpoint = "finished"
     }
 
     func testSignedHostPresentsAndClosesItsOwnedBrowserWindow() async throws {

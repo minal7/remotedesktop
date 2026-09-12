@@ -18,8 +18,9 @@ struct ComputerUseBrowserReviewPart: Equatable, Sendable {
     var responseSchema: [String: Any] {
         func enumeration(_ values: [String]) -> [String: Any] { ["type":"string", "enum":values] }
         func index(_ values: [Int]) -> [String: Any] { values.isEmpty ? ["type":"integer"] : ["type":"integer", "enum":values] }
-        let references: [String: Any] = ["type":"array", "maxItems":min(8, input.textIDs.count),
-            "items":input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)]
+        let maximumReferences: Int = min(8, input.textIDs.count)
+        let referenceItems: [String: Any] = input.textIDs.isEmpty ? ["type":"string"] : enumeration(input.textIDs)
+        let references: [String: Any] = ["type":"array", "maxItems":maximumReferences, "items":referenceItems]
         var fieldProperties: [String: Any] = ["field":index(fields),
                 "scope":enumeration(input.permitsOfferAssertions ? ["offer", "page", "unknown"] : ["page", "unknown"]),
                 "price":enumeration(ComputerUseBrowserResultReview.Price.allCases.map(\.rawValue)), "qualifiers":references]

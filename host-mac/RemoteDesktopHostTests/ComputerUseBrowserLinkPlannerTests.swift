@@ -314,7 +314,11 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
             }
             XCTFail("A choice cannot publish through Pause during native validation")
         } catch { XCTAssertTrue(error is CancellationError) }
-        XCTAssertTrue(validationStarted); XCTAssertFalse(owner.isOperating); XCTAssertTrue(owner.isPaused)
+        XCTAssertTrue(validationStarted); XCTAssertFalse(owner.isOperating)
+        do {
+            _ = try await owner.planCandidateNavigation { _, _ in XCTFail("Paused work must not reach selection"); return nil }
+            XCTFail("A paused owner requires explicit handback")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
         XCTAssertEqual(owner.input, original); XCTAssertEqual(fixture.server.count("/details"), 0)
         try await owner.resumeAfterUserControl()
         let none = try await owner.planCandidateNavigation { _, _ in nil }

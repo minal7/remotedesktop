@@ -10,6 +10,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
     func testPartyComponentCorrectionRetainsTheOtherCountBudgetAndTicketRequirementAcrossPartitions() throws {
         for (topic, answer, adults, children) in [(ComputerUseBrowserClarificationTopic.replaceAdults, "3 adults", 3, 1), (.replaceChildren, "0 children", 2, 0), (.replaceChildren, "zero children", 2, 0)] {
           for split in [false, true] {
+            let scenario = "\(topic.rawValue), answer: \(answer), split original: \(split)"
             let original = try input("Find concerts. 2 adults and 1 child. Under USD 50. 2 tickets."), state = Clarification(input: original)
             let rows = [row("Find concerts. "), row("2 adults and 1 child. ", role: "condition", field: "quantity"),
                 row("Under USD 50. ", role: "condition", field: "price"), row("2 tickets.", role: "condition", field: "quantity")]
@@ -25,10 +26,10 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
                     row(answerParts[1], turn: 1, role: "condition", field: "source")], disposition: "research")
             let ledger = Scalars(proposal: current), activeStart = old.count + 3
             let activeIDs = Array(current.requirements[activeStart...].map(\.id))
-            XCTAssertFalse(current.hasUncompiledRequirementReplacements)
-            XCTAssertEqual(ledger.currentParty(requirementIDs: activeIDs), Scalars.PartyComposition(adults: Int64(adults), children: Int64(children)))
+            XCTAssertFalse(current.hasUncompiledRequirementReplacements, scenario)
+            XCTAssertEqual(ledger.currentParty(requirementIDs: activeIDs), Scalars.PartyComposition(adults: Int64(adults), children: Int64(children)), scenario)
             for index in 1...old.count {
-                guard case .superseded(let record) = ledger.entries[index].resolution else { return XCTFail("Retain the old party as superseded history") }
+                guard case .superseded(let record) = ledger.entries[index].resolution else { return XCTFail("Retain the old party as superseded history: \(scenario)") }
                 XCTAssertEqual(record.topic, topic); XCTAssertEqual(record.replacementRequirementIDs, activeIDs)
             }
             guard case .bound(let budget) = ledger.entries[old.count + 1].resolution,
@@ -137,7 +138,7 @@ final class ComputerUseBrowserGoalClarificationTests: XCTestCase {
             XCTAssertEqual(ComputerUseBrowserGoalProposal.interpretationBeforeAnswer(at: index, in: fixture.input)?.input, prefix)
         }
         guard case .bound(let budget) = Scalars(proposal: current).entries[1].resolution else { return XCTFail("The original budget must remain bound") }
-        XCTAssertEqual(budget.compareLiteral(.price(try XCTUnwrap(Scalars.Amount(hundredths: 40_000, currency: .USD)), .total, .included)), .satisfied)
+        XCTAssertEqual(budget.compareLiteral(.price(try XCTUnwrap(Scalars.Amount(hundredths: 40_000, currency: .usd)), .total, .included)), .satisfied)
         XCTAssertEqual(current.requirements[2].role, .prohibition)
         let normalized = ComputerUseBrowserResearchFormInput.normalizations(for: current)
         XCTAssertEqual(normalized.filter { $0.kind == .date }.map(\.value), ["2026-10-16"])

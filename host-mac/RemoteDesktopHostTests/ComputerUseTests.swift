@@ -7917,8 +7917,11 @@ final class ComputerUseTests: XCTestCase {
                 XCTAssertEqual(fixture.manager.activity, .paused)
                 XCTAssertEqual(fixture.browser.taskControls?.ownerID, controls.ownerID)
                 XCTAssertEqual(fixture.browser.taskControls?.phase, .paused)
-                XCTAssertThrowsError(try oldTools.perform(.typeText("stale task input"))) {
-                    guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
+                do {
+                    try oldTools.perform(.typeText("stale task input"))
+                    XCTFail("Expected closed action gate")
+                } catch {
+                    guard let error = error as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
                 }
                 if intervene { inputRevokedAdmission = fixture.manager.recordUserInputForIntervention() != nil }
             }

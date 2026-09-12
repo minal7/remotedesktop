@@ -42,7 +42,7 @@ final class ComputerUseBrowserClarificationTransport {
         let owner: ComputerUseBrowserResearchTask
         let answerTaskID: String
         let inputDigest: String
-        fileprivate init(owner: ComputerUseBrowserResearchTask, answerTaskID: String) {
+        @MainActor fileprivate init(owner: ComputerUseBrowserResearchTask, answerTaskID: String) {
             self.owner = owner; self.answerTaskID = answerTaskID; inputDigest = owner.input.digest
         }
     }

@@ -867,7 +867,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
     }
 
     private func changedPendingResearchLinkFixture() async throws -> (fixture: DOMFixture, owner: ComputerUseBrowserResearchTask,
-        reader: BrowserResearchResultFixture, state: ResearchNavigationTestState, directory: URL) {
+        reader: BrowserResearchResultFixture, state: ResearchNavigationTestState, directory: URL, planningWorker: ComputerUsePlanningWorker) {
         let prepared = try await pendingResearchLinkFixture(body: """
             <article><h2>Concert Alpha</h2><a id='details' href='/alpha'>Alpha details</a></article>
             <script>fetch('/signal').then(() => { document.getElementById('details').href = '/fresh'; fetch('/changed'); });</script>

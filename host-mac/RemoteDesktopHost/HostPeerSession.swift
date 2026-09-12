@@ -525,12 +525,18 @@ final class HostPeerSession: NSObject {
     }
 
     private func configureCaptureCallbacks() {
+        let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
+        if audioEnabled {
+            onAudioSample = { [weak self] sample in self?.audioBridge.enqueue(sample) }
+        } else {
+            onAudioSample = nil
+        }
         captureOwner = capture.beginSession(callbacks: ScreenCapture.Callbacks(
             onVideoFrame: { [weak self] frame, attempt in
                 self?.pushVideoFrame(frame)
                 self?.recordRecoveryFrame(from: attempt)
             },
-            onAudioSample: audioEnabled ? { [weak self] sample in self?.audioBridge.enqueue(sample) } : nil,
+            onAudioSample: onAudioSample,
             onVideoUnavailable: { [weak self] attempt in self?.handleCaptureVideoUnavailable(from: attempt) },
             onStopped: { [weak self] receipt, error in
                 // Classify the stop before any retry can retire its receipt.

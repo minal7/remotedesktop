@@ -6494,7 +6494,7 @@ final class HostComputerUseManager: ObservableObject {
             await precedingExecution?.value
             guard !Task.isCancelled,
                   currentExecutionToken == token else { return }
-            let admission = admitAutomation { actionGate.activatePendingAutomation(admissionID) }
+            let admission = admitAutomation { self.actionGate.activatePendingAutomation(admissionID) }
             guard admission == .admitted else {
                 pauseAfterPendingAutomationWasBlocked(context: context, token: token,
                     guidance: Self.admissionGuidance(admission))

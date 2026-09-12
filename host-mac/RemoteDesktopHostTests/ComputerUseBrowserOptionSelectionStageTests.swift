@@ -116,8 +116,11 @@ final class ComputerUseBrowserOptionSelectionStageTests: XCTestCase {
                     let lease = try other.acquireExecution(taskID: stage.contract.taskID, expected: saved)
                     lease.release(); XCTFail("Another runner cannot acquire the in-flight stage")
                 } catch { excluded = error as? ComputerUseTaskJournalStore.StoreError == .busy }
-                XCTAssertThrowsError(try stage.reopened { try .init(directory: $0) }) {
-                    XCTAssertEqual($0 as? ComputerUseBrowserOptionSelectionError, .busy)
+                do {
+                    _ = try stage.reopened { try .init(directory: $0) }
+                    XCTFail("An in-flight stage cannot be reopened")
+                } catch {
+                    XCTAssertEqual(error as? ComputerUseBrowserOptionSelectionError, .busy)
                 }
                 cancel?()
             }

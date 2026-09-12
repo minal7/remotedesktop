@@ -13,6 +13,16 @@ indirect enum MCPJSONValue: Codable, Equatable, Sendable {
     case array([MCPJSONValue])
     case object([String: MCPJSONValue])
 
+    /// Index schemas require an exact integer, including integral JSON doubles.
+    /// Preserve native integer precision and never truncate fractional values.
+    var exactInteger: Int? {
+        switch self {
+        case .integer(let value): return value
+        case .double(let value): return Int(exactly: value)
+        default: return nil
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() {

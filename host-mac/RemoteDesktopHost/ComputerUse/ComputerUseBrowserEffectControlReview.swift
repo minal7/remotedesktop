@@ -43,7 +43,7 @@ struct ComputerUseBrowserEffectControlReview: Equatable, Sendable, CustomStringC
                   case .string(let name)? = row["relationship"], let relationship = ComputerUseBrowserControlRelevance.Relationship(rawValue: name),
                   case .array(let requirements)? = row["requirements"], case .array(let evidence)? = row["evidence"] else { throw invalid }
             let indices = try requirements.map { value -> Int in
-                guard case .number(let number) = value, let index = Int(exactly: number) else { throw invalid }
+                guard let index = value.exactInteger else { throw invalid }
                 return index
             }
             let references = try evidence.map { value -> String in

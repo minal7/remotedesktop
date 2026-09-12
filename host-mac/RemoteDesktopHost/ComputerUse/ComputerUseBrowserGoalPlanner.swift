@@ -255,6 +255,13 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
             question?.topic.rawValue ?? "none"] + (question?.requirementIDs ?? []) + requirements.map(\.id))
     }
 
+    /// Read retained scalar values while composing a clarification question.
+    /// The temporary research disposition is confined to this read-only ledger.
+    var clarificationScalarRequirements: ComputerUseBrowserScalarRequirements {
+        .init(proposal: Self(input: input, disposition: .research,
+            requirements: requirements, question: nil))
+    }
+
     /// Only the complete interpretation sealed by a native question can be
     /// restored. This is historical context, not authority for new effects.
     static func interpretationBeforeAnswer(at index: Int, in input: ComputerUseBrowserGoalInput) -> Self? {
@@ -371,7 +378,7 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
         var requirements: [Requirement] = [], previousTurn = 0
         for (index, row) in rows.enumerated() {
             guard case .object(let item) = row, Set(item.keys) == ["turn", sourceKey, "role", "field", "relation", "values"],
-                  case .number(let turnNumber)? = item["turn"], let turn = Int(exactly: turnNumber),
+                  let turn = item["turn"]?.exactInteger,
                   userTurns.indices.contains(turn), turn >= previousTurn,
                   case .string(let roleValue)? = item["role"], let role = Role(rawValue: roleValue),
                   case .string(let fieldValue)? = item["field"], let field = Field(rawValue: fieldValue),
@@ -381,7 +388,7 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
             }
             let source: String
             if let catalogue {
-                guard case .number(let number)? = item["through"], let end = Int(exactly: number),
+                guard let end = item["through"]?.exactInteger,
                       let retained = catalogue.source(turn: turn, from: nextPieces[turn], through: end) else {
                     throw ComputerUseBrowserGoalPlanError.invalidResponse
                 }
@@ -426,7 +433,7 @@ struct ComputerUseBrowserGoalProposal: Equatable, Sendable, CustomStringConverti
             }
             var indices: [Int] = []
             for value in questionIndices {
-                guard case .number(let number) = value, let index = Int(exactly: number),
+                guard let index = value.exactInteger,
                       requirements.indices.contains(index), index > (indices.last ?? -1) else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
                 indices.append(index)
             }

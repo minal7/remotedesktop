@@ -163,7 +163,7 @@ struct ComputerUseBrowserFormProposal: Equatable, Sendable, CustomStringConverti
     }
 
     private static func requirementIndex(_ value: MCPJSONValue, input: ComputerUseBrowserResearchFormInput) throws -> Int {
-        guard case .number(let number) = value, let index = Int(exactly: number),
+        guard let index = value.exactInteger,
               input.interpretation.requirements.indices.contains(index) else { throw ComputerUseBrowserResearchFormError.invalidProposal }
         return index
     }

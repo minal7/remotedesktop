@@ -373,16 +373,17 @@ struct ComputerUseBrowserActionInput: Equatable, Sendable, CustomStringConvertib
         }.map(\.controlID)) : []
         let queryFormID = formEffectScope?.queryControlID.flatMap { id in evidence.page.controls.first { $0.id == id }?.form?.id }
         let reviewControlIDs = Set(effectReviewControlIDs)
-        effectQueryValueControlIDs = queryFormID.map { form in evidence.page.controls.filter {
+        let queryValueControlIDs = queryFormID.map { form in evidence.page.controls.filter {
             $0.form?.id == form && !$0.disabled && !$0.name.isEmpty && !["submit","button","reset","image"].contains($0.kind)
                 && reviewControlIDs.contains($0.id)
         }.map(\.id) } ?? []
+        effectQueryValueControlIDs = queryValueControlIDs
         let retainedFormControls = formEffectScope?.formID.map { form in editableControls.filter {
             $0.form?.id == form && queryBound.contains($0.id) && reviewControlIDs.contains($0.id)
         }.map(\.id) } ?? []
         let priorReadControls = preparationReview?.readSources.map(\.controlID).filter { reviewControlIDs.contains($0) } ?? []
-        effectRequiredControlIDs = effectQueryValueControlIDs + retainedFormControls
-            + priorReadControls.filter { !effectQueryValueControlIDs.contains($0) && !retainedFormControls.contains($0) }
+        effectRequiredControlIDs = queryValueControlIDs + retainedFormControls
+            + priorReadControls.filter { !queryValueControlIDs.contains($0) && !retainedFormControls.contains($0) }
         effectFieldRequirementIndices = interpretation.requirements.indices.filter {
             replacementsCompiled && !retiredPurposes.contains(interpretation.requirements[$0].id) && [.outcome,.condition].contains(interpretation.requirements[$0].role)
         }
@@ -628,7 +629,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                           case .array(let references)? = row["requirements"], (1...8).contains(references.count),
                           let entry = reviewed.first(where: { $0.controlID == id }) else { throw invalid }
                     let indices: [Int] = try references.map {
-                        guard case .number(let number) = $0, let index = Int(exactly: number), input.effectFieldRequirementIndices.contains(index),
+                        guard let index = $0.exactInteger, input.effectFieldRequirementIndices.contains(index),
                               entry.requirementIndices.isEmpty || entry.requirementIndices.contains(index) else { throw invalid }
                         return index
                     }
@@ -644,7 +645,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                 let controls: [ComputerUseBrowserControlPreservation] = try rows.map { value in
                     guard case .object(let row) = value, Set(row.keys) == ["control","requirement"],
                           case .string(let id)? = row["control"], input.effectAdditionalPreservationControlIDs.contains(id),
-                          case .number(let number)? = row["requirement"], let index = Int(exactly: number),
+                          let index = row["requirement"]?.exactInteger,
                           input.effectReviewRequirementIndices.contains(index),
                           reviewed.contains(where: { $0.controlID == id && ($0.requirementIndices.isEmpty || $0.requirementIndices.contains(index)) }) else { throw invalid }
                     return .init(controlID: id, requirementIndex: index)
@@ -660,7 +661,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                 let controls: [ComputerUseBrowserControlRead] = try rows.map { row in
                     guard case .object(let item) = row, Set(item.keys) == ["control", "requirement"],
                           case .string(let id)? = item["control"], input.readableControlIDs.contains(id),
-                          case .number(let number)? = item["requirement"], let index = Int(exactly: number),
+                          let index = item["requirement"]?.exactInteger,
                           input.readableRequirementIndices.contains(index) else { throw invalid }
                     return .init(controlID: id, requirementIndex: index)
                 }
@@ -682,7 +683,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                 let preserved: [ComputerUseBrowserControlPreservation] = try rows.map { row in
                     guard case .object(let item) = row, Set(item.keys) == ["control", "requirement"],
                           case .string(let control)? = item["control"], input.preservableControlIDs.contains(control),
-                          case .number(let number)? = item["requirement"], let index = Int(exactly: number),
+                          let index = item["requirement"]?.exactInteger,
                           input.interpretation.requirements.indices.contains(index),
                           [.outcome, .condition, .prohibition].contains(input.interpretation.requirements[index].role),
                           input.interpretation.permitsTaskPurpose(input.interpretation.requirements[index]) else { throw invalid }
@@ -696,21 +697,21 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
             if case .object(let selection)? = root["select_option"], Set(selection.keys) == ["control", "option", "requirement"],
                case .string(let control)? = selection["control"], case .string(let option)? = selection["option"],
                input.optionChoices.contains(where: { $0.controlID == control && $0.optionIDs.contains(option) }),
-               case .number(let number)? = selection["requirement"], let index = Int(exactly: number),
+               let index = selection["requirement"]?.exactInteger,
                input.readableRequirementIndices.contains(index) { step = .selectOption(control, option, index) }
             else if case .object(let popup)? = root["open_popup"], Set(popup.keys) == ["control", "requirement"],
                case .string(let id)? = popup["control"], input.popupControlIDs.contains(id),
-               case .number(let number)? = popup["requirement"], let index = Int(exactly: number),
+               let index = popup["requirement"]?.exactInteger,
                input.readableRequirementIndices.contains(index) { step = .openPopup(id, index) }
             else if case .bool(true)? = root["read_results"] { step = .readResults }
             else if case .bool(true)? = root["unavailable"] { step = .unavailable }
             else if case .string(let id)? = root["login_handoff"], input.loginHandoffTargets.contains(where: { $0.id == id }) {
                 step = .loginHandoff(id)
             }
-            else if case .number(let number)? = root["reading"], let index = Int(exactly: number), input.recallableReadingIndices.contains(index) {
+            else if let index = root["reading"]?.exactInteger, input.recallableReadingIndices.contains(index) {
                 step = .recall(index)
             }
-            else if case .number(let number)? = root["revisit"], let index = Int(exactly: number), input.historyVisitIndices.contains(index) {
+            else if let index = root["revisit"]?.exactInteger, input.historyVisitIndices.contains(index) {
                 step = .revisit(index)
             }
             else if case .string(let control)? = root["query"], input.queryControlIDs.contains(control), let receipt = input.queryReceipt {
@@ -719,7 +720,7 @@ struct ComputerUseBrowserActionProposal: Equatable, Sendable, CustomStringConver
                       case .string(let name)? = question["topic"], let topic = ComputerUseBrowserClarificationTopic(rawValue: name),
                       case .array(let rows)? = question["requirements"], (1...8).contains(rows.count) {
                 let indices = try rows.map { value -> Int in
-                    guard case .number(let number) = value, let index = Int(exactly: number),
+                    guard let index = value.exactInteger,
                           input.interpretation.requirements.indices.contains(index) else { throw invalid }
                     return index
                 }

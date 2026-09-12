@@ -106,9 +106,10 @@ final class ComputerUseBrowserAdmissionTests: XCTestCase {
             guard command == .pageIdentity else { return }
             state.onCommand = nil
             owner.pause()
-            XCTAssertThrowsError(try self.prepare(coordinator, taskID: "replacement")) {
-                XCTAssertEqual($0 as? ComputerUseBrowserResearchTask.Failure, .busy)
-            }
+            do {
+                _ = try self.prepare(coordinator, taskID: "replacement")
+                XCTFail("Paused admission must keep its current owner until the callback returns")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .busy) }
         }
         do { _ = try await owner.interpretGoal(); XCTFail("Pause cancels admission before ownership transfers") }
         catch { XCTAssertTrue(error is CancellationError) }

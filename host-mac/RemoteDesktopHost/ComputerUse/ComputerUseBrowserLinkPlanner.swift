@@ -29,24 +29,24 @@ struct ComputerUseBrowserLinkProposal: Sendable, CustomStringConvertible, Custom
             var parser = StrictSemanticJSONParser(content, maximumValueCount: input.allowsAnswer ? 16 : 8)
             guard case .object(let root) = try parser.parse() else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
             if Set(root.keys) == ["revisit"] {
-                guard case .number(let number)? = root["revisit"], let index = Int(exactly: number) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
+                guard let index = root["revisit"]?.exactInteger else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
                 return try .init(input: input, selection: nil, history: input.resolveHistory(visit: index))
             }
             if Set(root.keys) == ["answer"] {
                 guard case .array(let values)? = root["answer"], (1...8).contains(values.count) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
                 let indices = try values.map { value -> Int in
-                    guard case .number(let number) = value, let index = Int(exactly: number) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
+                    guard let index = value.exactInteger else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
                     return index
                 }
                 return try .init(input: input, selection: nil, answer: input.resolveAnswer(indices: indices))
             }
             if Set(root.keys) == ["reading"] {
-                guard case .number(let number)? = root["reading"], let index = Int(exactly: number),
+                guard let index = root["reading"]?.exactInteger,
                       input.recallableReadingIndices.contains(index) else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
                 return .init(input: input, selection: nil, reading: index)
             }
             guard Set(root.keys) == ["candidate", "link"],
-                  case .number(let number)? = root["candidate"], let index = Int(exactly: number),
+                  let index = root["candidate"]?.exactInteger,
                   case .string(let link)? = root["link"] else { throw ComputerUseBrowserLinkPlanError.invalidProposal }
             return try .init(input: input, selection: input.resolve(candidate: index, link: link))
         } catch { throw ComputerUseBrowserLinkPlanError.invalidProposal }

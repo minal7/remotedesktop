@@ -87,7 +87,7 @@ struct ComputerUseBrowserPageEvidence: Equatable, Sendable, CustomStringConverti
     let documentID: String
     let page: ComputerUseBrowserPageSnapshot
 
-    fileprivate init(document: ComputerUseBrowserDocument, documentID: String, page: ComputerUseBrowserPageSnapshot) {
+    init(document: ComputerUseBrowserDocument, documentID: String, page: ComputerUseBrowserPageSnapshot) {
         self.document = document
         self.documentID = documentID
         self.page = page
@@ -155,7 +155,7 @@ struct ComputerUseBrowserHistoryOption: Equatable, Sendable {
 struct ComputerUseBrowserHandbackRequirement: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let taskID: String
     fileprivate let contextID: String?
-    fileprivate let sessionID: UUID?
+    let sessionID: UUID?
     fileprivate let ownershipEpoch: UUID?
     fileprivate let requiresPresentation: Bool
 

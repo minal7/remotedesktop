@@ -2053,6 +2053,7 @@ final class ComputerUseSessionModel: ObservableObject {
             switch composerMode {
             case .answer: statusText = "Answer the question to continue the original request"
             case .legacyAnswer: statusText = "Answer the question or start a new request"
+            case .recoveringAnswer: statusText = "Checking your saved question with the Mac…"
             case .expiredAnswer: statusText = "This question is no longer active. Start a new request."
             case .request: statusText = "Ready for a request"
             }

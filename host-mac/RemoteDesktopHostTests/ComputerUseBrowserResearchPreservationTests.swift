@@ -165,7 +165,10 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             guard command == .bindPageFields else { return }
             fixture.state.onCommand = nil; interrupted = true
             XCTAssertNil(frame.unusedInitialIntentObservation, "A dispatched binding read still owns its callback")
-            XCTAssertThrowsError(try frame.retireUnusedInitialIntent(observation: .initialEditPreconditions))
+            do {
+                try frame.retireUnusedInitialIntent(observation: .initialEditPreconditions)
+                XCTFail("An in-flight binding read cannot retire its preparation")
+            } catch { }
             operation?.cancel()
         }
         operation = Task { @MainActor in try await frame.prepare(browser: fixture.browser, checkCurrent: { try Task.checkCancellation() }) }
@@ -218,7 +221,10 @@ final class ComputerUseBrowserResearchPreservationTests: XCTestCase {
             fixture.state.onCommand = nil; interrupted = true
             XCTAssertFalse(frame.target.canRetireUnusedPreparation)
             XCTAssertNil(frame.unusedInitialIntentObservation)
-            XCTAssertThrowsError(try frame.target.retireUnusedPreparation())
+            do {
+                try frame.target.retireUnusedPreparation()
+                XCTFail("An input attempt cannot retire as unused preparation")
+            } catch { }
             operation?.cancel()
         }
         operation = Task { @MainActor in try await frame.target.apply(
