@@ -13,6 +13,14 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
     func testShippedClientCompletesLocalBrowserWorkflowThroughTLSLoginHandback() async throws {
+        try await runShippedClientTLSLoginWorkflow(stopAtLogin: false)
+    }
+
+    func testShippedClientStopDuringLoginRejectsImmediateAndLateResume() async throws {
+        try await runShippedClientTLSLoginWorkflow(stopAtLogin: true)
+    }
+
+    private func runShippedClientTLSLoginWorkflow(stopAtLogin: Bool) async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/form": .init(body: """
                 <input id='password' type='password' value='private-fixture-password'>
@@ -102,6 +110,41 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let paused = try XCTUnwrap(store.load(taskID: pending.messageID))
         XCTAssertEqual(paused.statuses, [.verified, .attempted, .planned, .planned])
         XCTAssertEqual(paused.promptDigest, ComputerUseTextTaskContract.digest(prompt))
+        if stopAtLogin {
+            client.stopCurrentTask()
+            XCTAssertTrue(client.isCancellationPending)
+            client.resumeAI()
+            XCTAssertTrue(client.isCancellationPending, "A queued Resume cannot supersede the client's pending Stop")
+            server.releaseHeldResponses()
+            try await reach("client stopped") {
+                !client.hasActivePrompt && client.latestTerminalOutcome == .unableToComplete && manager.activity == .idle
+            }
+            XCTAssertEqual(client.state, .ready)
+            XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            XCTAssertNil(browser.taskID)
+            XCTAssertNil(browser.taskControls)
+            XCTAssertEqual(client.messages.last(where: { $0.author == .assistant })?.text,
+                           ComputerUseTaskLedger.stoppedResponse)
+            client.resumeAI()
+            XCTAssertFalse(client.hasActivePrompt)
+            XCTAssertFalse(client.isCancellationPending)
+            XCTAssertEqual(client.state, .ready, "Resume after confirmed Stop cannot create another request")
+            let ledger = ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
+            XCTAssertEqual(try ledger.claim(taskID: pending.messageID, senderID: clientID, sessionID: sessionID,
+                promptBody: pending.exactWireBody), .completed(ComputerUseTaskLedger.stoppedResponse))
+            XCTAssertEqual(server.count("/form"), 1)
+            XCTAssertEqual(server.count("/edited?value=Paris"), 0)
+            XCTAssertEqual(server.count("/results?q=Paris"), 0)
+            XCTAssertEqual(server.count("/event?session=retained"), 0)
+            XCTAssertEqual(server.count("/event?session=lost"), 0)
+            XCTAssertEqual(fallbackEntries, 0)
+            XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
+            let evidence = XCTAttachment(string: "Shipped client Stop during login over real TLS; immediate Resume cannot supersede pending Stop, released login response cannot resume effects, client receives the durable stopped result, browser ownership retires, and Resume after terminal does nothing. Zero field edits, queries or link openings.")
+            evidence.name = "Client-to-host Stop during login"
+            evidence.lifetime = .keepAlways
+            add(evidence)
+            return
+        }
         server.releaseHeldResponses()
         try await reach("simulated login return") { server.count("/logged-in") == 1 && browser.hasPageAwaitingHandback }
         client.resumeAI()

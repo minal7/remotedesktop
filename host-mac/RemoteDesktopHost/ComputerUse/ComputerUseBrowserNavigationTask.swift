@@ -240,6 +240,13 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
 
     func stopBrowserActivity() { research?.retire(); browser.stop() }
 
+    func stopBrowserActivity(taskID: String) {
+        let browserTaskID = browserTaskID(forExecution: taskID)
+        retireResearchTask(taskID: taskID)
+        guard browser.taskID == browserTaskID else { return }
+        browser.stop()
+    }
+
     func updateTaskControls(_ controls: ComputerUseBrowserTaskControls?,
         handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
         browser.updateTaskControls(controls, handler: handler)

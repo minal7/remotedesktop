@@ -2041,6 +2041,41 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(server.count("/unrelated"), 1)
     }
 
+    func test_managerNativeStopPreservesUnrelatedBrowserOwnership() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/unrelated": .init(body: "<p>Another task's page</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = ImmediateComputerUseExecutor(results: [.userInterventionRequired("Finish the native step.")])
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
+        defer { fixture.manager.stop(); fixture.browser.close() }
+        try fixture.browser.claim(taskID: "unrelated")
+        let document = try await fixture.browser.navigate(taskID: "unrelated", operationID: "other-page",
+            to: base.appendingPathComponent("unrelated"))
+        let retainedSession = try XCTUnwrap(fixture.browser.handbackRequirement(taskID: "unrelated"))
+        XCTAssertEqual(fixture.browser.receipt(taskID: "unrelated", operationID: "other-page"), document)
+        let prompt = makeEnvelope(id: "native-stop", kind: .prompt, body: "Continue the task in Notes after I finish the manual step.")
+        fixture.manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
+        await waitUntil { fixture.manager.activity == .paused }
+        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .cancel,
+            taskID: prompt.id, revision: 1, hostEpoch: 1), channel: fixture.channel))
+        await waitUntil {
+            await fixture.channel.sentMessages().contains { message in
+                guard let update = try? RemoteDesktopHost.ComputerUseTaskUpdate.decodeBody(message.body) else { return false }
+                return update.taskID == prompt.id && update.text == ComputerUseTaskLedger.stoppedResponse
+            }
+        }
+        XCTAssertEqual(fixture.manager.activity, .idle)
+        XCTAssertEqual(executor.callCount, 1)
+        XCTAssertEqual(fixture.browser.taskID, "unrelated")
+        XCTAssertEqual(fixture.browser.handbackRequirement(taskID: "unrelated"), retainedSession)
+        XCTAssertNil(fixture.browser.receipt(taskID: "unrelated", operationID: "other-page"),
+                     "Stop still closes global action admission; retained browser identity cannot authorize old effects")
+        XCTAssertEqual(server.count("/unrelated"), 1)
+    }
+
     func test_managerConsumesSuccessfulHandbackBeforeCapturingTheNextSession() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/first": .init(body: "<p>First page</p>"), "/second": .init(body: "<p>Next session</p>")])

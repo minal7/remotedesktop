@@ -1331,6 +1331,10 @@ final class ComputerUseHostTools {
 
     func stopOwnedBrowserActivity() { browserNavigationTask?.stopBrowserActivity() }
 
+    func stopOwnedBrowserActivity(taskID: String) {
+        browserNavigationTask?.stopBrowserActivity(taskID: taskID)
+    }
+
     private func publishOwnedBrowserTaskControls() {
         guard let browserTaskControlHandler else { return }
         browserNavigationTask?.updateTaskControls(browserTaskControls, handler: browserTaskControlHandler)
@@ -4916,7 +4920,6 @@ final class HostComputerUseManager: ObservableObject {
                      replyingTo: context.envelope, channel: context.channel, outcome: .unableToComplete)
             }
             stopExecution(context)
-            tools.stopOwnedBrowserActivity()
             sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
         }
     }
@@ -5360,7 +5363,10 @@ final class HostComputerUseManager: ObservableObject {
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
         actionGate.endAutomation(allowsActions: false)
-        tools.retireOwnedBrowserResearch(taskID: context.envelope.id)
+        // Phone and local Stop share browser retirement. Retiring only the
+        // research planner left explicit workflows holding their document and
+        // sign-in session after the client had already received a terminal.
+        tools.stopOwnedBrowserActivity(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()
