@@ -4,6 +4,38 @@ import CoreGraphics
 
 @MainActor
 final class RemoteVideoPresentationTests: XCTestCase {
+    func test_simulatorReceiptRequiresSuccessfulCommittedGPUWorkAndNeverClaimsPresentation() throws {
+        let drawable = NSObject()
+        for succeeded in [true, false] {
+            var ledger = RemoteVideoPresentationLedger()
+            let ticket = try XCTUnwrap(ledger.reserve(context: UUID(), frame: UUID(),
+                drawable: ObjectIdentifier(drawable), drawableID: 0, requiresPresentationCallback: false))
+            XCTAssertTrue(ledger.completeGPU(ticket, succeeded: true, completionTime: 4).results.isEmpty)
+            XCTAssertTrue(ledger.commit(ticket))
+            XCTAssertTrue(ledger.presented(ticket, drawable: ObjectIdentifier(drawable), drawableID: 0, time: 5).results.isEmpty,
+                "A Simulator ticket cannot acquire a hardware presentation receipt")
+            let result = ledger.completeGPU(ticket, succeeded: succeeded, completionTime: 6)
+            XCTAssertEqual(result.results.first?.1, succeeded ? .rendered(6) : .failed)
+            XCTAssertEqual(result.released, [ticket]); XCTAssertEqual(ledger.count, 0)
+            XCTAssertTrue(ledger.completeGPU(ticket, succeeded: true, completionTime: 7).results.isEmpty)
+        }
+    }
+
+    func test_simulatorRetirementAndExpiryKeepGPUOwnershipAndRejectLateReadiness() throws {
+        let drawable = NSObject(), context = UUID()
+        for expires in [true, false] {
+            var ledger = RemoteVideoPresentationLedger(capacity: 1)
+            let ticket = try XCTUnwrap(ledger.reserve(context: context, frame: UUID(),
+                drawable: ObjectIdentifier(drawable), drawableID: 1, requiresPresentationCallback: false))
+            XCTAssertTrue(ledger.commit(ticket))
+            let retirement = expires ? ledger.expire(ticket) : ledger.retire(context: context)
+            XCTAssertTrue(retirement.released.isEmpty); XCTAssertEqual(ledger.count, 1)
+            XCTAssertNil(ledger.reserve(context: UUID(), frame: UUID(), drawable: ObjectIdentifier(drawable), drawableID: 2))
+            let late = ledger.completeGPU(ticket, succeeded: true, completionTime: 8)
+            XCTAssertTrue(late.results.isEmpty); XCTAssertEqual(late.released, [ticket]); XCTAssertEqual(ledger.count, 0)
+        }
+    }
+
     func test_receiptRequiresGPUCompletionAndExactPresentationInEitherOrder() throws {
         let drawable = NSObject()
         for presentationFirst in [true, false] {

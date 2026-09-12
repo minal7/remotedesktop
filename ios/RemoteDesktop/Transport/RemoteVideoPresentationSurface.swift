@@ -146,14 +146,15 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         case .expired:
             fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.")
             return
-        case .presented: break
+        case .presented, .rendered: break
         }
         refreshLayout()
         guard isCurrent(context), layout != nil else { return }
         switch result {
-        case .presented(let time):
+        case .presented(let time), .rendered(let time):
             cancelWaits(); failedAttempts = 0
-            presentation.present(context: context, frame: frame, time: time)
+            if case .presented = result { presentation.present(context: context, frame: frame, time: time) }
+            else { presentation.render(context: context, frame: frame, time: time) }
             if isCurrent(context) { requestNext() }
         case .skipped, .failed:
             // A known failed image is not a layout redraw candidate. A newer

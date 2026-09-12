@@ -72,9 +72,19 @@ final class RemoteVideoPresentationProducer {
                 onResult: @escaping @MainActor (UUID, RemoteVideoPresentationLedger.Result) -> Void) -> Admission {
         guard active, drawable.layer === layer, drawable.texture.device === device,
               !drawable.texture.isFramebufferOnly, drawable.texture.pixelFormat == .bgra8Unorm,
-              drawable.presentedTime == 0, let drawableID = Int(exactly: drawable.drawableID),
-              lastDrawableID.map({ drawableID > $0 }) ?? true,
               Self.validDestination(width: drawable.texture.width, height: drawable.texture.height) else { return .unavailable }
+        #if targetEnvironment(simulator)
+        // The acquirer supplies nextDrawable() ownership. Simulator has no
+        // native drawable IDs or presentation callback; identify submissions
+        // locally and report GPU rendering separately from physical presentation.
+        guard lastDrawableID != Int.max else { return .unavailable }
+        let drawableID = (lastDrawableID ?? -1) + 1
+        let requiresPresentationCallback = false
+        #else
+        guard drawable.presentedTime == 0, let drawableID = Int(exactly: drawable.drawableID),
+              lastDrawableID.map({ drawableID > $0 }) ?? true else { return .unavailable }
+        let requiresPresentationCallback = true
+        #endif
         let size = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         guard size == layer.drawableSize,
               layout.map({ $0.size == size && $0.contentMode == contentMode }) ?? true else { return .unavailable }
@@ -82,14 +92,17 @@ final class RemoteVideoPresentationProducer {
         let contextID = self.contextID
         guard let ticket = budget.reserve(context: contextID, frame: frameID,
             drawable: ObjectIdentifier(drawable), drawableID: drawableID,
+            requiresPresentationCallback: requiresPresentationCallback,
             onResult: { [weak self] result in
                 guard let self, self.active, self.contextID == contextID,
                       self.layer.drawableSize == size,
                       self.lastReceiptDrawableID.map({ drawableID > $0 }) ?? true else { return }
-                if case .presented(let time) = result {
+                switch result {
+                case .presented(let time), .rendered(let time):
                     guard time >= self.lastReceiptTime else { return }
                     self.lastReceiptTime = time
                     self.lastReceiptDrawableID = drawableID
+                default: break
                 }
                 onResult(frameID, result)
             }) else { return .busy }
@@ -133,15 +146,18 @@ final class RemoteVideoPresentationProducer {
         command.addCompletedHandler { command in
             withExtendedLifetime(resources) {
                 let succeeded = command.status == .completed
-                Task { @MainActor in budget.completeGPU(ticket, succeeded: succeeded) }
+                let completionTime = CACurrentMediaTime()
+                Task { @MainActor in budget.completeGPU(ticket, succeeded: succeeded, completionTime: completionTime) }
             }
         }
+        #if !targetEnvironment(simulator)
         drawable.addPresentedHandler { presented in
             let object = ObjectIdentifier(presented)
             let time = presented.presentedTime
             guard let id = Int(exactly: presented.drawableID) else { return }
             Task { @MainActor in budget.presented(ticket, drawable: object, drawableID: id, time: time) }
         }
+        #endif
         command.present(drawable)
         command.commit()
         return .submitted(ticket)

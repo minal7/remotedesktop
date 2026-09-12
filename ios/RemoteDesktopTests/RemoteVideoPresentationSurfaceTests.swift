@@ -1,10 +1,88 @@
 import XCTest
 import CoreGraphics
+import CoreVideo
 import LiveKitWebRTC
+import QuartzCore
 @testable import RemoteDesktop
 
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
+    /// One synthetic frame through the real mailbox, drawable acquirer and GPU.
+    /// A rendering receipt is not a pixel comparison or hardware display proof.
+    func test_optInSingleNativeSimulatorFrameReachesRenderedSurface() async throws {
+        #if targetEnvironment(simulator)
+        guard ProcessInfo.processInfo.environment["RUN_SINGLE_SIMULATOR_FRAME"] == "1" else {
+            throw XCTSkip("Opt-in: one synthetic frame on an isolated Simulator")
+        }
+        let host = try RemoteKeyboardTestWindow()
+        defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make())
+        defer { surface.retire() }
+        surface.view.frame = CGRect(x: 24, y: 96, width: 64, height: 64)
+        let root = try XCTUnwrap(host.window.rootViewController?.view)
+        root.addSubview(surface.view)
+        root.layoutIfNeeded()
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        XCTAssertTrue(surface.view.window === host.window)
+
+        var pixels: CVPixelBuffer?
+        let attributes = [kCVPixelBufferMetalCompatibilityKey: true,
+                          kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64,
+            kCVPixelFormatType_32BGRA, attributes, &pixels), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixels)
+        XCTAssertEqual(CVPixelBufferLockBaseAddress(buffer, []), kCVReturnSuccess)
+        do {
+            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+            let base = try XCTUnwrap(CVPixelBufferGetBaseAddress(buffer)).assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRow(buffer)
+            for y in 0..<64 { for x in 0..<64 {
+                let offset = y * stride + x * 4
+                base[offset] = 0; base[offset + 1] = 255
+                base[offset + 2] = 0; base[offset + 3] = 255
+            } }
+        }
+        let finished = expectation(description: "Single frame rendering finishes")
+        var receipt: RemoteVideoSurfacePresentation.State?
+        surface.presentation.observe { state in
+            switch state {
+            case .rendered, .presented, .failed:
+                guard receipt == nil else { return }
+                receipt = state; finished.fulfill()
+            case .waiting, .retired: break
+            }
+        }
+        let started = CACurrentMediaTime()
+        surface.renderFrame(RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: 1))
+        await fulfillment(of: [finished], timeout: 5)
+        guard case .rendered(_, _, let time) = receipt else {
+            return XCTFail("Expected actual Simulator GPU completion, received \(String(describing: receipt))")
+        }
+        XCTAssertGreaterThanOrEqual(time, started)
+        XCTAssertLessThanOrEqual(time - started, 5)
+        print("Single Simulator frame rendered in \(time - started)s; drawable=\(surface.view.metalLayer.drawableSize)")
+        surface.retire()
+        XCTAssertEqual(surface.presentation.state, .retired)
+        #else
+        throw XCTSkip("This experiment targets the Simulator rendering path")
+        #endif
+    }
+
+    func test_renderedReadinessRetainsContextAndRejectsStaleOrRetiredGPUCompletion() {
+        let old = UUID(), current = UUID(), frame = UUID()
+        let channel = RemoteVideoSurfacePresentation(context: old)
+        channel.begin(context: current)
+        channel.render(context: old, frame: frame, time: 4)
+        XCTAssertEqual(channel.state, .waiting(context: current))
+        channel.render(context: current, frame: frame, time: 5)
+        XCTAssertEqual(channel.state, .rendered(context: current, frame: frame, time: 5))
+        channel.render(context: current, frame: UUID(), time: 4)
+        XCTAssertEqual(channel.state, .rendered(context: current, frame: frame, time: 5))
+        channel.retire()
+        channel.render(context: current, frame: frame, time: 6)
+        XCTAssertEqual(channel.state, .retired)
+    }
+
     func test_frameMailboxKeepsOnlyTheLatestFrameAndOneWake() throws {
         let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), log = SurfaceWakeLog(), context = UUID()
         mailbox.setWakeHandler { log.append($0) }; mailbox.replaceContext(context)

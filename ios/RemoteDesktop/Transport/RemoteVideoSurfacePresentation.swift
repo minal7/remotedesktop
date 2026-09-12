@@ -6,6 +6,7 @@ final class RemoteVideoSurfacePresentation {
     enum State: Equatable {
         case waiting(context: UUID)
         case presented(context: UUID, frame: UUID, time: TimeInterval)
+        case rendered(context: UUID, frame: UUID, time: TimeInterval)
         case failed(context: UUID, message: String)
         case retired
     }
@@ -39,6 +40,14 @@ final class RemoteVideoSurfacePresentation {
         guard self.context == context, !terminal, time.isFinite, time > 0, time >= lastPresentationTime else { return }
         lastPresentationTime = time
         publish(.presented(context: context, frame: frame, time: time))
+    }
+
+    /// GPU completion after scheduling presentation, without a hardware
+    /// presentation timestamp. Used only by the Simulator producer.
+    func render(context: UUID, frame: UUID, time: TimeInterval) {
+        guard self.context == context, !terminal, time.isFinite, time > 0, time >= lastPresentationTime else { return }
+        lastPresentationTime = time
+        publish(.rendered(context: context, frame: frame, time: time))
     }
 
     func fail(context: UUID, message: String) {

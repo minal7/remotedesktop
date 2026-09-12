@@ -7,14 +7,17 @@ struct RemoteVideoPresentationTicket: Hashable, Sendable {
     let frame: UUID
     let drawable: ObjectIdentifier
     let drawableID: Int
+    let requiresPresentationCallback: Bool
 }
 
-/// A receipt requires both successful GPU completion and a non-skipped
-/// presentation of the exact drawable. Observation expiry cannot free work
-/// that the GPU has not actually finished.
+/// Device receipts require successful GPU completion and exact drawable
+/// presentation. Simulator receipts report rendering for a scheduled drawable,
+/// since its SDK does not expose presentation callbacks. Expiry never frees
+/// work that the GPU has not actually finished.
 struct RemoteVideoPresentationLedger {
     enum Result: Equatable, Sendable {
         case presented(TimeInterval)
+        case rendered(TimeInterval)
         case skipped
         case failed
         case expired
@@ -28,6 +31,7 @@ struct RemoteVideoPresentationLedger {
         let ticket: RemoteVideoPresentationTicket
         var committed = false
         var gpuSucceeded: Bool?
+        var gpuCompletionTime: TimeInterval = 0
         var presentation: TimeInterval?
         var retired = false
     }
@@ -38,10 +42,11 @@ struct RemoteVideoPresentationLedger {
     init(capacity: Int = 2) { self.capacity = max(1, capacity) }
 
     mutating func reserve(context: UUID, frame: UUID, drawable: ObjectIdentifier,
-                          drawableID: Int) -> RemoteVideoPresentationTicket? {
+                          drawableID: Int, requiresPresentationCallback: Bool = true) -> RemoteVideoPresentationTicket? {
         guard entries.count < capacity, drawableID >= 0,
               !entries.values.contains(where: { $0.ticket.drawable == drawable }) else { return nil }
-        let ticket = RemoteVideoPresentationTicket(context: context, frame: frame, drawable: drawable, drawableID: drawableID)
+        let ticket = RemoteVideoPresentationTicket(context: context, frame: frame, drawable: drawable, drawableID: drawableID,
+            requiresPresentationCallback: requiresPresentationCallback)
         entries[ticket.id] = Entry(ticket: ticket)
         return ticket
     }
@@ -54,17 +59,19 @@ struct RemoteVideoPresentationLedger {
         return true
     }
 
-    mutating func completeGPU(_ ticket: RemoteVideoPresentationTicket, succeeded: Bool) -> Change {
+    mutating func completeGPU(_ ticket: RemoteVideoPresentationTicket, succeeded: Bool, completionTime: TimeInterval = 0) -> Change {
         guard var entry = entries[ticket.id], entry.ticket == ticket, entry.committed,
               entry.gpuSucceeded == nil else { return Change() }
         entry.gpuSucceeded = succeeded
+        entry.gpuCompletionTime = completionTime
         entries[ticket.id] = entry
         return settle(ticket)
     }
 
     mutating func presented(_ ticket: RemoteVideoPresentationTicket, drawable: ObjectIdentifier,
                             drawableID: Int, time: TimeInterval) -> Change {
-        guard var entry = entries[ticket.id], entry.ticket == ticket, entry.committed,
+        guard ticket.requiresPresentationCallback,
+              var entry = entries[ticket.id], entry.ticket == ticket, entry.committed,
               ticket.drawable == drawable, ticket.drawableID == drawableID,
               entry.presentation == nil else { return Change() }
         entry.presentation = time.isFinite && time > 0 ? time : 0
@@ -112,6 +119,12 @@ struct RemoteVideoPresentationLedger {
             entries.removeValue(forKey: ticket.id)
             return Change(results: [(ticket, .failed)], released: [ticket])
         }
+        if !ticket.requiresPresentationCallback {
+            entries.removeValue(forKey: ticket.id)
+            let time = entry.gpuCompletionTime
+            let result: Result = time.isFinite && time > 0 ? .rendered(time) : .failed
+            return Change(results: [(ticket, result)], released: [ticket])
+        }
         guard let time = entry.presentation else { return Change() }
         entries.removeValue(forKey: ticket.id)
         return Change(results: [(ticket, time > 0 ? .presented(time) : .skipped)], released: [ticket])
@@ -128,8 +141,10 @@ final class RemoteVideoPresentationBudget {
     private var deadlines: [UUID: Task<Void, Never>] = [:]
 
     func reserve(context: UUID, frame: UUID, drawable: ObjectIdentifier, drawableID: Int,
+                 requiresPresentationCallback: Bool = true,
                  onResult: @escaping @MainActor (RemoteVideoPresentationLedger.Result) -> Void) -> RemoteVideoPresentationTicket? {
-        guard let ticket = ledger.reserve(context: context, frame: frame, drawable: drawable, drawableID: drawableID) else { return nil }
+        guard let ticket = ledger.reserve(context: context, frame: frame, drawable: drawable, drawableID: drawableID,
+            requiresPresentationCallback: requiresPresentationCallback) else { return nil }
         callbacks[ticket.id] = onResult
         // Provisional observation bound; it does not cancel native GPU work.
         deadlines[ticket.id] = Task { @MainActor [weak self] in
@@ -143,7 +158,9 @@ final class RemoteVideoPresentationBudget {
     func commit(_ ticket: RemoteVideoPresentationTicket) -> Bool { ledger.commit(ticket) }
     func abandonUncommitted(_ ticket: RemoteVideoPresentationTicket) { apply(ledger.abandonUncommitted(ticket)) }
     func retire(context: UUID) { apply(ledger.retire(context: context)) }
-    func completeGPU(_ ticket: RemoteVideoPresentationTicket, succeeded: Bool) { apply(ledger.completeGPU(ticket, succeeded: succeeded)) }
+    func completeGPU(_ ticket: RemoteVideoPresentationTicket, succeeded: Bool, completionTime: TimeInterval = 0) {
+        apply(ledger.completeGPU(ticket, succeeded: succeeded, completionTime: completionTime))
+    }
     func presented(_ ticket: RemoteVideoPresentationTicket, drawable: ObjectIdentifier, drawableID: Int, time: TimeInterval) {
         apply(ledger.presented(ticket, drawable: drawable, drawableID: drawableID, time: time))
     }

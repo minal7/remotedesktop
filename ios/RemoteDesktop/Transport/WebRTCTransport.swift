@@ -501,7 +501,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                       self.rendererRegistration?.lease == lease, self.inputPresentation.acceptsFrame(lease),
                       self.directInputState.isReady, attachment.presentation?.state == state else { return }
                 switch state {
-                case .presented:
+                case .presented, .rendered:
+                    // Simulator readiness follows GPU rendering of a scheduled
+                    // drawable; physical devices require the presentation callback.
                     guard !self.hasReportedRendererFrame else { return }
                     self.hasReportedRendererFrame = true
                     self.onFirstVideoFrame?()
