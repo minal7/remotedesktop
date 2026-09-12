@@ -3617,6 +3617,28 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
 
 @MainActor
 final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
+    func testOptInPlainWindowCanActivateFromTestHostPolicy() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: one plain local window checks test-host activation")
+        }
+        let previous = NSApp.activationPolicy()
+        let granted = NSApp.setActivationPolicy(.accessory)
+        let window = NSWindow(contentRect: NSRect(x: 120, y: 120, width: 480, height: 320),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Remote Desktop — activation experiment"
+        window.isReleasedWhenClosed = false
+        defer { window.close(); NSApp.setActivationPolicy(previous) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !NSApp.isActive && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let report = "policyGranted=\(granted), previousPolicy=\(previous.rawValue), currentPolicy=\(NSApp.activationPolicy().rawValue), runningPolicy=\(NSRunningApplication.current.activationPolicy.rawValue), active=\(NSApp.isActive), visible=\(window.isVisible), key=\(window.isKeyWindow), currentPID=\(ProcessInfo.processInfo.processIdentifier), frontmostPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1)"
+        print("Plain-window activation: \(report)")
+        XCTAssertTrue(NSApp.isActive && window.isKeyWindow, report)
+    }
+
     func testQueuedLocationDeliveryResumesAfterNativeChildCleanup() async throws {
         guard ProcessInfo.processInfo.environment["RUN_OWNED_BROWSER_VISIBLE_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: delivers a queued URL during a native child-window close notification")

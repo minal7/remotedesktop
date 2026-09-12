@@ -8,7 +8,7 @@ enum InputScrollPhase: String, Codable {
 }
 
 /// Messages sent from the client to the host, per `protocol/PROTOCOL.md`.
-enum ControlMessage {
+enum ControlMessage: Equatable {
     case hello(proto: Int)
     case pointer(x: Int, y: Int, buttons: UInt8)
     case scroll(x: Int, y: Int, dx: Int, dy: Int, phase: InputScrollPhase)

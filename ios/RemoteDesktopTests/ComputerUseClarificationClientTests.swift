@@ -515,8 +515,8 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find travel tickets"))
         let root = try await fixture.channel.prompt(at: 0)
         await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id,
-            text: ComputerUseStatusSignal.userIntervention("Finish signing in."), outcome: .userInterventionRequired,
-            hostControlEpoch: 1).encodedBody(), kind: .status)
+            text: ComputerUseStatusSignal.userIntervention("Finish signing in."), hostControlEpoch: 1,
+            outcome: .userInterventionRequired).encodedBody(), kind: .status)
         try await fixture.channel.waitForDelivery()
         XCTAssertEqual(fixture.model.state, .paused)
         fixture.model.resumeAI()
@@ -524,7 +524,7 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertEqual(delayed.kind, .resume); XCTAssertEqual(first.observedHostControlEpoch, 1)
         await fixture.channel.deliver(try ComputerUseTaskUpdate(taskID: root.id,
             text: ComputerUseStatusSignal.userIntervention("You used the Mac while AI was paused. Choose Resume again when you are ready."),
-            outcome: .userInterventionRequired, hostControlEpoch: 2).encodedBody(), kind: .status)
+            hostControlEpoch: 2, outcome: .userInterventionRequired).encodedBody(), kind: .status)
         try await fixture.channel.waitForDelivery()
         XCTAssertEqual(fixture.model.state, .paused); XCTAssertTrue(fixture.model.hasActivePrompt)
         let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))

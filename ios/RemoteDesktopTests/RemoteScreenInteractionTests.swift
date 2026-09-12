@@ -37,7 +37,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
         XCTAssertEqual(routing.pointer(at: nil, buttons: 1, geometry: geometry, viewport: viewport),
                        .pointer(x: 69, y: 39, buttons: 1))
         let unavailable = RemoteScreenGeometry(bounds: .zero, display: nil)
-        XCTAssertEqual(routing.pointer(at: CGPoint(x: .nan, y: .infinity), buttons: 0,
+        XCTAssertEqual(routing.pointer(at: CGPoint(x: CGFloat.nan, y: CGFloat.infinity), buttons: 0,
             geometry: unavailable, viewport: .zero), .pointer(x: 69, y: 39, buttons: 0),
             "Missing geometry cannot prevent release of this routing state's existing hold")
         XCTAssertNil(routing.pointer(at: nil, buttons: 0, geometry: unavailable, viewport: .zero))
@@ -125,14 +125,14 @@ final class RemoteScreenInteractionTests: XCTestCase {
             }
         }
         XCTAssertNil(geometry.localToRemote(CGPoint(x: 110, y: 80)))
-        XCTAssertNil(geometry.localToRemote(CGPoint(x: .nan, y: 20), clamping: true))
+        XCTAssertNil(geometry.localToRemote(CGPoint(x: CGFloat.nan, y: 20), clamping: true))
         for display in [nil, DisplayInfo(w: 0, h: 1, scale: 1),
                         DisplayInfo(w: Int(Int32.max) + 1, h: 1, scale: 1),
                         DisplayInfo(w: 5, h: 3, scale: .infinity)] {
             let invalid = RemoteScreenGeometry(bounds: geometry.bounds, display: display)
             XCTAssertNil(invalid.localToRemote(CGPoint(x: 50, y: 50), clamping: true))
         }
-        let invalid = RemoteScreenGeometry(bounds: CGRect(x: .nan, y: 0, width: 100, height: 60), display: geometry.display)
+        let invalid = RemoteScreenGeometry(bounds: CGRect(x: CGFloat.nan, y: 0, width: 100, height: 60), display: geometry.display)
         XCTAssertNil(invalid.localToRemote(.zero, clamping: true))
     }
 
@@ -155,7 +155,7 @@ final class RemoteScreenInteractionTests: XCTestCase {
         cursor.move(by: CGPoint(x: 10000, y: 10000), within: rect)
         XCTAssertTrue(RemoteScreenGeometry.contains(try XCTUnwrap(cursor.positionedCenter), in: rect))
         let prior = cursor.positionedCenter
-        cursor.move(by: CGPoint(x: .nan, y: .infinity), within: rect)
+        cursor.move(by: CGPoint(x: CGFloat.nan, y: CGFloat.infinity), within: rect)
         XCTAssertEqual(cursor.positionedCenter, prior)
         let zoomed = CGRect(x: 25, y: 10, width: 50, height: 20)
         cursor.clamp(to: zoomed)
