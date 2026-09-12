@@ -374,6 +374,167 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
         }
     }
 
+    func testRealHTTPPreflightPreservesRequestAndAdmitsOnlyTheExactBudget() async throws {
+        let alias = ComputerUseNativeTextRuntimeInputs.modelAlias
+        let literal = "  東京 e\u{301} 😀\n"
+        let prompt = "Set Origin to \"\(literal)\"."
+        let rendered = "<|im_start|>user\nfixture Ω\n<|im_end|>\n<|im_start|>assistant\n"
+        let templateReply = try JSONSerialization.data(withJSONObject: ["prompt": rendered])
+        let completionReply = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p1"}]}"#, model: alias)
+        for count in [3_008, 3_009] {
+            let tokenReply = try JSONSerialization.data(withJSONObject: ["tokens": Array(repeating: 1, count: count)])
+            let replies = ["/apply-template": templateReply, "/tokenize": tokenReply, "/v1/chat/completions": completionReply]
+            let fixture = try LocalHTTPFixture(respond: { request in
+                LocalHTTPFixture.jsonResponse(replies[request.path] ?? Data())
+            })
+            defer { fixture.stop() }
+            let port = try await fixture.start()
+            let transport = URLSessionOSAtlasTransport()
+            let connection = try ComputerUseTextModelConnection(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")),
+                bearerToken: "fictional-test-token", modelAlias: alias)
+            let planner = ComputerUseLocalTextGoalPlanner(connection: connection, transport: transport)
+            do {
+                let result = try await planner.propose(prompt: prompt, fields: fields())
+                XCTAssertEqual(count, 3_008)
+                XCTAssertEqual(result, .edits([.init(targetID: "private-ax-0", mode: .replaceAll, text: literal)],
+                    unchangedTargetIDs: ["private-ax-1"]))
+            } catch {
+                XCTAssertEqual(count, 3_009)
+                XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .contextLimit)
+            }
+            await transport.cancelAll()
+            let requests = fixture.requests
+            XCTAssertEqual(requests.map(\.path), count == 3_008
+                ? ["/apply-template", "/tokenize", "/v1/chat/completions"] : ["/apply-template", "/tokenize"])
+            XCTAssertTrue(requests.allSatisfy { $0.method == "POST" && $0.headers["authorization"] == "Bearer fictional-test-token" })
+            guard requests.count >= 2 else { return XCTFail("Both preflight phases must reach HTTP") }
+            let expected = try planner.makeRequest(catalog: ComputerUseTextPayloadCatalog(prompt), fields: fields())
+            XCTAssertEqual(requests[0].body, expected.httpBody)
+            if count == 3_008 { XCTAssertEqual(requests.last?.body, expected.httpBody) }
+            let tokenBody = try XCTUnwrap(JSONSerialization.jsonObject(with: requests[1].body) as? [String: Any])
+            XCTAssertEqual(tokenBody as NSDictionary, ["model": alias, "content": rendered,
+                "add_special": false, "parse_special": true, "with_pieces": false] as NSDictionary)
+            for request in requests {
+                let body = String(decoding: request.body, as: UTF8.self)
+                XCTAssertFalse(body.contains("東京")); XCTAssertFalse(body.contains("private existing value"))
+            }
+        }
+    }
+
+    func testHTTPPlannedBrowserEditsPauseResumeAndReplayWithoutAnotherRequest() async throws {
+        let pages = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <label>Origin<input value="A"></label><label>Destination<input value="B"></label>
+            <label>Reference<input value="keep"></label>
+            """)])
+        let base = try await pages.start()
+        var edits = 0, allowed = true
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: {
+            if $0 == .edit { edits += 1 }
+        }, mayAct: { true })
+        defer { browser.close(); pages.stop() }
+        var stage = "claim browser"
+        do {
+            let taskID = "http-planned-browser"
+            try browser.claim(taskID: taskID)
+            stage = "navigate hidden form"
+            let document = try await browser.navigate(taskID: taskID, operationID: "open", to: base.appendingPathComponent("form"))
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: document, requiresFrontmost: false)
+            let alias = ComputerUseNativeTextRuntimeInputs.modelAlias
+            let completion = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"append","value":"p1"},{"fieldID":"f2","mode":"append","value":"p1"}]}"#, model: alias)
+            let replies = ["/apply-template": Data(#"{"prompt":"fixture rendered prompt"}"#.utf8),
+                "/tokenize": Data(#"{"tokens":[1,2,3]}"#.utf8), "/v1/chat/completions": completion]
+            let model = try LocalHTTPFixture(respond: { request in LocalHTTPFixture.jsonResponse(replies[request.path] ?? Data()) })
+            defer { model.stop() }
+            stage = "start model HTTP fixture"
+            let port = try await model.start()
+            let transport = URLSessionOSAtlasTransport()
+            let planner = RecordingHTTPTextPlanner(wrapped: ComputerUseLocalTextGoalPlanner(connection: try .init(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")), bearerToken: "fictional-test-token", modelAlias: alias),
+                transport: transport))
+            func values() async throws -> [String] {
+                var values: [String] = []
+                for id in await planner.fieldIDs {
+                    let snapshot = try await target.read(targetID: id)
+                    values.append(try XCTUnwrap(snapshot).value)
+                }
+                return values
+            }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { allowed }, journalDirectory: directory,
+                planner: planner, editOverride: { _, _ in XCTFail("Browser edits must use their owned DOM target") },
+                browserTargetProvider: { _ in target })
+            stage = "plan and execute first edit"
+            let prompt = "Append \"!\" to both Origin and Destination."
+            do {
+                _ = try await executor.execute(taskID: taskID, prompt: prompt, verifiedStep: { complete, total in
+                    XCTAssertEqual(total, 2)
+                    if complete == 1 { allowed = false }
+                }, progress: { _ in })
+                XCTFail("Revoking execution after the first verified edit must pause the task")
+            } catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
+            stage = "observe paused fields"
+            let paused = try await values()
+            XCTAssertEqual(paused, ["A!", "B", "keep"])
+            XCTAssertEqual(edits, 1)
+            XCTAssertTrue(try ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: directory))
+            allowed = true
+            stage = "resume retained task"
+            let resumed = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+            guard case .completed? = resumed else { await transport.cancelAll(); return XCTFail("Resume must finish the retained task") }
+            stage = "replay completed task"
+            let replayed = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
+            guard case .completed? = replayed else { await transport.cancelAll(); return XCTFail("Replay must retain completion") }
+            await transport.cancelAll()
+            stage = "observe final fields"
+            let finished = try await values()
+            XCTAssertEqual(finished, ["A!", "B!", "keep"])
+            XCTAssertEqual(edits, 2)
+            let requests = model.requests
+            XCTAssertEqual(requests.map(\.path), ["/apply-template", "/tokenize", "/v1/chat/completions"],
+                "Resume and completed replay cannot replan or repeat an HTTP request")
+            XCTAssertEqual(requests.first?.body, requests.last?.body)
+            XCTAssertEqual(pages.count("/form"), 1)
+        } catch {
+            print("HTTP_BROWSER_FAILURE stage=\(stage) error=\(String(reflecting: error))")
+            throw error
+        }
+    }
+
+    func testHTTPPlannerCancellationAtEveryPhasePreventsLaterRequestsAndProposals() async throws {
+        let phases = ["/apply-template", "/tokenize", "/v1/chat/completions"]
+        let replies = ["/apply-template": Data(#"{"prompt":"fixture rendered prompt"}"#.utf8),
+            "/tokenize": Data(#"{"tokens":[1,2,3]}"#.utf8)]
+        for (index, phase) in phases.enumerated() {
+            let fixture = try LocalHTTPFixture(respond: { request in
+                if request.path == phase {
+                    return "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n"
+                }
+                return LocalHTTPFixture.jsonResponse(replies[request.path] ?? Data())
+            }, closeAfterResponse: false)
+            defer { fixture.stop() }
+            let port = try await fixture.start()
+            let transport = URLSessionOSAtlasTransport()
+            let planner = ComputerUseLocalTextGoalPlanner(connection: try .init(
+                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")), bearerToken: "fictional-test-token", modelAlias: "test-native"),
+                transport: transport)
+            let task = Task { try await planner.propose(prompt: "Set Origin to Paris.", fields: fields()) }
+            let deadline = ContinuousClock.now + .seconds(2)
+            while !fixture.requests.contains(where: { $0.path == phase }) && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertTrue(fixture.requests.contains { $0.path == phase }, "The selected phase must actually reach HTTP")
+            let started = ContinuousClock.now
+            task.cancel()
+            do { _ = try await task.value; XCTFail("Cancelled phase \(phase) cannot produce a plan") }
+            catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled, "\(phase): \(error)") }
+            XCTAssertLessThan(ContinuousClock.now - started, .seconds(1))
+            await transport.cancelAll()
+            XCTAssertEqual(fixture.requests.map(\.path), Array(phases.prefix(index + 1)),
+                "Cancellation cannot start another preflight or completion request")
+        }
+    }
+
     func testLoopbackModelTransportNeverFollowsRedirects() async throws {
         let destination = try LocalHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
         defer { destination.stop() }
@@ -468,16 +629,41 @@ private actor CurrentTurnOnlyClarificationFixture: ComputerUseTextGoalPlanning {
     }
 }
 
+private actor RecordingHTTPTextPlanner: ComputerUseTextGoalPlanning {
+    let wrapped: ComputerUseLocalTextGoalPlanner
+    private(set) var fieldIDs: [String] = []
+    init(wrapped: ComputerUseLocalTextGoalPlanner) { self.wrapped = wrapped }
+    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
+        fieldIDs = fields.map { $0.snapshot.targetID }
+        return try await wrapped.propose(prompt: prompt, fields: fields)
+    }
+}
+
 private final class LocalHTTPFixture: @unchecked Sendable {
+    struct Request: Sendable {
+        let method: String
+        let path: String
+        let headers: [String: String]
+        let body: Data
+    }
     private let listener: NWListener
     private let queue = DispatchQueue(label: "remotedesktop.test.local-http")
     private let lock = NSLock()
     private var accepted = 0
     private var readyReported = false
     private var activeConnections: [NWConnection] = []
+    private var received: [Request] = []
+    private let respond: @Sendable (Request) -> String
+    private let closeAfterResponse: Bool
     var connections: Int { lock.withLock { accepted } }
+    var requests: [Request] { lock.withLock { received } }
 
-    init(response: String, closeAfterResponse: Bool = true) throws {
+    convenience init(response: String, closeAfterResponse: Bool = true) throws {
+        try self.init(respond: { _ in response }, closeAfterResponse: closeAfterResponse)
+    }
+
+    init(respond: @escaping @Sendable (Request) -> String, closeAfterResponse: Bool = true) throws {
+        self.respond = respond; self.closeAfterResponse = closeAfterResponse
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         listener = try NWListener(using: parameters)
@@ -485,12 +671,53 @@ private final class LocalHTTPFixture: @unchecked Sendable {
             guard let self else { return }
             self.lock.withLock { self.accepted += 1; self.activeConnections.append(connection) }
             connection.start(queue: self.queue)
-            connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { _, _, _, _ in
-                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in
-                    if closeAfterResponse { connection.cancel() }
-                })
-            }
+            self.receive(connection, data: Data())
         }
+    }
+
+    // These URLSession fixtures use one Content-Length request per connection.
+    // Wait for the complete body so equality checks exercise bytes sent over HTTP.
+    private func receive(_ connection: NWConnection, data: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] chunk, _, complete, error in
+            guard let self, error == nil else { connection.cancel(); return }
+            let accumulated = data + (chunk ?? Data())
+            guard accumulated.count <= 512 * 1_024 else { connection.cancel(); return }
+            guard let separator = accumulated.range(of: Data("\r\n\r\n".utf8)) else {
+                if complete { connection.cancel() } else { self.receive(connection, data: accumulated) }
+                return
+            }
+            let lines = String(decoding: accumulated[..<separator.lowerBound], as: UTF8.self).components(separatedBy: "\r\n")
+            let start = (lines.first ?? "").split(separator: " ")
+            guard start.count == 3 else { connection.cancel(); return }
+            var headers: [String: String] = [:]
+            for line in lines.dropFirst() {
+                guard let colon = line.firstIndex(of: ":") else { connection.cancel(); return }
+                let key = line[..<colon].lowercased()
+                guard headers[key] == nil else { connection.cancel(); return }
+                headers[key] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+            guard headers["transfer-encoding"] == nil,
+                  let length = Int(headers["content-length"] ?? "0"), (0...512 * 1_024).contains(length) else {
+                connection.cancel(); return
+            }
+            let end = separator.upperBound + length
+            guard accumulated.count >= end else {
+                if complete { connection.cancel() } else { self.receive(connection, data: accumulated) }
+                return
+            }
+            guard accumulated.count == end else { connection.cancel(); return }
+            let request = Request(method: String(start[0]), path: String(start[1]), headers: headers,
+                body: accumulated.subdata(in: separator.upperBound..<end))
+            self.lock.withLock { self.received.append(request) }
+            connection.send(content: Data(self.respond(request).utf8), completion: .contentProcessed { _ in
+                if self.closeAfterResponse { connection.cancel() }
+            })
+        }
+    }
+
+    static func jsonResponse(_ body: Data) -> String {
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+            + String(decoding: body, as: UTF8.self)
     }
 
     func start() async throws -> UInt16 {
