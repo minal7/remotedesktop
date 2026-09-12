@@ -347,6 +347,33 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
             bearerToken: "token\r\nInjected: value", modelAlias: "test-native"))
     }
 
+    func testTokenizationUsesTheSameModelAsTheNativeCompletionRequest() throws {
+        for alias in [ComputerUseNativeTextRuntimeInputs.modelAlias, "alternate-lightweight-model"] {
+            let connection = try ComputerUseTextModelConnection(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:49123")),
+                bearerToken: "fictional-test-token", modelAlias: alias)
+            let planner = ComputerUseLocalTextGoalPlanner(connection: connection, transport: FixedTextTransport())
+            let completion = try planner.makeRequest(catalog: ComputerUseTextPayloadCatalog("Set Origin to Paris."), fields: fields())
+            let template = try OSAtlasLlamaHTTPClient.makeSemanticTemplateRequest(from: completion)
+            XCTAssertEqual(template.httpBody, completion.httpBody)
+            let rendered = "<|im_start|>user\nSet Origin to Paris.\n<|im_end|>\n<|im_start|>assistant\n"
+            let tokenize = try OSAtlasLlamaHTTPClient.makeTokenizeRequest(from: completion, templatePrompt: rendered)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(tokenize.httpBody)) as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, alias)
+            XCTAssertEqual(body["content"] as? String, rendered)
+            XCTAssertEqual(body["add_special"] as? Bool, false)
+            XCTAssertEqual(body["parse_special"] as? Bool, true)
+            XCTAssertEqual(body["with_pieces"] as? Bool, false)
+            XCTAssertEqual(tokenize.value(forHTTPHeaderField: "Authorization"), completion.value(forHTTPHeaderField: "Authorization"))
+        }
+        var invalid = try planner().makeRequest(catalog: ComputerUseTextPayloadCatalog("Set Origin to Paris."), fields: fields())
+        for body in [#"{}"#, #"{"model":null}"#, #"{"model":42}"#, #"{"model":""}"#, "invalid JSON"] {
+            invalid.httpBody = Data(body.utf8)
+            XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeTokenizeRequest(from: invalid, templatePrompt: "rendered")) {
+                XCTAssertEqual($0 as? OSAtlasLlamaRuntimeError, .invalidResponse)
+            }
+        }
+    }
+
     func testLoopbackModelTransportNeverFollowsRedirects() async throws {
         let destination = try LocalHTTPFixture(response: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
         defer { destination.stop() }

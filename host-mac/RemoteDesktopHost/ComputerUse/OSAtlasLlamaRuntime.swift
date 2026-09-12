@@ -2446,7 +2446,7 @@ enum OSAtlasLlamaHTTPClient {
     }
 
     private struct TokenizeRequestBody: Encodable {
-        let model = OSAtlasLlamaServedModel.semanticRouter.rawValue
+        let model: String
         let content: String
         let addSpecial = false
         let parseSpecial = true
@@ -2643,7 +2643,7 @@ enum OSAtlasLlamaHTTPClient {
     /// `oaicompat_chat_params_parse` path as `/v1/chat/completions`. Reusing
     /// the exact completion body therefore includes tools, required tool
     /// choice, `parallel_tool_calls: false`, and every sampling/request field
-    /// in the model's real Granite chat-template render.
+    /// in the selected model's chat-template render.
     static func makeSemanticTemplateRequest(
         from completionRequest: URLRequest
     ) throws -> URLRequest {
@@ -2700,6 +2700,9 @@ enum OSAtlasLlamaHTTPClient {
               completionURL.query == nil,
               completionURL.fragment == nil,
               completionURL.port != nil,
+              let completionBody = completionRequest.httpBody,
+              let body = try? JSONSerialization.jsonObject(with: completionBody) as? [String: Any],
+              let model = body["model"] as? String, !model.isEmpty,
               !templatePrompt.isEmpty,
               templatePrompt.utf8.count <= maximumTemplateResponseBytes else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -2718,8 +2721,10 @@ enum OSAtlasLlamaHTTPClient {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        // Count with the model selected by this exact completion request.
+        // Native text planners and semantic routing use different aliases.
         request.httpBody = try JSONEncoder().encode(TokenizeRequestBody(
-            content: templatePrompt))
+            model: model, content: templatePrompt))
         return request
     }
 
