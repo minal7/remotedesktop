@@ -43,6 +43,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var turns = 0
         var terminal: ComputerUseExecutionResult?
         var approval: PendingApproval?
+        var isStarting = false
         init(taskID: String, goal: String, browserIdentity: String, journal: ComputerUseTaskJournal) {
             self.taskID = taskID; self.goal = goal; self.browserIdentity = browserIdentity; self.journal = journal
         }
@@ -130,9 +131,66 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation, session: Session) {
+        record(proposal, png: observation.png, currentURL: observation.currentURL, session: session)
+    }
+
+    private func record(_ proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: observation.png, response: proposal.response, currentURL: observation.currentURL))
+        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
+    }
+
+    private func start(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation, session: Session,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws {
+        guard session.turns < 64 else { throw Failure.stepLimit }
+        guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
+        let lease = try store.acquireExecution(taskID: session.journal.taskID, expected: session.journal)
+        defer { lease.release() }
+        try lease.assertOwnership()
+        progress("Reading the browser…")
+        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history)
+        let propose = self.propose
+        let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
+        try Task.checkCancellation(); try lease.assertOwnership()
+        try tools.validateOwnedBrowserInitialAgentObservation(observation)
+        let destination: URL
+        switch proposal.action {
+        case .visitURL(let url): destination = url
+        case .webSearch(let query): destination = try searchProvider.destination(query: query)
+        case .wait(let seconds):
+            try await Task.sleep(for: .seconds(seconds))
+            record(proposal, png: observation.png, currentURL: nil, session: session)
+            return
+        case .remember:
+            record(proposal, png: observation.png, currentURL: nil, session: session)
+            return
+        default: throw Failure.unsupportedAction
+        }
+        let actionID = ComputerUseTaskContract.digest([session.journal.taskID, "native-dispatch", String(session.turns)])
+        let dispatchLease = try store.acquireExecution(taskID: actionID, expected: nil)
+        defer { dispatchLease.release() }
+        let attempted = ComputerUseTaskJournal(taskID: actionID, promptDigest: session.journal.promptDigest,
+            contractDigest: ComputerUseTaskContract.digest([observation.authorityDigest, proposal.response]),
+            stepIDs: ["native-dispatch-returned"], statuses: [.attempted])
+        var began = false
+        do {
+            try await tools.performOwnedBrowserInitialAgentNavigation(destination, observation: observation, operationID: actionID, willBeginEffect: {
+                try lease.assertOwnership(); try dispatchLease.assertOwnership()
+                try self.store.save(attempted, replacing: nil)
+                began = true
+            })
+            var dispatched = attempted; dispatched.statuses = [.verified]
+            try store.save(dispatched, replacing: attempted)
+            record(proposal, png: observation.png, currentURL: nil, session: session)
+            session.isStarting = false
+        } catch {
+            if began {
+                var uncertain = attempted; uncertain.statuses = [.uncertain]
+                try? store.save(uncertain, replacing: attempted)
+                session.terminal = .unableToComplete(Failure.uncertainAction.localizedDescription)
+            }
+            throw error
+        }
     }
 
     private func dispatch(_ proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation,
@@ -189,12 +247,30 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         if let result = try await tools.executeOwnedBrowserTaskIfSupported(taskID: taskID, prompt: goal, progress: progress) {
             return result
         }
+        let rootID = ComputerUseTaskContract.digest(["fara-browser-session-v1", taskID])
+        if session == nil, try store.load(taskID: rootID) != nil { throw Failure.recoveredTask }
+        while session == nil || session?.isStarting == true {
+            guard let initial = try await tools.captureOwnedBrowserInitialAgentObservation(taskID: taskID,
+                expectedSessionIdentity: session?.browserIdentity) else {
+                session?.isStarting = false
+                break
+            }
+            if session == nil {
+                let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTextTaskContract.digest(goal),
+                    contractDigest: ComputerUseTaskContract.digest([rootID, initial.sessionIdentity, goal]),
+                    stepIDs: ["model-assessed-completion"], statuses: [.attempted])
+                try store.save(journal, replacing: nil)
+                session = Session(taskID: taskID, goal: goal, browserIdentity: initial.sessionIdentity, journal: journal)
+                session?.isStarting = true
+            }
+            guard let session else { throw Failure.browserChanged }
+            try await start(initial, session: session, tools: tools, progress: progress)
+        }
         let first: ComputerUseOwnedBrowser.AgentObservation
         do { first = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
         catch ComputerUseBrowserError.authenticationRequired {
             return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
         }
-        let rootID = ComputerUseTaskContract.digest(["fara-browser-session-v1", taskID])
         if session == nil {
             guard try store.load(taskID: rootID) == nil else { throw Failure.recoveredTask }
             let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTextTaskContract.digest(goal),

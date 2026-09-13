@@ -468,23 +468,18 @@ enum ComputerUseNativeTextExecutorLoader {
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
         let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
             receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
-        let providers = try ComputerUseBrowserSourceRequirements.defaultProviders()
         let endpoint = try await runtime.activateNativeText(inputs)
         do { try Task.checkCancellation() }
         catch { await runtime.cancel(endpoint: endpoint); throw error }
         let native = tools.makeNativeTextExecutor(
             planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
             journalDirectory: journalDirectory)
-        let research = ComputerUseBrowserResearchDriver(
-            goalPlanner: ComputerUseRuntimeBrowserGoalPlanner(inputs: inputs, runtime: runtime),
-            resultPlanner: ComputerUseReviewedBrowserResultPlanner(
-                reader: ComputerUseRuntimeBrowserResultPlanner(inputs: inputs, runtime: runtime),
-                reviewer: ComputerUseRuntimeBrowserResultReviewPlanner(inputs: inputs, runtime: runtime)),
-            searchPlanner: ComputerUseRuntimeBrowserSearchPlanner(inputs: inputs, runtime: runtime),
-            actionPlanner: ComputerUseRuntimeBrowserActionPlanner(inputs: inputs, runtime: runtime),
-            formPlanner: ComputerUseRuntimeBrowserFormPlanner(inputs: inputs, runtime: runtime),
-            planning: ComputerUseModelBrowserResearchPlanning(providers: providers,
-                linkPlanner: ComputerUseRuntimeBrowserLinkPlanner(inputs: inputs, runtime: runtime)))
-        return ComputerUseCapabilityExecutor(native: native, browserResearch: research)
+        return ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, progress in
+            // The owned browser uses the trained Fara path composed by setup.
+            // Its task admission and manual login controls stay on that path
+            // instead of treating the browser as a global AX form.
+            if try tools.shouldRouteToOwnedBrowserAgent() { return nil }
+            return try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
+        }, nativeClarification: native)
     }
 }

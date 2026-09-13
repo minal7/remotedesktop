@@ -238,6 +238,8 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
 
     func close() { research?.retire(); browser.close() }
 
+    var hasFrontmostOwnedWindow: Bool { browser.hasFrontmostOwnedWindow }
+
     func stopBrowserActivity() { research?.retire(); browser.stop() }
 
     func stopBrowserActivity(taskID: String) {
@@ -292,6 +294,19 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
                 try await Task.sleep(for: .milliseconds(50))
             }
         }
+    }
+
+    func captureInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> ComputerUseOwnedBrowser.InitialAgentObservation? {
+        try await browser.captureInitialAgentObservation(taskID: taskID, expectedSessionIdentity: expectedSessionIdentity)
+    }
+
+    func validateInitialAgentObservation(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation) throws {
+        try browser.validateInitialAgentObservation(observation)
+    }
+
+    func performInitialAgentNavigation(_ url: URL, observation: ComputerUseOwnedBrowser.InitialAgentObservation,
+        operationID: String, willBeginEffect: () throws -> Void) async throws {
+        try await browser.performInitialAgentNavigation(url, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func validateAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {

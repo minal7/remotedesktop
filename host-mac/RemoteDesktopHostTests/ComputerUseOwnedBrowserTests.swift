@@ -4069,6 +4069,7 @@ final class ComputerUseOwnedBrowserVisibleAcceptanceTests: XCTestCase {
         checkpoint = "verify and close child sign-in window"
         XCTAssertTrue(child.isVisible)
         XCTAssertTrue(NSApp.keyWindow === child)
+        XCTAssertTrue(browser.hasFrontmostOwnedWindow, "A sign-in child must remain on the browser handoff path.")
         XCTAssertFalse(child.isRestorable)
         XCTAssertTrue(child.styleMask.contains(.closable))
         XCTAssertTrue(child.styleMask.contains(.resizable))

@@ -7,6 +7,166 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInBrowserRoutingKeepsOtherMacWindowsOnNativePathAndHonorsPause() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: owned browser and a local native form window") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraRouting-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory))
+        _ = try await tools.captureOwnedBrowserInitialAgentObservation(taskID: "routing", expectedSessionIdentity: nil)
+        XCTAssertTrue(try tools.shouldRouteToOwnedBrowserAgent())
+        let native = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 400, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
+        native.isReleasedWhenClosed = false
+        native.contentView = NSTextField(string: "Unrelated native form")
+        defer { native.close() }
+        native.makeKeyAndOrderFront(nil)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while NSApp.keyWindow !== native && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertTrue(NSApp.keyWindow === native)
+        XCTAssertFalse(try tools.shouldRouteToOwnedBrowserAgent())
+        allowed = false
+        XCTAssertThrowsError(try tools.shouldRouteToOwnedBrowserAgent()) { XCTAssertEqual($0 as? ComputerUseHostTools.ToolError, .paused) }
+    }
+
+    @MainActor
+    func testOptInInitialBrowserObservationsRejectReplacementCancellationAndReusedNavigation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native empty-browser ownership") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Local page</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let oldValue = try await browser.captureInitialAgentObservation(taskID: "initial-ownership", expectedSessionIdentity: nil)
+        let old = try XCTUnwrap(oldValue)
+        let currentValue = try await browser.captureInitialAgentObservation(taskID: "initial-ownership", expectedSessionIdentity: old.sessionIdentity)
+        let current = try XCTUnwrap(currentValue)
+        XCTAssertThrowsError(try browser.validateInitialAgentObservation(old))
+        var effects = 0
+        let cancelled = Task {
+            try Task.checkCancellation()
+            try await browser.performInitialAgentNavigation(base.appendingPathComponent("page"), observation: current, operationID: "cancelled", willBeginEffect: { effects += 1 })
+        }
+        cancelled.cancel()
+        do { try await cancelled.value; XCTFail("Cancelled initial navigation must not run") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(effects, 0); XCTAssertTrue(server.requestedPaths.isEmpty)
+        try await browser.performInitialAgentNavigation(base.appendingPathComponent("page"), observation: current, operationID: "first", willBeginEffect: { effects += 1 })
+        XCTAssertEqual(effects, 1); XCTAssertEqual(server.count("/page"), 1)
+        do {
+            try await browser.performInitialAgentNavigation(base.appendingPathComponent("page"), observation: current, operationID: "replay", willBeginEffect: { effects += 1 })
+            XCTFail("An initial observation must be single-use")
+        } catch { }
+        try browser.claim(taskID: "successor")
+        do {
+            _ = try await browser.captureInitialAgentObservation(taskID: "initial-ownership", expectedSessionIdentity: old.sessionIdentity)
+            XCTFail("An old task cannot reclaim the successor's browser")
+        } catch { }
+        XCTAssertEqual(browser.taskID, "successor")
+        XCTAssertEqual(effects, 1); XCTAssertEqual(server.count("/page"), 1)
+    }
+
+    @MainActor
+    func testOptInFailedInitialFaraSearchCannotReplayOrRestartItsJournal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: one failed initial search") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let path = "/search?q=concerts"
+        let server = try OwnedBrowserHTTPFixture(routes: [path: .init(status: 500, body: "Search unavailable")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraInitialFailure-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("navigation")))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { _ in
+                calls += 1
+                let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"web_search","query":"concerts"}}</tool_call>"#
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+        do {
+            _ = try await executor.execute(taskID: "initial-failure", prompt: "Find concerts", trustedUserPrompt: "Find concerts", tools: tools, progress: { _ in })
+            XCTFail("A failed first request cannot complete")
+        } catch { }
+        let retried = try await executor.execute(taskID: "initial-failure", prompt: "Find concerts", trustedUserPrompt: "Find concerts", tools: tools, progress: { _ in })
+        guard case .unableToComplete = retried else { return XCTFail("Uncertain navigation requires manual reconciliation") }
+        let restarted = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            XCTFail("Restart must not reconstruct missing live history"); throw ComputerUseFaraBrowserExecutor.Failure.recoveredTask
+        })
+        do {
+            _ = try await restarted.execute(taskID: "initial-failure", prompt: "Find concerts", trustedUserPrompt: "Find concerts", tools: tools, progress: { _ in })
+            XCTFail("A restarted executor must reject this journal")
+        } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .recoveredTask) }
+        XCTAssertEqual(calls, 1); XCTAssertEqual(server.count(path), 1)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.first { $0.stepIDs == ["native-dispatch-returned"] }?.statuses, [.uncertain])
+    }
+
+    @MainActor
+    func testOptInFaraStartsFromEmptyBrowserThenSearchesOnceWithOriginalGoal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: visible blank browser and one controlled search")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let path = "/search?q=Tokyo%20concerts"
+        let server = try OwnedBrowserHTTPFixture(routes: [path: .init(body: "<!doctype html><title>Tokyo concerts</title><h1>Tokyo Music Hall</h1><p>Friday, 7 pm. Tickets: 2400 JPY.</p>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraEmpty-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("navigation")))
+        XCTAssertNil(browser.taskID)
+        let goal = "Find a Tokyo concert and report its ticket price, time and source."
+        let source = base.absoluteString + path
+        let answer = "Tokyo Music Hall: 2400 JPY, Friday 7 pm. Source: " + source
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { input in
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.history.count, calls)
+                try ComputerUseFaraModel.validatePNG(input.screenshotPNG)
+                guard calls < 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                if calls == 0 {
+                    XCTAssertNil(input.currentURL, "An empty browser is not a navigated page.")
+                    XCTAssertTrue(server.requestedPaths.isEmpty, "Starting the agent must not invent an initial website.")
+                    let image = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+                    image.name = "Actual initial empty browser"; image.lifetime = .keepAlways; self.add(image)
+                } else {
+                    XCTAssertEqual(input.currentURL?.absoluteString, source)
+                    XCTAssertNil(input.history.first?.currentURL)
+                    XCTAssertEqual(server.count(path), 1)
+                }
+                let action: [String: Any] = calls == 0 ? ["action": "web_search", "query": "Tokyo concerts"] : ["action": "terminate", "answer": answer]
+                let json = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": action])
+                let response = "<tool_call>" + String(decoding: json, as: UTF8.self) + "</tool_call>"
+                calls += 1
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(taskID: "fara-empty", prompt: "Untrusted old assistant context", trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        } catch {
+            XCTFail("Empty-browser task failed after \(calls) proposals and requests \(server.requestedPaths): \(String(reflecting: error))")
+            return
+        }
+        XCTAssertEqual(result, .completed(answer))
+        let repeated = try await executor.execute(taskID: "fara-empty", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(repeated, result)
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(server.requestedPaths, [path])
+    }
+
+    @MainActor
     func testOptInFaraScrollMatchesViewportDirectionAndRetiresObservation() async throws {
         try await runFaraViewportScroll(observesWheel: false)
     }
@@ -472,7 +632,12 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runManagedFaraConcertResult(scrollFirst: Bool, productionLoader: Bool = false) async throws {
+    func testOptInProductionFaraStartsFromEmptyBrowserAndFindsConcertSource() async throws {
+        try await runManagedFaraConcertResult(scrollFirst: false, productionLoader: true, startEmpty: true)
+    }
+
+    @MainActor
+    private func runManagedFaraConcertResult(scrollFirst: Bool, productionLoader: Bool = false, startEmpty: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: actual Fara on a fictional search and concert page")
@@ -501,7 +666,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             allowedOrigins: [ComputerUseBrowserSourceOrigin(base)])
         let browserSession = try browser.prepareWorkflowSession(taskID: "fara-search-model")
         try browser.installSourcePolicy(boundary, replacing: nil, session: browserSession)
-        _ = try await browser.navigate(taskID: "fara-search-model", operationID: "open", to: base.appendingPathComponent("start"))
+        if !startEmpty { _ = try await browser.navigate(taskID: "fara-search-model", operationID: "open", to: base.appendingPathComponent("start")) }
         let runtime = OSAtlasLlamaRuntime()
         let executable = inputs.llamaServerURL
         let memory = Task.detached { () -> (UInt64, Int) in
@@ -515,7 +680,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
             return (peak, count)
         }
         var responses: [[String: Any]] = []
-        let goal = (scrollFirst ? "Scroll down to find the Tokyo Music Hall concert in these search results. " : "Find the Tokyo Music Hall concert in these search results. ")
+        let goal = (startEmpty ? "Visit \(base.appendingPathComponent("start").absoluteString). " : "")
+            + (scrollFirst ? "Scroll down to find the Tokyo Music Hall concert in these search results. " : "Find the Tokyo Music Hall concert in these search results. ")
             + "Open its details and report the ticket price and start time with the source URL."
         let started = Date()
         let executor: any ComputerUseExecuting
@@ -553,7 +719,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
         let reportedAnswer: String
         if case .completed(let answer) = result { reportedAnswer = answer } else { reportedAnswer = "" }
-        let report: [String: Any] = ["scope": productionLoader ? "production-Fara-loader-controlled-concert-result" : (scrollFirst ? "actual-Fara-controlled-scroll-concert-result" : "actual-Fara-controlled-concert-result-navigation"), "targetMacRAMGB": 12,
+        let report: [String: Any] = ["scope": startEmpty ? "production-Fara-empty-browser-concert-result" : (productionLoader ? "production-Fara-loader-controlled-concert-result" : (scrollFirst ? "actual-Fara-controlled-scroll-concert-result" : "actual-Fara-controlled-concert-result-navigation")), "targetMacRAMGB": 12,
             "wholeApp12GBQualified": false, "liveWebsiteQualified": false, "responses": responses,
             "reportedAnswer": reportedAnswer,
             "requests": server.requestedPaths, "elapsedSeconds": Date().timeIntervalSince(started),

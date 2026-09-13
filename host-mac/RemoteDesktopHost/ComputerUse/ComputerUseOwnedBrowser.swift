@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Combine
 import SwiftUI
 import WebKit
@@ -647,6 +648,91 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 /// receipts come from the exact WKNavigation owned by the current task.
 @MainActor
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    /// A real snapshot of an allocated browser with no document or network
+    /// activity. It grants only a first navigation, never page input authority.
+    struct InitialAgentObservation: Equatable, Sendable {
+        let png: Data
+        fileprivate let session: ComputerUseBrowserHandbackRequirement
+        fileprivate let id: UUID
+        fileprivate let takeover: UUID
+        fileprivate let viewportSize: NSSize
+        fileprivate let windowFrame: NSRect
+        var sessionIdentity: String { ComputerUseTaskContract.digest([session.contextID ?? "", session.taskID, session.ownershipEpoch?.uuidString ?? ""]) }
+        var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
+    }
+
+    func captureInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> InitialAgentObservation? {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        agentObservationID = nil
+        defer { agentOperationInProgress = false }
+        try Task.checkCancellation()
+        let requirement: ComputerUseBrowserHandbackRequirement
+        if let expectedSessionIdentity {
+            guard let existing = handbackRequirement(taskID: taskID, required: true),
+                  ComputerUseTaskContract.digest([existing.contextID ?? "", existing.taskID, existing.ownershipEpoch?.uuidString ?? ""]) == expectedSessionIdentity else {
+                throw ComputerUseBrowserError.handbackContextLost
+            }
+            requirement = existing
+        } else if self.taskID == taskID, let existing = handbackRequirement(taskID: taskID, required: true) {
+            requirement = existing
+        } else {
+            requirement = try await admitResearchSession(taskID: taskID, assertAdmission: {})
+        }
+        try validateWorkflowSession(requirement)
+        guard try isUnnavigatedSession(requirement) else { return nil }
+        guard let view = browser else { throw ComputerUseBrowserError.closed }
+        let takeover = takeoverEpoch
+        presentIfNeeded(view)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !hasRequiredPresentation && ContinuousClock.now < deadline {
+            try Task.checkCancellation(); try validateWorkflowSession(requirement)
+            guard takeoverEpoch == takeover, try isUnnavigatedSession(requirement) else { throw ComputerUseBrowserError.pageChanged }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        guard hasRequiredPresentation, let window else { throw ComputerUseBrowserError.windowNotActive }
+        let frame = window.frame, size = view.bounds.size
+        guard size.width > 0, size.height > 0, window.backingScaleFactor > 0 else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        // WebKit has no document drawing area before its first load and its
+        // snapshot API returns WKError(1). Capture this proven-empty native
+        // view through AppKit. Loaded pages never use this path.
+        guard let nativeBitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        view.cacheDisplay(in: view.bounds, to: nativeBitmap)
+        guard let raw = nativeBitmap.representation(using: .png, properties: [:]),
+              let source = CGImageSourceCreateWithData(raw as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 1188] as CFDictionary) else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        try Task.checkCancellation(); try validateHandback(requirement, taskID: taskID)
+        guard self.browser === view, self.window === window, takeoverEpoch == takeover,
+              window.frame == frame, view.bounds.size == size, try isUnnavigatedSession(requirement),
+              let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else { throw ComputerUseBrowserError.pageChanged }
+        try ComputerUseFaraModel.validatePNG(png)
+        let id = UUID(); agentObservationID = id
+        return InitialAgentObservation(png: png, session: requirement, id: id, takeover: takeover, viewportSize: size, windowFrame: frame)
+    }
+
+    func validateInitialAgentObservation(_ observation: InitialAgentObservation) throws {
+        try Task.checkCancellation()
+        try validateHandback(observation.session, taskID: observation.session.taskID)
+        guard agentObservationID == observation.id, takeoverEpoch == observation.takeover,
+              browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+              try isUnnavigatedSession(observation.session) else { throw ComputerUseBrowserError.pageChanged }
+    }
+
+    func performInitialAgentNavigation(_ url: URL, observation: InitialAgentObservation,
+        operationID: String, willBeginEffect: () throws -> Void) async throws {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        defer { agentOperationInProgress = false }
+        try validateInitialAgentObservation(observation)
+        _ = try await navigate(taskID: observation.session.taskID, operationID: operationID, to: url,
+            requiringUnnavigatedSession: observation.session, willBeginEffect: {
+                try self.validateInitialAgentObservation(observation)
+                try willBeginEffect()
+                self.agentObservationID = nil
+            })
+    }
+
     struct AgentObservation: Equatable, Sendable {
         let png: Data
         let pixelWidth: Int
@@ -1253,6 +1339,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard let window, window.isVisible, !window.isMiniaturized,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier else { return false }
         return NSApp.keyWindow === window
+    }
+
+    /// Routing evidence only. A foreground sign-in child must stay in the
+    /// browser's manual-control path instead of becoming a global AX form.
+    var hasFrontmostOwnedWindow: Bool {
+        if isFrontmostWindow { return true }
+        guard let signInWindow, hasOpenSignInWindow, signInWindow.isVisible, !signInWindow.isMiniaturized,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier else { return false }
+        return NSApp.keyWindow === signInWindow
     }
 
     var hasRequiredPresentation: Bool { !hasOpenSignInWindow && (!presentsWindow || isFrontmostWindow) }

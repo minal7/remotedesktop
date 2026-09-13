@@ -1183,6 +1183,12 @@ final class ComputerUseHostTools {
             })
     }
 
+    func shouldRouteToOwnedBrowserAgent() throws -> Bool {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        return browserNavigationTask?.hasFrontmostOwnedWindow == true
+    }
+
     func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
         let workflow = try ComputerUseBrowserWorkflowRequest.compile(prompt)
@@ -1277,6 +1283,33 @@ final class ComputerUseHostTools {
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
         return try await browserNavigationTask.captureAgentObservation(taskID: taskID)
+    }
+
+    func captureOwnedBrowserInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> ComputerUseOwnedBrowser.InitialAgentObservation? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        if browserNavigationTask == nil {
+            guard expectedSessionIdentity == nil, !HostRuntimeContext.isRunningUnitTests else { throw ComputerUseBrowserError.closed }
+            browserNavigationTask = .init(browser: ComputerUseOwnedBrowser(mayAct: mayAct), journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
+            publishOwnedBrowserTaskControls()
+        }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.captureInitialAgentObservation(taskID: taskID, expectedSessionIdentity: expectedSessionIdentity)
+    }
+
+    func validateOwnedBrowserInitialAgentObservation(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation) throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try browserNavigationTask.validateInitialAgentObservation(observation)
+    }
+
+    func performOwnedBrowserInitialAgentNavigation(_ url: URL, observation: ComputerUseOwnedBrowser.InitialAgentObservation,
+        operationID: String, willBeginEffect: () throws -> Void) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try await browserNavigationTask.performInitialAgentNavigation(url, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func validateOwnedBrowserAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {

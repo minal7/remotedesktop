@@ -1,8 +1,92 @@
 import XCTest
+import AppKit
+import CryptoKit
 @testable import RemoteDesktopHost
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testOptInProductionNativeLoaderRoutesBrowserTaskThroughMacToolsToFara() async throws {
+        try await runProductionBrowserComposition(reusesPriorTaskPage: false)
+    }
+
+    func testOptInProductionNativeLoaderStartsNewBrowserTaskOnPriorTasksPage() async throws {
+        try await runProductionBrowserComposition(reusesPriorTaskPage: true)
+    }
+
+    private func runProductionBrowserComposition(reusesPriorTaskPage: Bool) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: production native/Fara loaders and controlled browser task") }
+        let nativeModel = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_TEXT_MODEL_PATH"]))
+        let file = try FileHandle(forReadingFrom: nativeModel)
+        defer { try? file.close() }
+        var hash = SHA256()
+        while let chunk = try file.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
+        XCTAssertEqual(hash.finalize().map { String(format: "%02x", $0) }.joined(), ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256)
+        let faraInputs = try await FaraTestAssets.inputs(environment: environment)
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let style = "<style>body{font:26px system-ui;margin:50px;background:white;color:#111}a{display:block;padding:24px;background:#eef4ff}</style>"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/results": .init(body: "<!doctype html>" + style + "<h1>Concert search results</h1><a href='/details'>Tokyo Music Hall concert details</a>"),
+            "/details": .init(body: "<!doctype html>" + style + "<h1>Tokyo Music Hall</h1><p>Friday concert starts at 7 pm.</p><p>Ticket price: 2400 JPY.</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraDefaultComposition-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "normal-browser-route"
+        let browserTaskID = reusesPriorTaskPage ? "prior-browser-task" : taskID
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let requirement = try browser.prepareWorkflowSession(taskID: browserTaskID)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: browserTaskID, prompt: "Controlled local sources only", referenceDate: Date(), timeZoneIdentifier: "UTC"),
+            allowedOrigins: [ComputerUseBrowserSourceOrigin(base)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: requirement)
+        _ = try await browser.navigate(taskID: browserTaskID, operationID: "fixture", to: base.appendingPathComponent("results"))
+        let runtime = OSAtlasLlamaRuntime()
+        let planner = StubMCPPlanner(mode: .generationFailure)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        var hybrid: MCPFirstComputerUseExecutor?
+        var visualLoads = 0, result: ComputerUseExecutionResult?, failure: Error?
+        do {
+            let native = try await ComputerUseNativeTextExecutorLoader.load(receipt: .init(
+                installationVersion: ComputerUseArtifactManifest.nativeTextV2.installationVersion, modelVariant: .nativeText4B,
+                modelDirectory: nativeModel.deletingLastPathComponent().path, installedAt: Date()), tools: tools, runtime: runtime,
+                journalDirectory: directory.appendingPathComponent("text"), progress: { _ in })
+            let loader = OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: directory.appendingPathComponent("fara"))
+            let deferred = ComputerUseDeferredVisualExecutor(loader: { progress in
+                visualLoads += 1
+                return try await loader.load(receipt: .init(installationVersion: ComputerUseArtifactManifest.current.installationVersion,
+                    modelVariant: .fara15_4B, modelDirectory: faraInputs.modelURL.deletingLastPathComponent().path, installedAt: Date()), progress: progress)
+            }, abandon: { _ in await loader.deactivate() })
+            native.setDesktopFactory { _ in
+                let loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fixture/helper"),
+                    visualFallback: deferred, planner: planner, clientPool: pool)
+                hybrid = loaded
+                return loaded
+            }
+            let goal = "Find the Tokyo Music Hall concert in these results. Open its details and report its ticket price, start time and source URL."
+            // Reserve the legacy driver's slot to reject that route before it
+            // can invoke Qwen research inference. The trained browser loop
+            // must use its own retained action/session path.
+            result = try await tools.withOwnedBrowserResearchAdmission(didPrepare: { _ in
+                XCTFail("Default browsing must not use the legacy Qwen research driver")
+            }, operation: {
+                try await native.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            })
+        } catch { failure = error }
+        hybrid?.cancelMCPWork()
+        await runtime.shutdown()
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: faraInputs.llamaServerURL).isEmpty)
+        if let failure { return XCTFail("Normal browser composition failed before \(visualLoads) Fara loads: \(String(reflecting: failure))") }
+        guard case .completed(let answer) = result else { return XCTFail("Normal composition did not complete the browser task") }
+        XCTAssertTrue(answer.lowercased().contains("2400 jpy"))
+        XCTAssertTrue(answer.lowercased().contains("7 pm") || answer.contains("19:00"))
+        XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
+        XCTAssertEqual(visualLoads, 1); XCTAssertEqual(planner.proposedToolNames.count, 1)
+        XCTAssertEqual(server.count("/details"), 1)
+        let calls = await pool.directExecuteCount(); XCTAssertEqual(calls, 0)
+    }
+
     func testApprovedMailConfirmationRequiresMatchingTypedStatusAndUsesHostWording() throws {
         let tool = try makeMailTool()
         for send in [false, true] {
