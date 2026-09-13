@@ -280,7 +280,10 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     }
 
     func captureAgentObservation(taskID: String, preserving session: ComputerUseOwnedBrowser.AgentObservation? = nil) async throws -> ComputerUseOwnedBrowser.AgentObservation {
-        let retryDeadline = ContinuousClock.now + .seconds(3)
+        // Live pages can apply sticky layout after a multi-second anchor
+        // transition. Bound fresh reads while that layout settles; retain
+        // immediate cancellation/ownership failure and never replay input.
+        let retryDeadline = ContinuousClock.now + .seconds(8)
         while true {
             do {
                 if let session { try browser.validateAgentSession(session) }

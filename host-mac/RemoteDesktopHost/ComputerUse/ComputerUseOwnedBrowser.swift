@@ -771,6 +771,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var agentOperationInProgress = false
     private var agentPointer = ComputerUseFaraAction.Point(x: 500, y: 500)
     private(set) var lastAgentTargetStatus: String?
+    private(set) var lastAgentCaptureStage: String?
 
     /// Refreshing a stale scene must retain its task and user-control authority.
     /// This deliberately ignores document/layout changes, which the new capture verifies.
@@ -805,6 +806,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         agentOperationInProgress = true
         agentObservationID = nil
         defer { agentOperationInProgress = false }
+        lastAgentCaptureStage = "native-admission"
         try Task.checkCancellation()
         guard validate(expected), let view = browser, let window, hasRequiredPresentation else {
             throw ComputerUseBrowserError.pageChanged
@@ -816,13 +818,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         // Existing page admission detects credentials before screenshotting.
         // The host retains DOM evidence; the model receives the image and current URL.
+        lastAgentCaptureStage = "observe-page"
         let evidence = try await observePage(document: expected, forAgentInput: true)
         let configuration = WKSnapshotConfiguration()
         configuration.rect = view.bounds
         let scale = min(1, 1188 / max(size.width, size.height))
         configuration.snapshotWidth = NSNumber(value: size.width * scale / window.backingScaleFactor)
+        lastAgentCaptureStage = "snapshot-image"
         let image = try await view.takeSnapshot(configuration: configuration)
+        lastAgentCaptureStage = "validate-page"
         try await validatePageEvidence(evidence)
+        lastAgentCaptureStage = "validate-native"
         try Task.checkCancellation()
         guard validate(expected), self.browser === view, self.window === window,
               ownershipEpoch == ownership, takeoverEpoch == takeover,
@@ -834,6 +840,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try ComputerUseFaraModel.validatePNG(png)
         let id = UUID()
         agentObservationID = id
+        lastAgentCaptureStage = "complete"
         return AgentObservation(png: png, pixelWidth: bitmap.pixelsWide, pixelHeight: bitmap.pixelsHigh,
             viewportSize: size, id: id, evidence: evidence, ownership: ownership, takeover: takeover, windowFrame: frame)
     }
@@ -863,6 +870,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         switch action {
         case .pointer(.leftClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window).action
         case .typeText(let text): return .typeText(text)
+        case .key(let keys) where keys.count == 1 && ["ENTER", "RETURN"].contains(keys[0].uppercased()):
+            return .key(usage: 0x28, modifiers: 0)
         case .key(let keys) where keys.count == 2 && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased()) && keys[1].uppercased() == "A":
             return .key(usage: 0x04, modifiers: 1 << 3)
         default: return nil
@@ -1012,6 +1021,22 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 // WebKit input events. It never adds select-all or Return.
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
             }
+        case .key(let keys) where keys.count == 1 && ["ENTER", "RETURN"].contains(keys[0].uppercased()):
+            guard let responder = window.firstResponder as? NSView,
+                  responder === view || responder.isDescendant(of: view),
+                  let client = responder as? any NSTextInputClient, !client.hasMarkedText() else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            let time = ProcessInfo.processInfo.systemUptime
+            guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: time,
+                windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36),
+                  let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: time + 0.001,
+                windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+                throw ComputerUseBrowserError.pageEvidenceUnavailable
+            }
+            // Preserve WebKit's key/form behavior. Admission and the durable
+            // attempt happen before this one native down/up pair.
+            dispatch = { window.sendEvent(down); window.sendEvent(up) }
         case .key(let keys) where keys.count == 2
             && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased())
             && keys[1].uppercased() == "A":
@@ -1175,6 +1200,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let ownershipEpoch: UUID
         let startedWhileActive: Bool
         var successfulResponseURL: URL?
+        var receivedMatchingCommit = false
     }
 
     private struct ObservedPage {
@@ -1708,7 +1734,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         var arguments: [String: Any] = [:]
         if includingControlState { arguments["includeControlState"] = true }
-        if forAgentInput { arguments["agentInput"] = true }
+        if forAgentInput {
+            guard let view = browser, let window else { throw ComputerUseBrowserError.closed }
+            let frame = window.convertToScreen(view.convert(view.bounds, to: nil))
+            let top = CGDisplayBounds(CGMainDisplayID()).height - frame.maxY
+            arguments["agentInput"] = true
+            arguments["agentRaster"] = ["width": view.bounds.width, "height": view.bounds.height,
+                "columns": ceil(frame.maxX)-ceil(frame.minX), "rows": ceil(top+frame.height)-ceil(top),
+                "offsetX": ceil(frame.minX)-frame.minX, "offsetY": ceil(top)-top]
+        }
         let result = try await callDOM(.pageSnapshot, arguments: arguments, document: expected)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
@@ -1726,6 +1760,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         let result = try await callDOM(.validatePageSnapshot,
             arguments: ["documentID": evidence.documentID, "snapshotID": evidence.page.id], document: evidence.document)
+        if lastAgentCaptureStage == "validate-page" { lastAgentCaptureStage = "validate-page-" + result.status }
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-current", result.documentID == evidence.documentID,
               result.fields == nil, result.page == nil else { throw ComputerUseBrowserError.pageChanged }
@@ -3332,9 +3367,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        if deferNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation, replay: {}) { return }
+        let committedURL = webView.url
+        if deferNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation, replay: { [weak self] in
+            self?.acceptObservedCommit(in: webView, navigation: navigation, url: committedURL)
+        }) { return }
         guard !isRetiredNavigation(navigation, in: webView) else { return }
         recordNavigationCallback(.documentCommitStarted, in: webView, navigation: navigation)
+        acceptObservedCommit(in: webView, navigation: navigation, url: committedURL)
+    }
+
+    private func acceptObservedCommit(in view: WKWebView, navigation: WKNavigation?, url: URL?) {
+        guard !isNativeCleanupActive, view === browser, let observed = observedNavigation,
+              navigation === observed.navigation, observed.generation == generation, taskID == observed.taskID,
+              observed.ownershipEpoch == ownershipEpoch, let url,
+              Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url) else { return }
+        observedNavigation?.receivedMatchingCommit = true
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -3361,8 +3408,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard let observed = observedNavigation,
                   navigation === observed.navigation else { return }
             guard taskID == observed.taskID, observed.generation == generation,
-                  let url = webView.url, Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url),
+                  let url = webView.url,
+                  (observed.receivedMatchingCommit || Self.responseURL(observed.successfulResponseURL, matchesDocumentURL: url)),
                   Self.validatedURL(url) != nil else { endObservedNavigation(.finishRejected); return }
+            // A committed page may replace its history URL before didFinish.
+            // Keep the matching native commit on this exact navigation; the
+            // final location remains an observation, never an action receipt.
             endObservedNavigation(.finished)
             let finishedScope = navigationCallbackScope(in: webView)
             let requiresExplicitHandback = !mayAct()

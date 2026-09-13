@@ -1074,7 +1074,8 @@ enum ComputerUseBrowserDOM {
         const field = textField ? [valueGetters[focused instanceof HTMLTextAreaElement ? 1 : 0].call(focused),
           focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : [];
         const selection = doc.getSelection();
-        return {elements,layout,focused,field:JSON.stringify(field),
+        return {elements,layout,indices:new Map(elements.map((element,index)=>[element,index])),focused,field:JSON.stringify(field),
+          width:innerWidth,height:innerHeight,
           anchor:selection?.anchorNode,focus:selection?.focusNode,start:selection?.anchorOffset,end:selection?.focusOffset};
       }
       function agentFocusStateMatches(previous, current) {
@@ -1083,7 +1084,82 @@ enum ComputerUseBrowserDOM {
       }
       function agentInputStateMatches(previous, current) {
         return agentFocusStateMatches(previous,current) && previous.elements.length === current.elements.length
-          && previous.elements.every((element,index) => element === current.elements[index]);
+          && previous.elements.every((element,index) => element === current.elements[index])
+          && (!previous.inputElements || previous.inputElements.every(element => agentElementStateMatches(previous,current,element)));
+      }
+      function agentElementStateMatches(previous, current, element) {
+        const before = previous.indices.get(element), after = current.indices.get(element);
+        return before !== undefined && after !== undefined && JSON.stringify(previous.layout[before]) === JSON.stringify(current.layout[after]);
+      }
+      function agentHitAtPoint(x,y) {
+        let hit = doc.elementFromPoint(x,y);
+        for (let depth=0; hit?.shadowRoot && depth<16; depth++) {
+          const child = hit.shadowRoot.elementFromPoint(x,y);
+          if (!child || child === hit) break;
+          hit = child;
+        }
+        return hit;
+      }
+      function captureAgentHitTargets(state, controls, links, nativeGrid) {
+        // Sample only visible interactive rectangles, on the same integral
+        // native screen-point grid used when posting a click. Keep DOM node
+        // identities in this isolated world; no hit map enters model context.
+        const grid = nativeGrid || {width:innerWidth,height:innerHeight,columns:Math.ceil(innerWidth),rows:Math.ceil(innerHeight),offsetX:0,offsetY:0};
+        if (![grid.width,grid.height,grid.columns,grid.rows,grid.offsetX,grid.offsetY].every(Number.isFinite)
+            || grid.width <= 0 || grid.height <= 0 || !Number.isInteger(grid.columns) || !Number.isInteger(grid.rows)
+            || grid.columns < 1 || grid.rows < 1 || grid.columns*grid.rows > 16777216
+            || grid.offsetX < 0 || grid.offsetX >= 1 || grid.offsetY < 0 || grid.offsetY >= 1) return false;
+        const stepX = innerWidth/grid.width, stepY = innerHeight/grid.height;
+        const originX = grid.offsetX*stepX, originY = grid.offsetY*stepY;
+        const pixels = new Uint16Array(grid.columns*grid.rows), inputElements = [];
+        for (const element of new Set([...controls.values(),...links.values()].map(binding=>binding.element))) {
+          let captured = false;
+          for (const rect of element.getClientRects()) {
+            const left = Math.max(0,Math.ceil((rect.left-originX)/stepX)), top = Math.max(0,Math.ceil((rect.top-originY)/stepY));
+            const right = Math.min(grid.columns,Math.ceil((rect.right-originX)/stepX)), bottom = Math.min(grid.rows,Math.ceil((rect.bottom-originY)/stepY));
+            if (right <= left || bottom <= top) continue;
+            captured = true;
+            for (let row=top; row<bottom; row++) for (let column=left; column<right; column++) {
+              const index = row*grid.columns+column;
+              if (pixels[index]) continue;
+              const target = state.indices.get(agentHitAtPoint(originX+column*stepX,originY+row*stepY));
+              pixels[index] = target === undefined ? 65535 : target+1;
+            }
+          }
+          if (captured) inputElements.push(element);
+        }
+        const focusRect = state.focused?.getBoundingClientRect();
+        const focusPoint = focusRect && [focusRect.x+focusRect.width/2,focusRect.y+focusRect.height/2];
+        state.hitTargets = {pixels,columns:grid.columns,rows:grid.rows,originX,originY,stepX,stepY};
+        state.inputElements = inputElements;
+        state.focusPoint = focusPoint;
+        state.focusHit = focusPoint && agentHitAtPoint(...focusPoint);
+        return true;
+      }
+      function agentTargetPointStateMatches(previous, current, x, y, focused) {
+        if (!agentFocusStateMatches(previous,current) || !previous.hitTargets || previous.width !== current.width || previous.height !== current.height
+            || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+        let oldHit;
+        if (focused) {
+          if (!previous.focusPoint || previous.focusPoint[0] !== x || previous.focusPoint[1] !== y
+              || !previous.focusHit || !contains(previous.focused,previous.focusHit)) return false;
+          oldHit = previous.focusHit;
+        } else {
+          const grid = previous.hitTargets, column = (x-grid.originX)/grid.stepX, row = (y-grid.originY)/grid.stepY;
+          const ix = Math.round(column), iy = Math.round(row);
+          if (Math.abs(column-ix)>0.000001 || Math.abs(row-iy)>0.000001 || ix<0 || iy<0 || ix>=grid.columns || iy>=grid.rows) return false;
+          const id = grid.pixels[iy*grid.columns+ix];
+          if (!id || id === 65535) return false;
+          oldHit = previous.elements[id-1];
+        }
+        if (oldHit !== agentHitAtPoint(x,y) || !agentElementStateMatches(previous,current,oldHit)) return false;
+        // A pointer-transparent overlay can obscure the image while leaving
+        // event hit-testing unchanged. Retain the conservative visual check.
+        const transparentAtPoint = state => state.layout.map((rect,index)=>({rect,element:state.elements[index]}))
+          .filter(item=>item.rect[4]==='none' && item.rect[0]<=x && x<item.rect[0]+item.rect[2] && item.rect[1]<=y && y<item.rect[1]+item.rect[3]);
+        const before = transparentAtPoint(previous), after = transparentAtPoint(current);
+        return before.length === after.length && before.every((item,index)=>item.element === after[index].element
+          && JSON.stringify(item.rect) === JSON.stringify(after[index].rect));
       }
       function agentPointStateMatches(previous, current, x, y) {
         if (!agentFocusStateMatches(previous,current) || !Number.isFinite(x) || !Number.isFinite(y)
@@ -1764,6 +1840,9 @@ enum ComputerUseBrowserDOM {
           const needsAgentState = command === 'pageSnapshot' ? args.agentInput === true : !!lastPageSnapshot?.agentState;
           const agentState = needsAgentState ? agentInputState() : null;
           if (needsAgentState && !agentState) { lastPageSnapshot = null; return reply('unsupported'); }
+          if (command === 'pageSnapshot' && agentState && !captureAgentHitTargets(agentState,controls,links,args.agentRaster)) {
+            lastPageSnapshot = null; return reply('unsupported');
+          }
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
@@ -1771,6 +1850,11 @@ enum ComputerUseBrowserDOM {
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
             const scopedAgentTarget = command === 'agentTarget' && !!lastPageSnapshot.agentState;
+            if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {
+              if (lastPageSnapshot.invalidated) return reply('stale-agent-bindings');
+              if (serialized !== lastPageSnapshot.serialized) return reply('stale-agent-content');
+              if (!agentInputStateMatches(lastPageSnapshot.agentState,agentState)) return reply('stale-agent-state');
+            }
             if (!scopedAgentTarget && (lastPageSnapshot.invalidated || serialized !== lastPageSnapshot.serialized
                 || (lastPageSnapshot.agentState && !agentInputStateMatches(lastPageSnapshot.agentState, agentState))
                 || containers.size !== lastPageSnapshot.containers.size
@@ -1857,7 +1941,7 @@ enum ComputerUseBrowserDOM {
               const targetRect = args.focused === true && hit?.getBoundingClientRect();
               const pointX = targetRect ? targetRect.x + targetRect.width/2 : args.x;
               const pointY = targetRect ? targetRect.y + targetRect.height/2 : args.y;
-              if (!agentPointStateMatches(lastPageSnapshot.agentState,agentState,pointX,pointY)) return reply('stale-agent-point');
+              if (!agentTargetPointStateMatches(lastPageSnapshot.agentState,agentState,pointX,pointY,args.focused === true)) return reply('stale-agent-point');
               // Typing requires the exact focused element to accept text. Ancestor
               // and link lookup below is only suitable for identifying other input.
               if (args.editable === true && !Array.from(controls.values()).some(binding => binding.element === hit
@@ -1869,6 +1953,7 @@ enum ComputerUseBrowserDOM {
                 for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled && binding.metadata.label.trim()) {
                   const previous = lastPageSnapshot.controls.get(id);
                   if (!previous || previous.retired || previous.element !== binding.element || previous.form !== binding.form
+                      || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)
                       || previous.signature !== binding.signature || JSON.stringify(previous.metadata) !== JSON.stringify(binding.metadata)
                       || previous.references.length !== binding.references.length
                       || previous.references.some((node,index) => node !== binding.references[index])) return reply('stale-agent-control');
@@ -1881,6 +1966,7 @@ enum ComputerUseBrowserDOM {
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);
                   if (!previous || previous[1].retired || previous[1].base !== binding.base || previous[1].signature !== binding.signature
+                      || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)
                       || JSON.stringify(previous[1].metadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-link');
                   const link = content.links.find(link => link.id === id);
                   if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:previous[0],agentTargetContext:'AXLink • '+link.label};

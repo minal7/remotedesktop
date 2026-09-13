@@ -51,7 +51,7 @@ enum ComputerUseActionSafetyPolicy {
                 return "Press Delete, which may permanently remove the selected item"
             }
             if usage == 0x28 {
-                if context.contains("search") {
+                if context.contains("search"), !containsAny(highImpactKeywords, in: context) {
                     return nil
                 }
                 return described(
