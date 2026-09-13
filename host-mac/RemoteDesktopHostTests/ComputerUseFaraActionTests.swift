@@ -8,13 +8,28 @@ import XCTest
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
     func testOptInFaraReplaysFrozenRejectedSearchHeading() async throws {
+        try await runFrozenFaraProposal(ticketAnswer: false)
+    }
+
+    @MainActor
+    func testOptInFaraReportsFrozenTicketPriceWithoutSelecting() async throws {
+        try await runFrozenFaraProposal(ticketAnswer: true)
+    }
+
+    @MainActor
+    private func runFrozenFaraProposal(ticketAnswer: Bool) async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard environment["RUN_FARA_FROZEN_RECOVERY"] == "1" else { throw XCTSkip("Opt-in: one frozen rejected-target model proposal, no browser or input") }
+        guard environment["RUN_FARA_FROZEN_RECOVERY"] == "1" else { throw XCTSkip("Opt-in: one frozen model proposal, no browser or input") }
         struct Replay: Decodable {
             struct Frame: Decodable { let pngFile: String; let pngSHA256: String; let response: String; let currentURL: URL?; let actionError: String? }
             struct Rectangle: Decodable { let x: Double; let y: Double; let width: Double; let height: Double }
             let goal: String; let history: [Frame]; let current: Frame
-            let imageWidth: Int; let imageHeight: Int; let acceptedClickRectangles: [Rectangle]
+            struct TicketOracle: Decodable {
+                let showtime: String; let screen: String; let runtimeMinutes: Int
+                let generalAdmissionTotal: String; let bookingFee: String; let screeningURL: String
+            }
+            let imageWidth: Int; let imageHeight: Int; let acceptedClickRectangles: [Rectangle]?
+            let oracle: TicketOracle?
         }
         let file = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_FROZEN_RECOVERY_INPUT"]))
         let bytes = try Data(contentsOf: file), replay = try JSONDecoder().decode(Replay.self, from: bytes)
@@ -43,17 +58,32 @@ final class ComputerUseFaraActionTests: XCTestCase {
         if case .scroll(horizontal: false, let pixels) = proposal?.action { recovery = pixels < 0 }
         if case .pointer(let kind, let point) = proposal?.action, kind == .leftClick || kind == .doubleClick {
             let pixel = try point.pixel(width: replay.imageWidth, height: replay.imageHeight)
-            recovery = replay.acceptedClickRectangles.contains { Double(pixel.x) > $0.x && Double(pixel.x) < $0.x + $0.width && Double(pixel.y) > $0.y && Double(pixel.y) < $0.y + $0.height }
+            recovery = (replay.acceptedClickRectangles ?? []).contains { Double(pixel.x) > $0.x && Double(pixel.x) < $0.x + $0.width && Double(pixel.y) > $0.y && Double(pixel.y) < $0.y + $0.height }
         }
+        if ticketAnswer {
+            let oracle = try XCTUnwrap(replay.oracle)
+            recovery = false
+            if case .reportCompletion(let answer) = proposal?.action {
+                let normalized = answer.lowercased()
+                let detector = try NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+                let links = detector.matches(in: answer, range: NSRange(answer.startIndex..., in: answer)).compactMap(\.url)
+                let expected = try XCTUnwrap(URL(string: oracle.screeningURL))
+                recovery = normalized.contains(oracle.showtime.lowercased()) && normalized.contains(oracle.screen.lowercased())
+                    && normalized.contains(String(oracle.runtimeMinutes)) && normalized.contains("min")
+                    && normalized.contains(oracle.generalAdmissionTotal) && normalized.contains(oracle.bookingFee)
+                    && links.contains(expected)
+            }
+        } else { _ = try XCTUnwrap(replay.acceptedClickRectangles) }
         let report: [String: Any] = ["response": proposal?.response ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
             "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited, "demonstratedRecoveryProposal": recovery,
             "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "requestSHA256": requestSHA256,
-            "actionError": input.actionError ?? "none", "noBrowserOrInput": true, "fullTaskAccepted": false]
+            "actionError": input.actionError ?? "none", "noBrowserOrInput": true, "fullTaskAccepted": false,
+            "criterion": ticketAnswer ? "Complete ticket facts without selecting tickets" : "Visible source/control or downward scroll"]
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
-        attachment.name = "Frozen rejected-heading recovery"; attachment.lifetime = .keepAlways; add(attachment)
+        attachment.name = ticketAnswer ? "Frozen ticket price stopping condition" : "Frozen rejected-heading recovery"; attachment.lifetime = .keepAlways; add(attachment)
         XCTAssertTrue(exited)
         if let failure { return XCTFail("Frozen recovery proposal failed: \(failure)") }
-        XCTAssertTrue(recovery, "The proposal must choose a visible source control or scroll to other results; this is a one-step recovery check only")
+        XCTAssertTrue(recovery, ticketAnswer ? "Report all observed ticket facts and the exact screening link without selecting tickets" : "The proposal must choose a visible source control or scroll to other results; this is a one-step recovery check only")
     }
 
     @MainActor
@@ -493,6 +523,40 @@ final class ComputerUseFaraActionTests: XCTestCase {
             XCTAssertEqual(attempts, 1); XCTAssertEqual(server.count("/selected"), 0)
             XCTAssertEqual(server.count("/unrelated"), 0); XCTAssertEqual(server.count("/page"), 1)
         }
+    }
+
+    @MainActor
+    func testOptInBrowserObservationsAndTaskRestartsRetainOneWindow() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: one local browser window across observations and task restarts")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(), base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for index in 0..<3 {
+            let taskID = "window-lifecycle-\(index)"
+            try browser.claim(taskID: taskID)
+            let document = try await browser.navigate(taskID: taskID, operationID: "open", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            for _ in 0..<2 {
+                let observation = try await browser.captureAgentObservation(document: document)
+                XCTAssertEqual(observation.currentURL, document.committedURL)
+                try requireSameNativeWindow(&retainedWindow)
+            }
+            browser.stop()
+            XCTAssertNil(browser.taskID); XCTAssertTrue(browser.hasSession)
+            XCTAssertFalse(browser.validate(document), "Retaining the window must not retain stopped input authority")
+            XCTAssertEqual(retainedWindow?.isVisible, true)
+            try requireSameNativeWindow(&retainedWindow)
+        }
+        XCTAssertEqual(server.count("/page"), 3, "Observations and Stop must not reload the page")
+        browser.close()
+        XCTAssertFalse(browser.hasSession)
+        XCTAssertEqual(retainedWindow?.isVisible, false)
+        XCTAssertNil(retainedWindow?.contentView, "Explicit Close must still release the browser")
     }
 
     @MainActor
@@ -3350,20 +3414,23 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        for control in ["<input id='target' aria-label='Reference' readonly>",
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for (index, control) in ["<input id='target' aria-label='Reference' readonly>",
                         "<textarea id='target' aria-label='Reference' readonly></textarea>",
                         "<button id='target'>Next</button>", "<a id='target' href='/next'>Next</a>",
                         "<input id='target' type='checkbox' aria-label='Choice'>",
-                        "<select id='target' aria-label='Destination'><option>Tokyo</option></select>"] {
+                        "<select id='target' aria-label='Destination'><option>Tokyo</option></select>"].enumerated() {
             let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
                 \(control)<script>requestAnimationFrame(()=>{document.getElementById('target').focus();fetch('/focused');});</script>
                 """)])
             let base = try await server.start()
             defer { server.stop() }
-            let browser = ComputerUseOwnedBrowser(mayAct: { true })
-            defer { browser.close() }
-            try browser.claim(taskID: "writable-focus")
-            let document = try await browser.navigate(taskID: "writable-focus", operationID: "open", to: base.appendingPathComponent("form"))
+            let taskID = "writable-focus-\(index)"
+            try browser.claim(taskID: taskID)
+            let document = try await browser.navigate(taskID: taskID, operationID: "open", to: base.appendingPathComponent("form"))
+            try requireSameNativeWindow(&retainedWindow)
             let deadline = ContinuousClock.now + .seconds(3)
             while server.count("/focused") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertEqual(server.count("/focused"), 1)
@@ -3385,11 +3452,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             """)])
         let base = try await server.start()
         defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        var retainedWindow: NSWindow?
         for scenario in ["different-point", "different-observation"] {
-            let browser = ComputerUseOwnedBrowser(mayAct: { true })
-            defer { browser.close() }
             try browser.claim(taskID: scenario)
             let document = try await browser.navigate(taskID: scenario, operationID: "open", to: base.appendingPathComponent("form"))
+            try requireSameNativeWindow(&retainedWindow)
             var observation = try await browser.captureAgentObservation(document: document)
             let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 500, y: 250))
             let inspected = try await browser.inspectAgentTarget(action, observation: observation)
