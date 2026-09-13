@@ -5,6 +5,139 @@ import XCTest
 
 @MainActor
 final class ComputerUseOwnedBrowserModelAcceptanceTests: XCTestCase {
+    func testOptInSingleResearchGoalProposalWithManagedModel() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_SINGLE_RESEARCH_GOAL_PROPOSAL"] == "1" else {
+            throw XCTSkip("Opt-in: diagnose one public research instruction without a browser or effects")
+        }
+        let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["SINGLE_RESEARCH_GOAL_REPORT"]))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw AcceptanceError.incomplete("Refusing to overwrite evidence") }
+        let installation = await ComputerUseInstaller.nativeText().currentInstallation()
+        let receipt = try XCTUnwrap(installation)
+        let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
+            runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+        let runtime = OSAtlasLlamaRuntime(), transport = URLSessionOSAtlasTransport()
+        let input = try ComputerUseBrowserGoalInput(taskID: "single-concert-goal",
+            prompt: "Find one upcoming concert in Los Angeles. Show its name, date, venue, and source link. Do not buy tickets.",
+            referenceDate: Date(), timeZoneIdentifier: TimeZone.current.identifier)
+        var report: [String: Any] = ["schemaVersion": 1, "scope": "one-public-goal-proposal-no-effects", "prompt": input.prompt]
+        func save() throws {
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reportURL.path)
+        }
+        do {
+            let endpoint = try await runtime.activateNativeText(inputs)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
+                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalBrowserGoalPlanner(connection: connection, transport: transport)
+            let request: URLRequest = try {
+                var request = try planner.makeRequest(input)
+                if environment["RESEARCH_GOAL_DISABLE_THINKING"] == "1" {
+                    var body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                    body["chat_template_kwargs"] = ["enable_thinking": false]
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+                }
+                return request
+            }()
+            let count = try await transport.exactInputTokenCount(completionRequest: request)
+            report["inputTokens"] = count
+            guard count > 0, count <= ComputerUseLocalBrowserGoalPlanner.contextTokens
+                    - ComputerUseLocalBrowserGoalPlanner.outputTokens - ComputerUseLocalBrowserGoalPlanner.framingReserve else {
+                throw ComputerUseBrowserGoalPlanError.contextLimit
+            }
+            // Only this fixed public prompt is recorded. Never persist headers,
+            // bearer tokens, arbitrary user prompts, page text or account data.
+            report["requestBody"] = try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody))
+            let response = try await ComputerUsePlanningWorker().perform(timeout: 30) {
+                try await transport.complete(request: request)
+            }
+            report["response"] = String(decoding: response, as: UTF8.self)
+            try save()
+            let proposal = try planner.decode(response, input: input)
+            report["disposition"] = proposal.disposition.rawValue
+            report["decoded"] = true
+            try save()
+            await transport.cancelAll()
+            await runtime.shutdown()
+        } catch {
+            report["decoded"] = false; report["error"] = String(describing: error)
+            try? save()
+            await transport.cancelAll()
+            await runtime.shutdown()
+            throw error
+        }
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty)
+    }
+
+    func testOptInSinglePublicConcertResearchWithManagedLocalModel() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_SINGLE_PUBLIC_CONCERT_RESEARCH"] == "1" else {
+            throw XCTSkip("Opt-in: one public concert lookup, real local model, visible browser, 90-second execution limit")
+        }
+        let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["SINGLE_PUBLIC_CONCERT_REPORT"]))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw AcceptanceError.incomplete("Refusing to overwrite evidence") }
+        let installation = await ComputerUseInstaller.nativeText().currentInstallation()
+        let receipt = try XCTUnwrap(installation, "Use only the existing model installation")
+        let runtime = OSAtlasLlamaRuntime()
+        let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SinglePublicConcert-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var allowsActions = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowsActions })
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowsActions }, browserNavigationTask: navigation)
+        defer { allowsActions = false; tools.closeOwnedBrowser() }
+        let prompt = "Find one upcoming concert in Los Angeles. Show its name, date, venue, and source link. Do not buy tickets."
+        let taskID = UUID().uuidString, start = ContinuousClock.now
+        var progress: [String] = []
+        func record(_ detail: String) {
+            if progress.count < 100 { progress.append(detail) }
+            FileHandle.standardError.write(Data("Public concert stage: \(detail)\n".utf8))
+        }
+        func save(result: String, verified: Bool) throws {
+            let report: [String: Any] = ["schemaVersion": 1, "scope": "one-public-concert-research-with-actual-local-model",
+                "prompt": prompt, "verified": verified, "executorResult": result, "progress": progress,
+                "installationVersion": receipt.installationVersion, "elapsed": String(describing: start.duration(to: .now)),
+                "modelSHA256FromVerifiedManifest": ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256,
+                "sourceAnswerRequiresIndependentReview": true]
+            try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reportURL.path)
+        }
+        do {
+            let executor = try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
+                journalDirectory: directory.appendingPathComponent("text"), progress: record)
+            let execution = Task { try await executor.execute(taskID: taskID, modelPrompt: prompt,
+                currentUserPrompt: prompt, conversation: [], tools: tools, progress: record) }
+            let timeout = Task {
+                do { try await Task.sleep(for: .seconds(90)) } catch { return }
+                allowsActions = false
+                browser.stop()
+                execution.cancel()
+            }
+            defer { timeout.cancel() }
+            let result = try await execution.value
+            guard case .browserResearchAnswer(let answer) = result else {
+                throw AcceptanceError.incomplete(String(describing: result))
+            }
+            try XCTUnwrap(tools.ownedBrowserResearch(taskID: taskID)).validateAnswer(answer)
+            guard !answer.message.isEmpty else { throw AcceptanceError.incomplete("Empty source answer") }
+            try save(result: answer.message, verified: true)
+            await runtime.shutdown()
+        } catch {
+            allowsActions = false
+            browser.stop()
+            try? save(result: String(describing: error), verified: false)
+            await runtime.shutdown()
+            throw error
+        }
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: runtimeDirectory.appendingPathComponent("llama-server")).isEmpty)
+    }
+
     func testSignedManagedLocalModelContinuesRetainedBrowserClarificationsWithoutReplay() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_SIGNED_BROWSER_CLARIFICATION_ACCEPTANCE"] == "1" else {

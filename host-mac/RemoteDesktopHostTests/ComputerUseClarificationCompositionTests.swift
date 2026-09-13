@@ -13,6 +13,14 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
     func testOptInShippedClientLocalModelResumesVisibleFormThroughTLSLoginHandback() async throws {
+        try await runSingleModelTLSLogin(earlyResume: false)
+    }
+
+    func testOptInShippedClientLocalModelEarlyResumeKeepsLoginPausedWithoutRepeatingInput() async throws {
+        try await runSingleModelTLSLogin(earlyResume: true)
+    }
+
+    private func runSingleModelTLSLogin(earlyResume: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_SINGLE_MODEL_TLS_LOGIN_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: one local-model goal, visible fixture, shipped client and real loopback TLS")
         }
@@ -122,6 +130,17 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             XCTAssertEqual(paused.map { $0["target"]! }, ["", "origin"])
             XCTAssertEqual(paused.last?["origin"], "Tokyo")
             XCTAssertEqual(paused.last?["destination"], "old destination")
+            if earlyResume {
+                client.resumeAI()
+                XCTAssertFalse(client.hasHostPauseAcknowledgement)
+                try await reach("early Resume remains paused") {
+                    client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+                }
+                XCTAssertEqual(client.latestTerminalOutcome, .userInterventionRequired)
+                XCTAssertEqual(FormOracle.states(server, id: "model-login"), paused)
+                XCTAssertEqual(server.count("/login-shown"), 1)
+                XCTAssertEqual(server.count("/logged-in"), 0)
+            }
             server.releaseHeldResponses()
             // This login changes only the DOM. hasPageAwaitingHandback tracks
             // navigation during user control and is false for this retained page.

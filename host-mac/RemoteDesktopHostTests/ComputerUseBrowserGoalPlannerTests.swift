@@ -4,6 +4,36 @@ import XCTest
 
 final class ComputerUseBrowserGoalPlannerTests: XCTestCase {
     @MainActor
+    func testObservedLocalModelResearchFailuresCannotReachBrowserEffects() async throws {
+        let prompt = "Find one upcoming concert in Los Angeles. Show its name, date, venue, and source link. Do not buy tickets."
+        // Actual Qwen3.5-4B replies with thinking on and off. Preserve the
+        // invalid coverage/order/question references; never repair them into authority.
+        let observedReplies = [
+            #"{"disposition":"clarification","question":{"requirements":[0,1,2,3,4,5,6,7],"topic":"origin"},"requirements":[{"field":"origin","relation":"equal","role":"clarification","through":7,"turn":0,"values":["Los Angeles"]}]}"#,
+            #"{"disposition":"clarification","question":{"requirements":[0,1,2,3,4,5,6,7],"topic":"origin"},"requirements":[{"field":"origin","relation":"equal","role":"condition","through":6,"turn":0,"values":["Los Angeles"]},{"field":"quantity","relation":"equal","role":"condition","through":1,"turn":0,"values":["one"]},{"field":"time","relation":"equal","role":"condition","through":2,"turn":0,"values":["upcoming"]},{"field":"source","relation":"equal","role":"condition","through":13,"turn":0,"values":["source"]},{"field":"navigationSource","relation":"equal","role":"condition","through":13,"turn":0,"values":["source"]},{"field":"answerSource","relation":"equal","role":"condition","through":13,"turn":0,"values":["source"]},{"field":"time","relation":"equal","role":"condition","through":3,"turn":0,"values":["upcoming"]},{"field":"quantity","relation":"equal","role":"condition","through":4,"turn":0,"values":["one"]}]}"#
+        ]
+        for content in observedReplies {
+            let fixture = try await ResearchDriverFixture.make(request: prompt)
+            defer { fixture.close() }
+            let transport = BrowserGoalFixtureTransport(response: try envelope(content))
+            let driver = ComputerUseBrowserResearchDriver(goalPlanner: try planner(transport: transport),
+                resultPlanner: fixture.results, searchPlanner: fixture.search, actionPlanner: fixture.actions,
+                formPlanner: fixture.forms, planning: fixture.policy)
+            let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: driver)
+            do {
+                _ = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: prompt,
+                    currentUserPrompt: prompt, conversation: [], tools: fixture.tools, progress: { _ in })
+                XCTFail("A malformed model plan cannot start research")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse) }
+            XCTAssertEqual(fixture.server.requestCount, 0)
+            XCTAssertTrue(fixture.state.commands.isEmpty)
+            XCTAssertTrue(fixture.search.inputs.isEmpty)
+            XCTAssertEqual(fixture.policy.providerCalls, 0)
+            XCTAssertNil(fixture.tools.ownedBrowserResearch(taskID: ResearchDriverFixture.root))
+        }
+    }
+
+    @MainActor
     func testLocalPlannerQuestionsReachExistingAnswerWireWithOriginalGoalAndClock() async throws {
         let input = try goal("Find movie tickets tomorrow. Do not purchase."), transport = BrowserGoalFixtureTransport(response: Data())
         let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
