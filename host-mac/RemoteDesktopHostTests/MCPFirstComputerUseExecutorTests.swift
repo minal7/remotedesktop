@@ -13,7 +13,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try await runProductionBrowserComposition(reusesPriorTaskPage: true)
     }
 
-    private func runProductionBrowserComposition(reusesPriorTaskPage: Bool) async throws {
+    func testOptInProductionNativeLoaderUsesActualMacHelperAndDefaultPlannerFromEmptyBrowser() async throws {
+        try await runProductionBrowserComposition(reusesPriorTaskPage: false, usesActualMacTools: true)
+    }
+
+    private func runProductionBrowserComposition(reusesPriorTaskPage: Bool, usesActualMacTools: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: production native/Fara loaders and controlled browser task") }
         let nativeModel = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_TEXT_MODEL_PATH"]))
@@ -41,12 +45,19 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: browserTaskID, prompt: "Controlled local sources only", referenceDate: Date(), timeZoneIdentifier: "UTC"),
             allowedOrigins: [ComputerUseBrowserSourceOrigin(base)])
         try browser.installSourcePolicy(policy, replacing: nil, session: requirement)
-        _ = try await browser.navigate(taskID: browserTaskID, operationID: "fixture", to: base.appendingPathComponent("results"))
+        if !usesActualMacTools {
+            _ = try await browser.navigate(taskID: browserTaskID, operationID: "fixture", to: base.appendingPathComponent("results"))
+        }
         let runtime = OSAtlasLlamaRuntime()
         let planner = StubMCPPlanner(mode: .generationFailure)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let helperState = directory.appendingPathComponent("helper-state")
+        let realPool = MCPClientPool(sessionFactory: { binary, generation in
+            MCPClientSession(validatedBinary: binary, processGeneration: generation, stateDirectory: helperState)
+        })
         var hybrid: MCPFirstComputerUseExecutor?
         var visualLoads = 0, result: ComputerUseExecutionResult?, failure: Error?
+        var progressMessages: [String] = [], discoveredTools: [String] = []
         do {
             let native = try await ComputerUseNativeTextExecutorLoader.load(receipt: .init(
                 installationVersion: ComputerUseArtifactManifest.nativeTextV2.installationVersion, modelVariant: .nativeText4B,
@@ -59,30 +70,48 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     modelVariant: .fara15_4B, modelDirectory: faraInputs.modelURL.deletingLastPathComponent().path, installedAt: Date()), progress: progress)
             }, abandon: { _ in await loader.deactivate() })
             native.setDesktopFactory { _ in
-                let loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fixture/helper"),
-                    visualFallback: deferred, planner: planner, clientPool: pool)
+                let loaded: MCPFirstComputerUseExecutor
+                if usesActualMacTools {
+                    let helper = URL(fileURLWithPath: try XCTUnwrap(environment["MAC_CONTROL_HELPER_PATH"]))
+                    loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: helper,
+                        visualFallback: deferred, clientPool: realPool)
+                    discoveredTools = try await realPool.allowedTools().map(\.toolName).sorted()
+                } else {
+                    loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fixture/helper"),
+                        visualFallback: deferred, planner: planner, clientPool: pool)
+                }
                 hybrid = loaded
                 return loaded
             }
-            let goal = "Find the Tokyo Music Hall concert in these results. Open its details and report its ticket price, start time and source URL."
+            let goal = (usesActualMacTools ? "Visit \(base.appendingPathComponent("results").absoluteString). " : "")
+                + "Find the Tokyo Music Hall concert in these results. Open its details and report its ticket price, start time and source URL."
             // Reserve the legacy driver's slot to reject that route before it
             // can invoke Qwen research inference. The trained browser loop
             // must use its own retained action/session path.
             result = try await tools.withOwnedBrowserResearchAdmission(didPrepare: { _ in
                 XCTFail("Default browsing must not use the legacy Qwen research driver")
             }, operation: {
-                try await native.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                try await native.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progressMessages.append($0) })
             })
         } catch { failure = error }
         hybrid?.cancelMCPWork()
+        await realPool.cancelAll()
         await runtime.shutdown()
         XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: faraInputs.llamaServerURL).isEmpty)
+        if usesActualMacTools {
+            let attachment = XCTAttachment(string: "Apple planner: \(AppleFoundationMCPPlanner().availability())\nTools: \(discoveredTools)\nFara loads: \(visualLoads)\nProgress: \(progressMessages)\nResult: \(String(reflecting: result))\nFailure: \(String(reflecting: failure))")
+            attachment.name = "Actual helper and default planner browser entry"
+            attachment.lifetime = .keepAlways; add(attachment)
+            XCTAssertGreaterThan(discoveredTools.count, 1, "The pinned helper's actual catalog must participate.")
+        }
         if let failure { return XCTFail("Normal browser composition failed before \(visualLoads) Fara loads: \(String(reflecting: failure))") }
         guard case .completed(let answer) = result else { return XCTFail("Normal composition did not complete the browser task") }
         XCTAssertTrue(answer.lowercased().contains("2400 jpy"))
         XCTAssertTrue(answer.lowercased().contains("7 pm") || answer.contains("19:00"))
         XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
-        XCTAssertEqual(visualLoads, 1); XCTAssertEqual(planner.proposedToolNames.count, 1)
+        XCTAssertEqual(visualLoads, 1)
+        if !usesActualMacTools { XCTAssertEqual(planner.proposedToolNames.count, 1) }
+        XCTAssertEqual(server.count("/results"), 1)
         XCTAssertEqual(server.count("/details"), 1)
         let calls = await pool.directExecuteCount(); XCTAssertEqual(calls, 0)
     }

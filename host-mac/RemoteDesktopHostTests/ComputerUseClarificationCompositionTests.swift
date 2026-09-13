@@ -12,6 +12,132 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testOptInProductionStartupCompletesClientConcertTaskThroughTLSAndFara() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_PRODUCTION_ENTRY_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: real installers, native/Fara loaders, Mac helper, Apple planner and client TLS")
+        }
+        let assets = try await FaraTestAssets.inputs(environment: environment)
+        let nativeModel = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_TEXT_MODEL_PATH"]))
+        let helper = URL(fileURLWithPath: try XCTUnwrap(environment["MAC_CONTROL_HELPER_PATH"]))
+        let directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+            .appendingPathComponent("ProductionFaraTLS-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Isolate installed receipts and files. The shipped installers recheck
+        // each copy's bytes, hash and trust; this test never starts a download.
+        func stagedModel(_ manifest: ComputerUseArtifactManifest, source: URL, name: String) throws -> ComputerUseInstaller {
+            let root = directory.appendingPathComponent(name)
+            let models = root.appendingPathComponent("Models").appendingPathComponent(manifest.installationVersion)
+            try FileManager.default.createDirectory(at: models, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            for artifact in manifest.modelArtifacts {
+                try FileManager.default.copyItem(at: source.appendingPathComponent(artifact.fileName), to: models.appendingPathComponent(artifact.fileName))
+            }
+            let receipt = ComputerUseInstallationReceipt(installationVersion: manifest.installationVersion,
+                modelVariant: manifest.modelVariant, modelDirectory: models.path, installedAt: Date())
+            try JSONEncoder().encode(receipt).write(to: root.appendingPathComponent("active-installation.json"), options: .atomic)
+            return ComputerUseInstaller(manifest: manifest, rootDirectory: root, legacyManifest: nil)
+        }
+        let nativeInstaller = try stagedModel(.nativeTextV2, source: nativeModel.deletingLastPathComponent(), name: "native")
+        let visualInstaller = try stagedModel(.current, source: assets.modelURL.deletingLastPathComponent(), name: "fara")
+        let helperManifest = MacControlMCPArtifactManifest.current
+        let helperRoot = directory.appendingPathComponent("helper")
+        let helperVersion = helperRoot.appendingPathComponent("Versions").appendingPathComponent(helperManifest.version)
+        try FileManager.default.createDirectory(at: helperVersion, withIntermediateDirectories: true)
+        let helperApp = helperVersion.appendingPathComponent(helperManifest.appBundleName)
+        try FileManager.default.copyItem(at: helper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent(), to: helperApp)
+        let helperReceipt = MacControlMCPInstallationReceipt(packageVersion: helperManifest.version,
+            archiveSHA256: helperManifest.archiveSHA256, appBundlePath: helperApp.path,
+            binaryPath: helperApp.appendingPathComponent("Contents/MacOS/" + helperManifest.executableName).path,
+            executableSHA256: helperManifest.executableSHA256, bundleIdentifier: helperManifest.bundleIdentifier,
+            teamIdentifier: helperManifest.teamIdentifier, signingIdentity: helperManifest.signingIdentity, installedAt: Date())
+        try JSONEncoder().encode(helperReceipt).write(to: helperRoot.appendingPathComponent("active-installation.json"), options: .atomic)
+        let helperInstaller = MacControlMCPInstaller(rootDirectory: helperRoot)
+        let nativeReceipt = await nativeInstaller.currentInstallation(), visualReceipt = await visualInstaller.currentInstallation()
+        let verifiedHelper = await helperInstaller.currentInstallation()
+        _ = try XCTUnwrap(nativeReceipt); _ = try XCTUnwrap(visualReceipt); _ = try XCTUnwrap(verifiedHelper)
+
+        let style = "<style>body{font:26px system-ui;margin:50px;background:white;color:#111}a{display:block;padding:24px;background:#eef4ff}</style>"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/results": .init(body: "<!doctype html>" + style + "<h1>Concert search results</h1><a href='/details'>Tokyo Music Hall concert details</a>"),
+            "/details": .init(body: "<!doctype html>" + style + "<h1>Tokyo Music Hall</h1><p>Friday concert starts at 7 pm.</p><p>Ticket price: 2400 JPY.</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let blank = NSWindow(contentRect: NSRect(x: 120, y: 150, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+        blank.isReleasedWhenClosed = false; blank.title = "Computer Use startup fixture"
+        blank.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        blank.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        defer { blank.close() }
+        let runtime = OSAtlasLlamaRuntime()
+        let loader = OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: directory.appendingPathComponent("fara-journal"))
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        var ownedBrowser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+            nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, tools, progress in
+                try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
+                    journalDirectory: directory.appendingPathComponent("text"), progress: progress)
+            }, macControlInstaller: helperInstaller, visualExecutorLoader: loader,
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                let browser = ComputerUseOwnedBrowser(mayAct: mayAct); ownedBrowser = browser
+                return .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
+            }, channelFactory: { _ in channel })
+        let browser = try XCTUnwrap(ownedBrowser); defer { browser.close() }
+        let key = Data(repeating: 0x6D, count: 32)
+        let broker = LocalComputerUseBrokerServer(credential: try RemoteDesktopHost.LocalComputerUseCredential(rawKey: key),
+            hostID: hostID, channel: channel, authorizePeer: { peer in manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in manager.revokePeerAuthorization() })
+        let port = try await broker.start(); defer { broker.stop() }
+        let clientChannel = RemoteDesktopClientCore.LocalComputerUseBrokerClient(endpoint: .init(host: "127.0.0.1", port: port),
+            credential: try RemoteDesktopClientCore.LocalComputerUseCredential(rawKey: key), pairingCode: pairingCode,
+            sessionID: sessionID, senderID: clientID, targetID: hostID)
+        let pendingStore = CompositionPendingStore()
+        let client = ClientModel(hostName: "Production Entry Fixture", pairingCode: pairingCode, hostID: hostID,
+            sessionID: sessionID, pendingStore: pendingStore, channel: clientChannel, promptRefreshInterval: .seconds(600))
+        var stage = "startup"
+        func reach(_ next: String, seconds: Double, _ condition: () -> Bool) async throws {
+            stage = next
+            let deadline = ContinuousClock.now + .seconds(seconds)
+            while !condition() {
+                if case .error(let detail) = manager.modelState { throw CompositionFailure.incomplete(detail) }
+                if !client.hasActivePrompt && client.latestTerminalOutcome == .unableToComplete {
+                    throw CompositionFailure.incomplete(client.statusText)
+                }
+                guard ContinuousClock.now < deadline else { throw CompositionFailure.incomplete("\(stage): \(client.statusText); host=\(manager.activity)") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        var failure: Error?
+        do {
+            manager.start(pairingCode: pairingCode, additionalChannels: [channel], includeDefaultChannel: false)
+            try await clientChannel.handshake()
+            try await reach("ready", seconds: 60) { if case .ready = manager.modelState { return true }; return false }
+            XCTAssertFalse(browser.hasSession, "No browser task/page may be pre-admitted for this cold-entry check.")
+            client.start()
+            let prompt = "Visit \(base.appendingPathComponent("results").absoluteString). Find the Tokyo Music Hall concert. Open its details and report the ticket price, start time and source URL."
+            XCTAssertTrue(client.sendPrompt(prompt))
+            let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            try await reach("concert answer", seconds: 90) { !client.hasActivePrompt }
+            XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
+            let answer = try XCTUnwrap(client.messages.last(where: { $0.author == .assistant })?.text)
+            XCTAssertTrue(answer.lowercased().contains("2400 jpy")); XCTAssertTrue(answer.lowercased().contains("7 pm") || answer.contains("19:00"))
+            XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
+            XCTAssertEqual(server.count("/results"), 1); XCTAssertEqual(server.count("/details"), 1)
+            XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            guard case .completed = try ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
+                .claim(taskID: pending.messageID, senderID: clientID, sessionID: sessionID, promptBody: pending.exactWireBody) else {
+                throw CompositionFailure.incomplete("Client answer was not durably completed for the original task")
+            }
+        } catch { failure = error }
+        let evidence = XCTAttachment(string: "Stage: \(stage)\nState: \(client.state)\nStatus: \(client.statusText)\nMessages: \(client.messages.filter { $0.author == .assistant }.map(\.text))\nHost: \(manager.activity)\nRequests: results=\(server.count("/results")), details=\(server.count("/details"))\nFailure: \(String(reflecting: failure))")
+        evidence.name = "Production startup client TLS Fara concert"; evidence.lifetime = .keepAlways; add(evidence)
+        client.stop(); await manager.shutdown(); await runtime.shutdown()
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: assets.llamaServerURL).isEmpty)
+        if let failure { throw failure }
+    }
+
     func testOptInShippedClientLocalModelResumesVisibleFormThroughTLSLoginHandback() async throws {
         try await runSingleModelTLSLogin(earlyResume: false)
     }

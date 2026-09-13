@@ -691,6 +691,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             try await Task.sleep(for: .milliseconds(25))
         }
         guard hasRequiredPresentation, let window else { throw ComputerUseBrowserError.windowNotActive }
+        // If this process already owns the key window, activation does not
+        // suspend above. Realize the SwiftUI browser view before snapshotting
+        // so a cold task cannot capture a still-detached WKWebView.
+        window.contentView?.layoutSubtreeIfNeeded()
+        guard view.window === window else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         let frame = window.frame, size = view.bounds.size
         guard size.width > 0, size.height > 0, window.backingScaleFactor > 0 else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
         // WebKit has no document drawing area before its first load and its

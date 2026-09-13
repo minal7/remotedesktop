@@ -5463,6 +5463,9 @@ private extension AppleFoundationMCPPlanner {
         Choose only from the provided tools. A tool call records a proposal; it does not execute anything.
         Call at most one tool in this response. After its acknowledgement, do not call another tool.
         Never claim a proposed tool ran or succeeded. The host validates policy and asks for approval separately.
+        The host provides a built-in browser and a separate browser agent for website tasks.
+        When the next step is visiting a URL, searching the web, reading a website or interacting with a web page, respond exactly: VISUAL_FALLBACK_REQUIRED
+        The browser agent handles that step and any missing website-task details. Do not ask which browser or application to use for website work.
         If required information is missing or ambiguous, respond exactly as CLARIFICATION_REQUIRED: followed by one short question, without calling a tool.
         Only after a local read-only tool result proves the informational request is complete, respond exactly as TASK_COMPLETE: followed by the short result.
         Never use TASK_COMPLETE to claim a consequential action occurred; sends, creates, Shortcut runs, orders, purchases, payments, submissions, and similar changes complete only from the approved tool result.

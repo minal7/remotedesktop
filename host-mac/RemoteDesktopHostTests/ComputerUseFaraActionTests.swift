@@ -7,6 +7,33 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInColdBrowserSnapshotLaysOutWhileHostAlreadyActive() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native initial browser layout") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let native = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 640, height: 480), styleMask: [.titled], backing: .buffered, defer: false)
+        native.isReleasedWhenClosed = false; native.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 480))
+        native.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        defer { native.close() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while (NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier || NSApp.keyWindow !== native) && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertTrue(NSApp.keyWindow === native)
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        do {
+            let captured = try await browser.captureInitialAgentObservation(taskID: "cold-layout", expectedSessionIdentity: nil)
+            let observation = try XCTUnwrap(captured)
+            try ComputerUseFaraModel.validatePNG(observation.png)
+            try browser.validateInitialAgentObservation(observation)
+        } catch {
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let views = NSApp.windows.filter { $0.title == "AI Browser — Remote Desktop" }.compactMap(\.contentView).flatMap(webViews)
+            XCTFail("Cold capture: \(error); browser frames: \(views.map(\.frame)); bounds: \(views.map(\.bounds))")
+        }
+    }
+
+    @MainActor
     func testOptInBrowserRoutingKeepsOtherMacWindowsOnNativePathAndHonorsPause() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: owned browser and a local native form window") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
