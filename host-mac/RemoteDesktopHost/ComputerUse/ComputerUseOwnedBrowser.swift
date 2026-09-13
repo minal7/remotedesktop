@@ -660,6 +660,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var sessionIdentity: String { ComputerUseTaskContract.digest([evidence.document.contextID, evidence.document.taskID, ownership.uuidString]) }
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
         var currentURL: URL { evidence.document.committedURL }
+        var approvalPageEvidence: ComputerUseBrowserPageEvidence { evidence }
     }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
@@ -718,6 +719,37 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             viewportSize: size, id: id, evidence: evidence, ownership: ownership, takeover: takeover, windowFrame: frame)
     }
 
+    /// Native and approval paths share the same integral screen point. The
+    /// approval fingerprint must identify precisely where the click is posted.
+    private func agentClickTarget(_ point: ComputerUseFaraAction.Point, observation: AgentObservation,
+                                  view: WKWebView, window: NSWindow) throws -> (location: NSPoint, action: ComputerUsePredictedAction) {
+        let pixel = try point.pixel(width: observation.pixelWidth, height: observation.pixelHeight)
+        let x = CGFloat(pixel.x) / CGFloat(observation.pixelWidth) * view.bounds.width
+        let y = CGFloat(pixel.y) / CGFloat(observation.pixelHeight) * view.bounds.height
+        let local = NSPoint(x: view.bounds.minX + x, y: view.isFlipped ? view.bounds.minY + y : view.bounds.maxY - y)
+        let screen = window.convertPoint(toScreen: view.convert(local, to: nil))
+        let primaryTop = CGDisplayBounds(CGMainDisplayID()).height
+        let globalX = Int(floor(screen.x)), globalY = Int(floor(primaryTop - screen.y))
+        let location = window.convertPoint(fromScreen: NSPoint(x: CGFloat(globalX), y: primaryTop - CGFloat(globalY)))
+        guard view.bounds.contains(view.convert(location, from: nil)) else { throw ComputerUseBrowserError.pageChanged }
+        return (location, .click(x: globalX, y: globalY, button: 0, count: 1))
+    }
+
+    func predictedAgentAction(_ action: ComputerUseFaraAction, observation: AgentObservation) throws -> ComputerUsePredictedAction? {
+        try Task.checkCancellation()
+        guard agentObservationID == observation.id, validate(observation.evidence.document),
+              ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
+              browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+              hasRequiredPresentation, let view = browser, let window else { throw ComputerUseBrowserError.pageChanged }
+        switch action {
+        case .pointer(.leftClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window).action
+        case .typeText(let text): return .typeText(text)
+        case .key(let keys) where keys.count == 2 && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased()) && keys[1].uppercased() == "A":
+            return .key(usage: 0x04, modifiers: 1 << 3)
+        default: return nil
+        }
+    }
+
     /// Delivers one already-admitted action to the owned native view. Returning
     /// means dispatch, not goal verification. The executor journals its attempt
     /// in willBeginEffect and observes the result before planning another action.
@@ -756,11 +788,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let dispatch: () throws -> Void
         switch action {
         case .pointer(.leftClick, let point):
-            let pixel = try point.pixel(width: observation.pixelWidth, height: observation.pixelHeight)
-            let x = CGFloat(pixel.x) / CGFloat(observation.pixelWidth) * view.bounds.width
-            let y = CGFloat(pixel.y) / CGFloat(observation.pixelHeight) * view.bounds.height
-            let local = NSPoint(x: view.bounds.minX + x, y: view.isFlipped ? view.bounds.minY + y : view.bounds.maxY - y)
-            let location = view.convert(local, to: nil)
+            let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
             let time = ProcessInfo.processInfo.systemUptime
             guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
                 timestamp: time, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),

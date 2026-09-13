@@ -317,6 +317,19 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         return result
     }
 
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard route == .desktop, continuation.taskID == taskID,
+              let continuing = desktop as? any ComputerUseVisualApprovalContinuing else { throw RoutingError.missingContinuation }
+        try await continuing.performApprovedVisualAction(continuation, action: action,
+            fingerprint: fingerprint, tools: tools, willBeginEffect: willBeginEffect)
+    }
+
     func continueAfterApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction, tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
@@ -407,6 +420,20 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
             currentUserPrompt: currentUserPrompt, conversation: conversation, tools: tools, progress: progress)
         try Task.checkCancellation()
         return result
+    }
+
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        guard !isExecuting else { throw ComputerUseCapabilityExecutor.RoutingError.alreadyExecuting }
+        guard continuation.taskID == taskID, let visual = loaded as? any ComputerUseVisualApprovalContinuing else {
+            throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation
+        }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        try await visual.performApprovedVisualAction(continuation, action: action,
+            fingerprint: fingerprint, tools: tools, willBeginEffect: willBeginEffect)
     }
 
     func continueAfterApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,

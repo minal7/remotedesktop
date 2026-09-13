@@ -721,7 +721,7 @@ struct ComputerUseFrontmostApplicationSnapshot: Equatable, Sendable {
     }
 }
 
-fileprivate struct ComputerUseApprovalFingerprint: Equatable {
+struct ComputerUseApprovalFingerprint: Equatable {
     let action: ComputerUsePredictedAction
     let applicationID: String
     let accessibilityIdentity: String
@@ -1284,6 +1284,21 @@ final class ComputerUseHostTools {
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
         try await browserNavigationTask.validateAgentObservation(observation)
+    }
+
+    func predictedOwnedBrowserAgentAction(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) throws -> ComputerUsePredictedAction? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try browserNavigationTask.predictedAgentAction(action, observation: observation)
+    }
+
+    /// Invoke inside the native browser's final pre-dispatch callback, after
+    /// its asynchronous scene validation and before recording/posting input.
+    func validateApprovedFingerprint(for action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint) throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard try prepareApproval(for: action).fingerprint == fingerprint else { throw ToolError.approvalTargetChanged }
     }
 
     func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
@@ -1967,6 +1982,10 @@ final class ComputerUseHostTools {
                     providerAction))
         }
 
+        return actionableElementSnapshot(at: point)?.attestationLabel
+    }
+
+    private func actionableElementSnapshot(at point: CGPoint) -> AccessibilitySnapshot? {
         let systemWide = AXUIElementCreateSystemWide()
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -1979,8 +1998,9 @@ final class ComputerUseHostTools {
         for _ in 0 ..< 8 {
             let snapshot = accessibilitySnapshot(for: current)
             if snapshot.isActionable,
-               let label = snapshot.attestationLabel {
-                return label
+               snapshot.attestationLabel != nil,
+               snapshot.frame?.contains(point) == true {
+                return snapshot
             }
             guard let parent = parentElement(of: current) else { break }
             current = parent
@@ -2340,7 +2360,7 @@ final class ComputerUseHostTools {
         switch action {
         case .click(let x, let y, _, _):
             let point = CGPoint(x: x, y: y)
-            snapshots = elementSnapshot(at: point).map { [$0] } ?? []
+            snapshots = actionableElementSnapshot(at: point).map { [$0] } ?? []
             checkpoints = [point]
 
         case .drag(let fromX, let fromY, let toX, let toY):
@@ -2390,11 +2410,17 @@ final class ComputerUseHostTools {
 
     private func accessibilityContext(for action: ComputerUsePredictedAction) -> String {
         if let accessibilityContextProvider {
-            return accessibilityContextProvider(action)
+            let context = accessibilityContextProvider(action)
+            if case .click = action,
+               Self.actionableLabel(fromProvidedContext: context) == nil { return "" }
+            return context
         }
         switch action {
         case .click(let x, let y, _, _):
-            return elementSnapshot(at: CGPoint(x: x, y: y))?.summary ?? ""
+            // A containing application/window/web area does not identify the
+            // clicked control. Resolve an actionable ancestor (for nested
+            // text/images), or require approval for the unidentified point.
+            return actionableElementSnapshot(at: CGPoint(x: x, y: y))?.summary ?? ""
         case .drag(let fromX, let fromY, let toX, let toY):
             return [
                 elementSnapshot(at: CGPoint(x: fromX, y: fromY))?.summary,
@@ -3594,6 +3620,14 @@ protocol ComputerUseExecuting: AnyObject {
 /// from host-authored prose.
 @MainActor
 protocol ComputerUseVisualApprovalContinuing: AnyObject {
+    func performApprovedVisualAction(
+        _ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction,
+        fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools,
+        willBeginEffect: () -> Void
+    ) async throws
+
     func continueAfterApprovedVisualAction(
         _ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction,
@@ -3603,6 +3637,15 @@ protocol ComputerUseVisualApprovalContinuing: AnyObject {
 
     func cancelVisualApprovalContinuation(
         _ continuation: ComputerUseVisualApprovalContinuation)
+}
+
+extension ComputerUseVisualApprovalContinuing {
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        try await tools.performApproved(action, fingerprint: fingerprint,
+            browserPageEvidence: continuation.browserPageEvidence, willBeginEffect: willBeginEffect)
+    }
 }
 
 extension ComputerUseExecuting {
@@ -6697,8 +6740,8 @@ final class HostComputerUseManager: ObservableObject {
             }
 
             do {
-                try await tools.performApproved(action, fingerprint: fingerprint,
-                    browserPageEvidence: continuationToken.browserPageEvidence,
+                try await continuationExecutor.performApprovedVisualAction(continuationToken,
+                    action: action, fingerprint: fingerprint, tools: tools,
                     willBeginEffect: { [weak self] in
                         // Browser validation can suspend without posting any
                         // input. Only cross into may-have-occurred tracking

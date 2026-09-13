@@ -1,4 +1,6 @@
 import CoreGraphics
+import AppKit
+import ApplicationServices
 import CloudKit
 import CryptoKit
 import CoreImage
@@ -9,6 +11,206 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func test_hostClickApprovalRequiresAnIdentifiedActionableControl() {
+        var context = ""
+        let tools = ComputerUseHostTools(
+            injector: InputInjector(), mayAct: { true },
+            accessibilityContextProvider: { _ in context })
+        let action = ComputerUsePredictedAction.click(x: 10, y: 10, button: 0, count: 1)
+        for value in ["", "AXApplication • RemoteDesktopHost", "AXWindow • Browser",
+                      "AXWebArea • Settings", "AXGroup • Controls", "AXStaticText • Next", "AXButton"] {
+            context = value
+            XCTAssertNotNil(tools.approvalReason(for: action), value)
+        }
+        for value in ["AXButton • Next", "AXLink • Details", "AXTextField • Destination"] {
+            context = value
+            XCTAssertNil(tools.approvalReason(for: action), value)
+        }
+        context = "AXButton • Save changes"
+        XCTAssertNotNil(tools.approvalReason(for: action))
+    }
+
+    func test_optInFaraManagerApprovesNativeClickOnceAndResumesTheTask() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: true)
+    }
+
+    func test_optInFaraManagerRequiresFreshCardAfterApprovalTargetChanges() async throws {
+        try await runFaraNativeApproval(changeTarget: true, approve: true)
+    }
+
+    func test_optInFaraManagerDenialPostsNoNativeInput() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: false)
+    }
+
+    func test_optInFaraApprovalSurvivesDeferredCapabilityWrappers() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: true, wrapped: true)
+    }
+
+    func test_optInActualFaraUsesLiveTargetApprovalAndResumesAfterWorkerShutdown() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: true, wrapped: true, realModel: true)
+    }
+
+    func test_optInFaraScriptedActionUsesLiveTargetApproval() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: true, wrapped: true, liveTarget: true)
+    }
+
+    private func runFaraNativeApproval(changeTarget: Bool, approve: Bool, wrapped: Bool = false, realModel: Bool = false, liveTarget: Bool = false) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment[realModel ? "RUN_FARA_APPROVAL_MODEL_ACCEPTANCE" : "RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: host approval messages and native input on fictional settings")
+        }
+        let inputs = realModel ? try await FaraTestAssets.inputs(environment: environment) : nil
+        let runtime = OSAtlasLlamaRuntime()
+        let memory = Task.detached { () -> (UInt64, Int) in
+            var peak: UInt64 = 0, count = 0
+            while realModel && !Task.isCancelled {
+                if let executable = inputs?.llamaServerURL {
+                    for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: executable)) ?? [] {
+                        if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) { peak = max(peak, bytes); count += 1 }
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return (peak, count)
+        }
+        addTeardownBlock {
+            await runtime.shutdown()
+            memory.cancel(); _ = await memory.value
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><title>Fictional settings approval</title>
+            <button style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' onclick="this.textContent='Saved';fetch('/saved')">Save changes</button>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let journalDirectory = ledgerURL.deletingLastPathComponent().appendingPathComponent("fara")
+        var calls = 0
+        var responses: [[String: Any]] = []
+        let started = Date()
+        let goal = "Save these settings."
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: journalDirectory, propose: { input in
+            XCTAssertEqual(input.goal, goal)
+            guard calls < 3 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            if let inputs {
+                let began = Date()
+                let endpoint = try await runtime.activateFara(inputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began)])
+                calls += 1
+                return proposal
+            }
+            let saved = server.count("/saved") > 0
+            XCTAssertEqual(input.history.count, saved ? 1 : 0)
+            let action = saved ? #"{"action":"terminate","answer":"Settings saved."}"# : #"{"action":"left_click","coordinate":[500,250]}"#
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, finishRun: { await runtime.shutdown() })
+        let channel = FakeHostComputerUseChannel()
+        let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
+        var owned: ComputerUseOwnedBrowser?
+        var target = "original-button"
+        let selected: any ComputerUseExecuting
+        if wrapped {
+            let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in executor })
+            selected = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in deferred })
+        } else { selected = executor }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: selected, taskLedger: ledger,
+            browserNavigationFactory: { mayAct in
+                let browser = ComputerUseOwnedBrowser(mayAct: mayAct); owned = browser
+                return ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("navigation"))
+            }, allowsExternalServices: false,
+            approvalTargetProvider: realModel || liveTarget ? nil : { _ in .init(context: "AXButton Save changes", applicationID: "fixture.browser", accessibilityIdentity: target) },
+            actionPerformer: { _ in XCTFail("Fara approval escaped into global input") },
+            accessibilityContextProvider: realModel || liveTarget ? nil : { _ in "AXButton Save changes" }, channelFactory: { _ in channel })
+        let browser = try XCTUnwrap(owned)
+        defer { manager.stop(); browser.close() }
+        let prompt = makeEnvelope(id: "fara-native-approval", kind: .prompt, body: goal)
+        try browser.claim(taskID: prompt.id)
+        _ = try await browser.navigate(taskID: prompt.id, operationID: "open", to: base.appendingPathComponent("form"))
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil(timeoutIterations: realModel ? 4500 : 500) { await channel.sentMessages().contains { $0.kind == .approvalRequest || $0.kind == .assistant } }
+        let messages = await channel.sentMessages()
+        if realModel || liveTarget {
+            let diagnostic: [String: Any] = ["stage": "initial approval", "responses": responses, "requests": server.requestedPaths,
+                "activity": String(describing: manager.activity), "accessibilityTrusted": AXIsProcessTrusted(),
+                "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
+                "messages": messages.map { ["kind": $0.kind.rawValue, "body": $0.body] }]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+            attachment.name = "Live approval initial state"; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        let first = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertEqual(server.count("/saved"), 0)
+        XCTAssertEqual(calls, 1)
+        if let inputs {
+            XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty,
+                "The model worker must exit while approval is pending")
+        }
+        var request = first
+        if changeTarget {
+            target = "replacement-button"
+            XCTAssertTrue(manager.handle(try approvalEnvelope(first), channel: channel))
+            await waitUntil(timeoutIterations: realModel ? 4500 : 500) { await channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
+            XCTAssertEqual(server.count("/saved"), 0)
+            let refreshed = await channel.sentMessages()
+            request = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(refreshed.last { $0.kind == .approvalRequest }).body)
+            XCTAssertNotEqual(first.requestID, request.requestID)
+            XCTAssertTrue(manager.handle(try approvalEnvelope(first), channel: channel))
+            XCTAssertEqual(server.count("/saved"), 0)
+        }
+        let response = makeEnvelope(kind: .approvalResponse, body: try ComputerUseApprovalResponse(requestID: request.requestID,
+            approved: approve, taskID: request.taskID, appliedControlRevision: request.appliedControlRevision,
+            hostControlEpoch: request.hostControlEpoch).encodedBody())
+        XCTAssertTrue(manager.handle(response, channel: channel))
+        await waitUntil(timeoutIterations: realModel ? 4500 : 500) {
+            if manager.activity == .idle { return true }
+            return await channel.sentMessages().filter { $0.kind == .approvalRequest }.count > (changeTarget ? 2 : 1)
+        }
+        if realModel || liveTarget {
+            let afterApproval = await channel.sentMessages()
+            let diagnostic: [String: Any] = ["stage": "after approval response", "responses": responses,
+                "activity": String(describing: manager.activity), "requests": server.requestedPaths,
+                "messages": afterApproval.map { ["kind": $0.kind.rawValue, "body": $0.body] }]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+            attachment.name = "Live approval response state"; attachment.lifetime = .keepAlways; add(attachment)
+            guard afterApproval.filter({ $0.kind == .approvalRequest }).count == 1 else {
+                return XCTFail("An unchanged native target unexpectedly required another approval card")
+            }
+        }
+        await waitUntil(timeoutIterations: realModel ? 4500 : 500) { await channel.sentMessages().contains { $0.kind == .assistant } }
+        XCTAssertEqual(server.count("/saved"), approve ? 1 : 0)
+        XCTAssertEqual(calls, approve ? (changeTarget ? 3 : 2) : 1)
+        XCTAssertTrue(manager.handle(response, channel: channel))
+        XCTAssertEqual(server.count("/saved"), approve ? 1 : 0)
+        let terminalMessages = await channel.sentMessages()
+        let terminal = terminalMessages.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.last
+        XCTAssertEqual(terminal?.outcome, approve ? .taskCompleted : .unableToComplete)
+        let journals = try FileManager.default.contentsOfDirectory(at: journalDirectory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.count, approve ? 2 : 1)
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, approve ? 1 : 0)
+        if approve { XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] }) }
+        if let inputs {
+            await runtime.shutdown()
+            memory.cancel(); let measured = await memory.value
+            let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+            XCTAssertTrue(gone)
+            let report: [String: Any] = ["scope": "actual-Fara-live-target-native-approval-through-wrappers", "targetMacRAMGB": 12,
+                "wholeApp12GBQualified": false, "responses": responses, "requests": server.requestedPaths,
+                "elapsedSeconds": Date().timeIntervalSince(started), "peakSampledProcessMemoryBytes": measured.0,
+                "memorySamples": measured.1, "ownedWorkerExited": gone, "approvalMessage": first.message,
+                "approvedNativeClicks": server.count("/saved")]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+            attachment.name = "Actual Fara native approval evidence"; attachment.lifetime = .keepAlways; add(attachment)
+        }
+    }
+
     func test_browserApprovalRequiresFreshApprovalAfterInvisibleDestinationOrRootChange() async throws {
         for mutation in ["document.querySelector('a').href='/event?opaque=changed-secret';",
                          "document.querySelector('form').action='/search?opaque=changed-secret';",

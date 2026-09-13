@@ -7,6 +7,123 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraHoldsConsequentialClickBeforeNativeDispatch() async throws {
+        try await runFaraApprovalLifecycle(mode: .hold)
+    }
+
+    @MainActor
+    func testOptInFaraApprovalRejectsForgedAndDuplicateContinuations() async throws {
+        try await runFaraApprovalLifecycle(mode: .perform)
+    }
+
+    @MainActor
+    func testOptInFaraApprovalCancellationBeforeDispatchRetiresAuthority() async throws {
+        try await runFaraApprovalLifecycle(mode: .cancelBefore)
+    }
+
+    @MainActor
+    func testOptInFaraApprovalCancellationAfterDispatchDoesNotReplayTheEffect() async throws {
+        try await runFaraApprovalLifecycle(mode: .cancelAfter)
+    }
+
+    private enum ApprovalTestMode { case hold, perform, cancelBefore, cancelAfter }
+
+    @MainActor
+    private func runFaraApprovalLifecycle(mode: ApprovalTestMode) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: a fictional Save changes button must await approval")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><title>Fictional settings</title><button style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' onclick="fetch('/saved')">Save changes</button>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraApproval-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("navigation"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "AXButton Save changes", applicationID: "fixture.browser", accessibilityIdentity: "save-button") },
+            browserNavigationTask: navigation, accessibilityContextProvider: { _ in "AXButton Save changes" })
+        try browser.claim(taskID: "fara-approval")
+        _ = try await browser.navigate(taskID: "fara-approval", operationID: "open", to: base.appendingPathComponent("form"))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            guard calls < 2 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            let action = calls == 0 ? #"{"action":"left_click","coordinate":[500,250]}"# : #"{"action":"terminate","answer":"Saved."}"#
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            let result = try await executor.execute(taskID: "fara-approval", prompt: "Save these settings.", trustedUserPrompt: "Save these settings.", tools: tools, progress: { _ in })
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(server.count("/saved"), 0)
+            guard case .approvalRequired(_, let action, let continuation) = result else { XCTFail("Consequential input bypassed approval"); return }
+            XCTAssertEqual(continuation.taskID, "fara-approval")
+            XCTAssertNotNil(continuation.browserPageEvidence)
+            let repeated = try await executor.execute(taskID: "fara-approval", prompt: "Save these settings.", trustedUserPrompt: "Save these settings.", tools: tools, progress: { _ in })
+            XCTAssertEqual(repeated, result)
+            XCTAssertEqual(calls, 1)
+            XCTAssertEqual(server.count("/saved"), 0)
+            if mode == .hold { return }
+            let fingerprint = ComputerUseApprovalFingerprint(action: action, applicationID: "fixture.browser", accessibilityIdentity: "save-button", visualDigest: nil)
+            var begins = 0
+            func perform(_ token: ComputerUseVisualApprovalContinuation, action proposed: ComputerUsePredictedAction? = nil) async throws {
+                try await executor.performApprovedVisualAction(token, action: proposed ?? action, fingerprint: fingerprint,
+                    tools: tools, willBeginEffect: { begins += 1 })
+            }
+            let forged = ComputerUseVisualApprovalContinuation(taskID: continuation.taskID, nonce: UUID(), browserPageEvidence: continuation.browserPageEvidence)
+            do { try await perform(forged); XCTFail("A forged continuation authorized input") }
+            catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+            do { try await perform(continuation, action: .wait); XCTFail("An approval authorized a different action") }
+            catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+            executor.cancelVisualApprovalContinuation(forged)
+            if mode == .cancelBefore {
+                executor.cancelVisualApprovalContinuation(continuation)
+                do { try await perform(continuation); XCTFail("Cancelled authority authorized input") }
+                catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+                XCTAssertEqual(begins, 0); XCTAssertEqual(server.count("/saved"), 0)
+                return
+            }
+            try await perform(continuation)
+            XCTAssertEqual(begins, 1)
+            do { try await perform(continuation); XCTFail("An approved input was posted twice") }
+            catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+            if mode == .cancelAfter {
+                executor.cancelVisualApprovalContinuation(continuation)
+                do {
+                    _ = try await executor.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: { _ in })
+                    XCTFail("Cancelled post-effect continuation resumed")
+                } catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+                let stopped = try await executor.execute(taskID: "fara-approval", prompt: "Save these settings.", trustedUserPrompt: "Save these settings.", tools: tools, progress: { _ in })
+                guard case .unableToComplete = stopped else { XCTFail("Interrupted approved effect was reconstructed"); return }
+                XCTAssertEqual(calls, 1)
+            } else {
+                let finished = try await executor.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: { _ in })
+                XCTAssertEqual(finished, .completed("Saved."))
+                XCTAssertEqual(calls, 2)
+                do {
+                    _ = try await executor.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: { _ in })
+                    XCTFail("A continuation was consumed twice")
+                } catch ComputerUseFaraBrowserExecutor.Failure.invalidApproval { }
+            }
+            let deadline = ContinuousClock.now + .seconds(3)
+            while server.count("/saved") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(begins, 1); XCTAssertEqual(server.count("/saved"), 1)
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(journals.count, 2)
+            XCTAssertEqual(journals.first { $0.stepIDs == ["native-dispatch-returned"] }?.statuses, [.verified])
+            XCTAssertEqual(journals.first { $0.stepIDs == ["model-assessed-completion"] }?.statuses, [mode == .cancelAfter ? .attempted : .verified])
+        } catch { XCTFail("Approval fixture failed: \(error)") }
+    }
+
+    @MainActor
     func testOptInManagedFaraOpensControlledConcertResultAndReportsSource() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else {

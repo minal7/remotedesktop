@@ -609,6 +609,19 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
+        try await waitForStartedCancellation()
+        guard let visual = visualFallback as? any ComputerUseVisualApprovalContinuing else {
+            throw ExecutorError.visualApprovalContinuationUnavailable
+        }
+        try await visual.performApprovedVisualAction(continuation, action: action,
+            fingerprint: fingerprint, tools: tools, willBeginEffect: willBeginEffect)
+    }
+
     /// Preserve the visual executor's typed, process-local continuation even
     /// when this hybrid wrapper selected the fallback path. Approval resume is
     /// deliberately not an ordinary execute call: re-entering the structured

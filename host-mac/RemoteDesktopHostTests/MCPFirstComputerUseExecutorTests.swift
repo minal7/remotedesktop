@@ -564,6 +564,28 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(count, 0)
     }
 
+    func testVisualApprovalEffectForwardsToRetainedFallbackWithoutGlobalInputOrPlanner() async throws {
+        let planner = StubMCPPlanner(mode: .clarification)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fictional/MacControlMCP"),
+            visualFallback: fallback, planner: planner, clientPool: pool)
+        let token = ComputerUseVisualApprovalContinuation(taskID: "native-effect-forward", nonce: UUID())
+        let action = ComputerUsePredictedAction.click(x: 20, y: 30, button: 0, count: 1)
+        let fingerprint = ComputerUseApprovalFingerprint(action: action, applicationID: "fixture.browser", accessibilityIdentity: "button", visualDigest: nil)
+        var began = 0
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            actionPerformer: { _ in XCTFail("Retained approval effect entered global input") })
+        try await executor.performApprovedVisualAction(token, action: action, fingerprint: fingerprint, tools: tools,
+            willBeginEffect: { began += 1 })
+        XCTAssertEqual(fallback.performedApprovals, [token])
+        XCTAssertEqual(fallback.performedFingerprints, [fingerprint])
+        XCTAssertEqual(began, 1)
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        let direct = await pool.directExecuteCount(), approved = await pool.approvedExecuteCount()
+        XCTAssertEqual(direct, 0); XCTAssertEqual(approved, 0)
+    }
+
     func testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()
         async throws {
         let planner = StubMCPPlanner(mode: .clarification)
@@ -4425,6 +4447,8 @@ private final class StubVisualExecutor:
     private(set) var continuations: [ComputerUseVisualApprovalContinuation] = []
     private(set) var continuationActions: [ComputerUsePredictedAction] = []
     private(set) var cancelledContinuations: [ComputerUseVisualApprovalContinuation] = []
+    private(set) var performedApprovals: [ComputerUseVisualApprovalContinuation] = []
+    private(set) var performedFingerprints: [ComputerUseApprovalFingerprint] = []
 
     init(result: ComputerUseExecutionResult = .completed("Visual complete")) {
         self.result = result
@@ -4453,6 +4477,15 @@ private final class StubVisualExecutor:
         prompts.append(prompt)
         trustedUserPrompts.append(trustedUserPrompt)
         return result
+    }
+
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        XCTAssertEqual(action, fingerprint.action)
+        performedApprovals.append(continuation)
+        performedFingerprints.append(fingerprint)
+        willBeginEffect()
     }
 
     func continueAfterApprovedVisualAction(
