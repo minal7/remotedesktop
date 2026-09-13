@@ -18,7 +18,7 @@ enum ComputerUseBrowserCompositeState {
         if role == "combobox" {
             guard ["true", "false"].contains(string(owner["aria-expanded"]) ?? ""),
                   owner["aria-haspopup"] == nil || string(owner["aria-haspopup"]) == "listbox" else { return nil }
-            if ["text", "search"].contains(control.kind) {
+            if ["text", "search", "textarea"].contains(control.kind) {
                 guard bounded(root["input_value"], limit: 2_048), isNull(root["display_text"]) else { return nil }
             } else {
                 guard isNull(root["input_value"]), bounded(root["display_text"], limit: 2_048) else { return nil }
@@ -236,6 +236,7 @@ enum ComputerUseBrowserCompositeState {
             let inputValue = null, displayText = null;
             if (control.compositeRole === 'combobox') {
               if (element instanceof HTMLInputElement) inputValue = valueGetters[0].call(element);
+              else if (element instanceof HTMLTextAreaElement) inputValue = valueGetters[1].call(element);
               else {
                 if (element.querySelector('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) throw 0;
                 displayText = displayValue(element);

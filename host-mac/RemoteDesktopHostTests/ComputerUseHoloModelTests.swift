@@ -342,7 +342,7 @@ enum HoloTestProposalRunner {
 
 /// Owns only the opt-in diagnostic Python process; that process joins its
 /// single model worker before exiting, including on SIGTERM cancellation.
-private final class HoloProbeProcess: @unchecked Sendable {
+final class HoloProbeProcess: @unchecked Sendable {
     private let process = Process()
     private let lock = NSLock()
     private var cancellationSent = false

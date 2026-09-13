@@ -184,7 +184,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         var compositeMetadataIsWellFormed: Bool {
             guard let compositeRole else { return !ComputerUseBrowserCompositeState.kinds.contains(kind) }
             guard !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-            if compositeRole == "combobox", ["text", "search"].contains(kind) { return true }
+            if compositeRole == "combobox", ["text", "search", "textarea"].contains(kind) { return true }
             return ["combobox", "listbox"].contains(compositeRole) && kind == "aria-" + compositeRole
                 && form == nil && constraints.isEmpty && options.isEmpty
         }
@@ -1436,7 +1436,10 @@ enum ComputerUseBrowserDOM {
             || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement;
           const role = element.getAttribute('role') || '';
           if (role === 'option') { if (renderedControl(element)) pendingOptions.push(element); continue; }
-          const nativeCombobox = element instanceof HTMLInputElement && ['text','search'].includes(element.type) && role === 'combobox';
+          // Search providers also expose a native textarea as their combobox editor.
+          // Preserve its textarea kind/value getter; the role does not turn it into an input.
+          const nativeCombobox = ((element instanceof HTMLInputElement && ['text','search'].includes(element.type))
+            || element instanceof HTMLTextAreaElement) && role === 'combobox';
           const declaredRole = (!native || element instanceof HTMLButtonElement)
             && (['checkbox','radio','switch','slider','spinbutton','combobox','listbox'].includes(role) ? role
               : ((role === 'button' || (!role && element instanceof HTMLButtonElement)) && element.hasAttribute('aria-pressed') ? 'button' : null));

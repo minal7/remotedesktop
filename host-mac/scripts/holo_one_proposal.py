@@ -1,4 +1,4 @@
-"""Opt-in Holo diagnostic: one proposal, no tool execution, joined worker cleanup.
+"""Opt-in Holo/GUI-Owl diagnostic: one proposal, no tool execution, joined worker cleanup.
 Arguments: request.json output-directory assets-directory signed-llama-server [4|5 GiB].
 The 5 GiB option is diagnostic only and does not change the production profile.
 """
@@ -28,15 +28,27 @@ assert memory_limit_gib in (4, 5)
 output.mkdir(exist_ok=False)
 request_bytes = request_file.read_bytes()
 request_body = json.loads(request_bytes)
-assert request_body['model'] == 'holo-browser-v1'
 assert request_body['max_tokens'] == 1024 and request_body['stream'] is False
-assert request_body['parallel_tool_calls'] is False
-assert request_body['tool_choice'] == 'required'
-assert {tool['function']['name'] for tool in request_body['tools']} <= {'click', 'scroll', 'web_search', 'wait', 'answer', 'key', 'type', 'ask_user', 'visit_url', 'history_back'}
+alias = request_body['model']
+if alias == 'holo-browser-v1':
+    assert request_body['parallel_tool_calls'] is False
+    assert request_body['tool_choice'] == 'required'
+    assert {tool['function']['name'] for tool in request_body['tools']} <= {'click', 'scroll', 'web_search', 'wait', 'answer', 'key', 'type', 'ask_user', 'visit_url', 'history_back'}
+    model_name, projector_name = 'Holo-3.1-4B.Q4_K_M.gguf', 'Holo-3.1-4B.mmproj-f16.gguf'
+    model_label = 'Holo'
+elif alias == 'gui-owl-desktop-v1':
+    assert 'tools' not in request_body and 'tool_choice' not in request_body
+    assert request_body['temperature'] == 0 and request_body['seed'] == 20260913
+    assert memory_limit_gib == 4
+    model_name, projector_name = 'GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf', 'GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf'
+    model_label = 'GUI-Owl-desktop'
+else:
+    raise AssertionError('Unsupported diagnostic model alias')
 processes = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True)
 assert not any(Path(line.strip()).name == 'llama-server' for line in processes.splitlines()), 'Another inference worker is active'
 subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(binary)], check=True)
 manifest = json.loads((assets / 'verified-assets.json').read_text())
+assert {item['name'] for item in manifest['files']} == {model_name, projector_name}
 for item in manifest['files']:
     path = assets / item['name']
     assert path.stat().st_size == item['bytes']
@@ -67,15 +79,15 @@ with os.fdopen(os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), '
 with socket.socket() as port_socket:
     port_socket.bind(('127.0.0.1', 0))
     port = port_socket.getsockname()[1]
-arguments = [str(binary), '--model', str(assets / 'Holo-3.1-4B.Q4_K_M.gguf'),
-    '--mmproj', str(assets / 'Holo-3.1-4B.mmproj-f16.gguf'), '--alias', request_body['model'],
+arguments = [str(binary), '--model', str(assets / model_name),
+    '--mmproj', str(assets / projector_name), '--alias', request_body['model'],
     '--host', '127.0.0.1', '--port', str(port), '--api-key-file', str(key_path),
     '--offline', '--no-ui', '--log-disable', '--parallel', '1', '--no-cont-batching',
     '--ctx-size', '8192', '--no-context-shift', '--cache-ram', '0', '--ctx-checkpoints', '0', '--no-cache-idle-slots',
     '--threads', '4', '--threads-batch', '4', '--poll', '0', '--poll-batch', '0',
     '--batch-size', '512', '--ubatch-size', '128', '--n-gpu-layers', '99',
     '--image-max-tokens', '1536', '--mtmd-batch-max-tokens', '1536', '--jinja']
-report = dict(scope='one-native-Holo-protocol-proposal-no-tool-execution',
+report = dict(scope='one-native-' + model_label + '-protocol-proposal-no-tool-execution',
     requestSHA256=hashlib.sha256(request_bytes).hexdigest(),
     modelAssets=manifest, binarySHA256=hashlib.sha256(binary.read_bytes()).hexdigest(),
     targetMacRAMGB=12, wholeApp12GBQualified=False, selectedProductionModelChanged=False,

@@ -4,6 +4,36 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserCompositeStateTests: XCTestCase {
+    func testTextareaComboboxRetainsNativeValueAndScopedOptionState() async throws {
+        let exact = "Paris typed\n東京 e\u{301} 😀"
+        let body = """
+            <article><h2>Concert Alpha</h2><form action='/search'><label>Destination
+            <textarea id=destination name=destination role=combobox type=search aria-expanded=false aria-controls=list aria-activedescendant=focused>\(exact)</textarea></label></form>
+            <span id=caption hidden>Charles de Gaulle</span><div id=list role=listbox aria-label=Airports hidden>
+            <div id=selected role=option aria-labelledby=caption aria-selected=true></div><div id=focused role=option aria-selected=false>Orly</div></div></article>
+            """
+        let fixture = try await ControlStateFixture(body:body)
+        defer { fixture.close() }
+        let input = try await input(fixture), control = try XCTUnwrap(input.evidence.page.controls.first)
+        XCTAssertEqual(control.kind,"textarea");XCTAssertEqual(control.compositeRole,"combobox")
+        XCTAssertFalse(input.evidence.page.omittedControls);XCTAssertEqual(input.readableControlIDs,[control.id])
+        XCTAssertFalse(input.contextJSON.contains("Paris typed"))
+        let general = try await fixture.browser.observePage(document:fixture.document,includingControlState:true)
+        XCTAssertEqual(general.page.controlStates.first?.kind,.unavailable)
+        let action = try await scope(fixture), reading = try await fixture.browser.observeResearchControls(for:action)
+        let state = try fixture.state("Destination",in:reading.page), value = try object(XCTUnwrap(state.value))
+        XCTAssertEqual(state.kind,.composite)
+        XCTAssertEqual((value["input_value"] as? String)?.utf8.map {$0},Array(exact.utf8))
+        XCTAssertTrue(value["display_text"] is NSNull)
+        XCTAssertNotNil(ComputerUseBrowserCompositeState.object(try XCTUnwrap(state.value),control:control))
+        let options = try XCTUnwrap(value["options"] as? [[String:Any]])
+        XCTAssertEqual(options.compactMap {$0["label"] as? String},["Charles de Gaulle","Orly"])
+        XCTAssertEqual(value["active_option"] as? String,options[1]["id"] as? String)
+        let scalar = ComputerUseBrowserControlState(controlID:control.id,kind:.text,value:exact,selectedOptionIDs:nil,checked:nil,indeterminate:nil)
+        XCTAssertFalse(scalar.isValid(for:control),"Composite text cannot be accepted without its scoped options")
+        try await fixture.browser.validatePageEvidence(reading)
+    }
+
     func testNativeComboboxKeepsEditMetadataButScopesInputAndOptionStateTogether() async throws {
         let fixture = try await ControlStateFixture(body: nativeCombo)
         defer { fixture.close() }
