@@ -7,6 +7,196 @@ import XCTest
 
 final class ComputerUseGUIOwlModelTests: XCTestCase {
     @MainActor
+    func testOptInUnrelatedContainerRenumberingPreservesNativeTextTarget() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native field identity across unrelated page structure") }
+        let previous = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previous) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{height:300vh}#search{position:fixed;top:10vh;left:10vw}input{width:400px;height:40px}article{position:fixed;top:70vh;left:60vw}</style>
+            <div id='search'><label>Search<input id='query'></label></div><script>window.edits=0;query.addEventListener('input',()=>edits++);query.focus();</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "container-identity")
+        let document = try await browser.navigate(taskID: "container-identity", operationID: "open", to: base.appendingPathComponent("page"))
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+        let observation = try await browser.captureAgentObservation(document: document)
+        _ = try await web.evaluateJavaScript("search.insertAdjacentHTML('beforebegin','<article><h2>Unrelated result</h2><p>Background content arrived</p></article>')")
+        var attempts = 0
+        do { try await browser.performAgentInput(.typeText("Roxie San Francisco"), observation: observation, willBeginEffect: { attempts += 1 }) }
+        catch { return XCTFail("Unrelated container catalogue change blocked the same field: \(error); \(browser.lastAgentTargetStatus ?? "none")") }
+        let value = try await web.evaluateJavaScript("query.value")
+        let edits = try await web.evaluateJavaScript("edits")
+        XCTAssertEqual(value as? String, "Roxie San Francisco"); XCTAssertEqual(edits as? Int, 1); XCTAssertEqual(attempts, 1)
+    }
+
+    @MainActor
+    func testOptInNativeComboboxEditingSurvivesAutocompleteExpansion() async throws {
+        try await runDelayedNativeEditing(combobox: true, mutations: [
+            "query.setAttribute('aria-expanded','true');suggestions.hidden=false",
+            "query.setAttribute('aria-busy','true');suggestions.firstElementChild.textContent='New suggestion'"])
+    }
+
+    @MainActor
+    func testOptInNativeTextEditingSurvivesBodyPresentationChanges() async throws {
+        try await runDelayedNativeEditing(combobox: false, mutations: [
+            "document.body.classList.add('background-ready')", "document.body.style.backgroundColor='rgb(250,250,250)'"])
+    }
+
+    @MainActor
+    func testOptInIdenticalAutocompleteAttributeWritesPreserveNativeEditing() async throws {
+        try await runDelayedNativeEditing(combobox: false, mutations: [
+            "query.setAttribute('autocomplete','off')", "query.setAttribute('autocomplete','off')"])
+    }
+
+    @MainActor
+    private func runDelayedNativeEditing(combobox: Bool, mutations: [String]) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native autocomplete editing") }
+        let previous = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previous) }
+        let field = combobox
+            ? "<textarea id='query' role='combobox' aria-controls='suggestions' aria-expanded='false' aria-busy='false'>Existing query</textarea>"
+            : "<input id='query' autocomplete='off' value='Existing query'>"
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>input,textarea{width:600px;height:60px}</style>
+            <label>Search\(field)</label>
+            <div id='suggestions' role='listbox' aria-label='Suggestions' hidden><div role='option'>Earlier suggestion</div></div>
+            <script>window.edits=0;query.addEventListener('input',()=>edits++);query.focus();</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "autocomplete")
+        let document = try await browser.navigate(taskID: "autocomplete", operationID: "open", to: base.appendingPathComponent("page"))
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+        var attempts = 0
+        for (index, action) in [ComputerUseFaraAction.key(["Control", "a"]), .typeText("Roxie San Francisco")].enumerated() {
+            let observation = try await browser.captureAgentObservation(document: document)
+            _ = try await web.evaluateJavaScript(mutations[index])
+            do { try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 }) }
+            catch { return XCTFail("Autocomplete update blocked native edit \(index): \(error); \(browser.lastAgentTargetStatus ?? "none")") }
+            if index == 0 {
+                let selected = try await web.evaluateJavaScript("query.selectionStart===0 && query.selectionEnd===query.value.length")
+                XCTAssertEqual(selected as? Bool, true)
+            }
+        }
+        let result = try await web.evaluateJavaScript("JSON.stringify({value:query.value,edits})")
+        let record = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(result as? String).utf8)) as? [String: Any])
+        XCTAssertEqual(record["value"] as? String, "Roxie San Francisco"); XCTAssertEqual(record["edits"] as? Int, 1)
+        XCTAssertEqual(attempts, 2)
+    }
+
+    @MainActor
+    func testOptInAutocompleteEditingStillRejectsChangedFieldAuthority() async throws {
+        try await runAutocompleteBoundaries(modes: ["label", "readonly", "role", "replacement", "container", "focus", "selection", "value", "attribute-restored"])
+    }
+
+    @MainActor
+    func testOptInAutocompleteExpansionDoesNotAuthorizeActivationKeysOrClicks() async throws {
+        try await runAutocompleteBoundaries(modes: ["return", "tab", "click"])
+    }
+
+    @MainActor
+    func testOptInPresentationChangesCannotHideMoveOrCoverAnEditingTarget() async throws {
+        try await runAutocompleteBoundaries(modes: ["body-hidden", "body-opacity", "moved", "covered"])
+    }
+
+    @MainActor
+    private func runAutocompleteBoundaries(modes: [String]) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native autocomplete authority boundaries") }
+        let previous = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previous) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in modes {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>textarea{width:600px;height:60px}</style>
+                <label>Search<textarea id='query' role='combobox' aria-controls='suggestions' aria-expanded='false'>Existing query</textarea></label>
+                <label>Other<input id='other'></label><div id='suggestions' role='listbox' aria-label='Suggestions' hidden><div role='option'>Evening</div></div>
+                <div id='cover' style='position:fixed;left:-9999px;top:0;width:100vw;height:100vh;z-index:999'></div>
+                <script>window.effects=0;for(const type of ['input','keydown','click'])document.addEventListener(type,()=>effects++);query.focus();query.setSelectionRange(2,2);</script>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            if let retainedWindow { XCTAssertTrue(window === retainedWindow) } else { retainedWindow = window }
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            let pointReading = try await web.evaluateJavaScript("(()=>{const r=query.getBoundingClientRect();return [(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]})()")
+            let point = try XCTUnwrap(pointReading as? [Double])
+            let observation = try await browser.captureAgentObservation(document: document)
+            let mutation: String
+            switch mode {
+            case "label": mutation = "query.setAttribute('aria-label','Other search')"
+            case "readonly": mutation = "query.readOnly=true"
+            case "role": mutation = "query.setAttribute('role','searchbox')"
+            case "replacement": mutation = "const old=query, replacement=old.cloneNode(true);old.replaceWith(replacement);replacement.focus();replacement.setSelectionRange(2,2)"
+            case "container": mutation = "const label=query.parentElement,wrapper=document.createElement('div');label.replaceWith(wrapper);wrapper.appendChild(label);query.focus();query.setSelectionRange(2,2)"
+            case "focus": mutation = "other.focus()"
+            case "selection": mutation = "query.setSelectionRange(0,2)"
+            case "value": mutation = "query.value='Changed query'"
+            case "attribute-restored": mutation = "query.setAttribute('name','temporary');query.removeAttribute('name')"
+            case "body-hidden": mutation = "document.body.hidden=true"
+            case "body-opacity": mutation = "document.body.style.opacity='0'"
+            case "moved": mutation = "query.style.transform='translateX(100px)'"
+            case "covered": mutation = "cover.style.left='0px'"
+            default: mutation = "query.setAttribute('aria-expanded','true');suggestions.hidden=false"
+            }
+            _ = try await web.evaluateJavaScript(mutation)
+            let action: ComputerUseFaraAction = mode == "return" ? .key(["Enter"]) : mode == "tab" ? .key(["Tab"])
+                : mode == "click" ? .pointer(.leftClick, .init(x: point[0], y: point[1])) : .typeText("must not type")
+            var attempts = 0
+            do {
+                try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 })
+                XCTFail("Autocomplete editing exception admitted \(mode)")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mode) }
+            XCTAssertEqual(attempts, 0, mode)
+            let effects = try await web.evaluateJavaScript("effects")
+            XCTAssertEqual(effects as? Int, 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInBingSelectAllAfterAutocompleteDelay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: public search focus/Select All, no inference or submission") }
+        let previous = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previous) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BingAutocomplete-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        try browser.claim(taskID: "bing-autocomplete")
+        let url = URL(string: "https://www.bing.com/search?q=site%3Aticket.theroxie.org+%22Cycle+of+Love%22+Roxie+San+Francisco+tickets&FORM=QBLH")!
+        _ = try await browser.navigate(taskID: "bing-autocomplete", operationID: "open", to: url)
+        // Bing can redirect its first search document asynchronously. Start
+        // the focus experiment on the adopted page after that initial load.
+        try await Task.sleep(for: .seconds(4))
+        let first = try await navigation.captureAgentObservation(taskID: "bing-autocomplete")
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+        let coordinates = try await web.evaluateJavaScript("(()=>{const e=document.querySelector('textarea[name=q],input[name=q]'),r=e.getBoundingClientRect();return [(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]})()")
+        let point = try XCTUnwrap(coordinates as? [Double])
+        try await browser.performAgentInput(.pointer(.leftClick, .init(x: point[0], y: point[1])), observation: first)
+        let observation = try await navigation.captureAgentObservation(taskID: "bing-autocomplete")
+        let metadataScript = "JSON.stringify((()=>{const e=document.activeElement;return {tag:e.tagName,id:e.id,attributes:Array.from(e.attributes).map(a=>[a.name,a.value]),value:e.value,start:e.selectionStart,end:e.selectionEnd,rect:Array.from([e.getBoundingClientRect()].flatMap(r=>[r.x,r.y,r.width,r.height]))}})())"
+        let before = try await web.evaluateJavaScript(metadataScript)
+        try await Task.sleep(for: .seconds(8))
+        let after = try await web.evaluateJavaScript(metadataScript)
+        var attempts = 0, failure: Error?
+        do { try await browser.performAgentInput(.key(["Control", "a"]), observation: observation, willBeginEffect: { attempts += 1 }) }
+        catch { failure = error }
+        let selected = try await web.evaluateJavaScript("(()=>{const e=document.activeElement;return e.selectionStart===0 && e.selectionEnd===e.value.length})()")
+        let report: [String: Any] = ["before": before ?? NSNull(), "after": after ?? NSNull(), "attempts": attempts, "selected": selected ?? NSNull(),
+            "failure": failure.map { String(reflecting: $0) } ?? "", "targetStatus": browser.lastAgentTargetStatus ?? "", "inference": false]
+        let evidence = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        evidence.name = "Bing delayed Select All"; evidence.lifetime = .keepAlways; add(evidence)
+        if let failure { return XCTFail("Delayed search-field Select All failed: \(failure); \(browser.lastAgentTargetStatus ?? "none")") }
+        XCTAssertEqual(attempts, 1); XCTAssertEqual(selected as? Bool, true)
+    }
+
+    @MainActor
     func testOptInBingSearchTextareaHasAuthorityAndRejectsContainerPoints() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one public search-field inspection, no input or model") }
         let previous=NSApp.activationPolicy();NSApp.setActivationPolicy(.accessory)

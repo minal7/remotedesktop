@@ -3829,7 +3829,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    func testOptInUnidentifiedBrowserControlHandsBackWithoutClickOrFurtherProposal() async throws {
+    func testOptInUnidentifiedBrowserControlHandsBackAfterBoundedUnsentProposals() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in unidentified-control handback") }
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
@@ -3850,14 +3850,18 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var calls = 0
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
             calls += 1
-            guard calls == 1 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            // Unbound points use the existing bounded fresh-observation path.
+            // No proposal may become an input attempt on this canvas.
+            guard calls <= 4 else { throw ComputerUseFaraAction.Failure.invalidResponse }
             let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[500,250]}}</tool_call>"#
             return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
         })
-        let result = try await executor.execute(taskID: "unknown-control", prompt: "Open the canvas item", trustedUserPrompt: "Open the canvas item", tools: tools, progress: { _ in })
+        let result: ComputerUseExecutionResult
+        do { result = try await executor.execute(taskID: "unknown-control", prompt: "Open the canvas item", trustedUserPrompt: "Open the canvas item", tools: tools, progress: { _ in }) }
+        catch { return XCTFail("Unknown canvas handback failed after \(calls) proposals: \(String(reflecting: error))") }
         guard case .userInterventionRequired = result else { return XCTFail("An unidentified control must hand back before input") }
         _ = try await browser.observePage(document: document)
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls, 4)
         XCTAssertEqual(server.count("/clicked"), 0)
         let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }

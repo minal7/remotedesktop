@@ -615,10 +615,19 @@ enum ComputerUseBrowserDOM {
                   || (record.type === 'attributes' && contains(record.target, binding.element))
                   || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
                 if (lastPageSnapshot.agentState) {
+                  // A repeated setAttribute with the same value does not
+                  // change authority. A change followed by restoration still
+                  // has a record whose old value differs and retires it.
+                  if (record.type === 'attributes' && record.oldValue === record.target.getAttribute(record.attributeName)) continue;
                   // Preserve individual input bindings so an unrelated
                   // carousel cannot retire a stable header control. Full
                   // page assessments still reject this changed snapshot.
                   binding.retired = true;
+                  const presentationOnly = record.type === 'attributes' && ['class','style'].includes(record.attributeName);
+                  binding.editingRetired = !!binding.editingRetired || !presentationOnly;
+                  const cause = [record.type,record.attributeName || '',record.target.localName || '',record.target === binding.element ? 'self' : 'ancestor'].join('-');
+                  binding.retiredCause = binding.retiredCause || cause;
+                  if (!presentationOnly) binding.editingRetiredCause = binding.editingRetiredCause || cause;
                   lastPageSnapshot.invalidated = true;
                 } else {
                   lastPageSnapshot = null;
@@ -640,7 +649,7 @@ enum ComputerUseBrowserDOM {
         }
       }
       const observer = new MutationObserver(retire);
-      const observationOptions = {subtree: true, childList: true, attributes: true,
+      const observationOptions = {subtree: true, childList: true, attributes: true, attributeOldValue: true,
         attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes, ...queryAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
@@ -1505,10 +1514,15 @@ enum ComputerUseBrowserDOM {
           bytes += size; controls.push(control);
           if (state) controlStates.push(state);
           if (compositeRole === 'listbox') representedLists.add(element);
-          const signature = declaredRole || compositeRole ? JSON.stringify(['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
-            'aria-details','aria-haspopup','aria-expanded','aria-orientation','aria-roledescription','aria-invalid','aria-busy'].map(key => [key, element.getAttribute(key)])) : null;
+          const roleAttributes = ['role','name','autocomplete','aria-label','aria-labelledby','aria-describedby','aria-controls','aria-owns',
+            'aria-details','aria-haspopup','aria-expanded','aria-orientation','aria-roledescription','aria-invalid','aria-busy'];
+          const signature = declaredRole || compositeRole ? JSON.stringify(roleAttributes.map(key => [key, element.getAttribute(key)])) : null;
+          // Native text editing does not select an autocomplete option. A
+          // popup may expand or load without changing the field's identity.
+          const textEditingSignature = nativeCombobox ? JSON.stringify(roleAttributes.filter(key => !['aria-expanded','aria-busy'].includes(key))
+            .map(key => [key, element.getAttribute(key)])) : null;
           controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature,
-            references:details.references,state,composite:details.composite || null});
+            textEditingSignature,references:details.references,state,composite:details.composite || null});
         }
         for (const option of pendingOptions) {
           if (compositeMembers.has(option)) continue;
@@ -2015,11 +2029,31 @@ enum ComputerUseBrowserDOM {
               for (let depth=0; hit && depth<24; depth++,hit=hit.parentElement || hit.getRootNode()?.host) {
                 for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled && binding.metadata.label.trim()) {
                   const previous = lastPageSnapshot.controls.get(id);
-                  if (!previous || previous.retired || previous.element !== binding.element || previous.form !== binding.form
-                      || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)
-                      || previous.signature !== binding.signature || JSON.stringify(previous.metadata) !== JSON.stringify(binding.metadata)
-                      || previous.references.length !== binding.references.length
-                      || previous.references.some((node,index) => node !== binding.references[index])) return reply('stale-agent-control');
+                  const nativeTextEditing = args.textEditing === true && args.focused === true && hit === binding.element
+                    && !binding.metadata.readOnly && (hit instanceof HTMLTextAreaElement || (hit instanceof HTMLInputElement && textTypes.has(hit.type)));
+                  const sameSignature = previous && (previous.signature === binding.signature
+                    || (nativeTextEditing && typeof previous.textEditingSignature === 'string'
+                      && previous.textEditingSignature === binding.textEditingSignature));
+                  if (!previous || previous.element !== binding.element || previous.form !== binding.form) return reply('stale-agent-control-identity');
+                  // Class/style churn need not retire a focused native text
+                  // recipient. Fresh hit, visibility, geometry, value, selection,
+                  // metadata and container checks still apply. Activation keeps
+                  // the stricter retirement rule, as do identity mutations.
+                  if (previous.retired && (!nativeTextEditing || previous.editingRetired)) return reply('stale-agent-control-retired-'
+                    + ((nativeTextEditing ? previous.editingRetiredCause : previous.retiredCause) || 'unknown'));
+                  if (!agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)) return reply('stale-agent-control-layout');
+                  if (!sameSignature) return reply('stale-agent-control-signature');
+                  // Catalogue numbers are local to each semantic page read.
+                  // Retain actual container objects instead of treating an
+                  // unrelated earlier text node as a different input target.
+                  const oldContainer = lastPageSnapshot.containers.get(previous.metadata.containerID), currentContainer = containers.get(binding.metadata.containerID);
+                  if (!oldContainer || !currentContainer || oldContainer.element !== currentContainer.element
+                      || oldContainer.parent !== currentContainer.parent) return reply('stale-agent-control-container');
+                  const previousMetadata = {...previous.metadata,containerID:binding.metadata.containerID};
+                  if (JSON.stringify(previousMetadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-control-metadata-'
+                    + Object.keys(binding.metadata).filter(key => JSON.stringify(previousMetadata[key]) !== JSON.stringify(binding.metadata[key])).join(','));
+                  if (previous.references.length !== binding.references.length
+                      || previous.references.some((node,index) => node !== binding.references[index])) return reply('stale-agent-control-references');
                   const kind = binding.metadata.kind;
                   const role = ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
                     : kind === 'textarea' ? 'AXTextArea'

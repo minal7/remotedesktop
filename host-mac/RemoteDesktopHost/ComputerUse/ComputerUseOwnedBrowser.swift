@@ -1025,9 +1025,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         case .typeText:
             arguments["focused"] = true
             arguments["editable"] = true
+            arguments["textEditing"] = true
         case .key(let keys):
             arguments["focused"] = true
             arguments["paging"] = keys.count == 1 && ["PAGEDOWN", "PAGEUP"].contains(keys[0].uppercased())
+            arguments["textEditing"] = keys.count == 2
+                && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased()) && keys[1].uppercased() == "A"
         default: return nil
         }
         let result = try await callDOM(.agentTarget, arguments: arguments, document: observation.evidence.document)
@@ -1096,6 +1099,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // animation; it is not input-location authority by itself.
         let inspectedTarget = try await readAgentTarget(action, observation: observation)
         try check()
+        // Keep this boundary safe even for direct native callers. A field
+        // that became read-only can no longer supply an editing target.
+        guard inspectedTarget?.context.isEmpty != true else { throw ComputerUseBrowserError.pageChanged }
         if let target {
             guard target.observation == observation, target.proposal == action,
                   inspectedTarget == target else { throw ComputerUseBrowserError.pageChanged }

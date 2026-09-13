@@ -1,0 +1,3155 @@
+{
+  "scope": "Native text editing on changing browser pages: red/green repairs, checked login/window regressions, and bounded Fara Q6 movie retry",
+  "sourceParent": "508e4893bb6e6ff45a3646f6212970635a5f9240",
+  "targetMacRAMGB": 12,
+  "productionSelectedModel": "Fara1.5-4B Q4",
+  "productionModelChanged": false,
+  "productionMemoryCapGiB": 4,
+  "diagnosticQ6MemoryCapGiB": 5,
+  "wholeApp12GBQualified": false,
+  "fullMovieTaskAccepted": false,
+  "installedAppReplaced": false,
+  "fullSuiteRun": false,
+  "uniqueNewSuccessfulMacMethods": 8,
+  "historicalMinimumSuccessfulMacMethods": 277,
+  "currentBuild": "native-noop-attribute-green-01",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "85172072fb76a53b02689cbcb4b7a5154fb3a96264527f47b2ea70e07e065ab8",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "54900506c8f7d9b70b4d167f7cbb9f5183ba8ffb9e65d14acf7669e65c1bca45",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "0c71cf9e1b0a54c844eb19cc657eb963014844dd9acb5d142a001051574d8b74",
+    "host-mac/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests.swift": "6e2d298e6ec0d588087b1273cbf11dbf67bc13b69777b1898517d7878c1e8c46"
+  },
+  "repairs": [
+    "Focused native text insertion and Select All tolerate only aria-expanded/aria-busy changes in a native combobox's otherwise identical signature. Return, Tab and click keep strict identity/signature checks.",
+    "Native control bindings compare the actual original/current container element and parent, not the container catalogue number assigned independently on each page scan. All remaining metadata and referenced objects still match.",
+    "Native text editing can survive class/style presentation mutations only after fresh hit, visibility, geometry, value, selection, owner, document, metadata and actual container checks.",
+    "MutationObserver retains old attribute values. Identical attribute writes do not retire an agent binding. A changed then restored identity attribute still retires it. Legacy form/query/input bindings retain their original retirement behavior.",
+    "Direct native dispatch rejects an empty/unidentified target context before input; the production executor already rejected that context.",
+    "Stale-control diagnostics distinguish identity, retirement cause, geometry, signature, actual container, metadata field names and referenced objects. They do not expose field values."
+  ],
+  "tests": [
+    {
+      "label": "native-autocomplete-red-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789335439.167,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335418.914,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Autocomplete update blocked native edit 0: pageChanged; stale-agent-control",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInNativeComboboxEditingSurvivesAutocompleteExpansion()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInNativeComboboxEditingSurvivesAutocompleteExpansion",
+          "testName": "testOptInNativeComboboxEditingSurvivesAutocompleteExpansion()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-bing-autocomplete-red-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789335487.81,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335471.739,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; agent-target",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-autocomplete-green-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789335666.909,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335640.901,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-autocomplete-boundaries-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789335710.801,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335703.211,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Autocomplete editing exception admitted readonly",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInAutocompleteEditingStillRejectsChangedFieldAuthority()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInAutocompleteEditingStillRejectsChangedFieldAuthority",
+          "testName": "testOptInAutocompleteEditingStillRejectsChangedFieldAuthority()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-autocomplete-boundaries-02",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789335778.937,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335761.567,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-autocomplete-activation-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789335833.324,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335831.724,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-bing-autocomplete-02",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789335889.588,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789335869.195,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; stale-agent-control",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-container-target-red-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336101.349,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336071.059,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Unrelated container catalogue change blocked the same field: pageChanged; stale-agent-control-metadata-containerID",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInUnrelatedContainerRenumberingPreservesNativeTextTarget()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInUnrelatedContainerRenumberingPreservesNativeTextTarget",
+          "testName": "testOptInUnrelatedContainerRenumberingPreservesNativeTextTarget()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-bing-target-diagnosis-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336154.841,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336134.759,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; agent-target",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-container-target-green-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789336286.705,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336262.172,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-autocomplete-regressions-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789336312.614,
+      "passedTests": 3,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336310.241,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "native-bing-target-green-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336407.973,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336385.542,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; stale-agent-control-retired",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-search-target-regressions-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 2,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336530.766,
+      "passedTests": 2,
+      "result": "Failed",
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "[Internal] Thread running at User-interactive quality-of-service class waiting on a lower QoS thread running at Default quality-of-service class. Investigate ways to avoid priority inversions"
+        }
+      ],
+      "skippedTests": 0,
+      "startTime": 1789336501.187,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed: caught error: \"InvalidTransition { \n  phase: idle\n  targetPhase: failed(removedFromContainer)\n}\"",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 2,
+          "testIdentifierString": "ComputerUseFaraActionTests/testOptInUnidentifiedBrowserControlHandsBackWithoutClickOrFurtherProposal()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInUnidentifiedBrowserControlHandsBackWithoutClickOrFurtherProposal",
+          "testName": "testOptInUnidentifiedBrowserControlHandsBackWithoutClickOrFurtherProposal()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "native-unknown-control-regression-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789336694.863,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336672.258,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-bing-retirement-cause-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336815.536,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336794.728,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; stale-agent-control-retired-attributes-class-body-ancestor",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-presentation-edit-red-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789336996.74,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789336977.284,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Autocomplete update blocked native edit 0: pageChanged; stale-agent-control-retired-attributes-class-body-ancestor",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInNativeTextEditingSurvivesBodyPresentationChanges()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInNativeTextEditingSurvivesBodyPresentationChanges",
+          "testName": "testOptInNativeTextEditingSurvivesBodyPresentationChanges()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-presentation-edit-green-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789337130.843,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337108.038,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-presentation-edit-boundaries-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789337200.826,
+      "passedTests": 3,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337198.14,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "native-bing-presentation-green-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789337272.43,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337252.511,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; stale-agent-control-retired-attributes-class-body-ancestor",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-editing-composite-regressions-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 9,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789337424.783,
+      "passedTests": 9,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337399.41,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 9
+    },
+    {
+      "label": "native-bing-edit-retirement-cause-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789337512.446,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337491.71,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Delayed search-field Select All failed: pageChanged; stale-agent-control-retired-attributes-autocomplete-input-self",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInBingSelectAllAfterAutocompleteDelay",
+          "testName": "testOptInBingSelectAllAfterAutocompleteDelay()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-noop-attribute-red-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789337691.478,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337671.848,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Autocomplete update blocked native edit 0: pageChanged; stale-agent-control-retired-attributes-autocomplete-input-self",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseGUIOwlModelTests/testOptInIdenticalAutocompleteAttributeWritesPreserveNativeEditing()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests/testOptInIdenticalAutocompleteAttributeWritesPreserveNativeEditing",
+          "testName": "testOptInIdenticalAutocompleteAttributeWritesPreserveNativeEditing()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-noop-attribute-green-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789337973.633,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337949.344,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-noop-boundaries-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789337989.842,
+      "passedTests": 3,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789337987.289,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "native-noop-composite-regressions-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 9,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789338012.214,
+      "passedTests": 9,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338008.694,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 9
+    },
+    {
+      "label": "native-bing-noop-green-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789338043.37,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338029.264,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-editing-target-regressions-02",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 6,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789338060.071,
+      "passedTests": 6,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338057.523,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 6
+    },
+    {
+      "label": "native-editing-login-window-regressions-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789338093.117,
+      "passedTests": 3,
+      "result": "Passed",
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "[Internal] Thread running at User-interactive quality-of-service class waiting on a lower QoS thread running at Default quality-of-service class. Investigate ways to avoid priority inversions"
+        }
+      ],
+      "skippedTests": 0,
+      "startTime": 1789338085.344,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "fara-q6-live-movie-03",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789338273.542,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338114.73,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Live ticket task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink",
+          "testName": "testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    }
+  ],
+  "publicBingProbes": [
+    {
+      "after": {
+        "tag": "BODY",
+        "id": "",
+        "attributes": [
+          [
+            "class",
+            "b_respl b_norr b_sbText"
+          ]
+        ],
+        "rect": [
+          0,
+          0,
+          1084,
+          1863
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "agent-target",
+      "sameBeforeAfterMetadata": false,
+      "testBundle": "native-bing-autocomplete-red-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "stale-agent-control",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-autocomplete-02"
+    },
+    {
+      "after": {
+        "tag": "BODY",
+        "id": "",
+        "attributes": [
+          [
+            "class",
+            "b_respl b_norr b_sbText"
+          ]
+        ],
+        "rect": [
+          0,
+          0,
+          1084,
+          1863
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "agent-target",
+      "sameBeforeAfterMetadata": false,
+      "testBundle": "native-bing-target-diagnosis-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "stale-agent-control-retired",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-target-green-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "stale-agent-control-retired-attributes-class-body-ancestor",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-retirement-cause-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "stale-agent-control-retired-attributes-class-body-ancestor",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-presentation-green-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 0,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "RemoteDesktopHost.ComputerUseBrowserError.pageChanged",
+      "inference": false,
+      "selected": false,
+      "targetStatus": "stale-agent-control-retired-attributes-autocomplete-input-self",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-edit-retirement-cause-01"
+    },
+    {
+      "after": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "attempts": 1,
+      "before": {
+        "tag": "INPUT",
+        "id": "sb_form_q",
+        "attributes": [
+          [
+            "class",
+            "b_searchbox "
+          ],
+          [
+            "id",
+            "sb_form_q"
+          ],
+          [
+            "name",
+            "q"
+          ],
+          [
+            "aria-autocomplete",
+            "both"
+          ],
+          [
+            "aria-label",
+            "Enter your search here - Search suggestions will show as you type"
+          ],
+          [
+            "type",
+            "search"
+          ],
+          [
+            "value",
+            "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets"
+          ],
+          [
+            "maxlength",
+            "1000"
+          ],
+          [
+            "dir",
+            ""
+          ],
+          [
+            "autocapitalize",
+            "off"
+          ],
+          [
+            "autocorrect",
+            "off"
+          ],
+          [
+            "autocomplete",
+            "off"
+          ],
+          [
+            "spellcheck",
+            "false"
+          ]
+        ],
+        "value": "site:ticket.theroxie.org \"Cycle of Love\" Roxie San Francisco tickets",
+        "start": 36,
+        "end": 36,
+        "rect": [
+          193,
+          24,
+          535,
+          44
+        ]
+      },
+      "failure": "",
+      "inference": false,
+      "selected": true,
+      "targetStatus": "agent-target",
+      "sameBeforeAfterMetadata": true,
+      "testBundle": "native-bing-noop-green-01"
+    }
+  ],
+  "movie03": {
+    "failure": "",
+    "finalDocumentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+%22The+Roxie%22+San+Francisco&FORM=QBLH&rdr=1&rdrig=C0784F47C721460C90DF0C82DFE575BA",
+    "goal": "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing.",
+    "lastAgentCaptureStage": "complete",
+    "lastAgentTargetStatus": "stale-agent-point",
+    "model": "Fara1.5-4B-Q6_K",
+    "nativeAttemptOutcomes": [
+      "documentCommitted",
+      "documentCommitted",
+      "documentCommitted"
+    ],
+    "nativeDispatchJournalStatuses": [
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ]
+    ],
+    "nativeObservations": [
+      "4:locationChanged:pendingSlot:observed",
+      "5:navigationAction:pendingSlot:allowed",
+      "6:provisionalStart:exactPendingNavigation:observed",
+      "7:response:pendingSlot:allowed",
+      "8:documentCommitStarted:exactPendingNavigation:observed",
+      "9:documentFinished:exactPendingNavigation:observed",
+      "11:navigationAction:none:allowed",
+      "12:locationChanged:none:observed",
+      "13:provisionalStart:exactObservedNavigation:observed",
+      "14:response:observedSlot:allowed",
+      "15:documentCommitStarted:exactObservedNavigation:observed",
+      "16:documentFinished:exactObservedNavigation:observed",
+      "17:observedNavigationEnded:exactObservedNavigation:observed",
+      "21:locationChanged:pendingSlot:observed",
+      "22:navigationAction:pendingSlot:allowed",
+      "23:provisionalStart:exactPendingNavigation:observed",
+      "24:response:pendingSlot:allowed",
+      "25:documentCommitStarted:exactPendingNavigation:observed",
+      "26:documentFinished:exactPendingNavigation:observed",
+      "29:locationChanged:pendingSlot:observed",
+      "30:navigationAction:pendingSlot:allowed",
+      "31:provisionalStart:exactPendingNavigation:observed",
+      "32:response:pendingSlot:allowed",
+      "33:documentCommitStarted:exactPendingNavigation:observed",
+      "34:documentFinished:exactPendingNavigation:observed",
+      "36:navigationAction:none:allowed",
+      "37:locationChanged:none:observed",
+      "38:provisionalStart:exactObservedNavigation:observed",
+      "39:response:observedSlot:allowed",
+      "40:documentCommitStarted:exactObservedNavigation:observed",
+      "41:documentFinished:exactObservedNavigation:observed",
+      "42:observedNavigationEnded:exactObservedNavigation:observed"
+    ],
+    "oracleCheckedOn": "2026-09-13",
+    "oracleURL": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c",
+    "ownedProcessExited": true,
+    "progress": [
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Reading the browser…"
+    ],
+    "proposalLimit": 24,
+    "responses": [
+      {
+        "actionError": "",
+        "currentURL": "",
+        "historyCount": 0,
+        "seconds": 11.405611991882324,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "visit_url",
+              "url": "https://www.theroxie.org"
+            }
+          }
+        ],
+        "responseSHA256": "b38cdeadc6e14e5a78558134c9dae7770ab2689b75c6046050d523330ec3f4c7"
+      },
+      {
+        "actionError": "visit_url to https://www.theroxie.org failed: BrowserSourcePolicy: The destination is not permitted for this task.",
+        "currentURL": "",
+        "historyCount": 1,
+        "seconds": 12.724886059761047,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "site:theroxie.org OR site:ticket.theroxie.org OR site:gotix.com \"The Cycle of Love\" \"September 17, 2026\" Roxie San Francisco official tickets"
+            }
+          }
+        ],
+        "responseSHA256": "47a5e4dcf4fc0dc1886663e6290d71c009dc6ccada927d0e2dd462e143485a71"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+OR+site%3Aticket.theroxie.org+OR+site%3Agotix.com+%22The+Cycle+of+Love%22+%22September+17%2C+2026%22+Roxie+San+Francisco+official+tickets&FORM=QBLH",
+        "historyCount": 2,
+        "seconds": 12.99743103981018,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 2
+            }
+          }
+        ],
+        "responseSHA256": "ccb274b1029ccc0b40cc33a083e5a8799ec94ad1dcec539ab11c21c7ebed359f"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+OR+site%3Aticket.theroxie.org+OR+site%3Agotix.com+%22The+Cycle+of+Love%22+%22September+17%2C+2026%22+Roxie+San+Francisco+official+tickets&FORM=QBLH&rdr=1&rdrig=D3F7642936C147358E79DACE09A7A1C6",
+        "historyCount": 3,
+        "seconds": 13.27120304107666,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "\"The Cycle of Love\" \"The Roxie\" \"San Francisco\" \"September 17 2026\" tickets"
+            }
+          }
+        ],
+        "responseSHA256": "5a9482abc3ca16bd74b1745e357070f37ec3f6153cac4538cb9257b965884be9"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+%22The+Roxie%22+%22San+Francisco%22+%22September+17+2026%22+tickets&FORM=QBLH",
+        "historyCount": 4,
+        "seconds": 12.950969934463501,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "ticket.theroxie.org \"The Cycle of Love\" \"September 17\" 2026"
+            }
+          }
+        ],
+        "responseSHA256": "e253cad439ce3f356c3f4e14b7f2c1e727accda146fd4f4a930b2d8a5a9f85ce"
+      },
+      {
+        "actionError": "The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+%22The+Roxie%22+%22San+Francisco%22+%22September+17+2026%22+tickets&FORM=QBLH",
+        "historyCount": 5,
+        "seconds": 12.770055055618286,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                452,
+                87
+              ]
+            }
+          }
+        ],
+        "responseSHA256": "3fdb1dac6f330940d38da28cdb058eb48edb80fc7380690419db57dcee3f2492"
+      },
+      {
+        "actionError": "left_click at [452.0, 87.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+%22The+Roxie%22+%22San+Francisco%22+%22September+17+2026%22+tickets&FORM=QBLH",
+        "historyCount": 6,
+        "seconds": 13.877676010131836,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "visit_url",
+              "url": "https://gotix.com/theroxie/"
+            }
+          }
+        ],
+        "responseSHA256": "789d931c31a53c5beb8cb73ac89c89b76e6a83eb0133b321899b9081d92466f0"
+      },
+      {
+        "actionError": "visit_url to https://gotix.com/theroxie/ failed: BrowserSourcePolicy: The destination is not permitted for this task.",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+%22The+Roxie%22+%22San+Francisco%22+%22September+17+2026%22+tickets&FORM=QBLH",
+        "historyCount": 7,
+        "seconds": 13.896201014518738,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "site:theroxie.org \"The Cycle of Love\" \"The Roxie\" San Francisco"
+            }
+          }
+        ],
+        "responseSHA256": "21f7dc50ee61d4f4d9ab4765825dfff3cf4e6c45c9d7a31717bd44db11c6b27a"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+%22The+Roxie%22+San+Francisco&FORM=QBLH",
+        "historyCount": 8,
+        "seconds": 14.472792983055115,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "\"Cycle of Love\" \"Roxie\" \"San Francisco\" \"September 17\" 2026 tickets -the"
+            }
+          }
+        ],
+        "responseSHA256": "04da90e0e999840247ad3693780a3b6ba34f2bc913e443e06da8ec358a7a4d3b"
+      },
+      {
+        "actionError": "The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+%22The+Roxie%22+San+Francisco&FORM=QBLH&rdr=1&rdrig=C0784F47C721460C90DF0C82DFE575BA",
+        "historyCount": 9,
+        "seconds": 14.288105010986328,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "key",
+              "keys": [
+                "Control",
+                "a"
+              ]
+            }
+          }
+        ],
+        "responseSHA256": "a9e9e38ad157cb1cfc4dc6f5681351611c909057a13e6cb4d431e50de4302030"
+      }
+    ],
+    "result": "Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+    "seconds": 143.22283899784088,
+    "timeoutSeconds": 300
+  },
+  "movie03Workers": [
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "63b0e1100c3599c5a1a25e658dd759e153f5e403f707fd9d59f50c944005fa3f",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4951736320,
+      "memorySamples": 32,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 28208,
+      "startupSeconds": 1.8150286249583587,
+      "generationSeconds": 6.492457665968686,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 2607,
+        "total_tokens": 2750,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 8.449071999988519
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "493ed7b7c79a528dc85269db0abb3ea0a0edf1acad6e8ce31be4f0b37122043b",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4978409472,
+      "memorySamples": 39,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 28213,
+      "startupSeconds": 1.2984434580430388,
+      "generationSeconds": 8.827139917062595,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 163,
+        "prompt_tokens": 3617,
+        "total_tokens": 3780,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.261151458020322
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "3b91dcf02a8364dc0d4011575dab0cda4c4308b13072f4fc5b9cadfd829f94f5",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 5000921088,
+      "memorySamples": 40,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 28845,
+      "startupSeconds": 1.3076250000158325,
+      "generationSeconds": 9.101087833056226,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 80,
+        "prompt_tokens": 4440,
+        "total_tokens": 4520,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.545862750033848
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "6dcf964faaaff872c753d546f983e8b2381bacdb7f18633a1170b7232c38dff1",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4988698624,
+      "memorySamples": 41,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 29162,
+      "startupSeconds": 1.305100749945268,
+      "generationSeconds": 9.268620040966198,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 115,
+        "prompt_tokens": 4400,
+        "total_tokens": 4515,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.70615124993492
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "68ceb6769ddf5ff61620c5bf0a88989a2131755cf3ddbca5893a26ffda379758",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4972462080,
+      "memorySamples": 40,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 29506,
+      "startupSeconds": 1.3102608330082148,
+      "generationSeconds": 8.984027000027709,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 117,
+        "prompt_tokens": 4334,
+        "total_tokens": 4451,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.429522125050426
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "0e68568bee7416aabb1f6c5a442fd2dbdc204041f182023bee1a5c34d983e3a5",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4968185856,
+      "memorySamples": 39,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 29823,
+      "startupSeconds": 1.3169110829476267,
+      "generationSeconds": 8.879585208953358,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 90,
+        "prompt_tokens": 4585,
+        "total_tokens": 4675,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.281087458017282
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "fa4e9f85f17e3618dbe4f6bbaf844b0e2ec5226ae08a75e8b3c605fec655c343",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4969299968,
+      "memorySamples": 43,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 29827,
+      "startupSeconds": 1.302760999999009,
+      "generationSeconds": 9.932639916078188,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 132,
+        "prompt_tokens": 4822,
+        "total_tokens": 4954,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.318872708943672
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "5ce9a095ae8a46bed8c2f99c37c503b5e5e6a534d6c974d329ced0ae9bfdbb42",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4972773376,
+      "memorySamples": 44,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 30147,
+      "startupSeconds": 1.2947804160648957,
+      "generationSeconds": 10.056664249976166,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 115,
+        "prompt_tokens": 5076,
+        "total_tokens": 5191,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.484677375061437
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "a91ea66ef02586e2cbb3b103ed576496d2788cdc7860a72736ac7f2f167bad9b",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4967645184,
+      "memorySamples": 46,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 30152,
+      "startupSeconds": 1.3107077910099179,
+      "generationSeconds": 10.548189082997851,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 129,
+        "prompt_tokens": 5271,
+        "total_tokens": 5400,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.939216750091873
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "0dd47facace4359ae19cd3b6e97e38e6ae40a29f7cb949d05105b0405cbd4c0c",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "e08d7c0c6cf39e2c9cdae2fff211a1e262a4a29e8e025b983210dc6310716dd3",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4967219200,
+      "memorySamples": 45,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 30467,
+      "startupSeconds": 1.3091586669906974,
+      "generationSeconds": 10.329250542097725,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 91,
+        "prompt_tokens": 5556,
+        "total_tokens": 5647,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.7734767079819
+    }
+  ],
+  "decisions": [
+    "Eight new logical methods pass: unrelated container numbering, autocomplete expansion, presentation changes, identical autocomplete writes, changed field authority, activation boundaries, visibility/overlay boundaries and the delayed public Bing Select All probe.",
+    "The native field-authority fixture covers nine cases, including attribute change followed by restoration; activation covers Return/Tab/click; visibility covers hidden body, transparent body, moved field and newly covering overlay. All reject before any input callback or page input/key/click event.",
+    "Two early Bing probes actually transition focus from INPUT to BODY and change metadata; those are preserved as real focus/document changes, not attributed to the repaired false retirement. Six later probes retain identical field metadata; the final one succeeds after the no-op attribute repair.",
+    "All nine composite state methods, six native target/positive regressions, scripted exact typing/login/Resume, Tab typing and six-observation/three-Stop-cycle window reuse pass on the current compiled source.",
+    "The pre-existing unknown-canvas fixture expected one proposal despite the already implemented four-unsent-proposal bound. The fixture now asserts the existing four-proposal handback, zero clicks and no input journal; no production retry budget changed. The rename adds no new method to the historical count.",
+    "One Q6 full retry after native tests still fails: 10 proposals, 143.222839 seconds of task/cleanup time, 3 verified native dispatches, last status stale-agent-point and no completed answer. The model uses guessed domains and restrictive queries. A focus click and two web_search proposals are rejected, followed by Select All; no ticket selection occurs.",
+    "The final movie failure does not reproduce stale-agent-control-retired. It does not yet isolate whether stale-agent-point is caused by focus, hit geometry or another retained point invariant. Source inspection shows web_search and visit_url still require whole-page validation; reproduce navigation timing before relaxing it or rerunning a full model workflow.",
+    "All ten movie workers exit and remove temporary credentials; peak sampled max(RSS,physical footprint) is 5000921088 bytes under the diagnostic 5 GiB cap. This is not total application memory or thermal acceptance.",
+    "29 build/test bundles are retained: 15 pass and 14 fail, including intended red tests and intervening diagnoses. No compiler-only failure occurs in this checkpoint. Existing Swift warnings and Xcode-beta's misleading exit-code-zero compiler output remain; 2 runtime-warning bundles report the known native login thread-priority inversion.",
+    "Keep Fara Q4 selected; Q6 remains diagnostic. Next isolate whole-page navigation preflight and focus recovery with controlled no-inference tests. Provider login, physical phone, full movie/travel, remaining native actions, whole-app 12 GB/heat and production acceptance remain open."
+  ]
+}
