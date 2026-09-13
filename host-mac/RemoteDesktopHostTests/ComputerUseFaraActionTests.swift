@@ -7,6 +7,218 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraFindSupportsExactReplacementNoMatchAndNativeClear() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: exact Find editing and query outcomes") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Reference 123456</h1><p style='margin-top:1500px'>café 🗼 first</p><p style='margin-top:2000px;margin-bottom:1000px'>café 🗼 second</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "query")
+        let document = try await browser.navigate(taskID: "query", operationID: "fixture", to: base.appendingPathComponent("page"))
+        func dispatch(_ action: ComputerUseFaraAction) async throws {
+            let observation = try await browser.captureAgentObservation(document: document)
+            try await browser.performAgentInput(action, observation: observation)
+        }
+        try await dispatch(.key(["Control", "F"]))
+        @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+        let views = descendants(try XCTUnwrap(NSApp.keyWindow?.contentView))
+        let web = try XCTUnwrap(views.compactMap { $0 as? WKWebView }.first)
+        let field = try XCTUnwrap(views.first { $0.identifier?.rawValue == "owned-browser-find-query" } as? NSSearchField)
+        try await dispatch(.typeText("café 🗼"))
+        XCTAssertEqual(field.stringValue, "café 🗼")
+        let first = try await web.evaluateJavaScript("scrollY") as? Double
+        try await dispatch(.key(["Control", "G"]))
+        let second = try await web.evaluateJavaScript("scrollY") as? Double
+        XCTAssertGreaterThan(try XCTUnwrap(second), try XCTUnwrap(first) + 1000)
+        try await dispatch(.key(["Control", "Shift", "G"]))
+        let previous = try await web.evaluateJavaScript("scrollY") as? Double
+        XCTAssertLessThan(try XCTUnwrap(previous), try XCTUnwrap(second) - 1000)
+        try await dispatch(.key(["Control", "A"]))
+        try await dispatch(.typeText("absent café 🗼"))
+        XCTAssertEqual(field.stringValue, "absent café 🗼")
+        XCTAssertTrue(views.compactMap { $0 as? NSTextField }.contains { $0.stringValue == "No matches" })
+        let observation = try await browser.captureAgentObservation(document: document)
+        let action = ComputerUseFaraAction.typeText("123456")
+        let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+        let target = try XCTUnwrap(inspected)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        XCTAssertNil(tools.approvalReason(for: target.action, nativeTarget: target), "Finding a numeric reference in native chrome does not enter credentials into a website")
+        let cell = try XCTUnwrap(field.cell as? NSSearchFieldCell)
+        let rect = cell.cancelButtonRect(forBounds: field.bounds)
+        let point = web.convert(NSPoint(x: rect.midX, y: rect.midY), from: field)
+        try await dispatch(.pointer(.leftClick, .init(x: point.x / web.bounds.width * 1000, y: (web.isFlipped ? point.y : web.bounds.height - point.y) / web.bounds.height * 1000)))
+        XCTAssertEqual(field.stringValue, "", "Clicking the native clear button must clear, not select all")
+        XCTAssertEqual(server.count("/page"), 1)
+    }
+
+    @MainActor
+    func testOptInFaraFindRejectsChangedQuerySelectionFocusLoginAndRetiredAuthority() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: Find input ownership boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["query", "selection", "focus", "login", "cancelled", "paused", "owner", "closed", "admission-withdrawn"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Find fixture</h1><input id='page-field'><p style='margin-top:2000px'>needle</p><script>document.addEventListener('input',()=>fetch('/edit'))</script>")])
+            let base = try await server.start(); defer { server.stop() }
+            var allowsActions = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowsActions }); defer { browser.close() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            let first = try await browser.captureAgentObservation(document: document)
+            try await browser.performAgentInput(.key(["Command", "F"]), observation: first)
+            @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            let views = descendants(try XCTUnwrap(window.contentView))
+            let web = try XCTUnwrap(views.compactMap { $0 as? WKWebView }.first)
+            let field = try XCTUnwrap(views.first { $0.identifier?.rawValue == "owned-browser-find-query" } as? NSSearchField)
+            let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
+            editor.insertText("seed", replacementRange: NSRange(location: NSNotFound, length: 0))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.typeText("needle")
+            let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+            let target = try XCTUnwrap(inspected)
+            switch mode {
+            case "query": editor.insertText("changed", replacementRange: NSRange(location: NSNotFound, length: 0))
+            case "selection": editor.setSelectedRange(NSRange(location: 0, length: 4))
+            case "focus": window.makeFirstResponder(web)
+            case "login": _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
+            case "paused": allowsActions = false; browser.prepareForUserControl(taskID: mode)
+            case "owner": try browser.claim(taskID: "successor")
+            case "closed": browser.close()
+            default: break
+            }
+            var attempts = 0
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: {
+                    attempts += 1
+                    if mode == "admission-withdrawn" { allowsActions = false }
+                })
+            }
+            do { try await work.value; XCTFail("Find accepted retired input: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, mode == "login" ? .authenticationRequired : .pageChanged, mode) }
+            }
+            XCTAssertEqual(attempts, mode == "admission-withdrawn" ? 1 : 0, mode)
+            XCTAssertFalse(field.stringValue.contains("needle"), mode)
+            XCTAssertEqual(server.count("/edit"), 0, mode)
+            if mode == "owner" { XCTAssertEqual(browser.taskID, "successor") }
+        }
+    }
+
+    @MainActor
+    func testOptInFaraFindsPageTextWithVisibleQueryAndReturnsToPage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: visible native Find in Page workflow") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{font:24px system-ui}section{margin-top:1500px;height:1200px}</style>
+            <h1>Local movie listings</h1><input id='page-input' aria-label='Page input'>
+            <section>September 17 — Little Roxie, 6:20 PM</section>
+            <script>document.addEventListener('input',()=>fetch('/page-edit'));document.addEventListener('keydown',()=>fetch('/page-key'));</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraFind-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "find")
+        _ = try await browser.navigate(taskID: "find", operationID: "fixture", to: base.appendingPathComponent("page"))
+        let actions = [#"{"action":"key","keys":["Control","f"]}"#, #"{"action":"type","text":"September 17"}"#,
+            #"{"action":"key","keys":["Return"]}"#, #"{"action":"key","keys":["Shift","Return"]}"#,
+            #"{"action":"key","keys":["Escape"]}"#, #"{"action":"terminate","answer":"September 17 — Little Roxie, 6:20 PM"}"#]
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard calls < actions.count else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+            let views = try XCTUnwrap(NSApp.keyWindow?.contentView).subviews.flatMap { descendants($0) }
+            if calls > 0 && calls < 5 {
+                let field = try XCTUnwrap(views.first { $0.identifier?.rawValue == "owned-browser-find-query" } as? NSSearchField)
+                XCTAssertFalse(field.isHiddenOrHasHiddenAncestor)
+                XCTAssertNotNil(field.currentEditor())
+                XCTAssertEqual(field.stringValue, calls == 1 ? "" : "September 17")
+            }
+            if calls >= 2 {
+                let web = try XCTUnwrap(views.compactMap { $0 as? WKWebView }.first)
+                let scroll = try await web.evaluateJavaScript("scrollY")
+                XCTAssertGreaterThan(try XCTUnwrap(scroll as? Double), 1000)
+                let value = try await web.evaluateJavaScript("document.getElementById('page-input').value")
+                XCTAssertEqual(value as? String, "")
+            }
+            if calls == 2 {
+                let attachment = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+                attachment.name = "Model sees native Find query and matching page"; attachment.lifetime = .keepAlways; self.add(attachment)
+            }
+            if calls == 5 { XCTAssertFalse(views.contains { $0.identifier?.rawValue == "owned-browser-find-query" && !$0.isHiddenOrHasHiddenAncestor }) }
+            let response = self.call(actions[calls]); calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            let result = try await executor.execute(taskID: "find", prompt: "Find September 17 in this page, inspect its result, then close Find.", trustedUserPrompt: "Find September 17 in this page, inspect its result, then close Find.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("September 17 — Little Roxie, 6:20 PM"))
+            let replay = try await executor.execute(taskID: "find", prompt: "Find September 17 in this page, inspect its result, then close Find.", trustedUserPrompt: "Find September 17 in this page, inspect its result, then close Find.", tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result)
+        } catch { return XCTFail("Find failed after \(calls) proposals: \(String(reflecting: error))") }
+        XCTAssertEqual(calls, actions.count); XCTAssertEqual(server.count("/page"), 1)
+        XCTAssertEqual(server.count("/page-edit"), 0); XCTAssertEqual(server.count("/page-key"), 0)
+        let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(records.filter { $0.stepIDs == ["native-dispatch-returned"] && $0.statuses == [.verified] }.count, 5)
+    }
+
+    @MainActor
+    func testOptInPublicWebKitTextFinderShowsFindBarAndFindsVisibleResult() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: one public AppKit/WebKit find experiment") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 960, height: 640))
+        let scroll = NSScrollView(frame: view.frame)
+        scroll.documentView = view
+        let finder = NSTextFinder(); finder.client = view; finder.findBarContainer = scroll
+        finder.isIncrementalSearchingEnabled = true
+        let window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.title = "Local Find in Page Experiment"; window.contentView = scroll
+        defer { finder.performAction(.hideFindInterface); finder.client = nil; finder.findBarContainer = nil; view.stopLoading(); window.close() }
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        view.loadHTMLString("<!doctype html><style>body{font:24px system-ui}section{margin-top:1800px;height:1000px}</style><h1>Local movie listings</h1><section>September 17, 2026: Little Roxie, 6:20 PM</section>", baseURL: nil)
+        var ready = false
+        let loadDeadline = ContinuousClock.now + .seconds(5)
+        while !ready && ContinuousClock.now < loadDeadline {
+            ready = (try? await view.evaluateJavaScript("document.readyState === 'complete' && !!document.querySelector('section')")) as? Bool == true
+            if !ready { try await Task.sleep(for: .milliseconds(25)) }
+        }
+        XCTAssertTrue(ready)
+        XCTAssertTrue(finder.validateAction(.showFindInterface))
+        finder.performAction(.showFindInterface)
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !scroll.isFindBarVisible && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertTrue(scroll.isFindBarVisible)
+        let editor = try XCTUnwrap(window.firstResponder as? NSTextView, "Find should focus its native text editor")
+        editor.selectAll(nil); editor.insertText("September 17", replacementRange: NSRange(location: NSNotFound, length: 0))
+        let findResult = try await view.find("September 17", configuration: WKFindConfiguration())
+        XCTAssertTrue(findResult.matchFound)
+        var found = false
+        while !found && ContinuousClock.now < deadline {
+            found = (try? await view.evaluateJavaScript("scrollY > 1000")) as? Bool == true
+            if !found { try await Task.sleep(for: .milliseconds(25)) }
+        }
+        let selection = try await view.evaluateJavaScript("JSON.stringify({scrollY,selection:window.getSelection().toString()})")
+        let state = XCTAttachment(string: "findBarVisible=\(scroll.isFindBarVisible), barFrame=\(String(describing: scroll.findBarView?.frame)), webFrame=\(view.frame), result=\(selection)")
+        state.name = "Public NSTextFinder experiment state"; state.lifetime = .keepAlways; add(state)
+        let webImage = try await view.takeSnapshot(configuration: nil)
+        let webAttachment = XCTAttachment(image: webImage); webAttachment.name = "WebKit snapshot with native find interface open"; webAttachment.lifetime = .keepAlways; add(webAttachment)
+        if let bar = scroll.findBarView, let bitmap = bar.bitmapImageRepForCachingDisplay(in: bar.bounds) {
+            bar.cacheDisplay(in: bar.bounds, to: bitmap)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                let barAttachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                barAttachment.name = "Native find bar pixels"; barAttachment.lifetime = .keepAlways; add(barAttachment)
+            }
+        }
+        XCTAssertTrue(found, "Public WebKit find must reveal the requested text")
+    }
+
+    @MainActor
     func testOptInFaraNewContextLinkCannotLeaveAllowedSources() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: source admission for observed new-context links") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

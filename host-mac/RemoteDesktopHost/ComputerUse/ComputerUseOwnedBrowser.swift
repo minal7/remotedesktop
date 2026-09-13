@@ -749,6 +749,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         fileprivate let takeover: UUID
         fileprivate let windowFrame: NSRect
         var sessionIdentity: String { ComputerUseTaskContract.digest([evidence.document.contextID, evidence.document.taskID, ownership.uuidString]) }
+        fileprivate let findState: OwnedBrowserFindBar.State?
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
         var currentURL: URL { evidence.document.committedURL }
         var approvalPageEvidence: ComputerUseBrowserPageEvidence { evidence }
@@ -757,17 +758,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// evidence, never model output or a serialized controller payload.
     struct AgentTarget: Equatable, Sendable {
         enum Navigation: String, Sendable { case document, fragment }
+        enum FindAction: String, Sendable { case show, queryClick, type, selectAll, next, previous, hide }
         fileprivate let observation: AgentObservation
         fileprivate let proposal: ComputerUseFaraAction
         let action: ComputerUsePredictedAction
         let context: String
         let isSearchSubmission: Bool
         let navigation: Navigation?
+        let findAction: FindAction?
         fileprivate let elementID: String
         var pageEvidence: ComputerUseBrowserPageEvidence { observation.evidence }
         var fingerprint: ComputerUseApprovalFingerprint {
             .init(action: action, applicationID: "owned-browser:\(observation.sessionIdentity)",
-                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission), navigation?.rawValue ?? "activation"]), visualDigest: nil)
+                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission), navigation?.rawValue ?? "activation", findAction?.rawValue ?? "page"]), visualDigest: nil)
         }
     }
     private var agentObservationID: UUID?
@@ -797,6 +800,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard agentObservationID == observation.id, validate(observation.evidence.document),
                   ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
                   browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  mainSurface?.findBar.state == observation.findState,
                   hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
         }
         try check()
@@ -816,6 +820,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         let ownership = ownershipEpoch, takeover = takeoverEpoch
         let frame = window.frame, size = view.bounds.size
+        let findState = mainSurface?.findBar.state
         guard size.width > 0, size.height > 0, window.backingScaleFactor > 0 else {
             throw ComputerUseBrowserError.pageEvidenceUnavailable
         }
@@ -828,7 +833,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let scale = min(1, 1188 / max(size.width, size.height))
         configuration.snapshotWidth = NSNumber(value: size.width * scale / window.backingScaleFactor)
         lastAgentCaptureStage = "snapshot-image"
-        let image = try await view.takeSnapshot(configuration: configuration)
+        var image = try await view.takeSnapshot(configuration: configuration)
+        if let surface = mainSurface, !surface.findBar.isHidden {
+            image = try surface.snapshotIncludingFindBar(webImage: image)
+        }
         lastAgentCaptureStage = "validate-page"
         try await validatePageEvidence(evidence)
         lastAgentCaptureStage = "validate-native"
@@ -836,6 +844,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard validate(expected), self.browser === view, self.window === window,
               ownershipEpoch == ownership, takeoverEpoch == takeover,
               window.frame == frame, view.bounds.size == size, hasRequiredPresentation,
+              mainSurface?.findBar.state == findState,
               let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
               let png = bitmap.representation(using: .png, properties: [:]) else {
             throw ComputerUseBrowserError.pageChanged
@@ -845,7 +854,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         agentObservationID = id
         lastAgentCaptureStage = "complete"
         return AgentObservation(png: png, pixelWidth: bitmap.pixelsWide, pixelHeight: bitmap.pixelsHigh,
-            viewportSize: size, id: id, evidence: evidence, ownership: ownership, takeover: takeover, windowFrame: frame)
+            viewportSize: size, id: id, evidence: evidence, ownership: ownership, takeover: takeover, windowFrame: frame, findState: findState)
     }
 
     /// Native and approval paths share the same integral screen point. The
@@ -873,12 +882,66 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
+    private func findAction(_ action: ComputerUseFaraAction, observation: AgentObservation) throws -> AgentTarget.FindAction? {
+        guard let surface = mainSurface else { return nil }
+        let bar = surface.findBar
+        if case .key(let raw) = action {
+            let keys = raw.map { $0.uppercased() }
+            let command = keys.count == 2 && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0])
+            if command && keys[1] == "F" {
+                guard (window?.firstResponder as? any NSTextInputClient)?.hasMarkedText() != true else { throw ComputerUseBrowserError.pageChanged }
+                return .show
+            }
+            if !bar.isHidden {
+                if keys == ["ESC"] || keys == ["ESCAPE"] { return .hide }
+                if command && keys[1] == "G" { return .next }
+                if keys.count == 3, ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0]), keys[1] == "SHIFT", keys[2] == "G" { return .previous }
+                if bar.editor != nil {
+                    guard bar.editor?.hasMarkedText() == false else { throw ComputerUseBrowserError.pageChanged }
+                    if command && keys[1] == "A" { return .selectAll }
+                    if keys == ["ENTER"] || keys == ["RETURN"] { return .next }
+                    if keys == ["SHIFT", "ENTER"] || keys == ["SHIFT", "RETURN"] { return .previous }
+                    throw ComputerUseBrowserError.unsupportedDocument
+                }
+            }
+        }
+        guard !bar.isHidden else { return nil }
+        if case .typeText(let text) = action, bar.editor != nil {
+            guard text.utf8.count <= 32_768, bar.editor?.hasMarkedText() == false else { throw ComputerUseBrowserError.pageChanged }
+            return .type
+        }
+        if case .pointer(.leftClick, let point) = action, let view = browser, let window {
+            let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
+            let local = bar.convert(location, from: nil)
+            if bar.bounds.contains(local) {
+                if bar.query.frame.contains(local) { return .queryClick }
+                if bar.next.frame.contains(local) { return .next }
+                if bar.previous.frame.contains(local) { return .previous }
+                if bar.done.frame.contains(local) { return .hide }
+                throw ComputerUseBrowserError.unsupportedDocument
+            }
+        }
+        return nil
+    }
+
     func predictedAgentAction(_ action: ComputerUseFaraAction, observation: AgentObservation) throws -> ComputerUsePredictedAction? {
         try validateSourceDocument(observation.evidence.document)
         guard agentObservationID == observation.id, validate(observation.evidence.document),
               ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
               browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+              mainSurface?.findBar.state == observation.findState,
               hasRequiredPresentation, let view = browser, let window else { throw ComputerUseBrowserError.pageChanged }
+        if let command = try findAction(action, observation: observation) {
+            if case .pointer(.leftClick, let point) = action { return try agentClickTarget(point, observation: observation, view: view, window: window).action }
+            switch command {
+            case .show: return .key(usage: 0x09, modifiers: 1 << 3)
+            case .type: if case .typeText(let text) = action { return .typeText(text) }
+            case .selectAll: return .key(usage: 0x04, modifiers: 1 << 3)
+            case .next, .previous: return .key(usage: 0x28, modifiers: command == .previous ? 1 << 1 : 0)
+            case .hide: return .key(usage: 0x29, modifiers: 0)
+            case .queryClick: break
+            }
+        }
         switch action {
         case .pointer(.leftClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window).action
         case .typeText(let text): return .typeText(text)
@@ -901,6 +964,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private func readAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
         guard let predicted = try predictedAgentAction(action, observation: observation) else { return nil }
         guard let view = browser, let window else { throw ComputerUseBrowserError.pageChanged }
+        if let command = try findAction(action, observation: observation) {
+            // Browser chrome is native host UI. Its identity, exact query,
+            // selection and focus are retained with the screenshot; it never
+            // borrows a DOM field or forwards its keys to the document.
+            try await validatePageEvidence(observation.evidence)
+            guard try predictedAgentAction(action, observation: observation) == predicted else { throw ComputerUseBrowserError.pageChanged }
+            return AgentTarget(observation: observation, proposal: action, action: predicted,
+                context: "AXSearchField • Find in page search", isSearchSubmission: false,
+                navigation: nil, findAction: command, elementID: "native-find-" + command.rawValue)
+        }
         var arguments: [String: Any] = ["documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id]
         switch action {
         case .pointer(.leftClick, let point):
@@ -932,7 +1005,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         return AgentTarget(observation: observation, proposal: action, action: predicted,
             context: context + (searchLabel.map { " • " + $0 } ?? ""),
-            isSearchSubmission: searchLabel != nil, navigation: navigation, elementID: id)
+            isSearchSubmission: searchLabel != nil, navigation: navigation, findAction: nil, elementID: id)
     }
 
     func validateAgentTarget(_ target: AgentTarget) async throws {
@@ -958,6 +1031,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard agentObservationID == observation.id, validate(observation.evidence.document),
                   ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
                   browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  mainSurface?.findBar.state == observation.findState,
                   hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
             try validateSourceDocument(observation.evidence.document)
         }
@@ -979,6 +1053,37 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             guard target.observation == observation, target.proposal == action,
                   inspectedTarget == target else { throw ComputerUseBrowserError.pageChanged }
             try check()
+        }
+        if let command = inspectedTarget?.findAction, let surface = mainSurface, let view = browser {
+            try willBeginEffect(); try check()
+            agentObservationID = nil
+            switch command {
+            case .show: surface.showFind()
+            case .queryClick:
+                guard case .pointer(.leftClick, let point) = action, let window else { throw ComputerUseBrowserError.pageChanged }
+                let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
+                let time = ProcessInfo.processInfo.systemUptime
+                guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+                    timestamp: time, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+                      let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [],
+                    timestamp: time + 0.001, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0) else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+                window.sendEvent(down); window.sendEvent(up)
+            case .hide: surface.hideFind()
+            case .selectAll:
+                guard let editor = surface.findBar.editor, !editor.hasMarkedText() else { throw ComputerUseBrowserError.pageChanged }
+                editor.selectAll(nil)
+            case .type:
+                guard case .typeText(let text) = action, text.utf8.count <= 32_768,
+                      let editor = surface.findBar.editor, !editor.hasMarkedText() else { throw ComputerUseBrowserError.pageChanged }
+                editor.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+                try await surface.find(backwards: false)
+            case .next, .previous: try await surface.find(backwards: command == .previous)
+            }
+            try Task.checkCancellation()
+            guard self.mainSurface === surface, self.browser === view,
+                  validate(observation.evidence.document), ownershipEpoch == observation.ownership,
+                  takeoverEpoch == observation.takeover, hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
+            return
         }
         let destination: URL?
         if case .visitURL(let url) = action { destination = url }
@@ -1183,6 +1288,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private let nativeNavigationDidDispatch: ((WKWebView, WKNavigation?) -> Void)?
     private var browser: WKWebView?
     private var window: NSWindow?
+    private var mainSurface: OwnedBrowserSurface?
     // Remember identity while WebKit or a callback still retains the object.
     // Do not pin every past load or forget a live retired navigation by age.
     private let knownMainNavigations = NSHashTable<WKNavigation>(options: [.weakMemory, .objectPointerPersonality], capacity: 0)
@@ -2606,6 +2712,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         pendingDOM = nil
         browser = nil
         window = nil
+        mainSurface = nil
         locationChanges.endSurface()
         deferredLocationDelivery = nil
         urlObservation = nil
@@ -2992,7 +3099,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             window.title = "AI Browser — Remote Desktop"
             window.isReleasedWhenClosed = false
             window.delegate = self
-            window.contentView = NSHostingView(rootView: OwnedBrowserContent(context: self, browser: browser))
+            let surface = OwnedBrowserSurface(browser: browser)
+            mainSurface = surface
+            window.contentView = NSHostingView(rootView: OwnedBrowserContent(context: self, browser: browser, surface: surface))
             window.minSize = NSSize(width: 480, height: 320)
             window.center()
             self.window = window
@@ -3061,6 +3170,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func retirePageObservations(_ reason: NavigationHistory.PageObservationEvent.Retirement) {
+        mainSurface?.hideFind()
         if let page = observedUserPage {
             recordPageObservation(.retired, page: page, retirement: reason)
         }
@@ -3681,6 +3791,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 private struct OwnedBrowserContent: View {
     @ObservedObject var context: ComputerUseOwnedBrowser
     let browser: WKWebView
+    let surface: OwnedBrowserSurface
     var body: some View {
         let current = context.isCurrentMainView(browser)
         VStack(spacing: 0) {
@@ -3713,7 +3824,7 @@ private struct OwnedBrowserContent: View {
                     .font(.caption).padding(.horizontal, 12).padding(.bottom, 8)
             }
             Divider()
-            OwnedBrowserWebView(browser: browser)
+            OwnedBrowserMainWebView(surface: surface)
         }.frame(minWidth: 480, minHeight: 320)
     }
 }
@@ -3753,4 +3864,154 @@ private struct OwnedBrowserWebView: NSViewRepresentable {
     let browser: WKWebView
     func makeNSView(context: Context) -> WKWebView { browser }
     func updateNSView(_ nsView: WKWebView, context: Context) { }
+}
+
+private struct OwnedBrowserMainWebView: NSViewRepresentable {
+    let surface: OwnedBrowserSurface
+    func makeNSView(context: Context) -> OwnedBrowserSurface { surface }
+    func updateNSView(_ nsView: OwnedBrowserSurface, context: Context) { }
+}
+
+/// A real native overlay inside the observed viewport. WebKit's snapshot does
+/// not include AppKit subviews, so capture composites the actual rendered bar
+/// at its actual location without changing the page's coordinate transform.
+@MainActor
+fileprivate final class OwnedBrowserSurface: NSView {
+    let browser: WKWebView
+    let findBar = OwnedBrowserFindBar()
+    override var isFlipped: Bool { true }
+
+    init(browser: WKWebView) {
+        self.browser = browser
+        super.init(frame: browser.frame)
+        addSubview(browser); addSubview(findBar)
+        findBar.isHidden = true
+        findBar.onFind = { [weak self] backwards in
+            Task { @MainActor [weak self] in
+                do { try await self?.find(backwards: backwards) }
+                catch { self?.findBar.status.stringValue = "Search unavailable" }
+            }
+        }
+        findBar.onClose = { [weak self] in self?.hideFind() }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        browser.frame = bounds
+        findBar.frame = NSRect(x: max(0, bounds.width - 520), y: 0, width: min(520, bounds.width), height: 44)
+    }
+    func showFind() {
+        findBar.isHidden = false
+        layoutSubtreeIfNeeded()
+        focusFind()
+    }
+    func focusFind() {
+        window?.makeFirstResponder(findBar.query)
+        findBar.query.selectText(nil)
+    }
+    func hideFind() {
+        guard !findBar.isHidden else { return }
+        let focused = findBar.editor != nil
+        findBar.isHidden = true
+        findBar.reset()
+        if focused { window?.makeFirstResponder(browser) }
+    }
+    func find(backwards: Bool) async throws {
+        guard !findBar.isHidden else { throw ComputerUseBrowserError.pageChanged }
+        let query = findBar.query.stringValue, revision = UUID(), url = browser.url
+        findBar.searchRevision = revision
+        guard !query.isEmpty else { findBar.status.stringValue = ""; return }
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = false
+        configuration.wraps = true
+        let result = try await browser.find(query, configuration: configuration)
+        guard !findBar.isHidden, findBar.searchRevision == revision,
+              findBar.query.stringValue == query, browser.url == url else { throw ComputerUseBrowserError.pageChanged }
+        findBar.status.stringValue = result.matchFound ? "Match found" : "No matches"
+    }
+    func snapshotIncludingFindBar(webImage: NSImage) throws -> NSImage {
+        layoutSubtreeIfNeeded()
+        guard let source = webImage.tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)),
+              let barBitmap = findBar.bitmapImageRepForCachingDisplay(in: findBar.bounds),
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: source.pixelsWide, pixelsHigh: source.pixelsHigh,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0), let graphics = NSGraphicsContext(bitmapImageRep: bitmap) else {
+            throw ComputerUseBrowserError.pageEvidenceUnavailable
+        }
+        findBar.cacheDisplay(in: findBar.bounds, to: barBitmap)
+        let barImage = NSImage(size: findBar.bounds.size); barImage.addRepresentation(barBitmap)
+        let size = NSSize(width: source.pixelsWide, height: source.pixelsHigh)
+        let scaleX = size.width / bounds.width, scaleY = size.height / bounds.height
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        webImage.draw(in: NSRect(origin: .zero, size: size))
+        let rect = NSRect(x: findBar.frame.minX * scaleX, y: (bounds.height - findBar.frame.maxY) * scaleY,
+                          width: findBar.frame.width * scaleX, height: findBar.frame.height * scaleY)
+        barImage.draw(in: rect)
+        NSGraphicsContext.restoreGraphicsState()
+        let image = NSImage(size: size); image.addRepresentation(bitmap)
+        return image
+    }
+}
+
+@MainActor
+fileprivate final class OwnedBrowserFindBar: NSView, NSSearchFieldDelegate {
+    struct State: Equatable, Sendable {
+        let visible: Bool
+        let query: String
+        let selection: NSRange?
+        let marked: Bool
+        let revision: UUID
+        let status: String
+    }
+    let query = NSSearchField()
+    let status = NSTextField(labelWithString: "")
+    let previous = NSButton(title: "↑", target: nil, action: nil)
+    let next = NSButton(title: "↓", target: nil, action: nil)
+    let done = NSButton(title: "Done", target: nil, action: nil)
+    var searchRevision = UUID()
+    var onFind: ((Bool) -> Void)?
+    var onClose: (() -> Void)?
+    var editor: NSTextView? { query.currentEditor() as? NSTextView }
+    var state: State { .init(visible: !isHidden, query: query.stringValue, selection: editor?.selectedRange(), marked: editor?.hasMarkedText() ?? false, revision: searchRevision, status: status.stringValue) }
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        query.identifier = NSUserInterfaceItemIdentifier("owned-browser-find-query")
+        query.placeholderString = "Find in page"
+        query.setAccessibilityLabel("Find in page")
+        query.delegate = self
+        query.sendsSearchStringImmediately = false
+        query.sendsWholeSearchString = true
+        query.target = self; query.action = #selector(nextMatch)
+        previous.target = self; previous.action = #selector(previousMatch)
+        next.target = self; next.action = #selector(nextMatch)
+        done.target = self; done.action = #selector(closeFind)
+        previous.setAccessibilityLabel("Previous match"); next.setAccessibilityLabel("Next match")
+        status.font = .systemFont(ofSize: 11)
+        [query, status, previous, next, done].forEach { addSubview($0) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); bounds.fill() }
+    override func layout() {
+        super.layout()
+        let width = bounds.width
+        query.frame = NSRect(x: 8, y: 9, width: max(80, width - 225), height: 26)
+        status.frame = NSRect(x: width - 209, y: 16, width: 78, height: 16)
+        previous.frame = NSRect(x: width - 130, y: 8, width: 32, height: 28)
+        next.frame = NSRect(x: width - 98, y: 8, width: 32, height: 28)
+        done.frame = NSRect(x: width - 64, y: 8, width: 58, height: 28)
+    }
+    func reset() { query.stringValue = ""; status.stringValue = ""; searchRevision = UUID() }
+    func controlTextDidChange(_ notification: Notification) { searchRevision = UUID(); status.stringValue = "" }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { onClose?(); return true }
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { onFind?(NSApp.currentEvent?.modifierFlags.contains(.shift) == true); return true }
+        return false
+    }
+    @objc private func nextMatch() { onFind?(false) }
+    @objc private func previousMatch() { onFind?(true) }
+    @objc private func closeFind() { onClose?() }
 }

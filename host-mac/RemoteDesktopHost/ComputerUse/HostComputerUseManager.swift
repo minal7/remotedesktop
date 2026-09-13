@@ -2026,6 +2026,10 @@ final class ComputerUseHostTools {
 
     func approvalReason(for action: ComputerUsePredictedAction, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) -> String? {
         if let nativeTarget, nativeTarget.action == action {
+            // This retained target addresses the host's Find UI only. Its
+            // query never enters a website field or submits a network request.
+            // Explicit approval still uses prepareApproval and its fingerprint.
+            if nativeTarget.findAction != nil { return nil }
             return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context,
                 verifiedSearchSubmission: nativeTarget.isSearchSubmission, verifiedLinkNavigation: nativeTarget.navigation != nil)
         }
