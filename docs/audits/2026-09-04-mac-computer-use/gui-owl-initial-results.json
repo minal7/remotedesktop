@@ -1,0 +1,326 @@
+{
+  "scope": "Four sequential no-effects proposals; no app source/default/permission changes",
+  "sourceHEAD": "a76374f",
+  "targetMacRAMGB": 12,
+  "wholeAppQualified": false,
+  "selectedModel": "Fara1.5-4B",
+  "productionMemoryCapGiB": 4,
+  "newInferenceCalls": 4,
+  "actionsExecuted": 0,
+  "newBuilds": 0,
+  "newXCTestExecutions": 0,
+  "inputsAndResults": {
+    "holo-grounding-image-history-01/freeze.json": {
+      "sha256": "8f54fcf1ad6e657419518e520112a4dab5c5800f128f5837d89475a7e492fcbc",
+      "data": {
+        "question": "Does removing only the two older images correct the same frozen Holo grounding failure?",
+        "sameOriginalGoal": true,
+        "allNativeTextToolHistoryRetained": true,
+        "sameCurrentScreenshot": true,
+        "seed": 20260913,
+        "temperature": 0.8,
+        "order": [
+          "three-images",
+          "current-image-only"
+        ],
+        "toolExecution": false,
+        "productionChanged": false,
+        "fullTaskAcceptance": false,
+        "criterion": "Exactly one valid complete click tool call inside the requested September 17 control in the retained 960x568 screenshot",
+        "controlPixelRectangle": {
+          "x": 829,
+          "y": 380,
+          "width": 115,
+          "height": 36
+        },
+        "seedDocumentation": "https://github.com/ggml-org/llama.cpp/blob/6eddde06a4f25d55d538b5d15628dcc2b6882147/tools/server/README.md",
+        "sourceSHA256": "09d7e0f714683052ddc0684571412732ca54930fb2fac14a5052bcc84d58a4fe",
+        "requestsSHA256": {
+          "current-image-only.json": "e80d24d4df2f8d2e2162421c7c440dfcc4f31a148fb3ac53013a89a438d6d4c5",
+          "three-images.json": "92c442f05500eb01b3b598366e83d47802f9ed88e65e04bab743ad0345260128"
+        }
+      }
+    },
+    "holo-grounding-image-history-01/results.json": {
+      "sha256": "f88a301f2a7e94e2c585a31d5b7c9043930093276dd87420cf2878aab7932a0a",
+      "data": {
+        "freeze": "freeze.json",
+        "results": [
+          {
+            "condition": "three-images",
+            "finishReason": "tool_calls",
+            "tool": "wait",
+            "arguments": {
+              "time": 3
+            },
+            "insideRequestedControl": false,
+            "generationSeconds": 9.997392209013924,
+            "totalSeconds": 11.384922542027198,
+            "peakSampledProcessMemoryBytes": 4358258688,
+            "ownedProcessExited": true,
+            "credentialRemoved": true
+          },
+          {
+            "condition": "current-image-only",
+            "finishReason": "tool_calls",
+            "tool": "click",
+            "arguments": {
+              "element": "Buy Tickets button for Thursday, September 17, 2026 6:20 PM",
+              "x": 910,
+              "y": 520
+            },
+            "insideRequestedControl": false,
+            "generationSeconds": 7.623180583002977,
+            "totalSeconds": 9.01472749991808,
+            "peakSampledProcessMemoryBytes": 4326752256,
+            "ownedProcessExited": true,
+            "credentialRemoved": true
+          }
+        ],
+        "conclusion": "No recovery demonstrated. The control waits; current-image-only repeats a click above the requested button. Removing older images does not fix this sampled grounding failure.",
+        "newInferenceCalls": 2,
+        "toolsExecuted": 0,
+        "productionChanges": false,
+        "fullTaskAccepted": false
+      }
+    },
+    "gui-owl-grounding-01/freeze.json": {
+      "sha256": "e2a6fee6dfb90a2af16a9f2cef6170dfd266261fc53cb3e8d45816809c30b08f",
+      "data": {
+        "scope": "One no-effects native GUI-Owl proposal from the unchanged Holo movie-02 failure",
+        "sourceRequestSHA256": "09d7e0f714683052ddc0684571412732ca54930fb2fac14a5052bcc84d58a4fe",
+        "requestSHA256": "21549b8d9510331667cb24e2e27b981b7f3ebf2cad4ff42a750b2fcefdc6f917",
+        "runnerSHA256": "d45e9cc1bb5f34edb46e4196756f40b96fb4dd57a79a78fc9a091d40c99243ff",
+        "systemPromptSHA256": "094160a5f8abf424690465500d9169244e065947505e9b48c3acabfbf815df9b",
+        "currentScreenshotSHA256": "f5d1efdc99304524b0e122688fd819c8b52d5c54f6eccc8584f8f66b1ece5bc2",
+        "history": "All ten earlier native Holo browser proposals and exact following tool results retained as factual Step lines; no fabricated GUI-Owl calls; rejected attempts remain unperformed. One unchanged current image. No observed next output or oracle included.",
+        "recipe": "Pinned official desktop notebook prompt and initial-user envelope; appended current URL; bounded 1024 tokens, fixed seed, no stream; summary-only history avoids notebook clipping bug.",
+        "oracle": {
+          "finishReason": "stop",
+          "oneNativeToolCall": true,
+          "name": "computer_use",
+          "action": "left_click",
+          "normalizedRange": [
+            0,
+            1000
+          ],
+          "imageSize": [
+            960,
+            568
+          ],
+          "expectedPointImageRectangle": [
+            829,
+            380,
+            944,
+            416
+          ],
+          "criterion": "Single complete native click inside requested September 17 Buy Tickets rectangle; waits, other actions and truncated output do not establish recovery."
+        },
+        "effectsPermitted": false,
+        "productionModelChanged": false,
+        "memoryCapGiB": 4
+      }
+    },
+    "gui-owl-grounding-01/result.json": {
+      "sha256": "f69543dfe3f125a8e22544a909323ca3aa8b34de7c5f02d4395ad5abdd0c6b14",
+      "data": {
+        "scope": "Frozen one-proposal grounding only",
+        "requestSHA256": "21549b8d9510331667cb24e2e27b981b7f3ebf2cad4ff42a750b2fcefdc6f917",
+        "responseSHA256": "9ec2ceada6a447d0a9f242f28e1ff73d721dc357f258a519ad5fc4a30f7de1a9",
+        "nativeCall": {
+          "name": "computer_use",
+          "arguments": {
+            "action": "left_click",
+            "coordinate": [
+              920,
+              688
+            ]
+          }
+        },
+        "pointImagePixels": [
+          883.1999999999999,
+          390.784
+        ],
+        "insideRequestedControl": true,
+        "passesFrozenCriterion": true,
+        "runtime": {
+          "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+          "requestSHA256": "21549b8d9510331667cb24e2e27b981b7f3ebf2cad4ff42a750b2fcefdc6f917",
+          "modelAssets": {
+            "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+            "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+            "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+            "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+            "files": [
+              {
+                "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                "bytes": 1107410432,
+                "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+              },
+              {
+                "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                "bytes": 819394848,
+                "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+              }
+            ]
+          },
+          "binarySHA256": "bf4e861879a429797d22d35440528c941186cc9c24e9d8eb65e0820ba09a764d",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 4294967296,
+          "diagnosticMemoryLimitOnly": false,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 3136962560,
+          "memorySamples": 13,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "pid": 84163,
+          "startupSeconds": 1.0361320410156623,
+          "generationSeconds": 2.5477346669649705,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 65,
+            "prompt_tokens": 2656,
+            "total_tokens": 2721,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "stop",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 3.6693803330417722
+        },
+        "toolsExecuted": 0,
+        "fullTaskAccepted": false
+      }
+    },
+    "gui-owl-ticket-stop-01/freeze.json": {
+      "sha256": "6d26d704725975e25d0c0d22f8c575814c28c0d06b34bfc81cf60dcec9adcf8c",
+      "data": {
+        "scope": "One no-effects native GUI-Owl final ticket-stopping proposal",
+        "sourceRequestSHA256": "1945d4e4fa5b0bf61bc9caf737313e5744b7e118060a6d220703efebe2b5f3ca",
+        "requestSHA256": "c643d16a23b6b49261fc09389ccdf91f930ed04f9177ac35615d85fdfd018be7",
+        "runner": "../gui-owl-grounding-01/one_proposal.py",
+        "runnerSHA256": "d45e9cc1bb5f34edb46e4196756f40b96fb4dd57a79a78fc9a091d40c99243ff",
+        "systemPromptSHA256": "094160a5f8abf424690465500d9169244e065947505e9b48c3acabfbf815df9b",
+        "screenshotSHA256": "7a88f9a742468362a2805cab2c4de0ef6cbc5effb4ffdc407e8cbe761625480f",
+        "history": "Eleven actual earlier proposals and following URLs/errors as factual Step lines, unchanged current screenshot. Fara reasoning and current.response excluded. Native summary recipe retains no older images, unlike earlier Holo three-image replay. All requested numeric facts are visible in current screenshot.",
+        "oracle": {
+          "nativeAction": "answer",
+          "textContains": {
+            "showtime": "6:20 PM",
+            "screen": "Little Roxie",
+            "runtimeMinutes": 95,
+            "generalAdmissionTotal": "$15.62",
+            "bookingFee": "$1.62",
+            "screeningURL": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c"
+          },
+          "noTicketSelection": true,
+          "completeNontruncatedSingleCall": true
+        },
+        "effectsPermitted": false,
+        "productionModelChanged": false,
+        "memoryCapGiB": 4
+      }
+    },
+    "gui-owl-ticket-stop-01/result.json": {
+      "sha256": "5fbdfa69c18e7ace69a912e9eb8520a82b53bc230905923c7550fe715b1bae94",
+      "data": {
+        "scope": "Frozen one-proposal final ticket answer only",
+        "requestSHA256": "c643d16a23b6b49261fc09389ccdf91f930ed04f9177ac35615d85fdfd018be7",
+        "responseSHA256": "75617e035844a3307109863530b40362a07b7472e20b8b92049a80feb3403caf",
+        "nativeCall": {
+          "name": "computer_use",
+          "arguments": {
+            "action": "left_click",
+            "coordinate": [
+              889,
+              202
+            ]
+          }
+        },
+        "pointImagePixels": [
+          853.4399999999999,
+          114.73599999999999
+        ],
+        "passesFrozenCriterion": false,
+        "reason": "Proposes the visible Show More link; does not provide requested answer. No quantity click proposed, but this is not accepted completion. No action was executed.",
+        "runtime": {
+          "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+          "requestSHA256": "c643d16a23b6b49261fc09389ccdf91f930ed04f9177ac35615d85fdfd018be7",
+          "modelAssets": {
+            "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+            "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+            "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+            "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+            "files": [
+              {
+                "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                "bytes": 1107410432,
+                "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+              },
+              {
+                "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                "bytes": 819394848,
+                "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+              }
+            ]
+          },
+          "binarySHA256": "bf4e861879a429797d22d35440528c941186cc9c24e9d8eb65e0820ba09a764d",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 4294967296,
+          "diagnosticMemoryLimitOnly": false,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 3139715072,
+          "memorySamples": 13,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "pid": 86052,
+          "startupSeconds": 1.0509719589026645,
+          "generationSeconds": 2.466418750002049,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 59,
+            "prompt_tokens": 2854,
+            "total_tokens": 2913,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "stop",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 3.60170295892749
+        },
+        "toolsExecuted": 0,
+        "fullTaskAccepted": false
+      }
+    }
+  },
+  "outcome": "Holo image-history reduction does not repair this sampled miss. GUI-Owl correctly grounds the requested screening but does not produce the requested final ticket report. No complete-task model replacement is established.",
+  "nextExperiment": "After native wire checks, preopen an owned search-provider homepage as explicit test setup. Use the unchanged original goal, independently verify click/exact type/Enter and confirmed search navigation; do not claim blank-start support.",
+  "integrationGaps": [
+    "Initial executor navigation permits visitURL/webSearch, absent from GUI-Owl desktop protocol; content capture has no address bar and native keys lack Control/Command+L.",
+    "Do not substitute SoM browser protocol or its automatic clear/type/Enter semantics.",
+    "GUI-Owl desktop scroll passes wheel units to PyAutoGUI; shared app scrolling uses normalized viewport distance.",
+    "answer(text) provides a report; terminate(status) must not invent facts. interact/text reply continuation needs a deliberate app mapping."
+  ],
+  "primarySources": [
+    "https://github.com/X-PLUG/MobileAgent/blob/11cea575561fb7800b5fb6b6cafa56f7a91de11f/Mobile-Agent-v3.5/cookbook/end2end_usage_computer.ipynb",
+    "https://github.com/X-PLUG/MobileAgent/blob/11cea575561fb7800b5fb6b6cafa56f7a91de11f/Mobile-Agent-v3.5/computer_use/utils.py",
+    "https://github.com/X-PLUG/MobileAgent/blob/11cea575561fb7800b5fb6b6cafa56f7a91de11f/Mobile-Agent-v3.5/computer_use/run_gui_owl_1_5_for_pc.py",
+    "https://huggingface.co/mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF/tree/1db6394f7337877ed46ad1fa0aa991889ea694ef"
+  ]
+}
