@@ -1492,6 +1492,28 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
+    /// Page extraction shares the action model's serialized owner and cancellation.
+    func readFaraPage(endpoint: OSAtlasLlamaEndpoint, reading: ComputerUseFaraModel.PageReading) async throws -> String {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: { Task { await self.cancel(endpoint: endpoint) } }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return try ComputerUseFaraModel.decodePageAnswer(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
     /// Holds the owner's model lease across template/tokenization, inference
     /// and strict decoding. Callers supply a goal and field snapshot, never a
     /// raw model request or a second independently owned server.

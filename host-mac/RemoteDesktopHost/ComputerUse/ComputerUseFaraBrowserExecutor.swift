@@ -5,6 +5,7 @@ import Foundation
 @MainActor
 final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
     typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal
+    typealias ReadPage = @MainActor @Sendable (ComputerUseFaraModel.PageReading) async throws -> String
     enum Failure: Error, LocalizedError, Equatable {
         case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval
         var errorDescription: String? {
@@ -40,6 +41,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let browserIdentity: String
         var journal: ComputerUseTaskJournal
         var history: [ComputerUseFaraModel.Step] = []
+        var pageReading: ComputerUseFaraModel.PageReading?
         var turns = 0
         var staleProposals = 0
         var terminal: ComputerUseExecutionResult?
@@ -51,15 +53,18 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
     private let store: ComputerUseTaskJournalStore
     private let propose: Propose
+    private let readPage: ReadPage
     private let searchProvider: ComputerUseBrowserSearchProvider
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
     private var isExecuting = false
     init(journalDirectory: URL, searchProvider: ComputerUseBrowserSearchProvider? = nil, propose: @escaping Propose,
+         readPage: @escaping ReadPage = { _ in throw Failure.unsupportedAction },
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory)
         self.propose = propose
+        self.readPage = readPage
         self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q")
         self.finishRun = finishRun
     }
@@ -137,7 +142,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL))
+        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading))
+        session.pageReading = nil
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 
@@ -289,7 +295,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
             progress("Reading the browser…")
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
-                history: Array(session.history.suffix(20)), currentURL: observation.currentURL)
+                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
@@ -333,6 +339,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 session.terminal = result
                 return result
             }
+            var nextReading: ComputerUseFaraModel.PageReading?
             switch proposal.action {
             case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
                 if let nativeTarget, nativeTarget.context.isEmpty {
@@ -350,9 +357,35 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             case .wait(let seconds):
                 try await Task.sleep(for: .seconds(seconds))
             case .remember: break
+            case .readPageQuestion(let question):
+                guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      question.utf8.count <= 1024 else { throw Failure.unsupportedAction }
+                // Preflight above validated the exact native page, source policy,
+                // owner and login state. This synchronous projection posts no input.
+                let page = observation.approvalPageEvidence.page
+                let fullText = page.texts.map(\.text).joined(separator: "\n")
+                var text = "", bytes = 0
+                for character in fullText {
+                    let part = String(character), size = part.utf8.count
+                    guard bytes + size <= 4096 else { break }
+                    text += part; bytes += size
+                }
+                var reading = ComputerUseFaraModel.PageReading(sourceURL: observation.currentURL, question: question, text: text,
+                    truncated: page.truncated || text != fullText, omittedEmbeddedContent: page.omittedEmbeddedContent)
+                let source = reading, readPage = self.readPage
+                reading.answer = try await planning.perform(timeout: 45) { try await readPage(source) }
+                try Task.checkCancellation(); try lease.assertOwnership()
+                // Extraction is another asynchronous planning call. Do not
+                // publish its result into a changed, revoked or login page.
+                do { try await tools.validateOwnedBrowserAgentObservation(observation) }
+                catch ComputerUseBrowserError.authenticationRequired {
+                    return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
+                }
+                nextReading = reading
             default: throw Failure.unsupportedAction
             }
             record(proposal, observation: observation, session: session)
+            session.pageReading = nextReading
             do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
             catch ComputerUseBrowserError.authenticationRequired {
                 return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")

@@ -418,6 +418,9 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                     propose: { input in
                         let endpoint = try await runtime.activateFara(inputs)
                         return try await runtime.proposeFara(endpoint: endpoint, input: input)
+                    }, readPage: { reading in
+                        let endpoint = try await runtime.activateFara(inputs)
+                        return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
                     }, finishRun: { await runtime.shutdown() })
             } catch {
                 await runtime.shutdown()

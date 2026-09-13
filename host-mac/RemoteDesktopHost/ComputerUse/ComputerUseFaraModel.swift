@@ -18,16 +18,28 @@ struct ComputerUseFaraRuntimeInputs: Equatable, Sendable {
 }
 
 enum ComputerUseFaraModel {
+    /// Page data read from a validated native observation, not a new instruction
+    /// or proof that the model's interpretation is correct.
+    struct PageReading: Equatable, Sendable, Codable {
+        let sourceURL: URL
+        let question: String
+        let text: String
+        let truncated: Bool
+        let omittedEmbeddedContent: Bool
+        var answer: String? = nil
+    }
     struct Step: Equatable, Sendable {
         let screenshotPNG: Data
         let response: String
         var currentURL: URL? = nil
+        var pageReading: PageReading? = nil
     }
     struct Input: Equatable, Sendable {
         let goal: String
         let screenshotPNG: Data
         var history: [Step] = []
         var currentURL: URL? = nil
+        var pageReading: PageReading? = nil
     }
     struct Proposal: Equatable, Sendable {
         let response: String
@@ -44,8 +56,10 @@ enum ComputerUseFaraModel {
         }
         var messages: [[String: Any]] = [["role": "system", "content": officialSystemPrompt]]
         let earliestImage = max(0, input.history.count - 2)
+        var readingBytes = 0
         for index in 0...input.history.count {
             var content: [[String: Any]] = []
+            var observationText: [String] = []
             let png = index == input.history.count ? input.screenshotPNG : input.history[index].screenshotPNG
             if index >= earliestImage {
                 try validatePNG(png)
@@ -58,8 +72,27 @@ enum ComputerUseFaraModel {
                 }
                 // Preserve the native browser observation alongside its image,
                 // including when that image ages out of the three-image window.
-                content.append(["type": "text", "text": "Current URL: " + currentURL.absoluteString])
+                observationText.append("Current URL: " + currentURL.absoluteString)
             }
+            if let reading = index == input.history.count ? input.pageReading : input.history[index].pageReading {
+                try validatePageReading(reading)
+                guard let answer = reading.answer, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      answer.utf8.count <= 32_768 else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+                let text: String
+                if index >= earliestImage {
+                    text = formatPageAnswer(question: reading.question, answer: answer)
+                        + "\nSource: " + reading.sourceURL.absoluteString
+                        + "\nPage text truncated: \(reading.truncated); embedded content omitted: \(reading.omittedEmbeddedContent)."
+                } else {
+                    text = "[Earlier page-reading text omitted] Source: " + reading.sourceURL.absoluteString
+                }
+                readingBytes += text.utf8.count
+                observationText.append(text)
+            }
+            if index > 0 { observationText.append("Here is the next screenshot. Think about what to do next.") }
+            if !observationText.isEmpty { content.append(["type": "text", "text": observationText.joined(separator: "\n")]) }
             if index == 0 { content.append(["type": "text", "text": input.goal]) }
             else if content.isEmpty { content.append(["type": "text", "text": "[Earlier screenshot omitted]"]) }
             messages.append(["role": "user", "content": content])
@@ -68,6 +101,10 @@ enum ComputerUseFaraModel {
                 _ = try ComputerUseFaraAction.decodeNativeMessage(response)
                 messages.append(["role": "assistant", "content": response])
             }
+        }
+        guard input.history.reduce(input.goal.utf8.count + (input.currentURL?.absoluteString.utf8.count ?? 0) + readingBytes,
+            { $0 + $1.response.utf8.count + ($1.currentURL?.absoluteString.utf8.count ?? 0) }) <= 65_536 else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"
@@ -80,6 +117,59 @@ enum ComputerUseFaraModel {
         ], options: [.sortedKeys, .withoutEscapingSlashes])
         guard request.httpBody!.count <= 9 * 1_024 * 1_024 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
         return request
+    }
+    static func validatePageReading(_ reading: PageReading) throws {
+        guard ComputerUseOwnedBrowser.validatedURL(reading.sourceURL) == reading.sourceURL,
+              !reading.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              reading.question.utf8.count <= 1024, reading.text.utf8.count <= 4096 else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+    }
+
+    /// Microsoft's pinned extract_from_page contract. Sampling is deliberately
+    /// left to the pinned server default; the action actor remains greedy.
+    static func makePageReadRequest(endpoint: OSAtlasLlamaEndpoint, reading: PageReading) throws -> URLRequest {
+        try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
+        try validatePageReading(reading)
+        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+        var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
+        request.httpMethod = "POST"; request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
+        let coverage = (reading.truncated ? "\n... [truncated]" : "")
+            + (reading.omittedEmbeddedContent ? "\n[Embedded page content omitted]" : "")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "messages": [
+                ["role": "system", "content": "You are given the markdown content of a web page. Answer the user's question based solely on this content. Be concise and extract only the relevant information."],
+                ["role": "user", "content": "Page content:\n\(reading.text)\(coverage)\n\nQuestion: \(reading.question)"]],
+            "max_tokens": 1024, "stream": false, "reasoning_format": "none"
+        ], options: [.sortedKeys, .withoutEscapingSlashes])
+        return request
+    }
+
+    static func formatPageAnswer(question: String, answer: String) -> String {
+        let text = "I read the page to answer: \(question)\nAnswer: \(answer)"
+        // The upstream 1,000-character observation keeps its first/last halves.
+        // Count whole Swift Characters so a native Unicode grapheme stays intact.
+        guard text.count > 1000 else { return text }
+        return String(text.prefix(500)) + "\n... [truncated \(text.count - 1000) chars] ...\n" + String(text.suffix(500))
+    }
+
+    static func decodePageAnswer(_ data: Data) throws -> String {
+        do {
+            guard data.count <= 1_024 * 1_024, let source = String(data: data, encoding: .utf8) else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            var parser = StrictSemanticJSONParser(source)
+            guard case .object(let root) = try parser.parse(), root["model"] == .string(ComputerUseFaraRuntimeInputs.modelAlias),
+                  case .array(let choices)? = root["choices"], choices.count == 1,
+                  case .object(let choice) = choices[0], choice["finish_reason"] == .string("stop"),
+                  case .object(let message)? = choice["message"], message["role"] == .string("assistant"),
+                  Set(message.keys).isSubset(of: ["role", "content"]), case .string(let answer)? = message["content"],
+                  !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, answer.utf8.count <= 32_768 else {
+                throw OSAtlasLlamaRuntimeError.invalidResponse
+            }
+            return answer
+        } catch { throw OSAtlasLlamaRuntimeError.invalidResponse }
     }
     static func decode(_ data: Data) throws -> Proposal {
         do {

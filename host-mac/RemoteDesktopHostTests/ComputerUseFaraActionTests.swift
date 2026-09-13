@@ -6,8 +6,263 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    func testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly() throws {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let reading = ComputerUseFaraModel.PageReading(sourceURL: URL(string: "https://example.com/source")!,
+            question: "Which venue?", text: "Miner Auditorium — 東京", truncated: true, omittedEmbeddedContent: true)
+        let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        XCTAssertEqual(messages.count, 2); XCTAssertEqual(messages.map { $0["role"] }, ["system", "user"])
+        XCTAssertEqual(messages[1]["content"], "Page content:\nMiner Auditorium — 東京\n... [truncated]\n[Embedded page content omitted]\n\nQuestion: Which venue?")
+        XCTAssertNil(body["temperature"]); XCTAssertNil(body["tools"]); XCTAssertEqual(body["max_tokens"] as? Int, 1024)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture")
+        func response(finish: String = "stop", content: String = "Miner Auditorium", role: String = "assistant", model: String = ComputerUseFaraRuntimeInputs.modelAlias) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "choices": [["finish_reason": finish, "message": ["role": role, "content": content]]]])
+        }
+        XCTAssertEqual(try ComputerUseFaraModel.decodePageAnswer(response()), "Miner Auditorium")
+        for data in [try response(finish: "length"), try response(finish: "tool_calls"), try response(content: " \n"),
+                     try response(content: String(repeating: "x", count: 32_769)), try response(role: "user"), try response(model: "another-model"),
+                     Data(#"{"model":"fara-browser-v1","model":"fara-browser-v1","choices":[]}"#.utf8)] {
+            XCTAssertThrowsError(try ComputerUseFaraModel.decodePageAnswer(data))
+        }
+        let bounded = ComputerUseFaraModel.formatPageAnswer(question: "Read", answer: String(repeating: "東京👩🏽‍💻", count: 600))
+        XCTAssertTrue(bounded.contains("[truncated ")); XCTAssertTrue(bounded.hasSuffix("東京👩🏽‍💻")); XCTAssertFalse(bounded.contains("�"))
+        XCTAssertLessThan(bounded.count, 1100)
+    }
+
+    func testFaraRejectsUnextractedPageTextInActionConversation() throws {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let reading = ComputerUseFaraModel.PageReading(sourceURL: URL(string: "https://example.com/source")!,
+            question: "Which venue?", text: "Raw page data is not the answer to the reading action.", truncated: false, omittedEmbeddedContent: false)
+        let input = try ComputerUseFaraModel.Input(goal: "Read the venue", screenshotPNG: smallPNG(), pageReading: reading)
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input),
+            "read_page_answer_question must receive an extracted answer before returning to the action conversation")
+    }
+
+    func testFaraPageReadingWireRetainsSourceAndBoundsContext() throws {
+        let png = try smallPNG()
+        let source = URL(string: "https://example.com/original-page")!
+        let reading = ComputerUseFaraModel.PageReading(sourceURL: source, question: "Which venue?", text: "Unrelated raw page text", truncated: true, omittedEmbeddedContent: true, answer: "Miner Auditorium — 東京")
+        let wait = #"<tool_call>{"name":"computer_use","arguments":{"action":"wait","time":0}}</tool_call>"#
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        var input = ComputerUseFaraModel.Input(goal: "Keep the complete original request.", screenshotPNG: png,
+            history: [.init(screenshotPNG: png, response: wait, currentURL: source, pageReading: reading)], currentURL: URL(string: "https://example.com/current-page")!)
+        func texts(_ value: ComputerUseFaraModel.Input) throws -> String {
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: value)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let parts = messages.filter { $0["role"] as? String == "user" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }
+            XCTAssertTrue(parts.contains { $0["text"] as? String == value.goal })
+            return parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }
+        let retained = try texts(input)
+        XCTAssertTrue(retained.contains("Miner Auditorium — 東京")); XCTAssertTrue(retained.contains(source.absoluteString))
+        XCTAssertTrue(retained.contains("Page text truncated: true; embedded content omitted: true"))
+        XCTAssertTrue(retained.contains("I read the page to answer: Which venue?\nAnswer: Miner Auditorium — 東京"))
+        XCTAssertFalse(retained.contains("Unrelated raw page text"))
+        input.history += Array(repeating: .init(screenshotPNG: png, response: wait), count: 3)
+        let aged = try texts(input)
+        XCTAssertFalse(aged.contains("Miner Auditorium")); XCTAssertTrue(aged.contains("[Earlier page-reading text omitted] Source: " + source.absoluteString))
+        for bad in [
+            ComputerUseFaraModel.PageReading(sourceURL: URL(string: "file:///private/page")!, question: "Read", text: "x", truncated: false, omittedEmbeddedContent: false),
+            .init(sourceURL: source, question: " \n", text: "x", truncated: false, omittedEmbeddedContent: false),
+            .init(sourceURL: source, question: String(repeating: "界", count: 342), text: "x", truncated: false, omittedEmbeddedContent: false),
+            .init(sourceURL: source, question: "Read", text: String(repeating: "x", count: 4097), truncated: false, omittedEmbeddedContent: false)
+        ] {
+            input.pageReading = bad
+            XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input))
+        }
+    }
+
+    @MainActor
+    func testOptInLiveSFJazzPageReadingRetainsExactVenueAndTicketFacts() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: native public-page text reading without inference") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLivePageText-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let url = URL(string: "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/")!
+        try browser.claim(taskID: "live-page-text")
+        _ = try await browser.navigate(taskID: "live-page-text", operationID: "open", to: url)
+        var calls = 0, screenshot = Data()
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1; guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 {
+                screenshot = input.screenshotPNG
+                let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"read_page_answer_question","question":"For the September 17, 2026 performance, read the exact venue, start time and advertised price range."}}</tool_call>"#
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }
+            let reading = try XCTUnwrap(input.pageReading)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            let text = XCTAttachment(data: try encoder.encode(reading), uniformTypeIdentifier: "public.json"); text.name = "Native SFJAZZ page reading"; text.lifetime = .keepAlways; self.add(text)
+            let image = XCTAttachment(data: screenshot, uniformTypeIdentifier: "public.png"); image.name = "Source screenshot for native page reading"; image.lifetime = .keepAlways; self.add(image)
+            XCTAssertEqual(reading.sourceURL, url)
+            XCTAssertTrue(reading.text.localizedCaseInsensitiveContains("Miner Auditorium"))
+            XCTAssertTrue(reading.text.contains("7:30")); XCTAssertTrue(reading.text.contains("$55.00")); XCTAssertTrue(reading.text.contains("$155.00"))
+            let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"Native text captured."}}</tool_call>"#
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, readPage: { $0.text.isEmpty ? "No matching information." : $0.text })
+        let result = try await executor.execute(taskID: "live-page-text", prompt: "Read the ticket details without input.", trustedUserPrompt: "Read the ticket details without input.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Native text captured.")); XCTAssertEqual(calls, 2)
+    }
+
+    @MainActor
+    func testOptInFaraPageReadingBoundsAndRetirement() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native page-reading boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["truncated", "empty", "empty-question", "oversized-question", "changed", "login", "revoked", "replacement", "cancelled", "reading-login", "reading-revoked", "reading-replacement", "reading-changed", "reading-cancelled"] {
+            let text = mode == "empty" ? "" : mode == "truncated" ? (0..<40).map { "<p>\($0) " + String(repeating: "東京😀", count: 15) + "</p>" }.joined() : "<h1 id='venue'>Original venue</h1>"
+            let change = mode.contains("login") ? "document.body.insertAdjacentHTML('beforeend','<input type=password>')" : "venue.textContent='Changed venue'"
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html>\(text)<input value='PrivateFieldValue'><iframe srcdoc='<p>EmbeddedOnly</p>'></iframe>
+                <script>fetch('/release').then(()=>{\(change);fetch('/changed')})</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraReadEdges-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var mayAct = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { mayAct }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { mayAct }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: mode)
+            let url = base.appendingPathComponent("page")
+            _ = try await browser.navigate(taskID: mode, operationID: "open", to: url)
+            var calls = 0
+            let question = mode == "empty-question" ? " \n\t" : mode == "oversized-question" ? String(repeating: "界", count: 342) : "Read the exact page text."
+            let read = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name":"computer_use","arguments":["action":"read_page_answer_question","question":question]]), as: UTF8.self) + "</tool_call>"
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                calls += 1; XCTAssertEqual(input.goal, "Read this page without changing it.")
+                guard calls <= 3 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                if calls == 1 {
+                    XCTAssertNil(input.pageReading)
+                    if mode == "changed" || mode == "login" {
+                        server.releaseHeldResponses()
+                        let deadline = ContinuousClock.now + .seconds(2)
+                        while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                        XCTAssertEqual(server.count("/changed"), 1)
+                    }
+                    if mode == "revoked" { mayAct = false }
+                    if mode == "replacement" { try browser.claim(taskID: "successor") }
+                    if mode == "cancelled" { throw CancellationError() }
+                    return try .init(response: read, action: ComputerUseFaraAction.decodeNativeMessage(read))
+                }
+                if mode == "changed" && calls == 2 {
+                    XCTAssertNil(input.pageReading); XCTAssertTrue(input.history.isEmpty, "An unsent stale read cannot leave an observation or history entry")
+                    return try .init(response: read, action: ComputerUseFaraAction.decodeNativeMessage(read))
+                }
+                let reading = try XCTUnwrap(input.pageReading)
+                XCTAssertEqual(reading.sourceURL, url); XCTAssertEqual(reading.question, question)
+                XCTAssertLessThanOrEqual(reading.text.utf8.count, 4096)
+                XCTAssertFalse(reading.text.contains("PrivateFieldValue")); XCTAssertFalse(reading.text.contains("EmbeddedOnly"))
+                XCTAssertTrue(reading.omittedEmbeddedContent)
+                if mode == "truncated" { XCTAssertTrue(reading.truncated); XCTAssertTrue(reading.text.contains("東京😀")); XCTAssertFalse(reading.text.contains("�")) }
+                if mode == "empty" { XCTAssertEqual(reading.text, ""); XCTAssertFalse(reading.truncated) }
+                if mode == "changed" { XCTAssertTrue(reading.text.contains("Changed venue")); XCTAssertFalse(reading.text.contains("Original venue")) }
+                let done = #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"Read without input."}}</tool_call>"#
+                return try .init(response: done, action: ComputerUseFaraAction.decodeNativeMessage(done))
+            }, readPage: { reading in
+                XCTAssertNil(reading.answer, "Extraction receives native source data only")
+                if mode == "reading-login" || mode == "reading-changed" {
+                    server.releaseHeldResponses()
+                    let deadline = ContinuousClock.now + .seconds(2)
+                    while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                    XCTAssertEqual(server.count("/changed"), 1)
+                }
+                if mode == "reading-revoked" { mayAct = false }
+                if mode == "reading-replacement" { try browser.claim(taskID: "successor") }
+                if mode == "reading-cancelled" { throw CancellationError() }
+                return reading.text.isEmpty ? "No matching information." : reading.text
+            })
+            do {
+                let result = try await executor.execute(taskID: mode, prompt: "Read this page without changing it.", trustedUserPrompt: "Read this page without changing it.", tools: tools, progress: { _ in })
+                if mode == "login" || mode == "reading-login" { guard case .userInterventionRequired = result else { return XCTFail("Login did not pause the read") }; XCTAssertEqual(calls, 1) }
+                else { XCTAssertTrue(["truncated", "empty", "changed"].contains(mode), mode); XCTAssertEqual(result, .completed("Read without input.")) }
+            } catch ComputerUseFaraBrowserExecutor.Failure.unsupportedAction { XCTAssertTrue(["empty-question", "oversized-question"].contains(mode), mode); XCTAssertEqual(calls, 1) }
+            catch ComputerUseHostTools.ToolError.paused { XCTAssertTrue(["revoked", "reading-revoked"].contains(mode)); XCTAssertEqual(calls, 1) }
+            catch is CancellationError { XCTAssertTrue(["cancelled", "reading-cancelled"].contains(mode)); XCTAssertEqual(calls, 1) }
+            catch ComputerUseBrowserError.ownershipLost { XCTAssertTrue(["replacement", "reading-replacement"].contains(mode)); XCTAssertEqual(browser.taskID, "successor"); XCTAssertEqual(calls, 1) }
+            catch ComputerUseBrowserError.pageChanged {
+                XCTAssertTrue(["reading-changed", "reading-replacement"].contains(mode)); XCTAssertEqual(calls, 1)
+                if mode == "reading-replacement" { XCTAssertEqual(browser.taskID, "successor") }
+            }
+            catch { return XCTFail("Page reading edge \(mode): \(error)") }
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] }, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraReadsNativePageTextWithoutInputAndRetainsItsSource() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: owned native page-reading action") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/concert": .init(body: """
+            <!doctype html><h1>Miner Auditorium — 東京</h1><p>Thursday, September 17, 2026 · 7:30 PM</p><p>$55.00–$155.00</p>
+            <input value='DoNotExportFieldValue'><div hidden>DoNotExportHiddenText</div>
+            <button onclick="fetch('/clicked')">Purchase</button><script>document.addEventListener('input',()=>fetch('/edited'))</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraPageRead-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "read-page")
+        let url = base.appendingPathComponent("concert")
+        _ = try await browser.navigate(taskID: "read-page", operationID: "open", to: url)
+        let goal = "Report this concert's exact venue, time and advertised price range. Do not purchase."
+        let read = #"<tool_call>{"name":"computer_use","arguments":{"action":"read_page_answer_question","question":"What are the exact venue, start time and price range on this page?"}}</tool_call>"#
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1; XCTAssertEqual(input.goal, goal)
+            guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 { return try .init(response: read, action: ComputerUseFaraAction.decodeNativeMessage(read)) }
+            XCTAssertEqual(input.currentURL, url)
+            XCTAssertEqual(input.history.map(\.response), [read])
+            let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "test-only")
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let content = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+            let text = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            XCTAssertTrue(text.contains("Miner Auditorium — 東京"))
+            XCTAssertTrue(text.contains("7:30 PM")); XCTAssertTrue(text.contains("$55.00–$155.00"))
+            XCTAssertTrue(text.contains(url.absoluteString))
+            XCTAssertFalse(text.contains("DoNotExportFieldValue")); XCTAssertFalse(text.contains("DoNotExportHiddenText"))
+            let answer = #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"Miner Auditorium — 東京; 7:30 PM; $55.00–$155.00"}}</tool_call>"#
+            return try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer))
+        }, readPage: { $0.text.isEmpty ? "No matching information." : $0.text })
+        do {
+            let result = try await executor.execute(taskID: "read-page", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Miner Auditorium — 東京; 7:30 PM; $55.00–$155.00"))
+        } catch { return XCTFail("Native page read failed after \(calls) proposals: \(error)") }
+        XCTAssertEqual(calls, 2); XCTAssertEqual(server.count("/concert"), 1)
+        XCTAssertEqual(server.count("/clicked"), 0); XCTAssertEqual(server.count("/edited"), 0)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] })
+    }
+
     @MainActor
     func testOptInFaraReplaysFrozenLiveTicketAnswerExactly() async throws {
+        try await runFrozenFaraReplay(templateOnly: false)
+    }
+
+    @MainActor
+    func testOptInFaraServerTemplateReceivesNativePageReading() async throws {
+        try await runFrozenFaraReplay(templateOnly: true)
+    }
+
+    @MainActor
+    func testOptInFaraExtractsExactVenueFromNativeText() async throws {
+        try await runFrozenFaraReplay(templateOnly: false, extractionOnly: true)
+    }
+
+    @MainActor
+    private func runFrozenFaraReplay(templateOnly: Bool, extractionOnly: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_FROZEN_REPLAY"] == "1" else { throw XCTSkip("Opt-in: one model proposal from an immutable public-site trajectory; no browser input") }
         struct Replay: Decodable {
@@ -23,24 +278,64 @@ final class ComputerUseFaraActionTests: XCTestCase {
             XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), frame.pngSHA256)
             return data
         }
-        let input = try ComputerUseFaraModel.Input(goal: replay.goal, screenshotPNG: image(replay.current),
+        var input = try ComputerUseFaraModel.Input(goal: replay.goal, screenshotPNG: image(replay.current),
             history: replay.history.map { try .init(screenshotPNG: image($0), response: $0.response, currentURL: $0.currentURL) }, currentURL: replay.current.currentURL)
+        var pageReadingSHA256 = "none"
+        if let path = environment["FARA_FROZEN_PAGE_READING"] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            input.pageReading = try JSONDecoder().decode(ComputerUseFaraModel.PageReading.self, from: data)
+            XCTAssertEqual(input.pageReading?.sourceURL, replay.expectedURL)
+            pageReadingSHA256 = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        }
+        if templateOnly && input.pageReading == nil { throw XCTSkip("Template probe requires the native page-reading fixture") }
         let inputs = try await FaraTestAssets.inputs(environment: environment)
         let runtime = OSAtlasLlamaRuntime(), started = Date()
         var proposal: ComputerUseFaraModel.Proposal?, failure: Error?
+        var templateContainsVenue = false, templateSHA256 = "none"
+        var extractedAnswer = "", extractionFinishReason = ""
         do {
             let endpoint = try await runtime.activateFara(inputs)
-            proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            if extractionOnly {
+                let reading = try XCTUnwrap(input.pageReading)
+                extractedAnswer = try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+                extractionFinishReason = "stop" // Strict production decoder rejects every other finish reason.
+            } else if templateOnly {
+                let completion = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: XCTUnwrap(input.pageReading))
+                let request = try OSAtlasLlamaHTTPClient.makeSemanticTemplateRequest(from: completion)
+                let data = try await URLSessionOSAtlasTransport().complete(request: request)
+                let prompt = try OSAtlasLlamaHTTPClient.templatePrompt(from: data)
+                templateContainsVenue = prompt.contains(replay.expectedVenue)
+                templateSHA256 = SHA256.hash(data: Data(prompt.utf8)).map { String(format: "%02x", $0) }.joined()
+            } else {
+                if var reading = input.pageReading {
+                    extractedAnswer = try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+                    extractionFinishReason = "stop"
+                    reading.answer = extractedAnswer
+                    input.pageReading = reading
+                }
+                proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            }
         } catch { failure = error }
         await runtime.shutdown()
         let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
         let report: [String: Any] = ["response": proposal?.response ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
             "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited,
-            "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
+            "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "pageReadingSHA256": pageReadingSHA256,
+            "extractionOnly": extractionOnly, "extractedAnswer": extractedAnswer, "extractionFinishReason": extractionFinishReason,
+            "extractionSampling": "pinned llama-server defaults; no temperature override, matching upstream extraction call",
+            "templateOnly": templateOnly, "templateContainsExactVenue": templateContainsVenue, "templateSHA256": templateSHA256]
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
         attachment.name = "Frozen live answer replay"; attachment.lifetime = .keepAlways; add(attachment)
         XCTAssertTrue(exited)
         if let failure { return XCTFail("Frozen proposal failed: \(failure)") }
+        if extractionOnly {
+            XCTAssertEqual(extractionFinishReason, "stop", "Truncated extraction is not a complete answer")
+            XCTAssertTrue(extractedAnswer.contains(replay.expectedVenue), "Text-only extraction must retain the exact source spelling")
+            XCTAssertTrue(extractedAnswer.localizedCaseInsensitiveContains(replay.expectedTime))
+            XCTAssertTrue(extractedAnswer.contains("$55") && extractedAnswer.contains("$155"))
+            return
+        }
+        if templateOnly { XCTAssertTrue(templateContainsVenue, "The actual server template must retain native page text"); return }
         guard case .reportCompletion(let answer) = proposal?.action else { return XCTFail("Expected a final answer from the complete retained page: \(String(reflecting: proposal?.action))") }
         XCTAssertTrue(answer.localizedCaseInsensitiveContains(replay.expectedVenue), "Exact venue must match the independent page oracle")
         XCTAssertTrue(answer.localizedCaseInsensitiveContains(replay.expectedTime))
@@ -827,7 +1122,10 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
             responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? ""])
             return proposal
-        }, finishRun: { await runtime.shutdown() })
+        }, readPage: { reading in
+                let endpoint = try await runtime.activateFara(inputs)
+                return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+            }, finishRun: { await runtime.shutdown() })
         let run = Task { try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progress.append($0) }) }
         let timeout = Task { try await Task.sleep(for: .seconds(timeoutSeconds)); run.cancel() }
         var result: ComputerUseExecutionResult?, failure: Error?
@@ -1594,6 +1892,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began),
                     "currentURL": input.currentURL?.absoluteString ?? ""])
                 return proposal
+            }, readPage: { reading in
+                let endpoint = try await runtime.activateFara(inputs)
+                return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
             }, finishRun: { await runtime.shutdown() })
         }
         var result: ComputerUseExecutionResult?, failure: Error?
@@ -2489,7 +2790,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let userParts = messages.filter { $0["role"] as? String == "user" }.compactMap { $0["content"] as? [[String: Any]] }
         XCTAssertEqual(userParts.count, 5)
         for (index, parts) in userParts.enumerated() {
-            XCTAssertTrue(parts.compactMap { $0["text"] as? String }.contains("Current URL: " + sources[index].absoluteString), "Missing URL at observation \(index)")
+            XCTAssertTrue(parts.compactMap { $0["text"] as? String }.flatMap { $0.components(separatedBy: "\n") }.contains("Current URL: " + sources[index].absoluteString), "Missing URL at observation \(index)")
         }
         XCTAssertTrue(userParts[0].contains { $0["text"] as? String == goal })
         XCTAssertEqual(userParts.flatMap { $0 }.filter { $0["type"] as? String == "image_url" }.count, 3)
