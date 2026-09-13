@@ -13,6 +13,14 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
     func testOptInProductionStartupCompletesClientConcertTaskThroughTLSAndFara() async throws {
+        try await runProductionStartupTLS(login: false)
+    }
+
+    func testOptInProductionStartupRetainsTaskThroughLoginAndClientResume() async throws {
+        try await runProductionStartupTLS(login: true)
+    }
+
+    private func runProductionStartupTLS(login: Bool) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_PRODUCTION_ENTRY_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: real installers, native/Fara loaders, Mac helper, Apple planner and client TLS")
@@ -61,7 +69,18 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let style = "<style>body{font:26px system-ui;margin:50px;background:white;color:#111}a{display:block;padding:24px;background:#eef4ff}</style>"
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/results": .init(body: "<!doctype html>" + style + "<h1>Concert search results</h1><a href='/details'>Tokyo Music Hall concert details</a>"),
-            "/details": .init(body: "<!doctype html>" + style + "<h1>Tokyo Music Hall</h1><p>Friday concert starts at 7 pm.</p><p>Ticket price: 2400 JPY.</p>")])
+            "/details": .init(body: "<!doctype html>" + style + "<h1>Tokyo Music Hall</h1><p>Friday concert starts at 7 pm.</p><p>Ticket price: 2400 JPY.</p>"),
+            "/form": .init(body: FormOracle.form(id: "production-login", initial: ["origin": "old origin", "destination": "old destination"]) + """
+                <style>p,h1{display:none}label,textarea{position:fixed!important;left:20vw!important;margin:0!important}
+                textarea{width:60vw!important;height:10vh!important}#origin{top:20vh}#destination{top:55vh}
+                label[for=origin]{top:12vh}label[for=destination]{top:47vh}</style>
+                <script>originField.addEventListener('input',()=>{
+                    if(sessionStorage.fixtureAccount==='retained')return;
+                    const password=document.createElement('input');password.type='password';password.value='private-fixture-password';
+                    document.querySelector('main').prepend(password);fetch('/login-shown');
+                    fetch('/release-login').then(()=>{password.remove();sessionStorage.fixtureAccount='retained';fetch('/logged-in')});
+                })</script>
+                """), "/release-login": .init(held: true)])
         let base = try await server.start(); defer { server.stop() }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
@@ -116,23 +135,56 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             try await reach("ready", seconds: 60) { if case .ready = manager.modelState { return true }; return false }
             XCTAssertFalse(browser.hasSession, "No browser task/page may be pre-admitted for this cold-entry check.")
             client.start()
-            let prompt = "Visit \(base.appendingPathComponent("results").absoluteString). Find the Tokyo Music Hall concert. Open its details and report the ticket price, start time and source URL."
+            let prompt = login
+                ? "Visit \(base.appendingPathComponent("form").absoluteString). First replace the Origin with Tokyo. Then replace the Destination with Kyoto."
+                : "Visit \(base.appendingPathComponent("results").absoluteString). Find the Tokyo Music Hall concert. Open its details and report the ticket price, start time and source URL."
             XCTAssertTrue(client.sendPrompt(prompt))
             let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
-            try await reach("concert answer", seconds: 90) { !client.hasActivePrompt }
-            XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
-            let answer = try XCTUnwrap(client.messages.last(where: { $0.author == .assistant })?.text)
-            XCTAssertTrue(answer.lowercased().contains("2400 jpy")); XCTAssertTrue(answer.lowercased().contains("7 pm") || answer.contains("19:00"))
-            XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
-            XCTAssertEqual(server.count("/results"), 1); XCTAssertEqual(server.count("/details"), 1)
+            if login {
+                try await reach("default-composition login pause", seconds: 90) {
+                    client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+                }
+                XCTAssertTrue(client.hasActivePrompt); XCTAssertEqual(client.latestTerminalOutcome, .userInterventionRequired)
+                let paused = FormOracle.states(server, id: "production-login").sorted { $0["sequence"]! < $1["sequence"]! }
+                XCTAssertEqual(paused.map { $0["target"]! }, ["", "origin"])
+                XCTAssertEqual(paused.last?["origin"], "Tokyo"); XCTAssertEqual(paused.last?["destination"], "old destination")
+                XCTAssertEqual(server.count("/login-shown"), 1)
+                client.resumeAI()
+                XCTAssertFalse(client.hasHostPauseAcknowledgement)
+                try await reach("early Resume remains paused", seconds: 15) {
+                    client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+                }
+                XCTAssertEqual(FormOracle.states(server, id: "production-login"), paused)
+                XCTAssertEqual(server.count("/logged-in"), 0)
+                server.releaseHeldResponses()
+                try await reach("simulated sign-in complete", seconds: 10) { server.count("/logged-in") == 1 }
+                XCTAssertEqual(FormOracle.states(server, id: "production-login"), paused, "Signing in cannot resume input by itself")
+                client.resumeAI()
+                try await reach("default-composition resumed completion", seconds: 90) {
+                    !client.hasActivePrompt && client.latestTerminalOutcome == .taskCompleted && manager.activity == .idle
+                }
+                let expected = try FormOracle.expectedSequence(initial: ["origin": "old origin", "destination": "old destination"],
+                    edits: [["field": 0, "mode": "replaceAll", "value": "Tokyo"], ["field": 1, "mode": "replaceAll", "value": "Kyoto"]])
+                let actual = FormOracle.states(server, id: "production-login").sorted { $0["sequence"]! < $1["sequence"]! }
+                XCTAssertTrue(FormOracle.matches(actual, expected: expected), "The original goal must produce exactly one edit per field")
+                XCTAssertEqual(server.count("/form"), 1)
+                XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
+            } else {
+                try await reach("concert answer", seconds: 90) { !client.hasActivePrompt }
+                XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
+                let answer = try XCTUnwrap(client.messages.last(where: { $0.author == .assistant })?.text)
+                XCTAssertTrue(answer.lowercased().contains("2400 jpy")); XCTAssertTrue(answer.lowercased().contains("7 pm") || answer.contains("19:00"))
+                XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
+                XCTAssertEqual(server.count("/results"), 1); XCTAssertEqual(server.count("/details"), 1)
+            }
             XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
             guard case .completed = try ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
                 .claim(taskID: pending.messageID, senderID: clientID, sessionID: sessionID, promptBody: pending.exactWireBody) else {
                 throw CompositionFailure.incomplete("Client answer was not durably completed for the original task")
             }
         } catch { failure = error }
-        let evidence = XCTAttachment(string: "Stage: \(stage)\nState: \(client.state)\nStatus: \(client.statusText)\nMessages: \(client.messages.filter { $0.author == .assistant }.map(\.text))\nHost: \(manager.activity)\nRequests: results=\(server.count("/results")), details=\(server.count("/details"))\nFailure: \(String(reflecting: failure))")
-        evidence.name = "Production startup client TLS Fara concert"; evidence.lifetime = .keepAlways; add(evidence)
+        let evidence = XCTAttachment(string: "Stage: \(stage)\nState: \(client.state)\nStatus: \(client.statusText)\nMessages: \(client.messages.filter { $0.author == .assistant }.map(\.text))\nHost: \(manager.activity)\nRequests: results=\(server.count("/results")), details=\(server.count("/details"))\nLogin: shown=\(server.count("/login-shown")), returned=\(server.count("/logged-in"))\nField receipts: \(FormOracle.states(server, id: "production-login"))\nFailure: \(String(reflecting: failure))")
+        evidence.name = login ? "Production startup client TLS login" : "Production startup client TLS Fara concert"; evidence.lifetime = .keepAlways; add(evidence)
         client.stop(); await manager.shutdown(); await runtime.shutdown()
         XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: assets.llamaServerURL).isEmpty)
         if let failure { throw failure }
