@@ -974,6 +974,24 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 })
             return
         }
+        if case .historyBack = action {
+            guard let operationID, let view = browser, let item = view.backForwardList.backItem else {
+                throw ComputerUseBrowserError.observedNavigationUnavailable
+            }
+            // Bind the immediate native item, never a model-supplied URL or a
+            // fresh load of a historical address. The shared traversal path
+            // rejects non-read-only requests and enforces source/owner checks.
+            let navigationTarget = try agentHistoryBackTarget(item: item, evidence: observation.evidence)
+            _ = try await openObservedDestination(navigationTarget, operationID: operationID, willBeginEffect: {
+                try check()
+                guard view.backForwardList.backItem === item else { throw ComputerUseBrowserError.pageChanged }
+                try willBeginEffect()
+                try check()
+                guard view.backForwardList.backItem === item else { throw ComputerUseBrowserError.pageChanged }
+                self.agentObservationID = nil
+            })
+            return
+        }
         guard let view = browser, let window else { throw ComputerUseBrowserError.closed }
         if case .scroll(let horizontal, let pixels) = action {
             guard pixels.isFinite, abs(pixels) <= 10_000,
@@ -1753,6 +1771,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard result.status == "page-snapshot", result.fields == nil,
               let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState,
               page.scopedControlIDs.isEmpty else { throw ComputerUseBrowserError.pageEvidenceUnavailable }
+        if expected.source != .automationNavigation, historyReceipts.count < 64,
+           let item = browser?.backForwardList.currentItem, item.url == expected.committedURL {
+            // Native link navigation is an observed page, not an action receipt.
+            // Retain its exact history item only after the page read succeeds;
+            // it remains absent from `receipts` and keeps its observed source.
+            historyReceipts[expected.operationID] = .init(item: item, url: item.url, document: expected)
+        }
         if historyReceipts[expected.operationID]?.document == expected { historyReceipts[expected.operationID]?.wasObserved = true }
         return ComputerUseBrowserPageEvidence(document: expected, documentID: result.documentID, page: page)
     }
@@ -1830,7 +1855,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     func historyOption(visit: Int, operationID: String, evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserHistoryOption {
         try validateSourceDocument(evidence.document)
-        guard let browser, let saved = historyReceipts[operationID], saved.wasObserved, receipts[operationID] == saved.document,
+        guard let browser, let saved = historyReceipts[operationID], saved.wasObserved,
+              (receipts[operationID] == saved.document || saved.document.source != .automationNavigation),
               saved.document.taskID == evidence.document.taskID, saved.document.contextID == evidence.document.contextID,
               saved.item.url == saved.url, Self.validatedURL(saved.url) != nil,
               browser.backForwardList.currentItem !== saved.item else { throw ComputerUseBrowserError.observedNavigationUnavailable }
@@ -1842,6 +1868,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return .init(visit: visit, operationID: operationID, mode: mode,
             target: .init(evidence: evidence, source: mode == .revisit ? .revisit(operationID) : .history(operationID),
                 destination: saved.url, sourcePolicyDigest: sourcePolicy?.digest))
+    }
+
+    private func agentHistoryBackTarget(item: WKBackForwardListItem,
+                                        evidence: ComputerUseBrowserPageEvidence) throws -> ComputerUseBrowserNavigationTarget {
+        guard let entry = historyReceipts.filter({ $0.value.item === item && $0.value.url == item.url })
+            .max(by: { $0.value.document.generation < $1.value.document.generation }) else {
+            throw ComputerUseBrowserError.observedNavigationUnavailable
+        }
+        let option = try historyOption(visit: 0, operationID: entry.key, evidence: evidence)
+        guard option.mode == .back else { throw ComputerUseBrowserError.observedNavigationUnavailable }
+        return option.target
     }
 
     func validateHistoryRefresh(_ previous: ComputerUseBrowserNavigationTarget, replacement: ComputerUseBrowserNavigationTarget) throws {

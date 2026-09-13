@@ -312,7 +312,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     try await tools.validateOwnedBrowserAgentObservation(observation)
                 }
                 switch proposal.action {
-                case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
+                case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll, .historyBack:
                     nativeTarget = try await tools.inspectOwnedBrowserAgentTarget(proposal.action, observation: observation)
                 default: break
                 }
@@ -341,7 +341,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             var nextReading: ComputerUseFaraModel.PageReading?
             switch proposal.action {
-            case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
+            case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll, .historyBack:
                 if let nativeTarget, nativeTarget.context.isEmpty {
                     return .userInterventionRequired("I couldn't identify that browser control. Complete this step in the browser, then choose Resume.")
                 }

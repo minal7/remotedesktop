@@ -6,6 +6,174 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    func testFaraBrowserBackShortcutUsesHistoryWithoutBroadeningOtherKeys() throws {
+        func decode(_ keys: [String]) throws -> ComputerUseFaraAction {
+            let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": ["action": "key", "keys": keys]])
+            return try ComputerUseFaraAction.decode("<tool_call>" + String(decoding: data, as: UTF8.self) + "</tool_call>")
+        }
+        for keys in [["Alt", "Left"], ["Alt", "ArrowLeft"], ["alt", "left"]] {
+            XCTAssertEqual(try decode(keys), .historyBack)
+        }
+        for keys in [["Left"], ["Control", "Left"], ["Alt", "Right"], ["Alt", "Shift", "Left"], ["Left", "Alt"], ["Control", "a"]] {
+            XCTAssertEqual(try decode(keys), .key(keys))
+        }
+    }
+
+    @MainActor
+    func testOptInFaraBackRejectsUnavailableStaleLoginAndRetiredAuthority() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native Back boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["empty", "unobserved", "stale", "revoked", "replacement", "cancelled", "login", "source-blocked", "throw-at-admission", "replace-at-admission"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/a": .init(body: "<!doctype html><h1>A</h1>"),
+                "/b": .init(body: "<!doctype html><h1>B</h1><script>fetch('/release').then(()=>{document.body.insertAdjacentHTML('beforeend','<input type=password>');fetch('/login')})</script>"),
+                "/c": .init(body: "<!doctype html><h1>C</h1>"), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            var mayAct = true, dispatches = 0, began = 0
+            let browser = ComputerUseOwnedBrowser(nativeNavigationDidDispatch: { _, _ in dispatches += 1 }, mayAct: { mayAct })
+            defer { browser.close() }
+            try browser.claim(taskID: mode)
+            if mode != "empty" {
+                let a = try await browser.navigate(taskID: mode, operationID: "open-a", to: base.appendingPathComponent("a"))
+                if mode != "unobserved" { _ = try await browser.captureAgentObservation(document: a) }
+            }
+            var components = try XCTUnwrap(URLComponents(url: base.appendingPathComponent("b"), resolvingAgainstBaseURL: false))
+            if mode == "source-blocked" { components.host = "localhost" }
+            let bURL = try XCTUnwrap(components.url)
+            let b = try await browser.navigate(taskID: mode, operationID: "open-b", to: bURL)
+            if mode == "source-blocked" {
+                let session = try browser.prepareWorkflowSession(taskID: mode)
+                let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: mode, prompt: "Go back", referenceDate: Date(), timeZoneIdentifier: "UTC"),
+                    allowedOrigins: [ComputerUseBrowserSourceOrigin(bURL)])
+                try browser.installSourcePolicy(policy, replacing: nil, session: session)
+            }
+            let observation = try await browser.captureAgentObservation(document: b)
+            if mode == "stale" { _ = try await browser.navigate(taskID: mode, operationID: "open-c", to: base.appendingPathComponent("c")) }
+            if mode == "revoked" { mayAct = false }
+            if mode == "replacement" { try browser.claim(taskID: "successor") }
+            if mode == "login" {
+                server.releaseHeldResponses()
+                let deadline = ContinuousClock.now + .seconds(2)
+                while server.count("/login") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/login"), 1)
+            }
+            let before = dispatches
+            let operation = Task { @MainActor in
+                try await browser.performAgentInput(.historyBack, observation: observation,
+                    operationID: ComputerUseTaskContract.digest([mode, "back"]), willBeginEffect: {
+                        began += 1
+                        if mode == "throw-at-admission" { throw CancellationError() }
+                        if mode == "replace-at-admission" { try browser.claim(taskID: "successor") }
+                    })
+            }
+            if mode == "cancelled" { operation.cancel() }
+            do { try await operation.value; XCTFail("Back unexpectedly dispatched: \(mode)") }
+            catch {
+                if ["empty", "unobserved"].contains(mode) { XCTAssertEqual(error as? ComputerUseBrowserError, .observedNavigationUnavailable) }
+                if mode == "source-blocked" { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
+                if mode == "login" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                if ["cancelled", "throw-at-admission"].contains(mode) { XCTAssertTrue(error is CancellationError) }
+            }
+            XCTAssertEqual(dispatches, before, "No native history call may escape rejection: \(mode)")
+            XCTAssertEqual(began, ["throw-at-admission", "replace-at-admission"].contains(mode) ? 1 : 0, mode)
+            if ["replacement", "replace-at-admission"].contains(mode) { XCTAssertEqual(browser.taskID, "successor") }
+        }
+    }
+
+    @MainActor
+    func testOptInFaraReturnsThroughObservedNativeHistoryWithoutRevisiting() async throws {
+        try await runNativeBackWorkflow(realModel: false)
+    }
+
+    @MainActor
+    func testOptInFaraBackShortcutTraversesNativeHistoryWithoutRevisiting() async throws {
+        try await runNativeBackWorkflow(realModel: false, shortcut: true)
+    }
+
+    @MainActor
+    func testOptInActualFaraCompletesNaturalLanguageBackWorkflow() async throws {
+        try await runNativeBackWorkflow(realModel: true)
+    }
+
+    @MainActor
+    private func runNativeBackWorkflow(realModel: Bool, shortcut: Bool = false) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let optIn = realModel ? "RUN_FARA_SEARCH_MODEL_ACCEPTANCE" : "RUN_FARA_NATIVE_BROWSER_INPUT"
+        guard environment[optIn] == "1" else { throw XCTSkip("Opt-in: bounded native browser history") }
+        let inputs = realModel ? try await FaraTestAssets.inputs(environment: environment) : nil
+        let runtime = OSAtlasLlamaRuntime()
+        var stage = "fixture setup", calls = 0, backProposals = 0
+        var modelResponses: [String] = []
+        var observedPaths: [String] = []
+        defer {
+            let attachment = XCTAttachment(string: "Stage: \(stage)\nProposals: \(calls)\nObserved paths: \(observedPaths)\nReal model: \(realModel)\nBack proposals: \(backProposals)\nModel responses: \(modelResponses)")
+            attachment.name = "Native Fara Back diagnostic"; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let style = "<style>a{position:fixed;left:20vw;top:20vh;width:60vw;height:20vh;background:#ddd}</style>"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/a": .init(body: "<!doctype html><h1>Page A</h1>" + style + "<a href='/b'>Open B</a>"),
+            "/b": .init(body: "<!doctype html><h1>Page B</h1>" + style + "<a href='/c'>Open C</a>"),
+            "/c": .init(body: "<!doctype html><h1>Page C</h1>")])
+        stage = "HTTP fixture start"
+        let base = try await server.start(); defer { server.stop() }
+        stage = "browser setup"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraBack-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "back")
+        stage = "initial A navigation"
+        _ = try await browser.navigate(taskID: "back", operationID: "open-a", to: base.appendingPathComponent("a"))
+        let goal = "Visit B and C, then go back twice to A."
+        let paths = ["/a", "/b", "/c", "/b", "/a"]
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            stage = "proposal \(calls + 1)"; observedPaths.append(input.currentURL?.path ?? "none")
+            guard calls < (realModel ? 8 : paths.count) else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
+            if let inputs {
+                let endpoint = try await runtime.activateFara(inputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                calls += 1; modelResponses.append(proposal.response)
+                if case .historyBack = proposal.action { backProposals += 1 }
+                return proposal
+            }
+            XCTAssertEqual(input.currentURL?.path, paths[calls])
+            let back = shortcut ? #"{"action":"key","keys":["Alt","Left"]}"# : #"{"action":"history_back"}"#
+            let action = calls < 2 ? #"{"action":"left_click","coordinate":[500,300]}"#
+                : calls < 4 ? back : #"{"action":"terminate","answer":"Returned to A."}"#
+            calls += 1
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, readPage: { reading in
+            guard let inputs else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
+            let endpoint = try await runtime.activateFara(inputs)
+            return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+        }, finishRun: { await runtime.shutdown() })
+        stage = "executor start"
+        let result: ComputerUseExecutionResult
+        do { result = try await executor.execute(taskID: "back", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+        catch { return XCTFail("Back failed at \(stage): \(String(reflecting: error)); type=\(String(reflecting: type(of: error)))") }
+        if let inputs {
+            guard case .completed = result else { return XCTFail("Model did not complete: \(result)") }
+            XCTAssertEqual(backProposals, 2, "The model must use Back, not synthesize old URLs")
+            XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty)
+            var visited: [String] = []
+            for path in observedPaths where visited.last != path { visited.append(path) }
+            XCTAssertEqual(visited, paths)
+        } else { XCTAssertEqual(result, .completed("Returned to A.")); XCTAssertEqual(calls, 5) }
+        XCTAssertEqual(browser.currentDocument(taskID: "back")?.committedURL.path, "/a")
+        XCTAssertEqual(server.count("/c"), 1, "Back must traverse existing entries, not append URL revisits")
+        XCTAssertLessThanOrEqual(server.count("/a"), 2); XCTAssertLessThanOrEqual(server.count("/b"), 2)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            .filter { $0.stepIDs == ["native-dispatch-returned"] }
+        if realModel { XCTAssertGreaterThanOrEqual(journals.count, 4) } else { XCTAssertEqual(journals.count, 4) }
+        XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
+    }
+
     func testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly() throws {
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
         let reading = ComputerUseFaraModel.PageReading(sourceURL: URL(string: "https://example.com/source")!,
