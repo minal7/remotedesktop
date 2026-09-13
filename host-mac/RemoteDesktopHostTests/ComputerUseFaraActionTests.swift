@@ -156,24 +156,42 @@ final class ComputerUseFaraActionTests: XCTestCase {
             try browser.claim(taskID: taskID)
             _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
             try requireSameNativeWindow(&retainedWindow)
-            var calls = 0
+            var calls = 0, waits = 0
+            var seen: [ComputerUseFaraModel.Input] = []
             let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
                 calls += 1
-                guard calls <= (recovers ? 3 : 4) else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                seen.append(input)
+                guard calls <= (recovers ? 8 : 4) else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 XCTAssertEqual(input.goal, goal)
                 if calls > 1 && (!recovers || calls == 2) {
                     guard let error = input.actionError else { XCTFail("A rejected native target must explain that no input was sent"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                     XCTAssertTrue(error.contains("left_click")); XCTAssertTrue(error.contains("300.0, 150.0")); XCTAssertTrue(error.contains("No input was sent"))
-                    XCTAssertTrue(input.history.isEmpty, "An unsent click cannot become an executed action")
+                    guard input.history.count == calls - 1 else {
+                        XCTFail("Rejected proposals must remain in model conversation history with their original observations")
+                        throw ComputerUseFaraBrowserExecutor.Failure.stepLimit
+                    }
+                    for (index, step) in input.history.enumerated() {
+                        XCTAssertEqual(step.response, self.call(#"{"action":"left_click","coordinate":[300,150]}"#))
+                        XCTAssertEqual(step.screenshotPNG, seen[index].screenshotPNG)
+                        XCTAssertEqual(step.currentURL, seen[index].currentURL)
+                        XCTAssertEqual(step.actionError, seen[index].actionError)
+                    }
                     XCTAssertEqual(server.count("/details"), 0)
                     let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
                     let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
                     XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains(error))
                 }
-                if recovers && calls == 3 {
-                    XCTAssertNil(input.actionError); XCTAssertEqual(input.history.count, 1)
-                    XCTAssertNotNil(input.history.last?.actionError)
-                    XCTAssertEqual(input.currentURL, base.appendingPathComponent("details"))
+                if recovers && calls >= 3 {
+                    XCTAssertNil(input.actionError); XCTAssertEqual(input.history.count, calls - 1)
+                    XCTAssertNotNil(input.history[1].actionError)
+                    // Native navigation may still be pending at the next observation.
+                    // The scripted actor must wait for the source it will report.
+                    if input.currentURL != base.appendingPathComponent("details") {
+                        guard waits < 5 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                        waits += 1
+                        let response = self.call(#"{"action":"wait","time":0.2}"#)
+                        return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                    }
                 }
                 let action = !recovers || calls == 1 ? #"{"action":"left_click","coordinate":[300,150]}"#
                     : calls == 2 ? #"{"action":"left_click","coordinate":[300,450]}"# : #"{"action":"terminate","answer":"6:20 PM"}"#
@@ -182,9 +200,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
             })
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
             if recovers {
-                XCTAssertEqual(result, .completed("6:20 PM")); XCTAssertEqual(calls, 3)
+                XCTAssertEqual(result, .completed("6:20 PM")); XCTAssertEqual(calls, 3 + waits)
                 let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-                XCTAssertEqual(replay, result); XCTAssertEqual(calls, 3)
+                XCTAssertEqual(replay, result); XCTAssertEqual(calls, 3 + waits)
             } else {
                 guard case .userInterventionRequired = result else { return XCTFail("Repeated rejected targets must stop") }
                 XCTAssertEqual(calls, 4)
@@ -222,7 +240,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 let web = try XCTUnwrap(try XCTUnwrap(NSApp.keyWindow?.contentView).subviews.flatMap { webViews($0) }.first)
                 _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:59'")
             } else {
-                guard input.history.count == 1 else { XCTFail("The app discarded an observed fact because unrelated countdown text changed"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                guard input.history.count == calls - 1 else { XCTFail("Memory and rejected completion must retain their observation history"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 XCTAssertEqual(input.history.first?.response, remembered)
                 XCTAssertEqual(input.history.first?.screenshotPNG, firstImage)
                 XCTAssertEqual(input.history.first?.currentURL, base.appendingPathComponent("page"))
@@ -332,6 +350,45 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertEqual(completed, .completed("The showtime is 6:20 PM.")); XCTAssertEqual(calls, 2)
         XCTAssertTrue(NSApp.keyWindow === window)
         XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/edit"), 0); XCTAssertEqual(server.count("/click"), 0)
+    }
+
+    @MainActor
+    func testOptInNativeRoxieFindAfterDelayedScrolledObservation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one native read-only Find experiment, no inference") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let url = try XCTUnwrap(URL(string: "https://roxie.com/film/the-cycle-of-love/"))
+        try browser.claim(taskID: "roxie-find")
+        let document = try await browser.navigate(taskID: "roxie-find", operationID: "fixture", to: url)
+        try await Task.sleep(for: .seconds(2))
+        let first = try await browser.captureAgentObservation(document: document)
+        try await browser.performAgentInput(.scroll(horizontal: false, pixels: -723), observation: first)
+        let before = try await browser.captureAgentObservation(document: document)
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        try await Task.sleep(for: .seconds(9))
+        var failure: Error?, attempts = 0
+        do {
+            let target = try await browser.inspectAgentTarget(.key(["Control", "f"]), observation: before)
+            try await browser.performAgentInput(.key(["Control", "f"]), observation: before, target: target, willBeginEffect: { attempts += 1 })
+        } catch { failure = error }
+        let after = try await browser.captureAgentObservation(document: document)
+        @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+        let field = descendants(try XCTUnwrap(window.contentView)).first { $0.identifier?.rawValue == "owned-browser-find-query" }
+        let visible = field?.isHiddenOrHasHiddenAncestor == false
+        let a = before.approvalPageEvidence.page, b = after.approvalPageEvidence.page
+        let report: [String: Any] = ["failure": failure.map { String(reflecting: $0) } ?? "", "attempts": attempts,
+            "findVisible": visible, "sameWindow": NSApp.keyWindow === window, "sameSource": after.currentURL == url,
+            "textsEqual": a.texts == b.texts, "linksEqual": a.links == b.links, "controlsEqual": a.controls == b.controls,
+            "viewportEqual": a.viewport == b.viewport, "noInference": true]
+        let evidence = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        evidence.name = "Native Roxie delayed Find"; evidence.lifetime = .keepAlways; add(evidence)
+        for (label, observation) in [("before", before), ("after", after)] {
+            let screenshot = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+            screenshot.name = "Roxie Find " + label; screenshot.lifetime = .keepAlways; add(screenshot)
+        }
+        if let failure { return XCTFail("Native Find failed before producing a visible search bar: \(failure)") }
+        XCTAssertEqual(attempts, 1); XCTAssertTrue(visible); XCTAssertTrue(NSApp.keyWindow === window)
     }
 
     @MainActor
@@ -491,6 +548,38 @@ final class ComputerUseFaraActionTests: XCTestCase {
         try await dispatch(.pointer(.leftClick, .init(x: point.x / web.bounds.width * 1000, y: (web.isFlipped ? point.y : web.bounds.height - point.y) / web.bounds.height * 1000)))
         XCTAssertEqual(field.stringValue, "", "Clicking the native clear button must clear, not select all")
         XCTAssertEqual(server.count("/page"), 1)
+    }
+
+    @MainActor
+    func testOptInNativeFindSurvivesUnrelatedPageTextChanges() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native Find is independent of unrelated page text") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Find fixture</h1><p id='clock'>10:00</p><p>needle</p><input value='Unchanged'><script>document.addEventListener('input',()=>fetch('/edit'));document.addEventListener('keydown',()=>fetch('/key'))</script>")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "changing-find")
+        let document = try await browser.navigate(taskID: "changing-find", operationID: "fixture", to: base.appendingPathComponent("page"))
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        @MainActor func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap { descendants($0) } }
+        let views = descendants(try XCTUnwrap(window.contentView))
+        let web = try XCTUnwrap(views.compactMap { $0 as? WKWebView }.first)
+        let field = try XCTUnwrap(views.first { $0.identifier?.rawValue == "owned-browser-find-query" } as? NSSearchField)
+        var attempts = 0
+        let actions: [ComputerUseFaraAction] = [.key(["Control", "f"]), .typeText("needle"), .key(["Enter"]), .key(["Escape"])]
+        for (index, action) in actions.enumerated() {
+            let observation = try await browser.captureAgentObservation(document: document)
+            _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:5" + String(index) + "'")
+            do { try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 }) }
+            catch { return XCTFail("Native Find rejected an unrelated text update at step \(index): \(error)") }
+            XCTAssertEqual(field.isHiddenOrHasHiddenAncestor, index == 3)
+            if index == 1 || index == 2 { XCTAssertEqual(field.stringValue, "needle") }
+            do { try await browser.performAgentInput(action, observation: observation); XCTFail("Find replayed a retired observation") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertTrue(NSApp.keyWindow === window)
+        }
+        XCTAssertEqual(attempts, 4); XCTAssertEqual(server.count("/page"), 1)
+        XCTAssertEqual(server.count("/edit"), 0); XCTAssertEqual(server.count("/key"), 0)
     }
 
     @MainActor
@@ -1663,6 +1752,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native page-reading boundaries") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
+        var mayAct = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { mayAct }); defer { browser.close() }
+        var retainedWindow: NSWindow?
         for mode in ["truncated", "empty", "empty-question", "oversized-question", "changed", "login", "revoked", "replacement", "cancelled", "reading-login", "reading-revoked", "reading-replacement", "reading-changed", "reading-cancelled"] {
             let text = mode == "empty" ? "" : mode == "truncated" ? (0..<40).map { "<p>\($0) " + String(repeating: "東京😀", count: 15) + "</p>" }.joined() : "<h1 id='venue'>Original venue</h1>"
             let change = mode.contains("login") ? "document.body.insertAdjacentHTML('beforeend','<input type=password>')" : "venue.textContent='Changed venue'"
@@ -1673,12 +1765,12 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let base = try await server.start(); defer { server.stop() }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraReadEdges-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
-            var mayAct = true
-            let browser = ComputerUseOwnedBrowser(mayAct: { mayAct }); defer { browser.close() }
+            mayAct = true
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { mayAct }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
             try browser.claim(taskID: mode)
             let url = base.appendingPathComponent("page")
             _ = try await browser.navigate(taskID: mode, operationID: "open", to: url)
+            try requireSameNativeWindow(&retainedWindow)
             var calls = 0
             let question = mode == "empty-question" ? " \n\t" : mode == "oversized-question" ? String(repeating: "界", count: 342) : "Read the exact page text."
             let read = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name":"computer_use","arguments":["action":"read_page_answer_question","question":question]]), as: UTF8.self) + "</tool_call>"
@@ -1699,7 +1791,10 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     return try .init(response: read, action: ComputerUseFaraAction.decodeNativeMessage(read))
                 }
                 if mode == "changed" && calls == 2 {
-                    XCTAssertNil(input.pageReading); XCTAssertTrue(input.history.isEmpty, "An unsent stale read cannot leave an observation or history entry")
+                    XCTAssertNil(input.pageReading, "Rejected reading must not fabricate an extracted answer")
+                    XCTAssertEqual(input.history.count, 1); XCTAssertEqual(input.history.first?.response, read)
+                    XCTAssertNil(input.history.first?.pageReading)
+                    XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
                     return try .init(response: read, action: ComputerUseFaraAction.decodeNativeMessage(read))
                 }
                 let reading = try XCTUnwrap(input.pageReading)
@@ -2506,13 +2601,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             catch { failure = error }
             if mode == "once" {
                 if let failure { return XCTFail("Unsent stale proposal was not replanned: \(failure)") }
-                XCTAssertEqual(result, .completed("Clicked Search once.")); XCTAssertEqual(calls, 3); XCTAssertEqual(historyCounts, [0,0,1])
+                XCTAssertEqual(result, .completed("Clicked Search once.")); XCTAssertEqual(calls, 3); XCTAssertEqual(historyCounts, [0,1,2])
                 let deadline = ContinuousClock.now + .seconds(2)
                 while server.count("/clicked") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
                 XCTAssertEqual(server.count("/clicked"), 1)
             } else if mode == "continuous" {
                 XCTAssertNil(failure); guard case .userInterventionRequired = result else { return XCTFail("Continuous change must hand control back after bounded replanning") }
-                XCTAssertEqual(calls, 4); XCTAssertEqual(historyCounts, [0,0,0,0]); XCTAssertEqual(server.count("/clicked"), 0)
+                XCTAssertEqual(calls, 4); XCTAssertEqual(historyCounts, [0,1,2,3]); XCTAssertEqual(server.count("/clicked"), 0)
             } else {
                 XCTAssertEqual(failure as? ComputerUseBrowserError, .ownershipLost); XCTAssertEqual(calls, 1)
                 XCTAssertEqual(browser.taskID, "replacement-owner", "Recovery must not reclaim a successor's browser")
@@ -2764,7 +2859,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let began = Date()
             let endpoint = try await runtime.activateFara(inputs)
             let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
-            responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? ""])
+            responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? "",
+                "actionError": input.actionError ?? "", "historyCount": input.history.count])
             if movie, input.currentURL?.host == "ticketing.uswest.veezi.com" {
                 // The trial is read-only. A model attempt to select tickets is
                 // a failed trial; it cannot be dispatched to the live provider.

@@ -979,7 +979,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             // Browser chrome is native host UI. Its identity, exact query,
             // selection and focus are retained with the screenshot; it never
             // borrows a DOM field or forwards its keys to the document.
-            try await validatePageEvidence(observation.evidence)
+            let current = try await callDOM(.validateAgentChrome,
+                arguments: ["documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id],
+                document: observation.evidence.document)
+            guard current.status == "agent-chrome-current", current.documentID == observation.evidence.documentID else {
+                throw ComputerUseBrowserError.pageChanged
+            }
             guard try predictedAgentAction(action, observation: observation) == predicted else { throw ComputerUseBrowserError.pageChanged }
             return AgentTarget(observation: observation, proposal: action, action: predicted,
                 context: "AXSearchField • Find in page search", isSearchSubmission: false,

@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
-    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget
+    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget, validateAgentChrome
     case scrollViewport, viewportScrollReceipt, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
@@ -1844,7 +1844,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'validateAgentChrome', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1865,6 +1865,10 @@ enum ComputerUseBrowserDOM {
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
+            // Native Find changes host chrome, never a page control. Retain the
+            // document/snapshot and fresh authentication gate above; native code
+            // verifies its window, query, selection and focus before dispatch.
+            if (command === 'validateAgentChrome') return reply(lastPageSnapshot.agentState ? 'agent-chrome-current' : 'unsupported');
             const scopedAgentTarget = ['agentTarget','agentFragmentScroll','agentScroll'].includes(command) && !!lastPageSnapshot.agentState;
             if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {
               if (lastPageSnapshot.invalidated) return reply('stale-agent-bindings');
