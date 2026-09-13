@@ -791,7 +791,30 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
-    func validateAgentObservation(_ observation: AgentObservation) async throws {
+    func validateAgentObservation(_ observation: AgentObservation, allowingIdenticalScreenshot: Bool = false) async throws {
+        if allowingIdenticalScreenshot {
+            do { try await validateAgentObservation(observation); return }
+            catch ComputerUseBrowserError.pageChanged { }
+            // A visual answer can still use an unchanged scene when only
+            // offscreen DOM content changed. This never authorizes input or
+            // text extracted outside the screenshot. Fresh capture repeats
+            // authentication and document checks before exposing any image.
+            try validateAgentMemoryObservation(observation)
+            guard browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  mainSurface?.findBar.state == observation.findState else { throw ComputerUseBrowserError.pageChanged }
+            let policy = sourcePolicy
+            let fresh = try await captureAgentObservation(document: observation.evidence.document)
+            try validateAgentSession(observation)
+            guard sourcePolicy == policy, fresh.evidence.document == observation.evidence.document,
+                  fresh.evidence.documentID == observation.evidence.documentID,
+                  fresh.ownership == observation.ownership, fresh.takeover == observation.takeover,
+                  fresh.windowFrame == observation.windowFrame, fresh.viewportSize == observation.viewportSize,
+                  fresh.findState == observation.findState, fresh.pixelWidth == observation.pixelWidth,
+                  fresh.pixelHeight == observation.pixelHeight, fresh.png == observation.png else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            return
+        }
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
         agentOperationInProgress = true
         defer { agentOperationInProgress = false }

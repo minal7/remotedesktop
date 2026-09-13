@@ -4264,6 +4264,115 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInFaraCompletesFromUnchangedPixelsAfterOffscreenUpdate() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: native completion on an unchanged visible scene")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: """
+            <!doctype html><title>Ticket information</title>
+            <h1>General admission: $15.62 including $1.62 booking fee</h1>
+            <p>Selected tickets: 0</p><span id="timer" style="position:absolute;top:2000px">09:55</span>
+            <script>fetch('/change').then(() => {document.getElementById('timer').textContent='09:54'; fetch('/changed')});</script>
+            """), "/change": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraCompletion-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("navigation")))
+        try browser.claim(taskID: "unchanged-completion")
+        _ = try await browser.navigate(taskID: "unchanged-completion", operationID: "open", to: base.appendingPathComponent("start"))
+        var calls = 0, firstImage: Data?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1
+            if calls > 1 {
+                XCTAssertEqual(input.screenshotPNG, firstImage, "The retry saw exactly the same visible evidence")
+                XCTFail("Completion was discarded despite identical pixels: \(input.actionError ?? "no explanation")")
+                throw ComputerUseFaraAction.Failure.invalidResponse
+            }
+            firstImage = input.screenshotPNG
+            server.releaseHeldResponses()
+            let deadline = ContinuousClock.now + .seconds(3)
+            while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(server.count("/changed"), 1)
+            let response = self.call(#"{"action":"terminate","answer":"General admission is $15.62 including a $1.62 fee. No tickets selected."}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            let result = try await executor.execute(taskID: "unchanged-completion", prompt: "Report the price and fee without selecting tickets.",
+                trustedUserPrompt: "Report the price and fee without selecting tickets.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("General admission is $15.62 including a $1.62 fee. No tickets selected."))
+        } catch { XCTFail("Unchanged-scene completion failed: \(error)") }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(server.count("/start"), 1)
+    }
+
+    @MainActor
+    func testOptInVisualCompletionRejectsChangedSceneAndRetiredAuthority() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: visual completion authority boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><h1 id="price">Price: $15.62</h1><span id="timer" style="position:absolute;top:2000px">09:55</span>
+            """), "/next": .init(body: "<!doctype html><h1>Different document</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        var allowed = true, retainedWindow: NSWindow?, duringCapture: (() -> Void)?
+        let browser = ComputerUseOwnedBrowser(domScriptDidDispatch: { command in
+            if command == .pageSnapshot { duringCapture?() }
+        }, mayAct: { allowed })
+        defer { browser.close() }
+        let modes = ["visible-text", "observation", "navigation", "root", "url", "login", "offscreen-login", "source", "owner", "take-control", "cancelled", "resized", "capture-revoked", "stop", "closed"]
+        for mode in modes {
+            allowed = true; duringCapture = nil
+            let session = try browser.prepareWorkflowSession(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            let observation = try await browser.captureAgentObservation(document: document)
+            _ = try await web.evaluateJavaScript("document.getElementById('timer').textContent='09:54'")
+            switch mode {
+            case "visible-text": _ = try await web.evaluateJavaScript("document.getElementById('price').textContent='Price: $20.00'")
+            case "observation": _ = try await browser.captureAgentObservation(document: document)
+            case "navigation": _ = try await browser.navigate(taskID: mode, operationID: "next", to: base.appendingPathComponent("next"))
+            case "root": _ = try await web.evaluateJavaScript("document.documentElement.replaceWith(document.documentElement.cloneNode(true))")
+            case "url": _ = try await web.evaluateJavaScript("history.replaceState(null,'','/changed-location')")
+            case "login", "offscreen-login": _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password style=\"position:absolute;top:\(mode == "login" ? "100" : "2100")px\">')")
+            case "source":
+                let goal = try ComputerUseBrowserGoalInput(taskID: mode, prompt: "Read this page", referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles")
+                try browser.installSourcePolicy(.init(goal: goal, allowedOrigins: []), replacing: nil, session: session)
+            case "owner": try browser.claim(taskID: "successor")
+            case "take-control": allowed = false; browser.prepareForUserControl(taskID: mode); allowed = true
+            case "resized": window.setContentSize(NSSize(width: window.contentView!.bounds.width - 20, height: window.contentView!.bounds.height))
+            case "capture-revoked": duringCapture = { allowed = false }
+            case "stop": browser.stop()
+            case "closed": browser.close()
+            default: break
+            }
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try await browser.validateAgentObservation(observation, allowingIdenticalScreenshot: true)
+            }
+            do { try await work.value; return XCTFail("Visual completion accepted changed authority: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else if mode.contains("login") { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else if mode == "source" { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
+                else { XCTAssertTrue([ComputerUseBrowserError.pageChanged, .ownershipLost].contains(error as? ComputerUseBrowserError ?? .busy), "\(mode): \(error)") }
+            }
+            duringCapture = nil
+            XCTAssertEqual(server.count("/page"), modes.firstIndex(of: mode)! + 1)
+        }
+        XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    @MainActor
     private func runFaraChangedPageProposal(waitForChange: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: the page changes during a read-only wait proposal")

@@ -1322,11 +1322,11 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.performInitialAgentNavigation(url, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
-    func validateOwnedBrowserAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {
+    func validateOwnedBrowserAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation, allowingIdenticalScreenshot: Bool = false) async throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.validateAgentObservation(observation)
+        try await browserNavigationTask.validateAgentObservation(observation, allowingIdenticalScreenshot: allowingIdenticalScreenshot)
     }
 
     func validateOwnedBrowserAgentMemoryObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) throws {

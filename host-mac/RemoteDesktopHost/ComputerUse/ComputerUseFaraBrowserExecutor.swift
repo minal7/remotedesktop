@@ -404,6 +404,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     break
                 case .remember:
                     try tools.validateOwnedBrowserAgentMemoryObservation(observation)
+                case .reportCompletion where session.pageReading == nil:
+                    try await tools.validateOwnedBrowserAgentObservation(observation, allowingIdenticalScreenshot: true)
                 default:
                     try await tools.validateOwnedBrowserAgentObservation(observation)
                 }

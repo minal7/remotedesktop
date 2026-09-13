@@ -355,8 +355,8 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try await browser.performInitialAgentNavigation(url, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
-    func validateAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {
-        try await browser.validateAgentObservation(observation)
+    func validateAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation, allowingIdenticalScreenshot: Bool = false) async throws {
+        try await browser.validateAgentObservation(observation, allowingIdenticalScreenshot: allowingIdenticalScreenshot)
     }
 
     func validateAgentMemoryObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) throws {
