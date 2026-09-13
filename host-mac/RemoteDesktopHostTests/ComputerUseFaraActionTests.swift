@@ -7,6 +7,48 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraReplaysFrozenLiveTicketAnswerExactly() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_FROZEN_REPLAY"] == "1" else { throw XCTSkip("Opt-in: one model proposal from an immutable public-site trajectory; no browser input") }
+        struct Replay: Decodable {
+            struct Frame: Decodable { let response: String; let currentURL: URL?; let pngFile: String?; let pngSHA256: String? }
+            let goal: String; let history: [Frame]; let current: Frame
+            let expectedVenue: String; let expectedTime: String; let expectedURL: URL
+        }
+        let file = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_FROZEN_REPLAY_INPUT"]))
+        let bytes = try Data(contentsOf: file), replay = try JSONDecoder().decode(Replay.self, from: bytes)
+        func image(_ frame: Replay.Frame) throws -> Data {
+            guard let name = frame.pngFile else { return Data() }
+            let data = try Data(contentsOf: file.deletingLastPathComponent().appendingPathComponent(name))
+            XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), frame.pngSHA256)
+            return data
+        }
+        let input = try ComputerUseFaraModel.Input(goal: replay.goal, screenshotPNG: image(replay.current),
+            history: replay.history.map { try .init(screenshotPNG: image($0), response: $0.response, currentURL: $0.currentURL) }, currentURL: replay.current.currentURL)
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let runtime = OSAtlasLlamaRuntime(), started = Date()
+        var proposal: ComputerUseFaraModel.Proposal?, failure: Error?
+        do {
+            let endpoint = try await runtime.activateFara(inputs)
+            proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+        } catch { failure = error }
+        await runtime.shutdown()
+        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+        let report: [String: Any] = ["response": proposal?.response ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
+            "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited,
+            "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Frozen live answer replay"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertTrue(exited)
+        if let failure { return XCTFail("Frozen proposal failed: \(failure)") }
+        guard case .reportCompletion(let answer) = proposal?.action else { return XCTFail("Expected a final answer from the complete retained page: \(String(reflecting: proposal?.action))") }
+        XCTAssertTrue(answer.localizedCaseInsensitiveContains(replay.expectedVenue), "Exact venue must match the independent page oracle")
+        XCTAssertTrue(answer.localizedCaseInsensitiveContains(replay.expectedTime))
+        XCTAssertTrue(answer.contains("$55") && answer.contains("$155"))
+        XCTAssertTrue(answer.contains(replay.expectedURL.absoluteString))
+    }
+
+    @MainActor
     func testOptInSearchSubmitUsesBoundFormContextAndRetainsCommitGates() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native icon search submission") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
