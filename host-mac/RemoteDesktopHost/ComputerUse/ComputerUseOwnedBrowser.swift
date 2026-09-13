@@ -860,7 +860,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// Native and approval paths share the same integral screen point. The
     /// approval fingerprint must identify precisely where the click is posted.
     private func agentClickTarget(_ point: ComputerUseFaraAction.Point, observation: AgentObservation,
-                                  view: WKWebView, window: NSWindow) throws -> (location: NSPoint, action: ComputerUsePredictedAction) {
+                                  view: WKWebView, window: NSWindow, count: Int = 1) throws -> (location: NSPoint, action: ComputerUsePredictedAction) {
         let pixel = try point.pixel(width: observation.pixelWidth, height: observation.pixelHeight)
         let x = CGFloat(pixel.x) / CGFloat(observation.pixelWidth) * view.bounds.width
         let y = CGFloat(pixel.y) / CGFloat(observation.pixelHeight) * view.bounds.height
@@ -870,7 +870,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let globalX = Int(floor(screen.x)), globalY = Int(floor(primaryTop - screen.y))
         let location = window.convertPoint(fromScreen: NSPoint(x: CGFloat(globalX), y: primaryTop - CGFloat(globalY)))
         guard view.bounds.contains(view.convert(location, from: nil)) else { throw ComputerUseBrowserError.pageChanged }
-        return (location, .click(x: globalX, y: globalY, button: 0, count: 1))
+        return (location, .click(x: globalX, y: globalY, button: 0, count: count))
     }
 
     private static func agentKeyStroke(_ keys: [String]) -> (usage: Int, keyCode: UInt16, text: String, shift: Bool)? {
@@ -944,6 +944,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         switch action {
         case .pointer(.leftClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window).action
+        case .pointer(.doubleClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window, count: 2).action
         case .typeText(let text): return .typeText(text)
         case .key(let keys) where Self.agentKeyStroke(keys) != nil:
             let key = Self.agentKeyStroke(keys)!
@@ -976,9 +977,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         var arguments: [String: Any] = ["documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id]
         switch action {
-        case .pointer(.leftClick, let point):
+        case .pointer(.leftClick, let point), .pointer(.doubleClick, let point):
             guard let viewport = observation.evidence.page.viewport, viewport.isWellFormed else { throw ComputerUseBrowserError.pageChanged }
             let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
+            if let bar = mainSurface?.findBar, !bar.isHidden, bar.bounds.contains(bar.convert(location, from: nil)) {
+                throw ComputerUseBrowserError.unsupportedDocument
+            }
             let local = view.convert(location, from: nil)
             arguments["x"] = (local.x - view.bounds.minX) / view.bounds.width * viewport.width
             arguments["y"] = (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height
@@ -1000,9 +1004,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let navigation = result.agentTargetNavigationKind.flatMap(AgentTarget.Navigation.init(rawValue:))
         if let kind = result.agentTargetNavigationKind {
             guard navigation != nil, navigation?.rawValue == kind, searchLabel == nil,
-                  case .pointer(.leftClick, _) = action,
+                  case .pointer(let kind, _) = action, kind == .leftClick || kind == .doubleClick,
                   observation.evidence.page.links.contains(where: { $0.id == id }) else { throw ComputerUseBrowserError.pageChanged }
         }
+        // Opening a bound new-context URL or revealing a bound section is one
+        // navigation even when Fara requests a double click. Never post a
+        // second pointer event into a document changed by the first click.
+        if case .pointer(.doubleClick, _) = action, navigation == nil { throw ComputerUseBrowserError.unsupportedDocument }
         return AgentTarget(observation: observation, proposal: action, action: predicted,
             context: context + (searchLabel.map { " • " + $0 } ?? ""),
             isSearchSubmission: searchLabel != nil, navigation: navigation, findAction: nil, elementID: id)
@@ -1037,7 +1045,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         try check()
         switch action {
-        case .pointer(.leftClick, _), .typeText, .key:
+        case .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key:
             // The isolated target read below verifies the original control,
             // input geometry and authentication even when other content changes.
             break
@@ -1100,7 +1108,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 to: url, from: observation.evidence.document, willBeginEffect: {
                     try willBeginEffect()
                     try check()
-                    if case .pointer(.leftClick, let point) = action { self.agentPointer = point }
+                    if case .pointer(_, let point) = action { self.agentPointer = point }
                     self.agentObservationID = nil
                 })
             return
@@ -1108,7 +1116,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         if inspectedTarget?.navigation == .fragment, let linkID = inspectedTarget?.elementID {
             guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
             try willBeginEffect(); try check()
-            if case .pointer(.leftClick, let point) = action { agentPointer = point }
+            if case .pointer(_, let point) = action { agentPointer = point }
             let result = try await callDOM(.agentFragmentScroll, arguments: [
                 "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
                 "operationID": operationID, "linkID": linkID], validateContext: { (try? check()) != nil })
