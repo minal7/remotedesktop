@@ -302,9 +302,18 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try browser.predictedAgentAction(action, observation: observation)
     }
 
+    func inspectAgentTarget(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) async throws -> ComputerUseOwnedBrowser.AgentTarget? {
+        try await browser.inspectAgentTarget(action, observation: observation)
+    }
+
+    func validateAgentTarget(_ target: ComputerUseOwnedBrowser.AgentTarget) async throws {
+        try await browser.validateAgentTarget(target)
+    }
+
     func performAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
+                           target: ComputerUseOwnedBrowser.AgentTarget? = nil,
                            willBeginEffect: () throws -> Void) async throws {
-        try await browser.performAgentInput(action, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
+        try await browser.performAgentInput(action, observation: observation, operationID: operationID, target: target, willBeginEffect: willBeginEffect)
     }
 
     func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {

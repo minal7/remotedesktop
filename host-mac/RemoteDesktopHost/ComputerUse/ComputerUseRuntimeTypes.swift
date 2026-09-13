@@ -11,11 +11,14 @@ struct ComputerUseVisualApprovalContinuation: Equatable, Sendable, CustomStringC
     /// Process-local evidence from the proposal, never part of the phone's
     /// approval payload. The host must validate it before posting the action.
     let browserPageEvidence: ComputerUseBrowserPageEvidence?
+    let nativeBrowserTarget: ComputerUseOwnedBrowser.AgentTarget?
 
-    init(taskID: String, nonce: UUID, browserPageEvidence: ComputerUseBrowserPageEvidence? = nil) {
+    init(taskID: String, nonce: UUID, browserPageEvidence: ComputerUseBrowserPageEvidence? = nil,
+         nativeBrowserTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) {
         self.taskID = taskID
         self.nonce = nonce
         self.browserPageEvidence = browserPageEvidence
+        self.nativeBrowserTarget = nativeBrowserTarget
     }
 
     var description: String { "ComputerUseVisualApprovalContinuation(browserBound: \(browserPageEvidence != nil))" }

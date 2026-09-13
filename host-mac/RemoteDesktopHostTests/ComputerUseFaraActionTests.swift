@@ -7,6 +7,109 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFocusedTargetRejectsReadOnlyAndNonTextControls() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in writable focus check") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for control in ["<input id='target' aria-label='Reference' readonly>",
+                        "<textarea id='target' aria-label='Reference' readonly></textarea>",
+                        "<button id='target'>Next</button>", "<a id='target' href='/next'>Next</a>",
+                        "<input id='target' type='checkbox' aria-label='Choice'>",
+                        "<select id='target' aria-label='Destination'><option>Tokyo</option></select>"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                \(control)<script>requestAnimationFrame(()=>{document.getElementById('target').focus();fetch('/focused');});</script>
+                """)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "writable-focus")
+            let document = try await browser.navigate(taskID: "writable-focus", operationID: "open", to: base.appendingPathComponent("form"))
+            let deadline = ContinuousClock.now + .seconds(3)
+            while server.count("/focused") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/focused"), 1)
+            let observation = try await browser.captureAgentObservation(document: document)
+            let inspected = try await browser.inspectAgentTarget(.typeText("123456"), observation: observation)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertTrue(target.context.isEmpty, "Typing must not be admitted to: \(control)")
+        }
+    }
+
+    @MainActor
+    func testOptInNativeTargetCannotAuthorizeAnotherPointOrObservation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in native target binding") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <button style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' onclick="fetch('/clicked')">Save changes</button>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        for scenario in ["different-point", "different-observation"] {
+            let browser = ComputerUseOwnedBrowser(mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: scenario)
+            let document = try await browser.navigate(taskID: scenario, operationID: "open", to: base.appendingPathComponent("form"))
+            var observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 500, y: 250))
+            let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertTrue(target.context.contains("Save changes"))
+            let attempted: ComputerUseFaraAction
+            if scenario == "different-point" { attempted = .pointer(.leftClick, .init(x: 600, y: 250)) }
+            else { observation = try await browser.captureAgentObservation(document: document); attempted = action }
+            var dispatches = 0
+            do {
+                try await browser.performAgentInput(attempted, observation: observation, target: target, willBeginEffect: { dispatches += 1 })
+                XCTFail("Target evidence authorized a different proposal or observation")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            _ = try await browser.observePage(document: document)
+            XCTAssertEqual(dispatches, 0)
+            XCTAssertEqual(server.count("/clicked"), 0)
+        }
+    }
+
+    @MainActor
+    func testOptInUnidentifiedBrowserControlHandsBackWithoutClickOrFurtherProposal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in unidentified-control handback") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <canvas style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh;background:gray' onclick="fetch('/clicked')"></canvas>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraUnknown-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("navigation"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+        try browser.claim(taskID: "unknown-control")
+        let document = try await browser.navigate(taskID: "unknown-control", operationID: "open", to: base.appendingPathComponent("form"))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            calls += 1
+            guard calls == 1 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[500,250]}}</tool_call>"#
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let result = try await executor.execute(taskID: "unknown-control", prompt: "Open the canvas item", trustedUserPrompt: "Open the canvas item", tools: tools, progress: { _ in })
+        guard case .userInterventionRequired = result else { return XCTFail("An unidentified control must hand back before input") }
+        _ = try await browser.observePage(document: document)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(server.count("/clicked"), 0)
+        let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.stepIDs, ["model-assessed-completion"])
+        XCTAssertEqual(records.first?.statuses, [.attempted])
+    }
+
+    @MainActor
     func testOptInFaraHoldsConsequentialClickBeforeNativeDispatch() async throws {
         try await runFaraApprovalLifecycle(mode: .hold)
     }

@@ -54,7 +54,15 @@ final class ComputerUseTests: XCTestCase {
         try await runFaraNativeApproval(changeTarget: false, approve: true, wrapped: true, liveTarget: true)
     }
 
-    private func runFaraNativeApproval(changeTarget: Bool, approve: Bool, wrapped: Bool = false, realModel: Bool = false, liveTarget: Bool = false) async throws {
+    func test_optInFaraManagerRefreshesReplacedNativeControlBeforeApproval() async throws {
+        try await runFaraNativeApproval(changeTarget: true, approve: true, wrapped: true, liveTarget: true)
+    }
+
+    func test_optInFaraManagerApprovesExactTypingIntoNativeField() async throws {
+        try await runFaraNativeApproval(changeTarget: false, approve: true, wrapped: true, liveTarget: true, typedReference: true)
+    }
+
+    private func runFaraNativeApproval(changeTarget: Bool, approve: Bool, wrapped: Bool = false, realModel: Bool = false, liveTarget: Bool = false, typedReference: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment[realModel ? "RUN_FARA_APPROVAL_MODEL_ACCEPTANCE" : "RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: host approval messages and native input on fictional settings")
@@ -80,10 +88,14 @@ final class ComputerUseTests: XCTestCase {
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
+        let control = typedReference
+            ? "<input aria-label='Reference' style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' oninput=\"fetch(this.value==='123456'?'/saved':'/wrong')\">"
+            : "<button style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' onclick=\"this.textContent='Saved';fetch('/saved')\"><span>Save changes</span></button>"
         let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
             <!doctype html><title>Fictional settings approval</title>
-            <button style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh' onclick="this.textContent='Saved';fetch('/saved')">Save changes</button>
-            """)])
+            \(control)
+            \(changeTarget && liveTarget ? "<script>fetch('/change').then(()=>{const button=document.querySelector('button');button.replaceWith(button.cloneNode(true));fetch('/changed');});</script>" : "")
+            """), "/change": .init(held: true)])
         let base = try await server.start()
         defer { server.stop() }
         let ledgerURL = temporaryLedgerURL()
@@ -92,7 +104,7 @@ final class ComputerUseTests: XCTestCase {
         var calls = 0
         var responses: [[String: Any]] = []
         let started = Date()
-        let goal = "Save these settings."
+        let goal = typedReference ? "Enter 123456 in Reference." : "Save these settings."
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: journalDirectory, propose: { input in
             XCTAssertEqual(input.goal, goal)
             guard calls < 3 else { throw ComputerUseFaraAction.Failure.invalidResponse }
@@ -105,8 +117,11 @@ final class ComputerUseTests: XCTestCase {
                 return proposal
             }
             let saved = server.count("/saved") > 0
-            XCTAssertEqual(input.history.count, saved ? 1 : 0)
-            let action = saved ? #"{"action":"terminate","answer":"Settings saved."}"# : #"{"action":"left_click","coordinate":[500,250]}"#
+            XCTAssertEqual(input.history.count, saved ? (typedReference ? 2 : 1) : (typedReference ? calls : 0))
+            let action: String
+            if saved { action = #"{"action":"terminate","answer":"Settings saved."}"# }
+            else if typedReference && calls == 1 { action = #"{"action":"type","text":"123456"}"# }
+            else { action = #"{"action":"left_click","coordinate":[500,250]}"# }
             let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
             calls += 1
             return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
@@ -146,8 +161,10 @@ final class ComputerUseTests: XCTestCase {
             attachment.name = "Live approval initial state"; attachment.lifetime = .keepAlways; add(attachment)
         }
         let first = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertTrue(first.message.contains(typedReference ? "one-time code" : "Save changes"), "The card must explain the host-observed approval reason")
+        if typedReference { XCTAssertTrue(first.message.contains("Reference"), "Typing approval must identify the destination field") }
         XCTAssertEqual(server.count("/saved"), 0)
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls, typedReference ? 2 : 1)
         if let inputs {
             XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty,
                 "The model worker must exit while approval is pending")
@@ -155,6 +172,11 @@ final class ComputerUseTests: XCTestCase {
         var request = first
         if changeTarget {
             target = "replacement-button"
+            if liveTarget {
+                await waitUntil { server.count("/change") == 1 }
+                server.releaseHeldResponses()
+                await waitUntil { server.count("/changed") == 1 }
+            }
             XCTAssertTrue(manager.handle(try approvalEnvelope(first), channel: channel))
             await waitUntil(timeoutIterations: realModel ? 4500 : 500) { await channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
             XCTAssertEqual(server.count("/saved"), 0)
@@ -179,13 +201,13 @@ final class ComputerUseTests: XCTestCase {
                 "messages": afterApproval.map { ["kind": $0.kind.rawValue, "body": $0.body] }]
             let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
             attachment.name = "Live approval response state"; attachment.lifetime = .keepAlways; add(attachment)
-            guard afterApproval.filter({ $0.kind == .approvalRequest }).count == 1 else {
+            guard afterApproval.filter({ $0.kind == .approvalRequest }).count == (changeTarget ? 2 : 1) else {
                 return XCTFail("An unchanged native target unexpectedly required another approval card")
             }
         }
         await waitUntil(timeoutIterations: realModel ? 4500 : 500) { await channel.sentMessages().contains { $0.kind == .assistant } }
         XCTAssertEqual(server.count("/saved"), approve ? 1 : 0)
-        XCTAssertEqual(calls, approve ? (changeTarget ? 3 : 2) : 1)
+        XCTAssertEqual(calls, approve ? ((changeTarget || typedReference) ? 3 : 2) : (typedReference ? 2 : 1))
         XCTAssertTrue(manager.handle(response, channel: channel))
         XCTAssertEqual(server.count("/saved"), approve ? 1 : 0)
         let terminalMessages = await channel.sentMessages()
@@ -193,8 +215,10 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(terminal?.outcome, approve ? .taskCompleted : .unableToComplete)
         let journals = try FileManager.default.contentsOfDirectory(at: journalDirectory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
-        XCTAssertEqual(journals.count, approve ? 2 : 1)
-        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, approve ? 1 : 0)
+        XCTAssertEqual(server.count("/wrong"), 0)
+        let nativeEffects = (typedReference ? 1 : 0) + (approve ? 1 : 0)
+        XCTAssertEqual(journals.count, nativeEffects + 1)
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, nativeEffects)
         if approve { XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] }) }
         if let inputs {
             await runtime.shutdown()

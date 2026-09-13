@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
-    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls
+    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget
     case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
@@ -529,6 +529,8 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let documentID: String
     let fields: [Field]?
     let page: ComputerUseBrowserPageSnapshot?
+    var agentTargetID: String? = nil
+    var agentTargetContext: String? = nil
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
     let formStateProof: ComputerUseBrowserFormStateProof.Reply?
@@ -1727,7 +1729,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1763,6 +1765,44 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'agentTarget') {
+              if (!lastPageSnapshot.agentState) return reply('unsupported');
+              let hit;
+              if (args.focused === true) {
+                hit = doc.activeElement;
+                for (let depth=0; hit?.shadowRoot?.activeElement && depth<16; depth++) hit = hit.shadowRoot.activeElement;
+              } else {
+                if (!Number.isFinite(args.x) || !Number.isFinite(args.y)
+                    || args.x < 0 || args.y < 0 || args.x >= innerWidth || args.y >= innerHeight) return reply('unsupported');
+                hit = doc.elementFromPoint(args.x,args.y);
+                for (let depth=0; hit?.shadowRoot && depth<16; depth++) {
+                  const child = hit.shadowRoot.elementFromPoint(args.x,args.y);
+                  if (!child || child === hit) break;
+                  hit = child;
+                }
+              }
+              // Typing requires the exact focused element to accept text. Ancestor
+              // and link lookup below is only suitable for identifying other input.
+              if (args.editable === true && !Array.from(controls.values()).some(binding => binding.element === hit
+                  && !binding.metadata.disabled && !binding.metadata.readOnly
+                  && ['text','search','url','tel','email','textarea','date','datetime-local','month','week','time','number'].includes(binding.metadata.kind))) {
+                return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};
+              }
+              for (let depth=0; hit && depth<24; depth++,hit=hit.parentElement || hit.getRootNode()?.host) {
+                for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled && binding.metadata.label.trim()) {
+                  const kind = binding.metadata.kind;
+                  const role = ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
+                    : kind === 'textarea' ? 'AXTextArea'
+                    : kind === 'select' ? 'AXComboBox' : kind.includes('checkbox') ? 'AXCheckBox' : kind.includes('radio') ? 'AXRadioButton' : 'AXButton';
+                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+binding.metadata.label};
+                }
+                for (const [id,binding] of links) if (binding.element === hit) {
+                  const link = content.links.find(link => link.id === id);
+                  if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:id,agentTargetContext:'AXLink • '+link.label};
+                }
+              }
+              return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};
+            }
             const selectionCurrent = selectionCurrentCommand(command,args,controls);
             if (selectionCurrent) return selectionCurrent;
             if (command === 'popupCandidates') return {...reply('popup-candidates'),

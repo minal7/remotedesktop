@@ -647,7 +647,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 /// receipts come from the exact WKNavigation owned by the current task.
 @MainActor
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
-    struct AgentObservation {
+    struct AgentObservation: Equatable, Sendable {
         let png: Data
         let pixelWidth: Int
         let pixelHeight: Int
@@ -661,6 +661,20 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
         var currentURL: URL { evidence.document.committedURL }
         var approvalPageEvidence: ComputerUseBrowserPageEvidence { evidence }
+    }
+    /// Created only from a current isolated-world target read. This is host
+    /// evidence, never model output or a serialized controller payload.
+    struct AgentTarget: Equatable, Sendable {
+        fileprivate let observation: AgentObservation
+        fileprivate let proposal: ComputerUseFaraAction
+        let action: ComputerUsePredictedAction
+        let context: String
+        fileprivate let elementID: String
+        var pageEvidence: ComputerUseBrowserPageEvidence { observation.evidence }
+        var fingerprint: ComputerUseApprovalFingerprint {
+            .init(action: action, applicationID: "owned-browser:\(observation.sessionIdentity)",
+                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context]), visualDigest: nil)
+        }
     }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
@@ -750,10 +764,49 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
+    func inspectAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        defer { agentOperationInProgress = false }
+        return try await readAgentTarget(action, observation: observation)
+    }
+
+    private func readAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
+        guard let predicted = try predictedAgentAction(action, observation: observation) else { return nil }
+        guard let view = browser, let window else { throw ComputerUseBrowserError.pageChanged }
+        var arguments: [String: Any] = ["documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id]
+        switch action {
+        case .pointer(.leftClick, let point):
+            guard let viewport = observation.evidence.page.viewport, viewport.isWellFormed else { throw ComputerUseBrowserError.pageChanged }
+            let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
+            let local = view.convert(location, from: nil)
+            arguments["x"] = (local.x - view.bounds.minX) / view.bounds.width * viewport.width
+            arguments["y"] = (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height
+        case .typeText:
+            arguments["focused"] = true
+            arguments["editable"] = true
+        case .key:
+            arguments["focused"] = true
+        default: return nil
+        }
+        let result = try await callDOM(.agentTarget, arguments: arguments, document: observation.evidence.document)
+        guard try predictedAgentAction(action, observation: observation) == predicted,
+              result.status == "agent-target", result.documentID == observation.evidence.documentID,
+              let id = result.agentTargetID, let context = result.agentTargetContext,
+              id.utf8.count <= 65, context.utf8.count <= 8_192 else { throw ComputerUseBrowserError.pageChanged }
+        return AgentTarget(observation: observation, proposal: action, action: predicted, context: context, elementID: id)
+    }
+
+    func validateAgentTarget(_ target: AgentTarget) async throws {
+        guard try await inspectAgentTarget(target.proposal, observation: target.observation) == target else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+    }
+
     /// Delivers one already-admitted action to the owned native view. Returning
     /// means dispatch, not goal verification. The executor journals its attempt
     /// in willBeginEffect and observes the result before planning another action.
-    func performAgentInput(_ action: ComputerUseFaraAction, observation: AgentObservation, operationID: String? = nil,
+    func performAgentInput(_ action: ComputerUseFaraAction, observation: AgentObservation, operationID: String? = nil, target: AgentTarget? = nil,
                            willBeginEffect: () throws -> Void = {}) async throws {
         guard agentObservationID == observation.id else { throw ComputerUseBrowserError.pageChanged }
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
@@ -772,6 +825,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try check()
         try await validatePageEvidence(observation.evidence)
         try check()
+        if let target {
+            guard target.observation == observation, target.proposal == action,
+                  try await readAgentTarget(action, observation: observation) == target else { throw ComputerUseBrowserError.pageChanged }
+            try check()
+        }
         if case .visitURL(let url) = action {
             guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
             // Use the existing exact WKNavigation receipt path. Retire the

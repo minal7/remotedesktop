@@ -1295,18 +1295,36 @@ final class ComputerUseHostTools {
 
     /// Invoke inside the native browser's final pre-dispatch callback, after
     /// its asynchronous scene validation and before recording/posting input.
-    func validateApprovedFingerprint(for action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint) throws {
+    func validateApprovedFingerprint(for action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+                                     nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
-        guard try prepareApproval(for: action).fingerprint == fingerprint else { throw ToolError.approvalTargetChanged }
+        guard try prepareApproval(for: action, nativeTarget: nativeTarget).fingerprint == fingerprint else { throw ToolError.approvalTargetChanged }
+    }
+
+    func inspectOwnedBrowserAgentTarget(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) async throws -> ComputerUseOwnedBrowser.AgentTarget? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        // Explicit fixture providers retain their synthetic target contract.
+        if accessibilityContextProvider != nil || approvalTargetProvider != nil { return nil }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        return try await browserNavigationTask.inspectAgentTarget(action, observation: observation)
+    }
+
+    fileprivate func validateOwnedBrowserAgentTarget(_ target: ComputerUseOwnedBrowser.AgentTarget) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try await browserNavigationTask.validateAgentTarget(target)
     }
 
     func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
+                                      target: ComputerUseOwnedBrowser.AgentTarget? = nil,
                                       willBeginEffect: () throws -> Void) async throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.performAgentInput(action, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
+        try await browserNavigationTask.performAgentInput(action, observation: observation, operationID: operationID, target: target, willBeginEffect: willBeginEffect)
     }
 
     func scrollOwnedBrowserViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
@@ -1963,8 +1981,11 @@ final class ComputerUseHostTools {
         return value as? String
     }
 
-    func approvalReason(for action: ComputerUsePredictedAction) -> String? {
-        ComputerUseActionSafetyPolicy.approvalReason(
+    func approvalReason(for action: ComputerUsePredictedAction, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) -> String? {
+        if let nativeTarget, nativeTarget.action == action {
+            return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context)
+        }
+        return ComputerUseActionSafetyPolicy.approvalReason(
             for: action,
             accessibilityContext: accessibilityContext(for: action))
     }
@@ -2261,8 +2282,16 @@ final class ComputerUseHostTools {
     }
 
     fileprivate func prepareApproval(
-        for action: ComputerUsePredictedAction
+        for action: ComputerUsePredictedAction,
+        nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil
     ) throws -> ComputerUsePreparedApproval {
+        if let nativeTarget {
+            try Task.checkCancellation()
+            guard mayAct(), nativeTarget.action == action else { throw ToolError.approvalTargetChanged }
+            return ComputerUsePreparedApproval(message: ComputerUseActionSafetyPolicy.approvalReason(
+                for: action, accessibilityContext: nativeTarget.context, forceConfirmation: true) ?? "Perform this exact browser action",
+                fingerprint: nativeTarget.fingerprint)
+        }
         let target = try approvalTarget(for: action)
         var accessibilityIdentity = target.accessibilityIdentity
         if case .typeText = action,
@@ -6599,7 +6628,7 @@ final class HostComputerUseManager: ObservableObject {
                             default:
                                 guidance = "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."
                             }
-                            try acceptExecutionResult(.userInterventionRequired(
+                            try await acceptExecutionResult(.userInterventionRequired(
                                 guidance),
                                 executor: executor, context: context, token: token)
                             return
@@ -6639,7 +6668,7 @@ final class HostComputerUseManager: ObservableObject {
                 }
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }
-                try acceptExecutionResult(
+                try await acceptExecutionResult(
                     result,
                     executor: executor,
                     context: context,
@@ -6816,7 +6845,7 @@ final class HostComputerUseManager: ObservableObject {
                 if activeVisualApprovalContinuation == continuationToken {
                     activeVisualApprovalContinuation = nil
                 }
-                try acceptExecutionResult(
+                try await acceptExecutionResult(
                     result,
                     executor: executor,
                     context: context,
@@ -6986,7 +7015,7 @@ final class HostComputerUseManager: ObservableObject {
                         authorizationGeneration: evidenceAuthorizationGeneration)
                 }
                 guard currentExecutionToken == token else { return }
-                try acceptExecutionResult(
+                try await acceptExecutionResult(
                     result,
                     executor: executor,
                     context: context,
@@ -7054,7 +7083,7 @@ final class HostComputerUseManager: ObservableObject {
         executor: any ComputerUseExecuting,
         context: ExecutionContext,
         token: UUID
-    ) throws {
+    ) async throws {
         guard currentExecutionToken == token else { throw CancellationError() }
         let envelope = context.envelope
 
@@ -7066,7 +7095,7 @@ final class HostComputerUseManager: ObservableObject {
             try owner.validateAnswer(answer)
             // Use the existing durable terminal/first-result-wins path only
             // after the exact retained source answer has been admitted.
-            try acceptExecutionResult(.completed(answer.message), executor: executor, context: context, token: token)
+            try await acceptExecutionResult(.completed(answer.message), executor: executor, context: context, token: token)
         case .completed(let response):
             sendDurableTerminal(
                 response,
@@ -7169,17 +7198,21 @@ final class HostComputerUseManager: ObservableObject {
                 throw VisualApprovalContinuationError.invalidContinuation
             }
             guard continuationToken.taskID == envelope.id,
-                  continuationToken.browserPageEvidence.map({ $0.document.taskID == envelope.id }) ?? true else {
+                  continuationToken.browserPageEvidence.map({ $0.document.taskID == envelope.id }) ?? true,
+                  continuationToken.nativeBrowserTarget.map({ $0.pageEvidence == continuationToken.browserPageEvidence && $0.action == proposedAction }) ?? true else {
                 continuationExecutor.cancelVisualApprovalContinuation(
                     continuationToken)
                 throw VisualApprovalContinuationError.invalidContinuation
             }
             // The visual model's confirmation copy is untrusted. Build the
             // user-facing description and TOCTOU fingerprint from the exact
-            // action and current Accessibility target.
+            // action and host-observed native browser or Accessibility target.
             let prepared: ComputerUsePreparedApproval
             do {
-                prepared = try tools.prepareApproval(for: proposedAction)
+                if let target = continuationToken.nativeBrowserTarget { try await tools.validateOwnedBrowserAgentTarget(target) }
+                try Task.checkCancellation()
+                guard currentExecutionToken == token else { throw CancellationError() }
+                prepared = try tools.prepareApproval(for: proposedAction, nativeTarget: continuationToken.nativeBrowserTarget)
             } catch {
                 continuationExecutor.cancelVisualApprovalContinuation(
                     continuationToken)

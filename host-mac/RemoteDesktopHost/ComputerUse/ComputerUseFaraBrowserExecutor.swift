@@ -27,8 +27,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let observation: ComputerUseOwnedBrowser.AgentObservation
         var performed = false
         init(taskID: String, action: ComputerUsePredictedAction, message: String,
-             proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation) {
-            continuation = .init(taskID: taskID, nonce: UUID(), browserPageEvidence: observation.approvalPageEvidence)
+             proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation,
+             nativeTarget: ComputerUseOwnedBrowser.AgentTarget?) {
+            continuation = .init(taskID: taskID, nonce: UUID(), browserPageEvidence: observation.approvalPageEvidence, nativeBrowserTarget: nativeTarget)
             self.action = action; self.message = message; self.proposal = proposal; self.observation = observation
         }
         var result: ComputerUseExecutionResult { .approvalRequired(message: message, action: action, continuation: continuation) }
@@ -96,6 +97,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         defer { lease.release() }
         do {
             try await dispatch(pending.proposal, observation: pending.observation, session: session, tools: tools,
+                nativeTarget: pending.continuation.nativeBrowserTarget,
                 approvedFingerprint: fingerprint, willBeginEffect: willBeginEffect, assertRootOwnership: { try lease.assertOwnership() })
             pending.performed = true
         } catch let error as ComputerUseBrowserError {
@@ -134,7 +136,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
 
     private func dispatch(_ proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation,
-        session: Session, tools: ComputerUseHostTools, approvedFingerprint: ComputerUseApprovalFingerprint? = nil,
+        session: Session, tools: ComputerUseHostTools, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil,
+        approvedFingerprint: ComputerUseApprovalFingerprint? = nil,
         willBeginEffect: () -> Void = {}, assertRootOwnership: () throws -> Void) async throws {
         let actionID = ComputerUseTaskContract.digest([session.journal.taskID, "native-dispatch", String(session.turns)])
         let dispatchLease = try store.acquireExecution(taskID: actionID, expected: nil)
@@ -147,11 +150,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         else { action = proposal.action }
         var began = false
         do {
-            try await tools.performOwnedBrowserAgentInput(action, observation: observation, operationID: actionID, willBeginEffect: {
+            try await tools.performOwnedBrowserAgentInput(action, observation: observation, operationID: actionID, target: nativeTarget, willBeginEffect: {
                 try assertRootOwnership(); try dispatchLease.assertOwnership()
                 if let predicted = try tools.predictedOwnedBrowserAgentAction(action, observation: observation) {
-                    if let approvedFingerprint { try tools.validateApprovedFingerprint(for: predicted, fingerprint: approvedFingerprint) }
-                    else if tools.approvalReason(for: predicted) != nil { throw Failure.invalidApproval }
+                    if let approvedFingerprint { try tools.validateApprovedFingerprint(for: predicted, fingerprint: approvedFingerprint, nativeTarget: nativeTarget) }
+                    else if tools.approvalReason(for: predicted, nativeTarget: nativeTarget) != nil { throw Failure.invalidApproval }
                 } else if approvedFingerprint != nil { throw Failure.invalidApproval }
                 try self.store.save(attempted, replacing: nil)
                 began = true
@@ -231,14 +234,18 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             switch proposal.action {
             case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch:
+                let nativeTarget = try await tools.inspectOwnedBrowserAgentTarget(proposal.action, observation: observation)
+                if let nativeTarget, nativeTarget.context.isEmpty {
+                    return .userInterventionRequired("I couldn't identify that browser control. Complete this step in the browser, then choose Resume.")
+                }
                 if let predicted = try tools.predictedOwnedBrowserAgentAction(proposal.action, observation: observation),
-                   let reason = tools.approvalReason(for: predicted) {
-                    let pending = PendingApproval(taskID: taskID, action: predicted, message: reason, proposal: proposal, observation: observation)
+                   let reason = tools.approvalReason(for: predicted, nativeTarget: nativeTarget) {
+                    let pending = PendingApproval(taskID: taskID, action: predicted, message: reason, proposal: proposal, observation: observation, nativeTarget: nativeTarget)
                     session.approval = pending
                     return pending.result
                 }
                 progress("Using the browser…")
-                try await dispatch(proposal, observation: observation, session: session, tools: tools,
+                try await dispatch(proposal, observation: observation, session: session, tools: tools, nativeTarget: nativeTarget,
                     assertRootOwnership: { try lease.assertOwnership() })
             case .wait(let seconds):
                 try await Task.sleep(for: .seconds(seconds))

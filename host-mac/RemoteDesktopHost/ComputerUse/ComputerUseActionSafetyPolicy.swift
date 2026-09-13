@@ -78,7 +78,7 @@ enum ComputerUseActionSafetyPolicy {
             }
             if nonSeparators.isEmpty,
                digits.count == 6 || (13 ... 19).contains(digits.count) {
-                return "Enter a value that looks like a one-time code or payment-card number"
+                return described("Enter a value that looks like a one-time code or payment-card number", context: accessibilityContext)
             }
             return forceConfirmation
                 ? described(
