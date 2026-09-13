@@ -396,6 +396,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     // Waiting posts no input. Input reads its exact retained
                     // target below; unrelated content need not stay frozen.
                     break
+                case .remember:
+                    try tools.validateOwnedBrowserAgentMemoryObservation(observation)
                 default:
                     try await tools.validateOwnedBrowserAgentObservation(observation)
                 }
@@ -480,7 +482,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             session.pageReading = nextReading
             session.actionError = rejection?.message
             if let rejection { observation = rejection.observation; continue }
-            do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
+            do {
+                let retainedSession: ComputerUseOwnedBrowser.AgentObservation?
+                if case .remember = proposal.action { retainedSession = observation } else { retainedSession = nil }
+                observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID, preserving: retainedSession)
+            }
             catch ComputerUseBrowserError.authenticationRequired {
                 return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
             }

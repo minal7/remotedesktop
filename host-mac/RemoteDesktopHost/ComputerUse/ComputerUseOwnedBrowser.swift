@@ -808,6 +808,16 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try check()
     }
 
+    /// Memorization retains a fact beside the screenshot and source where it
+    /// was observed. It posts no input and asserts no current goal completion.
+    /// The next screenshot still performs fresh page/authentication admission.
+    func validateAgentMemoryObservation(_ observation: AgentObservation) throws {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        try validateAgentSession(observation)
+        try validateSourceDocument(observation.evidence.document)
+        guard agentObservationID == observation.id, hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
+    }
+
     func captureAgentObservation(document expected: ComputerUseBrowserDocument) async throws -> AgentObservation {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
         agentOperationInProgress = true

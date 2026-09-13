@@ -7,6 +7,181 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraRemembersObservedFactWhenBackgroundCountdownChanges() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: retained facts are bound to their observation") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Showtime: 6:20 PM</h1><p>Time remaining: <span id='clock'>10:00</span></p><script>document.addEventListener('input',()=>fetch('/edit'));document.addEventListener('click',()=>fetch('/click'))</script>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraMemory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "memory")
+        _ = try await browser.navigate(taskID: "memory", operationID: "fixture", to: base.appendingPathComponent("page"))
+        let remembered = self.call(#"{"action":"pause_and_memorize_fact","fact":"The displayed showtime is 6:20 PM."}"#)
+        var calls = 0, firstImage: Data?, secondImage: Data?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1
+            guard calls <= 3 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 {
+                firstImage = input.screenshotPNG
+                @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+                let web = try XCTUnwrap(try XCTUnwrap(NSApp.keyWindow?.contentView).subviews.flatMap { webViews($0) }.first)
+                _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:59'")
+            } else {
+                guard input.history.count == 1 else { XCTFail("The app discarded an observed fact because unrelated countdown text changed"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                XCTAssertEqual(input.history.first?.response, remembered)
+                XCTAssertEqual(input.history.first?.screenshotPNG, firstImage)
+                XCTAssertEqual(input.history.first?.currentURL, base.appendingPathComponent("page"))
+                if calls == 2 {
+                    secondImage = input.screenshotPNG
+                    @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+                    let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+                    _ = try await web.evaluateJavaScript("document.querySelector('h1').textContent='Showtime: 7:00 PM'")
+                } else { XCTAssertNotEqual(input.screenshotPNG, secondImage, "Completion must reread changed facts") }
+            }
+            let response = calls == 1 ? remembered : self.call(calls == 2
+                ? #"{"action":"terminate","answer":"The showtime is 6:20 PM."}"#
+                : #"{"action":"terminate","answer":"The showtime is 7:00 PM."}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let goal = "Read and remember the displayed showtime, then report it."
+        let result = try await executor.execute(taskID: "memory", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("The showtime is 7:00 PM."))
+        let replay = try await executor.execute(taskID: "memory", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(replay, result); XCTAssertEqual(calls, 3)
+        XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/edit"), 0); XCTAssertEqual(server.count("/click"), 0)
+    }
+
+    @MainActor
+    func testOptInFaraMemoryRejectsRetiredObservationSourceAndControl() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: memory authority boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var allowsActions = true, retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowsActions }); defer { browser.close() }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Public fact</h1>"), "/next": .init(body: "<!doctype html><h1>Another source</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraMemoryAuthority-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowsActions }, browserNavigationTask: .init(browser: browser, journalDirectory: directory))
+        for mode in ["observation", "navigation", "owner", "take-control", "cancelled", "stop", "closed"] {
+            allowsActions = true
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let observation = try await browser.captureAgentObservation(document: document)
+            switch mode {
+            case "observation": _ = try await browser.captureAgentObservation(document: document)
+            case "navigation": _ = try await browser.navigate(taskID: mode, operationID: "next", to: base.appendingPathComponent("next"))
+            case "owner": try browser.claim(taskID: "successor")
+            case "take-control": allowsActions = false; browser.prepareForUserControl(taskID: mode); allowsActions = true
+            case "stop": browser.stop()
+            case "closed": browser.close()
+            default: break
+            }
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try tools.validateOwnedBrowserAgentMemoryObservation(observation)
+            }
+            do { try await work.value; return XCTFail("Memory accepted retired authority: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertTrue([ComputerUseBrowserError.pageChanged, .ownershipLost].contains(error as? ComputerUseBrowserError ?? .busy), "\(mode): \(error)") }
+            }
+            if mode == "owner" { XCTAssertEqual(browser.taskID, "successor") }
+        }
+        XCTAssertEqual(server.count("/page"), 7); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    @MainActor
+    func testOptInFaraMemoryPausesBeforeCapturingLoginAndRetainsPublicHistoryOnResume() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: memory followed by login") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Showtime: 6:20 PM</h1><script>document.addEventListener('input',()=>fetch('/edit'));document.addEventListener('click',()=>fetch('/click'))</script>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraMemoryLogin-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "memory-login")
+        _ = try await browser.navigate(taskID: "memory-login", operationID: "fixture", to: base.appendingPathComponent("page"))
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        let web = try XCTUnwrap(webViews(try XCTUnwrap(window.contentView)).first)
+        let remembered = self.call(#"{"action":"pause_and_memorize_fact","fact":"The displayed showtime is 6:20 PM."}"#)
+        var calls = 0, firstImage: Data?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1
+            guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 {
+                firstImage = input.screenshotPNG
+                _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input id=login type=password value=PrivateFixturePassword>')")
+            } else {
+                XCTAssertEqual(input.history.count, 1)
+                XCTAssertEqual(input.history.first?.response, remembered)
+                XCTAssertEqual(input.history.first?.screenshotPNG, firstImage)
+                XCTAssertEqual(input.history.first?.currentURL, base.appendingPathComponent("page"))
+                XCTAssertFalse(input.goal.contains("PrivateFixturePassword"))
+            }
+            let response = calls == 1 ? remembered : self.call(#"{"action":"terminate","answer":"The showtime is 6:20 PM."}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let goal = "Remember and report the showtime."
+        let paused = try await executor.execute(taskID: "memory-login", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        guard case .userInterventionRequired = paused else { return XCTFail("Login did not pause") }
+        XCTAssertEqual(calls, 1)
+        let early = try await executor.execute(taskID: "memory-login", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(early, paused); XCTAssertEqual(calls, 1)
+        _ = try await web.evaluateJavaScript("document.getElementById('login').remove()")
+        let completed = try await executor.execute(taskID: "memory-login", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(completed, .completed("The showtime is 6:20 PM.")); XCTAssertEqual(calls, 2)
+        XCTAssertTrue(NSApp.keyWindow === window)
+        XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/edit"), 0); XCTAssertEqual(server.count("/click"), 0)
+    }
+
+    @MainActor
+    func testOptInNativeVeeziMemoryRemainsBoundWhileCountdownChanges() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one read-only public ticket-page observation experiment") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let url = try XCTUnwrap(URL(string: "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c"))
+        try browser.claim(taskID: "read-lifetime")
+        let document = try await browser.navigate(taskID: "read-lifetime", operationID: "fixture", to: url)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("VeeziReadLifetime-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        // Let the initial loading overlay settle before the reading interval.
+        try await Task.sleep(for: .seconds(4))
+        let first = try await navigation.captureAgentObservation(taskID: "read-lifetime")
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        try await Task.sleep(for: .seconds(4))
+        var failure: String?
+        do { try await browser.validateAgentObservation(first) } catch { failure = String(reflecting: error) }
+        XCTAssertNoThrow(try browser.validateAgentMemoryObservation(first))
+        let keyWindowRetained = NSApp.keyWindow === window
+        let currentSourceValid = (try? browser.validateSourceDocument(document)) != nil
+        let second = try await navigation.captureAgentObservation(taskID: "read-lifetime", preserving: first)
+        func publicReading(_ page: ComputerUseBrowserPageSnapshot) throws -> String {
+            let data = try JSONSerialization.data(withJSONObject: ["texts": page.texts.map(\.text),
+                "links": page.links.map { ["label": $0.label, "destination": $0.destination] },
+                "controlCount": page.controls.count, "containerCount": page.containers.count], options: [.prettyPrinted, .sortedKeys])
+            return String(decoding: data, as: UTF8.self)
+        }
+        let before = first.approvalPageEvidence.page, after = second.approvalPageEvidence.page
+        let report = XCTAttachment(string: "validationFailure=\(failure ?? "none")\nkeyWindowRetained=\(keyWindowRetained)\ncurrentSourceValid=\(currentSourceValid)\nviewportEqual=\(before.viewport == after.viewport)\ncontrolsEqual=\(before.controls == after.controls)\nBEFORE\n\(try publicReading(before))\nAFTER\n\(try publicReading(after))")
+        report.name = "Public Veezi observation lifetime"; report.lifetime = .keepAlways; add(report)
+        for (name, png) in [("Before reading", first.png), ("After reading", second.png)] {
+            let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        XCTAssertTrue(keyWindowRetained); XCTAssertTrue(currentSourceValid)
+    }
+
+    @MainActor
     func testOptInFaraFragmentRevealRetainsItsTargetAcrossUnrelatedPageChanges() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scoped fragment reveal on a changing page") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

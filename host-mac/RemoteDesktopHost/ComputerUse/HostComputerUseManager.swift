@@ -1329,6 +1329,13 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.validateAgentObservation(observation)
     }
 
+    func validateOwnedBrowserAgentMemoryObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try browserNavigationTask.validateAgentMemoryObservation(observation)
+    }
+
     func predictedOwnedBrowserAgentAction(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) throws -> ComputerUsePredictedAction? {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
