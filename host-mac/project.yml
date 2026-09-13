@@ -159,6 +159,7 @@ targets:
     sources:
       - path: ../ios/RemoteDesktop/ComputerUse/ComputerUseSessionModel.swift
       - path: ../ios/RemoteDesktop/ComputerUse/ComputerUsePendingPromptStore.swift
+      - path: ../ios/RemoteDesktop/ComputerUse/LocalComputerUseBrokerClient.swift
       - path: ../protocol/Swift
         excludes:
           - DesktopVideoQuality.swift

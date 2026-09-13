@@ -190,7 +190,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading, userResponse: session.userResponse, actionError: session.actionError))
+        if !session.history.isEmpty {
+            session.history[session.history.count - 1].resultObservation = .init(currentURL: currentURL,
+                userResponse: session.userResponse, actionError: session.actionError)
+        }
+        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading, userResponse: session.userResponse, actionError: session.actionError, action: proposal.action))
         session.pageReading = nil
         session.userResponse = nil
         session.actionError = nil
@@ -199,7 +203,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             // out, so an answer never loses the question that gives it meaning.
             guard let index = session.history.firstIndex(where: {
                 if $0.userResponse != nil { return false }
-                if case .some(.askUser(_)) = try? ComputerUseFaraAction.decodeNativeMessage($0.response) { return false }
+                if case .some(.askUser(_)) = $0.action { return false }
                 return true
             }) else { break }
             session.history.remove(at: index)

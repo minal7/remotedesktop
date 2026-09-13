@@ -29,12 +29,23 @@ enum ComputerUseFaraModel {
         var answer: String? = nil
     }
     struct Step: Equatable, Sendable {
+        struct ResultObservation: Equatable, Sendable {
+            let currentURL: URL?
+            let userResponse: String?
+            let actionError: String?
+        }
         let screenshotPNG: Data
         let response: String
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
         var userResponse: String? = nil
         var actionError: String? = nil
+        /// Native action metadata for executor history retention, independent
+        /// of the actor's response protocol. It does not authorize input.
+        var action: ComputerUseFaraAction? = nil
+        /// Keep the actual next observation's result fields when intervening
+        /// history is evicted. This is feedback, not an execution receipt.
+        var resultObservation: ResultObservation? = nil
     }
     struct Input: Equatable, Sendable {
         let goal: String
