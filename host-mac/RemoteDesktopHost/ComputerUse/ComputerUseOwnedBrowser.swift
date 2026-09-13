@@ -1114,12 +1114,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         if inspectedTarget?.navigation == .fragment, let linkID = inspectedTarget?.elementID {
-            guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
+            guard let operationID, !operationID.isEmpty,
+                  case .pointer(_, let point) = action, let view = browser, let window,
+                  let viewport = observation.evidence.page.viewport, viewport.isWellFormed else { throw ComputerUseBrowserError.unsupportedDocument }
+            let location = try agentClickTarget(point, observation: observation, view: view, window: window).location
+            let local = view.convert(location, from: nil)
             try willBeginEffect(); try check()
             if case .pointer(_, let point) = action { agentPointer = point }
             let result = try await callDOM(.agentFragmentScroll, arguments: [
                 "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
-                "operationID": operationID, "linkID": linkID], validateContext: { (try? check()) != nil })
+                "operationID": operationID, "linkID": linkID,
+                "x": (local.x - view.bounds.minX) / view.bounds.width * viewport.width,
+                "y": (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height], validateContext: { (try? check()) != nil })
             guard result.status == "agent-scroll-dispatched", result.documentID == observation.evidence.documentID else {
                 throw ComputerUseBrowserError.viewportScrollUncertain
             }

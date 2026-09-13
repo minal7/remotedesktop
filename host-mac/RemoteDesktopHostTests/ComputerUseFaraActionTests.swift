@@ -7,6 +7,54 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraFragmentRevealRetainsItsTargetAcrossUnrelatedPageChanges() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scoped fragment reveal on a changing page") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["text", "links"] {
+            let change = mode == "text" ? "status.textContent='Background content is ready'" : "status.insertAdjacentHTML('afterend',\"<a href='/unrelated' style='position:fixed;left:0;top:0'>More information</a>\")"
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0}#target{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;display:block}section{margin-top:150vh;height:100vh}</style>
+                <div id='status'>Loading background content</div><a id='target' href='#showtimes' onclick="fetch('/selected')">Buy Tickets</a><section id='showtimes'>Screening details</section>
+                <script>fetch('/release').then(()=>{const status=document.getElementById('status');\(change);fetch('/changed')})</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let observation = try await browser.captureAgentObservation(document: document)
+            let deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/release") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/release"), 1)
+            server.releaseHeldResponses()
+            while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/changed"), 1)
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 200, y: 150))
+            let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertEqual(target.navigation, .fragment)
+            var attempts = 0
+            do {
+                try await browser.performAgentInput(action, observation: observation,
+                    operationID: ComputerUseTaskContract.digest([mode, "reveal"]), target: target, willBeginEffect: { attempts += 1 })
+            } catch { return XCTFail("A retained fragment target failed after unrelated \(mode) changed: \(String(reflecting: error))") }
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+            let web = try XCTUnwrap(try XCTUnwrap(NSApp.keyWindow?.contentView).subviews.flatMap { webViews($0) }.first)
+            let revealed = try await web.evaluateJavaScript("scrollY > 500 && Math.abs(document.getElementById('showtimes').getBoundingClientRect().top) < 2 && location.hash === ''")
+            XCTAssertEqual(revealed as? Bool, true)
+            do {
+                try await browser.performAgentInput(action, observation: observation,
+                    operationID: ComputerUseTaskContract.digest([mode, "replay"]), target: target, willBeginEffect: { attempts += 1 })
+                XCTFail("Fragment input replayed")
+            } catch { }
+            XCTAssertEqual(attempts, 1); XCTAssertEqual(server.count("/selected"), 0)
+            XCTAssertEqual(server.count("/unrelated"), 0); XCTAssertEqual(server.count("/page"), 1)
+        }
+    }
+
+    @MainActor
     private func requireSameNativeWindow(_ retained: inout NSWindow?) throws {
         let current = try XCTUnwrap(NSApp.keyWindow)
         if let retained {

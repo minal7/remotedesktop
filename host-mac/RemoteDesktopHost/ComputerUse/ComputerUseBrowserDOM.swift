@@ -1865,7 +1865,7 @@ enum ComputerUseBrowserDOM {
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
-            const scopedAgentTarget = command === 'agentTarget' && !!lastPageSnapshot.agentState;
+            const scopedAgentTarget = ['agentTarget','agentFragmentScroll'].includes(command) && !!lastPageSnapshot.agentState;
             if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {
               if (lastPageSnapshot.invalidated) return reply('stale-agent-bindings');
               if (serialized !== lastPageSnapshot.serialized) return reply('stale-agent-content');
@@ -1891,13 +1891,20 @@ enum ComputerUseBrowserDOM {
                 }))) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
             if (command === 'agentFragmentScroll') {
-              const previous = lastPageSnapshot.links.get(args.linkID), current = links.get(args.linkID);
+              const previous = lastPageSnapshot.links.get(args.linkID);
+              const current = previous && Array.from(links.values()).find(binding => binding.element === previous.element);
               if (!lastPageSnapshot.agentState || !previous || previous.retired || !current
-                  || previous.element !== current.element || previous.signature !== current.signature
+                  || previous.element !== current.element || previous.base !== current.base || previous.signature !== current.signature
+                  || JSON.stringify(previous.metadata) !== JSON.stringify(current.metadata)
+                  || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,current.element)
+                  || !agentPointStateMatches(lastPageSnapshot.agentState,agentState,args.x,args.y)
                   || previous.agentNavigationKind !== 'fragment' || current.agentNavigationKind !== 'fragment'
                   || !previous.fragmentTarget || previous.fragmentTarget !== current.fragmentTarget
                   || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
                   || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64) return reply('stale');
+              let hit = agentHitAtPoint(args.x,args.y);
+              for (let depth=0; hit && hit !== current.element && depth<64; depth++) hit = hit.parentElement ?? hit.getRootNode()?.host;
+              if (hit !== current.element) return reply('stale');
               const destination = current.fragmentTarget;
               agentScrollOperations.add(args.operationID);
               lastPageSnapshot = null; formQueries.clear();
