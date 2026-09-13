@@ -7,6 +7,56 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraReplaysFrozenRejectedSearchHeading() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_FROZEN_RECOVERY"] == "1" else { throw XCTSkip("Opt-in: one frozen rejected-target model proposal, no browser or input") }
+        struct Replay: Decodable {
+            struct Frame: Decodable { let pngFile: String; let pngSHA256: String; let response: String; let currentURL: URL?; let actionError: String? }
+            struct Rectangle: Decodable { let x: Double; let y: Double; let width: Double; let height: Double }
+            let goal: String; let history: [Frame]; let current: Frame
+            let imageWidth: Int; let imageHeight: Int; let acceptedClickRectangles: [Rectangle]
+        }
+        let file = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_FROZEN_RECOVERY_INPUT"]))
+        let bytes = try Data(contentsOf: file), replay = try JSONDecoder().decode(Replay.self, from: bytes)
+        func image(_ frame: Replay.Frame) throws -> Data {
+            let png = try Data(contentsOf: file.deletingLastPathComponent().appendingPathComponent(frame.pngFile))
+            guard SHA256.hash(data: png).map({ String(format: "%02x", $0) }).joined() == frame.pngSHA256 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            return png
+        }
+        let input = try ComputerUseFaraModel.Input(goal: replay.goal, screenshotPNG: image(replay.current),
+            history: replay.history.map { try .init(screenshotPNG: image($0), response: $0.response, currentURL: $0.currentURL, actionError: $0.actionError) },
+            currentURL: replay.current.currentURL, actionError: replay.current.actionError)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: input.screenshotPNG))
+        XCTAssertEqual(bitmap.pixelsWide, replay.imageWidth); XCTAssertEqual(bitmap.pixelsHigh, replay.imageHeight)
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let runtime = OSAtlasLlamaRuntime(), worker = ComputerUsePlanningWorker(), started = Date()
+        var proposal: ComputerUseFaraModel.Proposal?, failure: Error?, requestSHA256 = "none"
+        do {
+            let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            requestSHA256 = SHA256.hash(data: try XCTUnwrap(request.httpBody)).map { String(format: "%02x", $0) }.joined()
+            proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+        } catch { failure = error }
+        await runtime.shutdown()
+        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+        var recovery = false
+        if case .scroll(horizontal: false, let pixels) = proposal?.action { recovery = pixels < 0 }
+        if case .pointer(let kind, let point) = proposal?.action, kind == .leftClick || kind == .doubleClick {
+            let pixel = try point.pixel(width: replay.imageWidth, height: replay.imageHeight)
+            recovery = replay.acceptedClickRectangles.contains { Double(pixel.x) > $0.x && Double(pixel.x) < $0.x + $0.width && Double(pixel.y) > $0.y && Double(pixel.y) < $0.y + $0.height }
+        }
+        let report: [String: Any] = ["response": proposal?.response ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
+            "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited, "demonstratedRecoveryProposal": recovery,
+            "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "requestSHA256": requestSHA256,
+            "actionError": input.actionError ?? "none", "noBrowserOrInput": true, "fullTaskAccepted": false]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Frozen rejected-heading recovery"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertTrue(exited)
+        if let failure { return XCTFail("Frozen recovery proposal failed: \(failure)") }
+        XCTAssertTrue(recovery, "The proposal must choose a visible source control or scroll to other results; this is a one-step recovery check only")
+    }
+
+    @MainActor
     func testOptInFaraScrollRejectsChangedPointLoginAndRetiredObservation() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scoped scroll ownership and geometry") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
@@ -651,7 +701,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: navigation classification is not purchase authorization") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        for markup in [
+        var retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        for (index, markup) in [
             "<button onclick=\"fetch('/selected')\">Buy Tickets</button>",
             "<a href='/details'>Buy Tickets</a>",
             "<a href='/details' target='_blank' role='button'>Buy Tickets</a>",
@@ -661,17 +713,18 @@ final class ComputerUseFaraActionTests: XCTestCase {
             "<a href='#'>Buy Tickets</a>",
             "<a href='#missing'>Buy Tickets</a>",
             "<a href='#hidden'>Buy Tickets</a><section id='hidden' hidden>Details</section>"
-        ] {
+        ].enumerated() {
             let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>a,button{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}</style>" + markup)])
             let base = try await server.start(); defer { server.stop() }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraTicketGate-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
-            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
             let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
-            try browser.claim(taskID: "gate")
-            _ = try await browser.navigate(taskID: "gate", operationID: "fixture", to: base.appendingPathComponent("page"))
-            let observation = try await navigation.captureAgentObservation(taskID: "gate")
+            let taskID = "gate-\(index)"
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let observation = try await navigation.captureAgentObservation(taskID: taskID)
             let inspected = try await browser.inspectAgentTarget(.pointer(.leftClick, .init(x: 200, y: 150)), observation: observation)
             let target = try XCTUnwrap(inspected)
             XCTAssertNil(target.navigation, markup)
@@ -683,7 +736,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 let response = self.call(#"{"action":"left_click","coordinate":[200,150]}"#)
                 return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
             })
-            let result = try await executor.execute(taskID: "gate", prompt: "Read the screening details.", trustedUserPrompt: "Read the screening details.", tools: tools, progress: { _ in })
+            let result = try await executor.execute(taskID: taskID, prompt: "Read the screening details.", trustedUserPrompt: "Read the screening details.", tools: tools, progress: { _ in })
             guard case .approvalRequired = result else { return XCTFail("Purchase control lost its approval gate: \(markup): \(result)") }
             XCTAssertEqual(calls, 1); XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/details"), 0); XCTAssertEqual(server.count("/selected"), 0)
         }
