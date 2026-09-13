@@ -1845,5 +1845,19 @@
     "Initial Bing02 type staleness has no isolated cause; do not infer every timing issue was repaired.",
     "Current local search/window, Fara target and Holo wire/login regressions pass; Holo native login repeats the known thread-priority warning.",
     "Every live attempt retained one native browser window; the local lifecycle regression checks six observations and three Stop/new-task cycles. Other intentional test process/window starts and ends remain."
-  ]
+  ],
+  "delegatedProtocolReview": {
+    "recommendation": "Pause full-actor GUI-Owl trials; no omitted mandatory requirement identified. Keep Fara selected.",
+    "findings": [
+      "Bing03 request-2 contains both native screenshot/action pairs plus current screenshot, before prefix eviction, but repeats the verified click.",
+      "Responses finish normally at 49 completion tokens; prompt usage reaches at most 3517 tokens, within 8192 context.",
+      "Temperature zero and original PNG submission follow the pinned desktop cookbook.",
+      "Frozen successful continuation includes a previous rejected typing proposal; Bing03 has clicking history. Its success is trajectory-specific."
+    ],
+    "references": [
+      "https://github.com/X-PLUG/MobileAgent/blob/11cea575561fb7800b5fb6b6cafa56f7a91de11f/Mobile-Agent-v3.5/cookbook/end2end_usage_computer.ipynb",
+      "https://huggingface.co/mPLUG/GUI-Owl-1.5-2B-Instruct/blob/528ceaec795bbfbe6103bd79e03db849feadfb24/generation_config.json",
+      "https://github.com/X-PLUG/MobileAgent/blob/11cea575561fb7800b5fb6b6cafa56f7a91de11f/Mobile-Agent-v3.5/computer_use/utils.py#L587-L663"
+    ]
+  }
 }
