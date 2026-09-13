@@ -18,11 +18,18 @@ final class ComputerUseHoloModelTests: XCTestCase {
     }
 
     @MainActor
-    private func runLocalWorkflow(actualModel: Bool) async throws {
+    func testOptInActualFaraQ6CompletesLocalTypingAndLoginResume() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_Q6_NATIVE_TRIAL"] == "1" else { throw XCTSkip("Opt-in: bounded Fara Q6 native typing/login trial") }
+        try await runLocalWorkflow(actualModel: true, faraQ6: true)
+    }
+
+    @MainActor
+    private func runLocalWorkflow(actualModel: Bool, faraQ6: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
+        let modelName = faraQ6 ? "Fara Q6" : "Holo"
         let previous = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previous) }
-        let directory = actualModel ? URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_TRIAL_DIRECTORY"]))
+        let directory = actualModel ? URL(fileURLWithPath: try XCTUnwrap(environment[faraQ6 ? "FARA_Q6_TRIAL_DIRECTORY" : "HOLO_TRIAL_DIRECTORY"]))
             : FileManager.default.temporaryDirectory.appendingPathComponent("HoloLocal-" + UUID().uuidString)
         guard !FileManager.default.fileExists(atPath: directory.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -43,12 +50,12 @@ final class ComputerUseHoloModelTests: XCTestCase {
         let base = try await server.start(); defer { server.stop() }
         defer {
             let events = XCTAttachment(string: server.requestedPaths.joined(separator: "\n"))
-            events.name = "Holo native fixture events"; events.lifetime = .keepAlways; add(events)
+            events.name = modelName + " native fixture events"; events.lifetime = .keepAlways; add(events)
             if let files = try? FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("actor"), includingPropertiesForKeys: nil) {
                 for file in files where file.pathExtension == "json" {
                     if let data = try? Data(contentsOf: file) {
                         let journal = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-                        journal.name = "Holo native action journal"; journal.lifetime = .keepAlways; add(journal)
+                        journal.name = modelName + " native action journal"; journal.lifetime = .keepAlways; add(journal)
                     }
                 }
             }
@@ -67,6 +74,9 @@ final class ComputerUseHoloModelTests: XCTestCase {
             guard calls < 8 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
             defer { calls += 1 }
             XCTAssertEqual(input.goal, goal)
+            if faraQ6 {
+                return try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment)
+            }
             let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
             _ = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
             let response: Data
@@ -92,7 +102,7 @@ final class ComputerUseHoloModelTests: XCTestCase {
         XCTAssertEqual(early, paused); XCTAssertEqual(calls, pausedCalls)
         _ = try await web.evaluateJavaScript("document.getElementById('login').remove()")
         let completed = try await run()
-        guard case .completed(let answer) = completed else { return XCTFail("Holo did not complete after explicit Resume: \(completed)") }
+        guard case .completed(let answer) = completed else { return XCTFail("\(modelName) did not complete after explicit Resume: \(completed)") }
         XCTAssertFalse(answer.isEmpty)
         let completedCalls = calls
         let replay = try await run()
@@ -117,13 +127,13 @@ final class ComputerUseHoloModelTests: XCTestCase {
         XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
         XCTAssertEqual(server.count("/key"), 0); XCTAssertEqual(server.count("/login-shown"), 1)
         XCTAssertTrue(NSApp.keyWindow === window)
-        let report: [String: Any] = ["actualModel":actualModel, "proposals":calls, "pausedProposals":pausedCalls, "answer":answer,
+        let report: [String: Any] = ["model":modelName, "actualModel":actualModel, "proposals":calls, "pausedProposals":pausedCalls, "answer":answer,
             "destination":state["destination"] ?? "", "origin":state["origin"] ?? "", "editEvents":edits.count,
             "sameWindow":NSApp.keyWindow === window, "wholeApp12GBQualified":false, "providerLoginQualified":false]
         let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: directory.appendingPathComponent("workflow.json"))
         let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-        attachment.name = "Holo native typing and login Resume"; attachment.lifetime = .keepAlways; add(attachment)
+        attachment.name = modelName + " native typing and login Resume"; attachment.lifetime = .keepAlways; add(attachment)
     }
 
     @MainActor

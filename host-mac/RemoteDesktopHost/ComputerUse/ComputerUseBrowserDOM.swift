@@ -1077,7 +1077,9 @@ enum ComputerUseBrowserDOM {
           focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : [];
         const selection = doc.getSelection();
         return {elements,layout,indices:new Map(elements.map((element,index)=>[element,index])),focused,field:JSON.stringify(field),
-          width:innerWidth,height:innerHeight,
+          width:innerWidth,height:innerHeight,scrollX,scrollY,
+          pageKeyFocus:(focused === doc.body || focused === doc.documentElement) && !focused.isContentEditable
+            && doc.designMode.toLowerCase() !== 'on' && !focused.hasAttribute('role') && !focused.hasAttribute('tabindex'),
           anchor:selection?.anchorNode,focus:selection?.focusNode,start:selection?.anchorOffset,end:selection?.focusOffset};
       }
       function agentFocusStateMatches(previous, current) {
@@ -1973,6 +1975,18 @@ enum ComputerUseBrowserDOM {
             }
             if (command === 'agentTarget') {
               if (!lastPageSnapshot.agentState) return reply('unsupported');
+              if (args.paging === true) {
+                // Page keys go through native WebKit key handling. Only a
+                // retained plain document focus may receive them; a quantity,
+                // editor or composite control must not gain paging authority.
+                const previous = lastPageSnapshot.agentState;
+                if (args.focused !== true || !agentFocusStateMatches(previous,agentState)
+                    || previous.width !== agentState.width || previous.height !== agentState.height
+                    || previous.scrollX !== agentState.scrollX || previous.scrollY !== agentState.scrollY
+                    || previous.pageKeyFocus !== agentState.pageKeyFocus) return reply('stale-agent-page-focus');
+                if (!agentState.pageKeyFocus) return reply('unsupported-agent-page-key');
+                return {...reply('agent-target'),agentTargetID:'native-page',agentTargetContext:'AXScrollArea • Browser page'};
+              }
               let hit;
               if (args.focused === true) {
                 hit = doc.activeElement;

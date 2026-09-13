@@ -153,7 +153,15 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runFrozenFaraProposal(ticketAnswer: Bool) async throws {
+    func testOptInRecordedFaraTicketAnswerPassesProductionDecoder() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_FROZEN_RECOVERY"] == "1" else { throw XCTSkip("Opt-in: recorded response decoding only") }
+        let response = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_RECORDED_RESPONSE"]))
+        try await runFrozenFaraProposal(ticketAnswer: true, recordedResponse: response)
+    }
+
+    @MainActor
+    private func runFrozenFaraProposal(ticketAnswer: Bool, recordedResponse: URL? = nil) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_FROZEN_RECOVERY"] == "1" else { throw XCTSkip("Opt-in: one frozen model proposal, no browser or input") }
         struct Replay: Decodable {
@@ -179,17 +187,21 @@ final class ComputerUseFaraActionTests: XCTestCase {
             currentURL: replay.current.currentURL, actionError: replay.current.actionError)
         let bitmap = try XCTUnwrap(NSBitmapImageRep(data: input.screenshotPNG))
         XCTAssertEqual(bitmap.pixelsWide, replay.imageWidth); XCTAssertEqual(bitmap.pixelsHigh, replay.imageHeight)
-        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let inputs = recordedResponse == nil ? try await FaraTestAssets.inputs(environment: environment) : nil
         let runtime = OSAtlasLlamaRuntime(), worker = ComputerUsePlanningWorker(), started = Date()
         var proposal: ComputerUseFaraModel.Proposal?, failure: Error?, requestSHA256 = "none"
         do {
-            let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
-            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-            requestSHA256 = SHA256.hash(data: try XCTUnwrap(request.httpBody)).map { String(format: "%02x", $0) }.joined()
-            proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+            if let recordedResponse {
+                proposal = try ComputerUseFaraModel.decode(Data(contentsOf: recordedResponse))
+            } else if let inputs {
+                let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
+                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                requestSHA256 = SHA256.hash(data: try XCTUnwrap(request.httpBody)).map { String(format: "%02x", $0) }.joined()
+                proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+            }
         } catch { failure = error }
         await runtime.shutdown()
-        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+        let exited = try inputs.map { try DarwinOSAtlasProcessInspector().matchingProcesses(for: $0.llamaServerURL).isEmpty } ?? true
         var recovery = false
         if case .scroll(horizontal: false, let pixels) = proposal?.action { recovery = pixels < 0 }
         if case .pointer(let kind, let point) = proposal?.action, kind == .leftClick || kind == .doubleClick {
@@ -214,6 +226,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited, "demonstratedRecoveryProposal": recovery,
             "inputSHA256": SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), "requestSHA256": requestSHA256,
             "actionError": input.actionError ?? "none", "noBrowserOrInput": true, "fullTaskAccepted": false,
+            "inferenceExecuted": recordedResponse == nil,
             "criterion": ticketAnswer ? "Complete ticket facts without selecting tickets" : "Visible source/control or downward scroll"]
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
         attachment.name = ticketAnswer ? "Frozen ticket price stopping condition" : "Frozen rejected-heading recovery"; attachment.lifetime = .keepAlways; add(attachment)
@@ -569,7 +582,12 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runNativeVeeziCountdown(scroll: Bool) async throws {
+    func testOptInNativeVeeziPageDownRevealsPricesWithoutSelectingTickets() async throws {
+        try await runNativeVeeziCountdown(scroll: false, pageKey: true)
+    }
+
+    @MainActor
+    private func runNativeVeeziCountdown(scroll: Bool, pageKey: Bool = false) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one read-only public ticket-page observation experiment") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
@@ -591,6 +609,14 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let keyWindowRetained = NSApp.keyWindow === window
         let currentSourceValid = (try? browser.validateSourceDocument(document)) != nil
         if scroll { try await browser.performAgentInput(.scroll(horizontal: false, pixels: -647), observation: first) }
+        if pageKey {
+            let action = ComputerUseFaraAction.key(["PageDown"])
+            let inspected = try await browser.inspectAgentTarget(action, observation: first)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertEqual(target.context, "AXScrollArea • Browser page")
+            try await browser.performAgentInput(action, observation: first, target: target)
+            try await Task.sleep(for: .milliseconds(500))
+        }
         let second = try await navigation.captureAgentObservation(taskID: "read-lifetime", preserving: first)
         func publicReading(_ page: ComputerUseBrowserPageSnapshot) throws -> String {
             let data = try JSONSerialization.data(withJSONObject: ["texts": page.texts.map(\.text),
@@ -599,13 +625,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             return String(decoding: data, as: UTF8.self)
         }
         let before = first.approvalPageEvidence.page, after = second.approvalPageEvidence.page
-        if scroll {
+        if scroll || pageKey {
             XCTAssertGreaterThan(try XCTUnwrap(after.viewport?.y), try XCTUnwrap(before.viewport?.y))
             XCTAssertEqual(second.currentURL, url)
             XCTAssertTrue(after.texts.map(\.text).joined(separator: " ").contains("15.62"))
             XCTAssertTrue(after.texts.map(\.text).joined(separator: " ").contains("1.62"))
         }
-        let report = XCTAttachment(string: "scrollPerformed=\(scroll)\nvalidationFailure=\(failure ?? "none")\nkeyWindowRetained=\(keyWindowRetained)\ncurrentSourceValid=\(currentSourceValid)\nviewportEqual=\(before.viewport == after.viewport)\ncontrolsEqual=\(before.controls == after.controls)\nBEFORE\n\(try publicReading(before))\nAFTER\n\(try publicReading(after))")
+        let report = XCTAttachment(string: "scrollPerformed=\(scroll)\npageKeyPerformed=\(pageKey)\nvalidationFailure=\(failure ?? "none")\nkeyWindowRetained=\(keyWindowRetained)\ncurrentSourceValid=\(currentSourceValid)\nviewportEqual=\(before.viewport == after.viewport)\ncontrolsEqual=\(before.controls == after.controls)\nBEFORE\n\(try publicReading(before))\nAFTER\n\(try publicReading(after))")
         report.name = "Public Veezi observation lifetime"; report.lifetime = .keepAlways; add(report)
         for (name, png) in [("Before reading", first.png), ("After reading", second.png)] {
             let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
@@ -1552,6 +1578,159 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertEqual(replay, result); XCTAssertEqual(calls, 26)
         do { _ = try await executor.continueClarification(taskID: "another-answer", originatingTaskID: "history", goal: goal, progress: { _ in }); XCTFail("Consumed question accepted a second answer") }
         catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .invalidQuestion) }
+    }
+
+    @MainActor
+    func testOptInNativePageKeysScrollOnceWithoutEditingFields() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native PageDown and PageUp") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{height:400vh}label{position:fixed;top:10px}</style>
+            <h1>Paging fixture</h1><label>Quantity<input id='quantity' type='number' value='0'></label>
+            <p style='margin-top:150vh'>Ticket prices</p>
+            <script>window.keys=[];for(const type of ['keydown','keyup'])document.addEventListener(type,e=>keys.push([e.type,e.key,e.isTrusted]));</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "page-keys")
+        var stage = "navigate"
+        defer {
+            let attachment = XCTAttachment(string: "stage=\(stage); capture=\(browser.lastAgentCaptureStage ?? "none"); target=\(browser.lastAgentTargetStatus ?? "none")")
+            attachment.name = "Paging checkpoint"; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        let document = try await browser.navigate(taskID: "page-keys", operationID: "open", to: base.appendingPathComponent("page"))
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let view = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        for (name, usage) in [("PageDown", 0x4E), ("PageUp", 0x4B)] {
+            stage = name + " initial reading"
+            let initialReading = try await view.evaluateJavaScript("scrollY")
+            let initialY = try XCTUnwrap(initialReading as? Double)
+            stage = name + " capture"
+            let observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.key([name])
+            stage = name + " inspect"
+            let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+            let target = try XCTUnwrap(inspected, "A plain document must support native \(name)")
+            XCTAssertEqual(target.action, .key(usage: usage, modifiers: 0))
+            XCTAssertNil(tools.approvalReason(for: target.action, nativeTarget: target))
+            var attempts = 0
+            stage = name + " dispatch"
+            do {
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: {
+                    attempts += 1; stage = name + " admitted"
+                })
+            } catch {
+                return XCTFail("\(stage), attempts=\(attempts), responder=\(String(describing: window.firstResponder)): \(String(reflecting: error))")
+            }
+            stage = name + " verify"
+            let deadline = ContinuousClock.now + .seconds(2)
+            var moved = false
+            while !moved && ContinuousClock.now < deadline {
+                let reading = try await view.evaluateJavaScript("scrollY")
+                let y = try XCTUnwrap(reading as? Double)
+                moved = name == "PageDown" ? y > initialY + 100 : y < initialY - 100
+                if !moved { try await Task.sleep(for: .milliseconds(20)) }
+            }
+            XCTAssertTrue(moved, name)
+            try await Task.sleep(for: .milliseconds(300))
+            do {
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: { attempts += 1 })
+                XCTFail("A consumed paging observation replayed")
+            } catch { }
+            XCTAssertEqual(attempts, 1)
+            XCTAssertTrue(NSApp.keyWindow === window)
+        }
+        stage = "receipt"
+        let receipt = try await view.evaluateJavaScript("JSON.stringify({keys,quantity:document.getElementById('quantity').value,bodyFocused:document.activeElement===document.body})")
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(receipt as? String).utf8)) as? [String: Any])
+        XCTAssertEqual(json["quantity"] as? String, "0"); XCTAssertEqual(json["bodyFocused"] as? Bool, true)
+        let keys = try XCTUnwrap(json["keys"] as? [[Any]])
+        XCTAssertEqual(keys.count, 4)
+        XCTAssertEqual(keys.compactMap { $0[1] as? String }, ["PageDown", "PageDown", "PageUp", "PageUp"])
+        XCTAssertTrue(keys.allSatisfy { $0[2] as? Bool == true })
+        let attachment = XCTAttachment(string: String(describing: receipt)); attachment.name = "Native paging receipt"
+        attachment.lifetime = .keepAlways; add(attachment)
+    }
+
+    @MainActor
+    func testOptInNativePageKeysRejectEditableCompositeAndFindFocus() async throws {
+        try await runPageKeyBoundaries(modes: ["number", "textarea", "composite", "body-editor", "design-mode", "find"])
+    }
+
+    @MainActor
+    func testOptInNativePageKeysRejectStaleFocusLoginAndRetiredControl() async throws {
+        try await runPageKeyBoundaries(modes: ["focus-changed", "native-focus-cleared", "page-scrolled", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"])
+    }
+
+    @MainActor
+    private func runPageKeyBoundaries(modes: [String]) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: paging focus and ownership boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var allowed = true, retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+        for mode in modes {
+            allowed = true
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{height:400vh}</style><label>Quantity<input id='number' type='number' value='0'></label>
+                <label>Notes<textarea id='textarea'>Unchanged</textarea></label><div id='composite' role='listbox' tabindex='0' aria-label='Screenings'><div role='option'>Evening</div></div>
+                <script>window.keyCount=0;document.addEventListener('keydown',()=>keyCount++);</script>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let view = try XCTUnwrap(retainedWindow?.contentView.flatMap { webViews($0).first })
+            // Reset this fixture's native focus between independent cases.
+            // Production must preserve the deliberately cleared user focus.
+            XCTAssertTrue(try XCTUnwrap(retainedWindow).makeFirstResponder(view), mode)
+            switch mode {
+            case "number", "textarea", "composite": _ = try await view.evaluateJavaScript("document.getElementById('\(mode)').focus()")
+            case "body-editor": _ = try await view.evaluateJavaScript("document.body.contentEditable='true';document.body.focus()")
+            case "design-mode": _ = try await view.evaluateJavaScript("document.designMode='on'")
+            case "find":
+                let initial = try await browser.captureAgentObservation(document: document)
+                try await browser.performAgentInput(.key(["Command", "F"]), observation: initial)
+            default: break
+            }
+            let observation = try await browser.captureAgentObservation(document: document)
+            switch mode {
+            case "focus-changed": _ = try await view.evaluateJavaScript("document.getElementById('number').focus()")
+            case "native-focus-cleared": retainedWindow?.makeFirstResponder(nil)
+            case "page-scrolled": _ = try await view.evaluateJavaScript("scrollTo(0,100)")
+            case "login": _ = try await view.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
+            case "revoked": allowed = false
+            case "replacement": try browser.claim(taskID: "successor")
+            default: break
+            }
+            var attempts = 0
+            let action = ComputerUseFaraAction.key(mode == "unsupported-modifier" ? ["Shift", "PageDown"] : ["PageDown"])
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try await browser.performAgentInput(action, observation: observation, willBeginEffect: {
+                    attempts += 1
+                    if mode == "admission-revoked" { allowed = false }
+                })
+            }
+            do { try await work.value; XCTFail("Rejected paging input dispatched: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else {
+                    let unsupported = ["number", "textarea", "composite", "body-editor", "design-mode", "find", "unsupported-modifier"].contains(mode)
+                    XCTAssertEqual(error as? ComputerUseBrowserError, mode == "login" ? .authenticationRequired : unsupported ? .unsupportedDocument : .pageChanged, mode)
+                }
+            }
+            XCTAssertEqual(attempts, mode == "admission-revoked" ? 1 : 0, mode)
+            let keyCount = try await view.evaluateJavaScript("keyCount")
+            XCTAssertEqual(keyCount as? Int, 0, mode)
+            let quantity = try await view.evaluateJavaScript("document.getElementById('number').value")
+            XCTAssertEqual(quantity as? String, "0", mode)
+            if mode == "replacement" { XCTAssertEqual(browser.taskID, "successor") }
+        }
     }
 
     @MainActor
@@ -3032,19 +3211,25 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runLiveTicketTrial(movie: Bool, holo: Bool = false) async throws {
+    func testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_Q6_NATIVE_TRIAL"] == "1" else { throw XCTSkip("Opt-in: diagnostic Fara Q6 read-only movie comparison") }
+        try await runLiveTicketTrial(movie: true, faraQ6: true)
+    }
+
+    @MainActor
+    private func runLiveTicketTrial(movie: Bool, holo: Bool = false, faraQ6: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: bounded public website ticket-information trial, no purchase") }
         var inputs: ComputerUseFaraRuntimeInputs?
-        if !holo { inputs = try await FaraTestAssets.inputs(environment: environment) }
-        let executable = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment["HOLO_BINARY"]))
+        if !holo && !faraQ6 { inputs = try await FaraTestAssets.inputs(environment: environment) }
+        let executable = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment[faraQ6 ? "FARA_Q6_BINARY" : "HOLO_BINARY"]))
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        let directory = holo ? URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_TRIAL_DIRECTORY"]))
+        let directory = (holo || faraQ6) ? URL(fileURLWithPath: try XCTUnwrap(environment[faraQ6 ? "FARA_Q6_TRIAL_DIRECTORY" : "HOLO_TRIAL_DIRECTORY"]))
             : FileManager.default.temporaryDirectory.appendingPathComponent("FaraLiveTicket-" + UUID().uuidString)
         guard !FileManager.default.fileExists(atPath: directory.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { if !holo { try? FileManager.default.removeItem(at: directory) } }
+        defer { if !holo && !faraQ6 { try? FileManager.default.removeItem(at: directory) } }
         let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
             browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
@@ -3070,7 +3255,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
             screenshot.name = "Live browser observation \(responses.count + 1)"; screenshot.lifetime = .keepAlways; self.add(screenshot)
             let began = Date()
             let proposal: ComputerUseFaraModel.Proposal
-            if holo {
+            if faraQ6 {
+                proposal = try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
+            } else if holo {
                 proposal = try await HoloTestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
             } else {
                 let endpoint = try await runtime.activateFara(XCTUnwrap(inputs))
@@ -3084,12 +3271,19 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 switch proposal.action {
                 case .pointer(let kind, _) where kind != .mouseMove:
                     throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+                case .key(let keys) where keys.count == 1 && ["PAGEDOWN", "PAGEUP"].contains(keys[0].uppercased()):
+                    // The native adapter also requires retained plain-document
+                    // focus; these keys cannot target a ticket field.
+                    break
                 case .typeText, .key: throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
                 default: break
                 }
             }
             return proposal
         }, readPage: { reading in
+                if faraQ6 {
+                    return try await FaraQ6TestProposalRunner.readPage(reading, directory: directory, index: responses.count, environment: environment)
+                }
                 guard let inputs else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
                 let endpoint = try await runtime.activateFara(inputs)
                 return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
@@ -3103,7 +3297,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let history = try? browser.navigationDispatchHistory(taskID: taskID)
         let journals = (try? FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }) ?? []
-        let report: [String: Any] = ["model": holo ? "Holo-3.1-4B" : "Fara1.5-4B", "goal": goal, "responses": responses, "progress": progress, "result": String(reflecting: result),
+        let report: [String: Any] = ["model": faraQ6 ? "Fara1.5-4B-Q6_K" : holo ? "Holo-3.1-4B" : "Fara1.5-4B", "goal": goal, "responses": responses, "progress": progress, "result": String(reflecting: result),
             "proposalLimit": proposalLimit, "timeoutSeconds": timeoutSeconds,
             "lastAgentTargetStatus": browser.lastAgentTargetStatus ?? "none",
             "lastAgentCaptureStage": browser.lastAgentCaptureStage ?? "none",
@@ -3116,9 +3310,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 ? "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c"
                 : "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/"]
         let reportData = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-        if holo { try reportData.write(to: directory.appendingPathComponent("workflow.json")) }
+        if holo || faraQ6 { try reportData.write(to: directory.appendingPathComponent("workflow.json")) }
         let evidence = XCTAttachment(data: reportData, uniformTypeIdentifier: "public.json")
-        evidence.name = holo ? "Live Roxie Holo ticket trial" : movie ? "Live Roxie Fara ticket trial" : "Live SFJAZZ Fara ticket trial"; evidence.lifetime = .keepAlways; add(evidence)
+        evidence.name = faraQ6 ? "Live Roxie Fara Q6 ticket trial" : holo ? "Live Roxie Holo ticket trial" : movie ? "Live Roxie Fara ticket trial" : "Live SFJAZZ Fara ticket trial"; evidence.lifetime = .keepAlways; add(evidence)
         XCTAssertTrue(exited)
         if let failure { return XCTFail("Live ticket task failed after \(responses.count) proposals: \(failure)") }
         guard case .completed(let answer) = result else { return XCTFail("Live ticket task did not complete: \(String(reflecting: result))") }
@@ -4992,6 +5186,33 @@ final class ComputerUseFaraActionTests: XCTestCase {
         }
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: 0, height: 768))
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: Int.max, height: 768))
+    }
+}
+
+@MainActor
+enum FaraQ6TestProposalRunner {
+    private static var endpoint: OSAtlasLlamaEndpoint {
+        .init(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
+    }
+    static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String]) async throws -> ComputerUseFaraModel.Proposal {
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment))
+    }
+    static func readPage(_ reading: ComputerUseFaraModel.PageReading, directory: URL, index: Int, environment: [String:String]) async throws -> String {
+        let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
+        return try ComputerUseFaraModel.decodePageAnswer(await run(request, directory: directory, name: "reading-\(index)", reading: true, environment: environment))
+    }
+    private static func run(_ request: URLRequest, directory: URL, name: String, reading: Bool, environment: [String:String]) async throws -> Data {
+        let file = directory.appendingPathComponent("request-\(name).json")
+        guard !FileManager.default.fileExists(atPath: file.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        try XCTUnwrap(request.httpBody).write(to: file)
+        let output = directory.appendingPathComponent("proposal-\(name)"), probe = HoloProbeProcess()
+        try probe.start(python: try XCTUnwrap(environment["FARA_Q6_PYTHON"]), script: try XCTUnwrap(environment["FARA_Q6_PROBE_SCRIPT"]), arguments: [file.path,output.path,try XCTUnwrap(environment["FARA_Q6_ASSETS"]),try XCTUnwrap(environment["FARA_Q6_BINARY"]),"5",reading ? "fara-q6-reading" : "fara-q6"])
+        let status = try await probe.finish()
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String:Any])
+        XCTAssertEqual(report["ownedProcessExited"] as? Bool,true); XCTAssertEqual(report["credentialRemoved"] as? Bool,true)
+        guard status == 0 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        return try Data(contentsOf: output.appendingPathComponent("response.json"))
     }
 }
 

@@ -1,5 +1,5 @@
-"""Opt-in Holo/GUI-Owl diagnostic: one proposal, no tool execution, joined worker cleanup.
-Arguments: request.json output-directory assets-directory signed-llama-server [4|5 GiB].
+"""Opt-in trained-model diagnostic: one proposal, no execution, joined cleanup.
+Arguments: request.json output-directory assets-directory signed-llama-server [4|5 GiB] [fara-q6|fara-q6-reading].
 The 5 GiB option is diagnostic only and does not change the production profile.
 """
 import base64
@@ -42,6 +42,19 @@ elif alias == 'gui-owl-desktop-v1':
     assert memory_limit_gib == 4
     model_name, projector_name = 'GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf', 'GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf'
     model_label = 'GUI-Owl-desktop'
+elif alias == 'fara-browser-v1':
+    assert len(sys.argv) == 7 and sys.argv[6] in ('fara-q6', 'fara-q6-reading')
+    assert memory_limit_gib == 5
+    assert 'tools' not in request_body and 'tool_choice' not in request_body
+    assert request_body['reasoning_format'] == 'none'
+    if sys.argv[6] == 'fara-q6':
+        assert request_body['temperature'] == 0
+    else:
+        assert 'temperature' not in request_body
+        assert len(request_body['messages']) == 2
+        assert request_body['messages'][0] == {'role':'system', 'content':"You are given the markdown content of a web page. Answer the user's question based solely on this content. Be concise and extract only the relevant information."}
+    model_name, projector_name = 'Fara1.5-4B-Q6_K.gguf', 'mmproj-Fara1.5-4B-f16.gguf'
+    model_label = 'Fara-Q6-reading' if sys.argv[6].endswith('-reading') else 'Fara-Q6'
 else:
     raise AssertionError('Unsupported diagnostic model alias')
 processes = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True)
@@ -95,6 +108,7 @@ report = dict(scope='one-native-' + model_label + '-protocol-proposal-no-tool-ex
     diagnosticMemoryLimitOnly=memory_limit_gib != 4, productionMemoryLimitChanged=False,
     peakSampledProcessMemoryBytes=0, memorySamples=0, startupDeadlineSeconds=45,
     generationDeadlineSeconds=45, totalDeadlineSeconds=100, runnerExecutesNoActions=True)
+report['minimumImageTokensEnvironment'] = os.environ.get('LLAMA_ARG_IMAGE_MIN_TOKENS')
 stop = threading.Event()
 process = None
 watcher = None

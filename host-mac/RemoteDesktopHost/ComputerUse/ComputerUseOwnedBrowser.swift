@@ -888,6 +888,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         case ["ENTER"], ["RETURN"]: return (0x28, 36, "\r", false)
         case ["TAB"]: return (0x2B, 48, "\t", false)
         case ["SHIFT", "TAB"]: return (0x2B, 48, "\t", true)
+        case ["PAGEDOWN"]: return (0x4E, 0x79, String(UnicodeScalar(NSPageDownFunctionKey)!), false)
+        case ["PAGEUP"]: return (0x4B, 0x74, String(UnicodeScalar(NSPageUpFunctionKey)!), false)
         default: return nil
         }
     }
@@ -1023,12 +1025,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         case .typeText:
             arguments["focused"] = true
             arguments["editable"] = true
-        case .key:
+        case .key(let keys):
             arguments["focused"] = true
+            arguments["paging"] = keys.count == 1 && ["PAGEDOWN", "PAGEUP"].contains(keys[0].uppercased())
         default: return nil
         }
         let result = try await callDOM(.agentTarget, arguments: arguments, document: observation.evidence.document)
         lastAgentTargetStatus = result.status
+        if result.status == "unsupported-agent-page-key" { throw ComputerUseBrowserError.unsupportedDocument }
         guard try predictedAgentAction(action, observation: observation) == predicted,
               result.status == "agent-target", result.documentID == observation.evidence.documentID,
               let id = result.agentTargetID, let context = result.agentTargetContext,
@@ -1244,7 +1248,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 throw ComputerUseBrowserError.pageChanged
             }
             let time = ProcessInfo.processInfo.systemUptime
-            let flags: NSEvent.ModifierFlags = key.shift ? [.shift] : []
+            var flags: NSEvent.ModifierFlags = key.shift ? [.shift] : []
+            if key.usage == 0x4E || key.usage == 0x4B { flags.insert(.function) }
             guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: time,
                 windowNumber: window.windowNumber, context: nil, characters: key.text, charactersIgnoringModifiers: key.text, isARepeat: false, keyCode: key.keyCode),
                   let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: flags, timestamp: time + 0.001,
@@ -3154,6 +3159,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             window.contentView = NSHostingView(rootView: OwnedBrowserContent(context: self, browser: browser, surface: surface))
             window.minSize = NSSize(width: 480, height: 320)
             window.center()
+            // A newly opened browser should receive document keys before its
+            // first click. Realize the representable before setting initial
+            // focus; later presentation/capture must preserve user focus.
+            window.contentView?.layoutSubtreeIfNeeded()
+            window.initialFirstResponder = browser
+            if browser.window === window { window.makeFirstResponder(browser) }
             self.window = window
         }
         window?.makeKeyAndOrderFront(nil)
