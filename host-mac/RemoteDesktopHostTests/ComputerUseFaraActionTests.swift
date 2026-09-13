@@ -7,6 +7,236 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraScrollMatchesViewportDirectionAndRetiresObservation() async throws {
+        try await runFaraViewportScroll(observesWheel: false)
+    }
+
+    @MainActor
+    func testOptInFaraScrollWorksWithPageWheelListenersWithoutPostingWheelEvents() async throws {
+        try await runFaraViewportScroll(observesWheel: true)
+    }
+
+    @MainActor
+    private func runFaraViewportScroll(observesWheel: Bool) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in owned-browser scroll contract") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{margin:0;width:400vw;height:400vh;background:linear-gradient(white,lightblue)}</style>
+            <h1 style='position:fixed'>Local scroll fixture</h1>
+            <script>addEventListener('scroll',()=>fetch('/scrolled?x='+scrollX+'&y='+scrollY));
+            \(observesWheel ? "addEventListener('wheel',event=>fetch('/wheel?dx='+event.deltaX+'&dy='+event.deltaY+'&trusted='+event.isTrusted),{passive:true});" : "")</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "native-scroll")
+        let document = try await browser.navigate(taskID: "native-scroll", operationID: "open", to: base.appendingPathComponent("page"))
+        var checkpoints: [[String: Any]] = []
+        defer {
+            let report: [String: Any] = ["checkpoints": checkpoints, "requests": server.requestedPaths]
+            if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "Owned-browser scroll checkpoints"; attachment.lifetime = .keepAlways; add(attachment)
+            }
+        }
+        for (horizontal, pixels) in [(false, -500.0), (false, 250.0), (true, 500.0), (true, -250.0)] {
+            let before = try await browser.captureAgentObservation(document: document)
+            let initial = try XCTUnwrap(before.approvalPageEvidence.page.viewport)
+            let delta = (pixels * (horizontal ? initial.width : initial.height) / 1000).rounded(.towardZero)
+            let expectedX = initial.x + (horizontal ? delta : 0)
+            let expectedY = initial.y - (horizontal ? 0 : delta)
+            var dispatches = 0
+            do {
+                try await browser.performAgentInput(.scroll(horizontal: horizontal, pixels: pixels), observation: before,
+                    willBeginEffect: { dispatches += 1 })
+            } catch { return XCTFail("Owned-browser scroll failed before observing movement: \(error)") }
+            let deadline = ContinuousClock.now + .seconds(2)
+            var actual: ComputerUseBrowserViewport?
+            repeat {
+                try await Task.sleep(for: .milliseconds(20))
+                actual = try await browser.observePage(document: document).page.viewport
+            } while ContinuousClock.now < deadline && (abs((actual?.x ?? -1) - expectedX) > 1 || abs((actual?.y ?? -1) - expectedY) > 1)
+            let moved = try XCTUnwrap(actual)
+            checkpoints.append(["horizontal": horizontal, "pixels": pixels, "beforeX": initial.x, "beforeY": initial.y,
+                "expectedX": expectedX, "expectedY": expectedY, "afterX": moved.x, "afterY": moved.y])
+            XCTAssertEqual(moved.x, expectedX, accuracy: 1, "horizontal=\(horizontal), pixels=\(pixels)")
+            XCTAssertEqual(moved.y, expectedY, accuracy: 1, "horizontal=\(horizontal), pixels=\(pixels)")
+            XCTAssertEqual(dispatches, 1)
+            do {
+                try await browser.performAgentInput(.scroll(horizontal: horizontal, pixels: pixels), observation: before,
+                    willBeginEffect: { dispatches += 1 })
+                XCTFail("A scroll reused its consumed observation")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(dispatches, 1)
+        }
+        XCTAssertTrue(server.requestedPaths.contains { $0.hasPrefix("/scrolled?") })
+        if observesWheel {
+            let events = server.requestedPaths.filter { $0.hasPrefix("/wheel?") }
+            XCTAssertEqual(events.count, 0)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraScrollKeepsNestedContainerAtItsBoundary() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in nested scroll target") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{margin:0;height:300vh}.panel{position:fixed;top:10vh;width:40vw;height:80vh;overflow:auto;overscroll-behavior:contain;scroll-behavior:smooth}
+            #left{left:0}#right{right:0}.inside{height:300vh}button{position:absolute;left:10vw;top:10vh;width:20vw;height:10vh}</style>
+            <div id='left' class='panel'><div class='inside'><button>Focus these results</button></div></div>
+            <div id='right' class='panel'><div class='inside'>Other results</div></div>
+            <script>left.addEventListener('scroll',()=>fetch('/left?y='+left.scrollTop+'&max='+(left.scrollHeight-left.clientHeight)));right.addEventListener('scroll',()=>fetch('/wrong'));</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "nested-scroll")
+        let document = try await browser.navigate(taskID: "nested-scroll", operationID: "open", to: base.appendingPathComponent("page"))
+        let initial = try await browser.captureAgentObservation(document: document)
+        try await browser.performAgentInput(.pointer(.leftClick, .init(x: 200, y: 250)), observation: initial)
+        for (index, pixels) in [-500.0, -10_000.0, -10_000.0].enumerated() {
+            let observation = try await browser.captureAgentObservation(document: document)
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: pixels), observation: observation)
+            let deadline = ContinuousClock.now + .seconds(1)
+            while server.requestedPaths.filter({ $0.hasPrefix("/left?") }).count < min(index + 1, 2) && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        let current = try await browser.observePage(document: document)
+        XCTAssertEqual(current.page.viewport?.y, 0, "Scrolling the left panel must preserve the page")
+        let deadline = ContinuousClock.now + .seconds(2)
+        while server.requestedPaths.filter({ $0.hasPrefix("/left?") }).count < 2 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(server.requestedPaths.filter { $0.hasPrefix("/left?") }.count, 2)
+        let finalPath = try XCTUnwrap(server.requestedPaths.last { $0.hasPrefix("/left?") })
+        let fields = try XCTUnwrap(URLComponents(string: "http://fixture" + finalPath)?.queryItems)
+        XCTAssertEqual(fields.first { $0.name == "y" }?.value, fields.first { $0.name == "max" }?.value)
+        XCTAssertEqual(server.count("/wrong"), 0)
+    }
+
+    @MainActor
+    func testOptInFaraScrollDoesNotMoveLockedPageBehindOverlay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in locked page scrolling") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for lockedElement in ["html", "body"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>\(lockedElement){overflow:hidden}body{margin:0;height:300vh}.overlay{position:fixed;inset:0;background:#eee}</style>
+                <h1>Background results</h1><div class='overlay'>Dialog over a locked page</div>
+                """)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: lockedElement)
+            let document = try await browser.navigate(taskID: lockedElement, operationID: "open", to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation)
+            let current = try await browser.observePage(document: document)
+            XCTAssertEqual(current.page.viewport?.y, 0, lockedElement)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraScrollRejectsInvalidCancelledAndRevokedInput() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in scroll rejection") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><body style='height:300vh'>Scroll rejection fixture</body>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        for mode in ["nan", "infinite", "over-limit", "cancelled", "revoked", "revoked-at-dispatch"] {
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let pixels: Double = mode == "nan" ? .nan : mode == "infinite" ? .infinity : mode == "over-limit" ? 10_001 : -500
+            if mode == "revoked" { allowed = false }
+            var attempts = 0
+            let task = Task { @MainActor in
+                try await browser.performAgentInput(.scroll(horizontal: false, pixels: pixels), observation: observation,
+                    willBeginEffect: { attempts += 1; if mode == "revoked-at-dispatch" { allowed = false } })
+            }
+            if mode == "cancelled" { task.cancel() }
+            do { try await task.value; XCTFail("Scroll admitted \(mode)") } catch { }
+            XCTAssertEqual(attempts, mode == "revoked-at-dispatch" ? 1 : 0, mode)
+            allowed = true
+            let current = try await browser.observePage(document: document)
+            XCTAssertEqual(current.page.viewport?.y, 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraScrollObservesRevealedContentAndJournalsOnce() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in Fara scroll workflow") }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{margin:0;height:300vh;font:26px system-ui}#result{position:absolute;top:110vh}</style>
+            <h1>Concert results</h1><p>More results below</p><h2 id='result'>Tokyo Music Hall: 2400 JPY, 7 pm</h2>
+            <script>let revealed=false; addEventListener('scroll',()=>{if(!revealed && document.getElementById('result').getBoundingClientRect().bottom<innerHeight){revealed=true;fetch('/revealed')}});</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraScroll-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("navigation"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+        try browser.claim(taskID: "scroll-result")
+        _ = try await browser.navigate(taskID: "scroll-result", operationID: "open", to: base.appendingPathComponent("page"))
+        var calls = 0
+        var initialImage: Data?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard calls < 2 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            if calls == 0 { initialImage = input.screenshotPNG; XCTAssertEqual(server.count("/revealed"), 0) }
+            else {
+                let image = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+                image.name = "Result observation after scrolling"; image.lifetime = .keepAlways; self.add(image)
+                // The independent page receipt uses fetch; network delivery may
+                // follow snapshot delivery even when the result is already visible.
+                let deadline = ContinuousClock.now + .seconds(1)
+                while server.count("/revealed") == 0 && ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                XCTAssertEqual(server.count("/revealed"), 1, "The next proposal must observe the revealed result")
+                XCTAssertNotEqual(input.screenshotPNG, initialImage)
+                XCTAssertEqual(input.history.count, 1)
+            }
+            let action = calls == 0 ? #"{"action":"scroll","pixels":-600}"# : #"{"action":"terminate","answer":"2400 JPY, 7 pm"}"#
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            let result = try await executor.execute(taskID: "scroll-result", prompt: "Find the concert price and start time.", trustedUserPrompt: "Find the concert price and start time.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("2400 JPY, 7 pm"))
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(server.count("/revealed"), 1)
+            let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(records.count, 2)
+            XCTAssertTrue(records.allSatisfy { $0.statuses == [.verified] })
+            let repeated = try await executor.execute(taskID: "scroll-result", prompt: "Find the concert price and start time.", trustedUserPrompt: "Find the concert price and start time.", tools: tools, progress: { _ in })
+            XCTAssertEqual(repeated, result)
+            XCTAssertEqual(calls, 2)
+        } catch { XCTFail("Fara scroll workflow failed after \(calls) proposals: \(error)") }
+    }
+
+    @MainActor
     func testOptInFocusedTargetRejectsReadOnlyAndNonTextControls() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in writable focus check") }
         let previousPolicy = NSApp.activationPolicy()
@@ -228,6 +458,16 @@ final class ComputerUseFaraActionTests: XCTestCase {
 
     @MainActor
     func testOptInManagedFaraOpensControlledConcertResultAndReportsSource() async throws {
+        try await runManagedFaraConcertResult(scrollFirst: false)
+    }
+
+    @MainActor
+    func testOptInManagedFaraScrollsToConcertResultAndReportsSource() async throws {
+        try await runManagedFaraConcertResult(scrollFirst: true)
+    }
+
+    @MainActor
+    private func runManagedFaraConcertResult(scrollFirst: Bool) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: at most six actual Fara proposals on a fictional search and concert page")
@@ -238,8 +478,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
         defer { NSApp.setActivationPolicy(previousPolicy) }
         let searchPath = "/search?q=Tokyo%20Music%20Hall%20concerts"
         let style = "<style>body{font:26px system-ui;background:white;color:#111;margin:50px}a{display:block;padding:24px;background:#eef4ff}</style>"
+        let spacer = scrollFirst ? "<p>More results below</p><div style='height:85vh'></div><script>addEventListener('scroll',()=>fetch('/scrolled'));</script>" : ""
         let server = try OwnedBrowserHTTPFixture(routes: [
-            "/start": .init(body: "<!doctype html><title>Local search results</title>" + style + "<h1>Concert search results</h1><a href='/details'>Tokyo Music Hall — concert times and tickets</a>"),
+            "/start": .init(body: "<!doctype html><title>Local search results</title>" + style + "<h1>Concert search results</h1>" + spacer + "<a href='/details'>Tokyo Music Hall — concert times and tickets</a>"),
             searchPath: .init(body: "<!doctype html><title>Concert search results</title>" + style + "<h1>Tokyo Music Hall concerts</h1><a href='/details'>Tokyo Music Hall — concert times and tickets</a>"),
             "/details": .init(body: "<!doctype html><title>Tokyo Music Hall concert details</title>" + style + "<h1>Tokyo Music Hall</h1><p>Friday concert starts at 7 pm.</p><p>Ticket price: 2400 JPY.</p>")])
         let base = try await server.start()
@@ -269,7 +510,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
             return (peak, count)
         }
         var responses: [[String: Any]] = []
-        let goal = "Find the Tokyo Music Hall concert in these search results. Open its details and report the ticket price and start time with the source URL."
+        let goal = (scrollFirst ? "Scroll down to find the Tokyo Music Hall concert in these search results. " : "Find the Tokyo Music Hall concert in these search results. ")
+            + "Open its details and report the ticket price and start time with the source URL."
         let started = Date()
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
             searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { input in
@@ -289,7 +531,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         memory.cancel()
         let measured = await memory.value
         let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
-        let report: [String: Any] = ["scope": "actual-Fara-controlled-concert-result-navigation", "targetMacRAMGB": 12,
+        let report: [String: Any] = ["scope": scrollFirst ? "actual-Fara-controlled-scroll-concert-result" : "actual-Fara-controlled-concert-result-navigation", "targetMacRAMGB": 12,
             "wholeApp12GBQualified": false, "liveWebsiteQualified": false, "responses": responses,
             "requests": server.requestedPaths, "elapsedSeconds": Date().timeIntervalSince(started),
             "peakSampledProcessMemoryBytes": measured.0, "memorySamples": measured.1, "ownedProcessExited": gone,
@@ -305,6 +547,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
         XCTAssertEqual(server.count(searchPath), 0)
         XCTAssertEqual(server.count("/details"), 1)
+        if scrollFirst { XCTAssertGreaterThan(server.count("/scrolled"), 0) }
     }
 
     @MainActor

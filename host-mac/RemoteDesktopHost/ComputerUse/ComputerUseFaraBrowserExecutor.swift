@@ -233,7 +233,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 return result
             }
             switch proposal.action {
-            case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch:
+            case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
                 let nativeTarget = try await tools.inspectOwnedBrowserAgentTarget(proposal.action, observation: observation)
                 if let nativeTarget, nativeTarget.context.isEmpty {
                     return .userInterventionRequired("I couldn't identify that browser control. Complete this step in the browser, then choose Resume.")

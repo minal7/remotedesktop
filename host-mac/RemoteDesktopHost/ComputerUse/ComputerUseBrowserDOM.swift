@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget
-    case scrollViewport, viewportScrollReceipt, validatePageLink, finishPendingChange, continueUnsentInput
+    case scrollViewport, viewportScrollReceipt, agentScroll, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
@@ -567,7 +567,7 @@ enum ComputerUseBrowserDOM {
       const retiredInputs = new Set();
       let fieldScope = null;
       // Independent of form discovery, which retires text-operation bindings.
-      const viewportOperations = new Map();
+      const viewportOperations = new Map(), agentScrollOperations = new Set();
       const formQueries = new Map();
       const preparedFieldRevisions = new Map(), formStateProofs = new Map();
       let lastPageSnapshot = null;
@@ -1729,7 +1729,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'agentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1765,6 +1765,53 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 })) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'agentScroll') {
+              if (!lastPageSnapshot.agentState || typeof args.horizontal !== 'boolean' || !Number.isFinite(args.pixels)
+                  || Math.abs(args.pixels) > 10000 || !Number.isFinite(args.x) || !Number.isFinite(args.y)
+                  || args.x < 0 || args.y < 0 || args.x >= innerWidth || args.y >= innerHeight
+                  || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
+                  || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64) return reply('unsupported');
+              let hit = doc.elementFromPoint(args.x,args.y);
+              for (let depth=0; hit?.shadowRoot && depth<16; depth++) {
+                const child = hit.shadowRoot.elementFromPoint(args.x,args.y);
+                if (!child || child === hit) break;
+                hit = child;
+              }
+              if (!hit || hit.closest('iframe,frame,object,embed,canvas')) return reply('unsupported');
+              // Fara normalizes distance to the matching viewport dimension.
+              // Positive is up vertically and right horizontally in its executor.
+              const amount = Math.trunc(Math.trunc(args.pixels) * (args.horizontal ? innerWidth : innerHeight) / 1000);
+              const delta = args.horizontal ? amount : -amount;
+              let scroller = null, locked = false;
+              for (let node=hit, depth=0; node && depth<128; depth++,node=parent(node)) {
+                const style = getComputedStyle(node), page = node === doc.scrollingElement;
+                const extent = args.horizontal ? node.scrollWidth-node.clientWidth : node.scrollHeight-node.clientHeight;
+                const overflow = args.horizontal ? style.overflowX : style.overflowY;
+                if (!page && (!['auto','scroll','overlay'].includes(overflow) || extent <= 0)) continue;
+                if (page) {
+                  // Viewport overflow can be propagated from body. A modal's
+                  // lock must prevent scrolling its background, just as wheel
+                  // input would, while still allowing a fresh model observation.
+                  const bodyStyle = doc.body && getComputedStyle(doc.body);
+                  const effectiveOverflow = overflow === 'visible' && bodyStyle
+                    ? (args.horizontal ? bodyStyle.overflowX : bodyStyle.overflowY) : overflow;
+                  if (['hidden','clip'].includes(effectiveOverflow)) { scroller = node; locked = true; break; }
+                }
+                if (args.horizontal && style.direction === 'rtl') return reply('unsupported');
+                const position = args.horizontal ? node.scrollLeft : node.scrollTop;
+                const overscroll = args.horizontal ? style.overscrollBehaviorX : style.overscrollBehaviorY;
+                if (page || delta === 0 || (delta > 0 ? position < extent : position > 0) || ['contain','none'].includes(overscroll)) {
+                  scroller = node; break;
+                }
+              }
+              if (!scroller) return reply('unsupported');
+              agentScrollOperations.add(args.operationID);
+              lastPageSnapshot = null; formQueries.clear();
+              try {
+                if (!locked) scroller.scrollBy({left:args.horizontal ? delta : 0, top:args.horizontal ? 0 : delta, behavior:'instant'});
+                return reply('agent-scroll-dispatched');
+              } catch (_) { return reply('uncertain'); }
+            }
             if (command === 'agentTarget') {
               if (!lastPageSnapshot.agentState) return reply('unsupported');
               let hit;

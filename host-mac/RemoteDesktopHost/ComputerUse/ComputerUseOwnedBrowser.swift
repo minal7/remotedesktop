@@ -678,6 +678,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
+    private var agentPointer = ComputerUseFaraAction.Point(x: 500, y: 500)
 
     func validateAgentObservation(_ observation: AgentObservation) async throws {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
@@ -843,6 +844,28 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard let view = browser, let window else { throw ComputerUseBrowserError.closed }
+        if case .scroll(let horizontal, let pixels) = action {
+            guard pixels.isFinite, abs(pixels) <= 10_000,
+                  let viewport = observation.evidence.page.viewport, viewport.isWellFormed else {
+                throw ComputerUseBrowserError.viewportScrollUnavailable
+            }
+            let position = try agentClickTarget(agentPointer, observation: observation, view: view, window: window).location
+            let local = view.convert(position, from: nil)
+            try willBeginEffect()
+            try check()
+            // Fixed isolated-world scrolling shares the page's target validation.
+            // A failed reply is uncertain; never send a wheel fallback or retry.
+            let result = try await callDOM(.agentScroll, arguments: [
+                "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
+                "operationID": operationID ?? ComputerUseTaskContract.digest([observation.authorityDigest, "scroll"]),
+                "x": (local.x - view.bounds.minX) / view.bounds.width * viewport.width,
+                "y": (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height,
+                "horizontal": horizontal, "pixels": pixels], validateContext: { (try? check()) != nil })
+            guard result.status == "agent-scroll-dispatched", result.documentID == observation.evidence.documentID else {
+                throw ComputerUseBrowserError.viewportScrollUncertain
+            }
+            return
+        }
         let dispatch: () throws -> Void
         switch action {
         case .pointer(.leftClick, let point):
@@ -855,6 +878,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 throw ComputerUseBrowserError.pageEvidenceUnavailable
             }
             dispatch = {
+                self.agentPointer = point
                 window.sendEvent(down)
                 // Release the same native button even if a callback revokes
                 // control. No subsequent action may reuse this observation.
@@ -1192,6 +1216,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                     beganAfterAnotherClaim: navigationDispatchLog != nil)
             }
             ownershipEpoch = nextEpoch
+            agentPointer = .init(x: 500, y: 500)
             self.taskID = taskID
             sourcePolicy = nil
             generation &+= 1
