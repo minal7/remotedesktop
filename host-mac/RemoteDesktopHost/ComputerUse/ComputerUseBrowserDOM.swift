@@ -612,8 +612,16 @@ enum ComputerUseBrowserDOM {
               if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element)))
                   || (record.type === 'attributes' && contains(record.target, binding.element))
                   || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
-                lastPageSnapshot = null;
-                break;
+                if (lastPageSnapshot.agentState) {
+                  // Preserve individual input bindings so an unrelated
+                  // carousel cannot retire a stable header control. Full
+                  // page assessments still reject this changed snapshot.
+                  binding.retired = true;
+                  lastPageSnapshot.invalidated = true;
+                } else {
+                  lastPageSnapshot = null;
+                  break;
+                }
               }
             }
           }
@@ -1066,13 +1074,28 @@ enum ComputerUseBrowserDOM {
         const field = textField ? [valueGetters[focused instanceof HTMLTextAreaElement ? 1 : 0].call(focused),
           focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : [];
         const selection = doc.getSelection();
-        return {elements,layout:JSON.stringify(layout),focused,field:JSON.stringify(field),
+        return {elements,layout,focused,field:JSON.stringify(field),
           anchor:selection?.anchorNode,focus:selection?.focusNode,start:selection?.anchorOffset,end:selection?.focusOffset};
       }
+      function agentFocusStateMatches(previous, current) {
+        return !!current && previous.focused === current.focused && previous.field === current.field
+          && previous.anchor === current.anchor && previous.focus === current.focus && previous.start === current.start && previous.end === current.end;
+      }
       function agentInputStateMatches(previous, current) {
-        return !!current && previous.layout === current.layout && previous.focused === current.focused && previous.field === current.field
-          && previous.anchor === current.anchor && previous.focus === current.focus && previous.start === current.start && previous.end === current.end
-          && previous.elements.length === current.elements.length && previous.elements.every((element,index) => element === current.elements[index]);
+        return agentFocusStateMatches(previous,current) && previous.elements.length === current.elements.length
+          && previous.elements.every((element,index) => element === current.elements[index]);
+      }
+      function agentPointStateMatches(previous, current, x, y) {
+        if (!agentFocusStateMatches(previous,current) || !Number.isFinite(x) || !Number.isFinite(y)
+            || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+        const covers = rect => rect[0] <= x && x < rect[0]+rect[2] && rect[1] <= y && y < rect[1]+rect[3];
+        // Decorative motion elsewhere need not freeze the entire browser.
+        // Retain exact geometry and hit-testing styles for every element at
+        // the input point, including one moving onto or away from that point.
+        const atPoint = state => state.layout.map((rect,index) => ({rect,element:state.elements[index]})).filter(item => covers(item.rect));
+        const before = atPoint(previous), after = atPoint(current);
+        return before.length === after.length && before.every((item,index) => item.element === after[index].element
+          && JSON.stringify(item.rect) === JSON.stringify(after[index].rect));
       }
       function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
         // The text pass reads rendered text nodes, never form values,
@@ -1209,7 +1232,7 @@ enum ComputerUseBrowserDOM {
           // downloads, pings and other browsing contexts need other contracts.
           const canOpen = !anchor.hasAttribute('download') && !(anchor.getAttribute('ping') || '').trim()
             && ['', '_self'].includes(target.toLowerCase()) && source.href !== destination.href;
-          linkBindings.set(id, {element: anchor, base, signature, canOpen});
+          linkBindings.set(id, {element: anchor, base, signature, canOpen, metadata:{label,destination:url.href}});
         }
         // Observe supported native control metadata in a separate bounded
         // pass: the text walker deliberately excludes inputs and options.
@@ -1746,7 +1769,9 @@ enum ComputerUseBrowserDOM {
             // Mutation records alone miss CSSOM/value-property changes.
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
-                || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized
+                || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
+            const scopedAgentTarget = command === 'agentTarget' && !!lastPageSnapshot.agentState;
+            if (!scopedAgentTarget && (lastPageSnapshot.invalidated || serialized !== lastPageSnapshot.serialized
                 || (lastPageSnapshot.agentState && !agentInputStateMatches(lastPageSnapshot.agentState, agentState))
                 || containers.size !== lastPageSnapshot.containers.size
                 || Array.from(containers).some(([id, binding]) => {
@@ -1763,7 +1788,7 @@ enum ComputerUseBrowserDOM {
                   const previous = lastPageSnapshot.links.get(id);
                   return !previous || previous.element !== binding.element || previous.base !== binding.base
                     || previous.signature !== binding.signature;
-                })) return reply('stale');
+                }))) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
             if (command === 'agentScroll') {
               if (!lastPageSnapshot.agentState || typeof args.horizontal !== 'boolean' || !Number.isFinite(args.pixels)
@@ -1771,6 +1796,7 @@ enum ComputerUseBrowserDOM {
                   || args.x < 0 || args.y < 0 || args.x >= innerWidth || args.y >= innerHeight
                   || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
                   || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64) return reply('unsupported');
+              if (!agentPointStateMatches(lastPageSnapshot.agentState,agentState,args.x,args.y)) return reply('stale');
               let hit = doc.elementFromPoint(args.x,args.y);
               for (let depth=0; hit?.shadowRoot && depth<16; depth++) {
                 const child = hit.shadowRoot.elementFromPoint(args.x,args.y);
@@ -1828,6 +1854,10 @@ enum ComputerUseBrowserDOM {
                   hit = child;
                 }
               }
+              const targetRect = args.focused === true && hit?.getBoundingClientRect();
+              const pointX = targetRect ? targetRect.x + targetRect.width/2 : args.x;
+              const pointY = targetRect ? targetRect.y + targetRect.height/2 : args.y;
+              if (!agentPointStateMatches(lastPageSnapshot.agentState,agentState,pointX,pointY)) return reply('stale-agent-point');
               // Typing requires the exact focused element to accept text. Ancestor
               // and link lookup below is only suitable for identifying other input.
               if (args.editable === true && !Array.from(controls.values()).some(binding => binding.element === hit
@@ -1837,6 +1867,11 @@ enum ComputerUseBrowserDOM {
               }
               for (let depth=0; hit && depth<24; depth++,hit=hit.parentElement || hit.getRootNode()?.host) {
                 for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled && binding.metadata.label.trim()) {
+                  const previous = lastPageSnapshot.controls.get(id);
+                  if (!previous || previous.retired || previous.element !== binding.element || previous.form !== binding.form
+                      || previous.signature !== binding.signature || JSON.stringify(previous.metadata) !== JSON.stringify(binding.metadata)
+                      || previous.references.length !== binding.references.length
+                      || previous.references.some((node,index) => node !== binding.references[index])) return reply('stale-agent-control');
                   const kind = binding.metadata.kind;
                   const role = ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
                     : kind === 'textarea' ? 'AXTextArea'
@@ -1844,8 +1879,11 @@ enum ComputerUseBrowserDOM {
                   return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+binding.metadata.label};
                 }
                 for (const [id,binding] of links) if (binding.element === hit) {
+                  const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);
+                  if (!previous || previous[1].retired || previous[1].base !== binding.base || previous[1].signature !== binding.signature
+                      || JSON.stringify(previous[1].metadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-link');
                   const link = content.links.find(link => link.id === id);
-                  if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:id,agentTargetContext:'AXLink • '+link.label};
+                  if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:previous[0],agentTargetContext:'AXLink • '+link.label};
                 }
               }
               return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};

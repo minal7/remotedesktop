@@ -1278,11 +1278,11 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.validatePageEvidence(evidence)
     }
 
-    func captureOwnedBrowserAgentObservation(taskID: String) async throws -> ComputerUseOwnedBrowser.AgentObservation {
+    func captureOwnedBrowserAgentObservation(taskID: String, preserving session: ComputerUseOwnedBrowser.AgentObservation? = nil) async throws -> ComputerUseOwnedBrowser.AgentObservation {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.captureAgentObservation(taskID: taskID)
+        return try await browserNavigationTask.captureAgentObservation(taskID: taskID, preserving: session)
     }
 
     func captureOwnedBrowserInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> ComputerUseOwnedBrowser.InitialAgentObservation? {

@@ -279,11 +279,13 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try await browser.validatePageEvidence(evidence)
     }
 
-    func captureAgentObservation(taskID: String) async throws -> ComputerUseOwnedBrowser.AgentObservation {
+    func captureAgentObservation(taskID: String, preserving session: ComputerUseOwnedBrowser.AgentObservation? = nil) async throws -> ComputerUseOwnedBrowser.AgentObservation {
         let retryDeadline = ContinuousClock.now + .seconds(3)
         while true {
             do {
+                if let session { try browser.validateAgentSession(session) }
                 let document = try await browser.acquireObservedDocument(taskID: taskID)
+                if let session { try browser.validateAgentSession(session) }
                 return try await browser.captureAgentObservation(document: document)
             } catch let error as ComputerUseBrowserError {
                 // A native click can start navigation between acquiring the

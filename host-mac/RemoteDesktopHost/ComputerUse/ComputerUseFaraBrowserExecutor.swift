@@ -41,6 +41,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var journal: ComputerUseTaskJournal
         var history: [ComputerUseFaraModel.Step] = []
         var turns = 0
+        var staleProposals = 0
         var terminal: ComputerUseExecutionResult?
         var approval: PendingApproval?
         var isStarting = false
@@ -294,11 +295,35 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.
             // Native dispatch receipts below do not themselves prove the goal.
-            if case .wait = proposal.action {
-                // Waiting posts no input. A loading page changing while the
-                // model thinks is precisely why it can ask for a fresh view.
-            } else {
-                try await tools.validateOwnedBrowserAgentObservation(observation)
+            var nativeTarget: ComputerUseOwnedBrowser.AgentTarget?
+            do {
+                switch proposal.action {
+                case .wait, .pointer(.leftClick, _), .typeText, .key:
+                    // Waiting posts no input. Input reads its exact retained
+                    // target below; unrelated content need not stay frozen.
+                    break
+                default:
+                    try await tools.validateOwnedBrowserAgentObservation(observation)
+                }
+                switch proposal.action {
+                case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
+                    nativeTarget = try await tools.inspectOwnedBrowserAgentTarget(proposal.action, observation: observation)
+                default: break
+                }
+            } catch ComputerUseBrowserError.authenticationRequired {
+                return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
+            } catch ComputerUseBrowserError.pageChanged {
+                // Only read-only preflight is retryable. Discard this proposal
+                // without a history entry or dispatch journal; never replay input.
+                do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID, preserving: observation) }
+                catch ComputerUseBrowserError.authenticationRequired {
+                    return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
+                }
+                session.staleProposals += 1
+                guard session.staleProposals <= 3 else {
+                    return .userInterventionRequired("The page keeps changing before I can use its controls. Complete this step in the browser, then choose Resume.")
+                }
+                continue
             }
             if case .reportCompletion(let answer) = proposal.action {
                 var completed = session.journal; completed.statuses = [.verified]
@@ -310,7 +335,6 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             switch proposal.action {
             case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll:
-                let nativeTarget = try await tools.inspectOwnedBrowserAgentTarget(proposal.action, observation: observation)
                 if let nativeTarget, nativeTarget.context.isEmpty {
                     return .userInterventionRequired("I couldn't identify that browser control. Complete this step in the browser, then choose Resume.")
                 }

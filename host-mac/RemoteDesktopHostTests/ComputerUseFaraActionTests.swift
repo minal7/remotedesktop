@@ -7,6 +7,329 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInLiveSFJazzSearchFieldRemainsUsableOverAnimatedHomepage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one live native search-panel experiment without inference") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLiveSearchProbe-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let taskID = "live-search-probe", session = try browser.prepareWorkflowSession(taskID: taskID)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: taskID, prompt: "Open site search", referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles"),
+            allowedOrigins: [ComputerUseBrowserSourceOrigin(URL(string: "https://sfjazz.org")!), ComputerUseBrowserSourceOrigin(URL(string: "https://www.sfjazz.org")!)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        let initial = try await browser.captureInitialAgentObservation(taskID: taskID, expectedSessionIdentity: nil)
+        try await browser.performInitialAgentNavigation(URL(string: "https://sfjazz.org")!, observation: XCTUnwrap(initial), operationID: "open", willBeginEffect: {})
+        var observation = try await navigation.captureAgentObservation(taskID: taskID)
+        let headerAction = ComputerUseFaraAction.pointer(.leftClick, .init(x: 277, y: 83))
+        let headerTarget = try await browser.inspectAgentTarget(headerAction, observation: observation)
+        XCTAssertTrue(try XCTUnwrap(headerTarget).context.lowercased().contains("search"))
+        try await browser.performAgentInput(headerAction, observation: observation, target: headerTarget)
+        try await Task.sleep(for: .seconds(1))
+        observation = try await navigation.captureAgentObservation(taskID: taskID)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let view = try XCTUnwrap(NSApp.windows.filter { $0.title == "AI Browser — Remote Desktop" }.compactMap(\.contentView).flatMap(webViews).first)
+        func pointDetails() async throws -> String {
+            try await view.evaluateJavaScript("""
+                JSON.stringify({focus:document.activeElement?.outerHTML.slice(0,500),selection:String(document.getSelection()),items:[...document.querySelectorAll('*')].flatMap(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.x<=137&&r.x+r.width>137&&r.y<=167&&r.y+r.height>167&&s.display!=='none'&&s.visibility==='visible'?[{tag:e.tagName,id:e.id,classes:e.className,rect:[r.x,r.y,r.width,r.height],opacity:s.opacity,z:s.zIndex,pointer:s.pointerEvents}]:[]})})
+                """) as? String ?? "unavailable"
+        }
+        let before = try await pointDetails()
+        let image = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+        image.name = "Live search field before delay"; image.lifetime = .keepAlways; add(image)
+        try await Task.sleep(for: .seconds(8))
+        let details = XCTAttachment(string: "Before: \(before)\nAfter: \(try await pointDetails())")
+        details.name = "Live search point geometry before and after delay"; details.lifetime = .keepAlways; add(details)
+        let fieldAction = ComputerUseFaraAction.pointer(.leftClick, .init(x: 143, y: 294))
+        do {
+            let target = try await browser.inspectAgentTarget(fieldAction, observation: observation)
+            XCTAssertTrue(try XCTUnwrap(target).context.contains("AXTextField"))
+            try await browser.performAgentInput(fieldAction, observation: observation, target: target)
+        } catch { XCTFail("Search field after eight seconds: \(error), target status: \(browser.lastAgentTargetStatus ?? "none")") }
+    }
+
+    @MainActor
+    func testOptInAgentScopesInputToUnchangedControlWhilePageContentChanges() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: target-scoped native input on a changing page") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let changes = [
+            ("away-text", "motion.textContent='Another concert'"),
+            ("away-node", "motion.append(Object.assign(document.createElement('span'),{textContent:'More dates'}))"),
+            ("away-control", "other.remove()"),
+            ("target-text", "search.textContent='Purchase tickets'"),
+            ("target-replaced", "search.replaceWith(search.cloneNode(true))"),
+            ("target-remove-restore", "const s=search,p=s.parentNode;s.remove();p.append(s)"),
+            ("target-link", "search.href='/changed-destination'"),
+            ("login", "motion.innerHTML='<input type=password>'"),
+            ("source-policy", "void 0"),
+            ("source-boundary", "void 0")
+        ]
+        for (mode, change) in changes {
+            let target = mode == "target-link" ? "<a id='search' href='/destination'>Search</a>" : "<button id='search' onclick=\"fetch('/clicked')\">Search</button>"
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0;height:100vh}#search{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}#motion{position:fixed;left:50vw;top:50vh;width:20vw;height:10vh}</style>
+                \(target)<div id='motion'>A concert<a id='other' href='/elsewhere'>Elsewhere</a></div>
+                <script>fetch('/release').then(()=>{\(change);fetch('/changed')})</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let session = try browser.prepareWorkflowSession(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            server.releaseHeldResponses()
+            let deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/changed"), 1)
+            func revokeSource() throws {
+                let goal = try ComputerUseBrowserGoalInput(taskID: mode, prompt: "Click Search", referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles")
+                let policy = try ComputerUseBrowserSourcePolicy(goal: goal, allowedOrigins: [])
+                try browser.installSourcePolicy(policy, replacing: nil, session: session)
+            }
+            if mode == "source-policy" { try revokeSource() }
+            let allowed = mode.hasPrefix("away-")
+            if allowed && mode != "away-node" {
+                do { try await browser.validateAgentObservation(observation); XCTFail("Changed page cannot verify a final answer") }
+                catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            }
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 200, y: 150))
+            var began = 0
+            do {
+                let target = try await browser.inspectAgentTarget(action, observation: observation)
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: {
+                    began += 1
+                    if mode == "source-boundary" { try revokeSource() }
+                })
+                if !allowed { XCTFail("Changed target admitted: \(mode)") }
+            } catch {
+                if allowed { return XCTFail("Unrelated content blocked an unchanged control (\(mode)): \(error)") }
+                let expected: ComputerUseBrowserError = mode == "login" ? .authenticationRequired : mode.hasPrefix("source-") ? .sourceNotAllowed : .pageChanged
+                XCTAssertEqual(error as? ComputerUseBrowserError, expected, mode)
+            }
+            if allowed { while server.count("/clicked") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) } }
+            XCTAssertEqual(began, allowed || mode == "source-boundary" ? 1 : 0, mode); XCTAssertEqual(server.count("/clicked"), allowed ? 1 : 0, mode)
+            XCTAssertEqual(server.count("/changed-destination"), 0)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraReplansOnlyUnsentStaleProposalsAndBoundsRetries() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: stale-proposal recovery with real native input") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["once", "continuous", "replacement"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0;height:100vh}button{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}</style>
+                <button id='search' onclick="fetch('/clicked')">Search</button>
+                <script>(async()=>{for(let n=1;n<=4;n++){await fetch('/release');search.style.left=(10+n*2)+'vw';fetch('/changed?n='+n)}})()</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraStaleProposal-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: mode)
+            _ = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            let goal = "Click Search once."
+            var calls = 0, historyCounts: [Int] = []
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                XCTAssertEqual(input.goal, goal); historyCounts.append(input.history.count); calls += 1
+                guard calls <= 4 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                if mode == "replacement" { try browser.claim(taskID: "replacement-owner") }
+                else if calls == 1 || mode == "continuous" {
+                    let deadline = ContinuousClock.now + .seconds(2)
+                    while server.count("/release") < calls && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                    server.releaseHeldResponses()
+                    while server.count("/changed?n=\(calls)") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                    XCTAssertEqual(server.count("/changed?n=\(calls)"), 1)
+                }
+                let action: [String: Any] = mode == "once" && calls == 3 ? ["action":"terminate","answer":"Clicked Search once."]
+                    : ["action":"left_click","coordinate":[mode == "once" && calls == 2 ? 220 : 200,150]]
+                let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name":"computer_use","arguments":action]), as: UTF8.self) + "</tool_call>"
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            var result: ComputerUseExecutionResult?, failure: Error?
+            do { result = try await executor.execute(taskID: mode, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+            catch { failure = error }
+            if mode == "once" {
+                if let failure { return XCTFail("Unsent stale proposal was not replanned: \(failure)") }
+                XCTAssertEqual(result, .completed("Clicked Search once.")); XCTAssertEqual(calls, 3); XCTAssertEqual(historyCounts, [0,0,1])
+                let deadline = ContinuousClock.now + .seconds(2)
+                while server.count("/clicked") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/clicked"), 1)
+            } else if mode == "continuous" {
+                XCTAssertNil(failure); guard case .userInterventionRequired = result else { return XCTFail("Continuous change must hand control back after bounded replanning") }
+                XCTAssertEqual(calls, 4); XCTAssertEqual(historyCounts, [0,0,0,0]); XCTAssertEqual(server.count("/clicked"), 0)
+            } else {
+                XCTAssertEqual(failure as? ComputerUseBrowserError, .ownershipLost); XCTAssertEqual(calls, 1)
+                XCTAssertEqual(browser.taskID, "replacement-owner", "Recovery must not reclaim a successor's browser")
+                XCTAssertEqual(server.count("/clicked"), 0)
+            }
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, mode == "once" ? 1 : 0)
+        }
+    }
+
+    @MainActor
+    func testOptInAgentAllowsUnrelatedMotionAndRejectsMotionAtInputPoint() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded native input geometry") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["away", "target", "cover", "uncover"] {
+            let initial = mode == "uncover" ? "left:10vw;top:10vh;width:20vw;height:10vh;z-index:99" : "left:50vw;top:50vh;width:20vw;height:10vh"
+            let change = mode == "away" ? "motion.style.transform='translateX(30px)'"
+                : mode == "target" ? "search.style.transform='translateX(40px)'"
+                : mode == "cover" ? "motion.style.cssText='position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;z-index:99;background:red'"
+                : "motion.style.top='50vh'"
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0;height:100vh}button{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}#motion{position:fixed;background:red;\(initial)}</style>
+                <button id='search' onclick="fetch('/clicked')">Search</button><div id='motion'></div>
+                <script>fetch('/release').then(()=>{\(change);fetch('/changed')})</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            server.releaseHeldResponses()
+            let deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/changed"), 1)
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 200, y: 150))
+            var began = 0
+            do {
+                try await browser.validateAgentObservation(observation)
+                let target = try await browser.inspectAgentTarget(action, observation: observation)
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: { began += 1 })
+                if mode != "away" { XCTFail("Input admitted motion at its point: \(mode)") }
+            } catch {
+                if mode == "away" { return XCTFail("Unrelated decorative motion blocked a stable Search button: \(error)") }
+                XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mode)
+            }
+            if mode == "away" {
+                while server.count("/clicked") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            }
+            XCTAssertEqual(began, mode == "away" ? 1 : 0, mode)
+            XCTAssertEqual(server.count("/clicked"), mode == "away" ? 1 : 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInLiveSFJazzInitialNavigationAndCaptureWithoutInference() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one native public-site navigation/capture, no inference") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("LiveNavigation-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let taskID = "live-native-probe", goal = "Read the official SFJAZZ site"
+        let session = try browser.prepareWorkflowSession(taskID: taskID)
+        let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: taskID, prompt: goal, referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles"),
+            allowedOrigins: [ComputerUseBrowserSourceOrigin(URL(string: "https://sfjazz.org")!), ComputerUseBrowserSourceOrigin(URL(string: "https://www.sfjazz.org")!)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        var stage = "initial capture", failure: Error?
+        do {
+            let captured = try await browser.captureInitialAgentObservation(taskID: taskID, expectedSessionIdentity: nil)
+            let initial = try XCTUnwrap(captured)
+            try await Task.sleep(for: .seconds(1))
+            stage = "initial validation"; try browser.validateInitialAgentObservation(initial)
+            stage = "native navigation"
+            try await browser.performInitialAgentNavigation(URL(string: "https://sfjazz.org")!, observation: initial, operationID: "native-open", willBeginEffect: {})
+            stage = "loaded page capture"
+            let page = try await navigation.captureAgentObservation(taskID: taskID)
+            let image = XCTAttachment(data: page.png, uniformTypeIdentifier: "public.png")
+            image.name = "Native SFJAZZ page"; image.lifetime = .keepAlways; add(image)
+            stage = "complete"
+        } catch { failure = error }
+        var details = ""
+        if let document = browser.currentDocument(taskID: taskID), let reply = try? await browser.callDOM(.pageSnapshot, arguments: ["agentInput": true], document: document) {
+            details += "DOM status: \(reply.status); page: \(String(describing: reply.page)); wellFormed: \(String(describing: reply.page?.isWellFormed))\n"
+            if let page = reply.page {
+                details += "Invalid link URLs: \(page.links.filter { URL(string: $0.destination).flatMap(ComputerUseOwnedBrowser.validatedURL) == nil }.map(\.destination))\n"
+                details += "Container roots: \(page.containers.filter { $0.parentID == nil }.count); duplicate container IDs: \(page.containers.count - Set(page.containers.map(\.id)).count); kinds: \(Set(page.containers.map(\.kind)))\n"
+            }
+        }
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        if let view = NSApp.windows.filter({ $0.title == "AI Browser — Remote Desktop" }).compactMap(\.contentView).flatMap(webViews).first {
+            let metadata = try? await view.evaluateJavaScript("JSON.stringify({ready:document.readyState,elements:document.getElementsByTagName('*').length,width:innerWidth,height:innerHeight})")
+            details += "Native document metadata: \(String(describing: metadata))\n"
+            if let snapshot = try? await view.takeSnapshot(configuration: nil), let tiff = snapshot.tiffRepresentation,
+               let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
+                let image = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                image.name = "Native live page diagnostic screenshot"; image.lifetime = .keepAlways; add(image)
+            }
+        }
+        let history = try? browser.navigationDispatchHistory(taskID: taskID)
+        let evidence = XCTAttachment(string: "Stage: \(stage)\nFailure: \(String(reflecting: failure))\n\(details)Attempts: \(history?.attempts.map { $0.outcome.rawValue } ?? [])\nObservations: \(history?.observations.map { "\($0.order):\($0.phase.rawValue):\($0.binding.rawValue):\($0.decision.rawValue)" } ?? [])\nCurrent document: \(browser.currentDocument(taskID: taskID)?.committedURL.absoluteString ?? "none")")
+        evidence.name = "Native live SFJAZZ navigation probe"; evidence.lifetime = .keepAlways; add(evidence)
+        if let failure { XCTFail("\(stage): \(failure)") }
+    }
+
+    @MainActor
+    func testOptInFaraFindsLiveSFJazzConcertTicketInformation() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: bounded public website ticket-information trial, no purchase") }
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLiveConcert-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let taskID = "live-sfjazz-ticket-information"
+        let goal = "Find tickets for Branford Marsalis and Dianne Reeves at SFJAZZ on September 17, 2026. Report the start time, venue, advertised price range and official event link. Stop before purchasing."
+        let session = try browser.prepareWorkflowSession(taskID: taskID)
+        let origins = try ["https://www.bing.com", "https://www.google.com", "https://www.duckduckgo.com", "https://duckduckgo.com", "https://www.sfjazz.org", "https://sfjazz.org"].map {
+            try ComputerUseBrowserSourceOrigin(XCTUnwrap(URL(string: $0)))
+        }
+        let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: taskID, prompt: goal, referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles"), allowedOrigins: origins)
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        let runtime = OSAtlasLlamaRuntime()
+        var responses: [[String: Any]] = [], progress: [String] = []
+        let started = Date()
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard responses.count < 8 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let screenshot = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+            screenshot.name = "Live browser observation \(responses.count + 1)"; screenshot.lifetime = .keepAlways; self.add(screenshot)
+            let began = Date()
+            let endpoint = try await runtime.activateFara(inputs)
+            let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? ""])
+            return proposal
+        }, finishRun: { await runtime.shutdown() })
+        let run = Task { try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progress.append($0) }) }
+        let timeout = Task { try await Task.sleep(for: .seconds(120)); run.cancel() }
+        var result: ComputerUseExecutionResult?, failure: Error?
+        do { result = try await run.value } catch { failure = error }
+        timeout.cancel(); await runtime.shutdown()
+        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+        let history = try? browser.navigationDispatchHistory(taskID: taskID)
+        let report: [String: Any] = ["goal": goal, "responses": responses, "progress": progress, "result": String(reflecting: result),
+            "nativeAttemptOutcomes": history?.attempts.map { $0.outcome.rawValue } ?? [],
+            "nativeObservations": history?.observations.map { "\($0.order):\($0.phase.rawValue):\($0.binding.rawValue):\($0.decision.rawValue)" } ?? [],
+            "failure": failure.map { String(reflecting: $0) } ?? "", "seconds": Date().timeIntervalSince(started), "ownedProcessExited": exited,
+            "oracleCheckedOn": "2026-09-13", "oracleURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/"]
+        let evidence = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        evidence.name = "Live SFJAZZ Fara ticket trial"; evidence.lifetime = .keepAlways; add(evidence)
+        XCTAssertTrue(exited)
+        if let failure { return XCTFail("Live concert task failed after \(responses.count) proposals: \(failure)") }
+        guard case .completed(let answer) = result else { return XCTFail("Live concert task did not complete: \(String(reflecting: result))") }
+        // A live-source oracle, independently checked on 2026-09-13. A changed
+        // event listing requires review, not silently weakening these checks.
+        let normalized = answer.lowercased()
+        XCTAssertTrue(normalized.contains("7:30") && normalized.contains("pm"))
+        XCTAssertTrue(normalized.contains("miner auditorium"))
+        XCTAssertTrue(normalized.contains("$55") && normalized.contains("$155"))
+        XCTAssertTrue(normalized.contains("sfjazz.org/"))
+        XCTAssertTrue(responses.contains { ($0["currentURL"] as? String)?.hasPrefix("https://www.sfjazz.org/") == true }, "A claimed answer must follow an actual native observation of the official site.")
+    }
+
+    @MainActor
     func testOptInColdBrowserSnapshotLaysOutWhileHostAlreadyActive() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native initial browser layout") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

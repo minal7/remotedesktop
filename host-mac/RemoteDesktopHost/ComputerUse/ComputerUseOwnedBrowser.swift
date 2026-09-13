@@ -770,6 +770,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
     private var agentPointer = ComputerUseFaraAction.Point(x: 500, y: 500)
+    private(set) var lastAgentTargetStatus: String?
+
+    /// Refreshing a stale scene must retain its task and user-control authority.
+    /// This deliberately ignores document/layout changes, which the new capture verifies.
+    func validateAgentSession(_ observation: AgentObservation) throws {
+        try Task.checkCancellation()
+        guard taskID == observation.evidence.document.taskID,
+              contextID == observation.evidence.document.contextID,
+              ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
+              browser != nil, hasOwnership(taskID: observation.evidence.document.taskID) else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+    }
 
     func validateAgentObservation(_ observation: AgentObservation) async throws {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
@@ -842,7 +855,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     func predictedAgentAction(_ action: ComputerUseFaraAction, observation: AgentObservation) throws -> ComputerUsePredictedAction? {
-        try Task.checkCancellation()
+        try validateSourceDocument(observation.evidence.document)
         guard agentObservationID == observation.id, validate(observation.evidence.document),
               ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
               browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
@@ -882,6 +895,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         default: return nil
         }
         let result = try await callDOM(.agentTarget, arguments: arguments, document: observation.evidence.document)
+        lastAgentTargetStatus = result.status
         guard try predictedAgentAction(action, observation: observation) == predicted,
               result.status == "agent-target", result.documentID == observation.evidence.documentID,
               let id = result.agentTargetID, let context = result.agentTargetContext,
@@ -913,13 +927,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
                   browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
                   hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
+            try validateSourceDocument(observation.evidence.document)
         }
         try check()
-        try await validatePageEvidence(observation.evidence)
+        switch action {
+        case .pointer(.leftClick, _), .typeText, .key:
+            // The isolated target read below verifies the original control,
+            // input geometry and authentication even when other content changes.
+            break
+        default: try await validatePageEvidence(observation.evidence)
+        }
+        try check()
+        // Native input validates its point even when a caller does not supply
+        // a retained approval target. Snapshot validation permits unrelated
+        // animation; it is not input-location authority by itself.
+        let inspectedTarget = try await readAgentTarget(action, observation: observation)
         try check()
         if let target {
             guard target.observation == observation, target.proposal == action,
-                  try await readAgentTarget(action, observation: observation) == target else { throw ComputerUseBrowserError.pageChanged }
+                  inspectedTarget == target else { throw ComputerUseBrowserError.pageChanged }
             try check()
         }
         if case .visitURL(let url) = action {
