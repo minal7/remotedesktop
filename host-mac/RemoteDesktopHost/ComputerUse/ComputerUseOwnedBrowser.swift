@@ -657,9 +657,27 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         fileprivate let ownership: UUID
         fileprivate let takeover: UUID
         fileprivate let windowFrame: NSRect
+        var sessionIdentity: String { ComputerUseTaskContract.digest([evidence.document.contextID, evidence.document.taskID, ownership.uuidString]) }
+        var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
     }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
+
+    func validateAgentObservation(_ observation: AgentObservation) async throws {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        defer { agentOperationInProgress = false }
+        func check() throws {
+            try Task.checkCancellation()
+            guard agentObservationID == observation.id, validate(observation.evidence.document),
+                  ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
+                  browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
+        }
+        try check()
+        try await validatePageEvidence(observation.evidence)
+        try check()
+    }
 
     func captureAgentObservation(document expected: ComputerUseBrowserDocument) async throws -> AgentObservation {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
@@ -754,6 +772,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 // WebKit input events. It never adds select-all or Return.
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
             }
+        case .key(let keys) where keys.count == 2
+            && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased())
+            && keys[1].uppercased() == "A":
+            guard let responder = window.firstResponder as? NSView,
+                  responder === view || responder.isDescendant(of: view),
+                  let client = responder as? any NSTextInputClient, !client.hasMarkedText() else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            // Fara's browser select-all shortcut uses Control on its training
+            // platform. Invoke the equivalent native editing command on macOS.
+            dispatch = { client.doCommand(by: #selector(NSText.selectAll(_:))) }
         default:
             throw ComputerUseBrowserError.unsupportedDocument
         }

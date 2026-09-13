@@ -7,6 +7,76 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraExecutorJournalsInputAndRejectsRestartReplay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: retained task and restart checks in a visible local fictional form")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><title>Local Fara journal</title><label for="destination" style="position:fixed;left:20vw;top:12vh">Destination</label>
+            <input id="destination" style="position:fixed;left:20vw;top:20vh;width:60vw;height:10vh">
+            <script>document.addEventListener('input', event => fetch('/typed?value='+encodeURIComponent(event.target.value)));
+            document.addEventListener('click', () => fetch('/clicked'));</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraJournal-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("navigation"))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+        try browser.claim(taskID: "fara-journal")
+        _ = try await browser.navigate(taskID: "fara-journal", operationID: "open", to: base.appendingPathComponent("form"))
+        var calls = 0
+        let goal = "Type Tokyo into Destination."
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            XCTAssertEqual(input.goal, goal)
+            XCTAssertEqual(input.history.count, calls)
+            let actions = [#"{"action":"left_click","coordinate":[500,250]}"#,
+                #"{"action":"type","text":"Tokyo"}"#, #"{"action":"terminate","answer":"Destination is Tokyo."}"#]
+            guard calls < actions.count else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + actions[calls] + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let result = try await executor.execute(taskID: "fara-journal", prompt: "Untrusted assistant text", trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Destination is Tokyo."))
+        XCTAssertEqual(calls, 3)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while server.count("/typed?value=Tokyo") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(server.count("/typed?value=Tokyo"), 1)
+        XCTAssertEqual(server.count("/clicked"), 1)
+        let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try Data(contentsOf: $0) }
+        let journals = try records.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: $0) }
+        XCTAssertEqual(journals.count, 3)
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, 2)
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["model-assessed-completion"] }.count, 1)
+        XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] && $0.promptDigest == ComputerUseTextTaskContract.digest(goal) })
+        XCTAssertFalse(records.contains { String(data: $0, encoding: .utf8)?.contains("Tokyo") == true })
+        let cached = try await executor.execute(taskID: "fara-journal", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(cached, result)
+        do {
+            _ = try await executor.execute(taskID: "fara-journal", prompt: "Type Kyoto", trustedUserPrompt: "Type Kyoto", tools: tools, progress: { _ in })
+            XCTFail("A changed request cannot reuse this task")
+        } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .changedTask) }
+        let restarted = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            XCTFail("Restart cannot reconstruct and replay the old task")
+            throw ComputerUseFaraAction.Failure.invalidResponse
+        })
+        do {
+            _ = try await restarted.execute(taskID: "fara-journal", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTFail("The durable prior task requires recovery, not replay")
+        } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .recoveredTask) }
+        XCTAssertEqual(calls, 3)
+        XCTAssertEqual(server.count("/typed?value=Tokyo"), 1)
+        XCTAssertEqual(server.count("/clicked"), 1)
+    }
+
+    @MainActor
     func testOptInOwnedBrowserNativeClickAndUnicodeInputStopAtLogin() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: native events in a visible local fictional browser form")
@@ -295,7 +365,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         }
         let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MANAGED_REPORT_PATH"]))
         guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
-        let inputs = try await verifiedFaraRuntimeInputs(environment: environment)
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
@@ -400,25 +470,6 @@ final class ComputerUseFaraActionTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: reportURL, options: .atomic)
         XCTAssertTrue(gone)
         if let failure { throw failure }
-    }
-
-    private func verifiedFaraRuntimeInputs(environment: [String: String]) async throws -> ComputerUseFaraRuntimeInputs {
-        let assets = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MODEL_DIRECTORY"]))
-        for (name, expected) in [(ComputerUseFaraRuntimeInputs.modelFileName, "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51"),
-                                 (ComputerUseFaraRuntimeInputs.projectorFileName, "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d")] {
-            let file = try FileHandle(forReadingFrom: assets.appendingPathComponent(name))
-            defer { try? file.close() }
-            var hash = SHA256()
-            while let chunk = try file.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
-            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
-                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
-            }
-        }
-        let directory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
-        let executable = directory.appendingPathComponent("llama-server")
-        guard try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-        return ComputerUseFaraRuntimeInputs(modelURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
-            projectorURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName), llamaServerURL: executable)
     }
 
     func testOptInManagedFaraProposesFrozenTargetAndReleasesWorker() async throws {
@@ -696,4 +747,27 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: 0, height: 768))
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: Int.max, height: 768))
     }
+}
+
+@MainActor
+enum FaraTestAssets {
+    static func inputs(environment: [String: String]) async throws -> ComputerUseFaraRuntimeInputs {
+        let assets = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MODEL_DIRECTORY"]))
+        for (name, expected) in [(ComputerUseFaraRuntimeInputs.modelFileName, "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51"),
+                                 (ComputerUseFaraRuntimeInputs.projectorFileName, "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d")] {
+            let file = try FileHandle(forReadingFrom: assets.appendingPathComponent(name))
+            defer { try? file.close() }
+            var hash = SHA256()
+            while let chunk = try file.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+        }
+        let directory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let executable = directory.appendingPathComponent("llama-server")
+        guard try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+        return ComputerUseFaraRuntimeInputs(modelURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
+            projectorURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName), llamaServerURL: executable)
+    }
+
 }

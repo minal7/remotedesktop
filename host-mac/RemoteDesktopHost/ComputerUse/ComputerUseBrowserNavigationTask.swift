@@ -277,6 +277,20 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try await browser.validatePageEvidence(evidence)
     }
 
+    func captureAgentObservation(taskID: String) async throws -> ComputerUseOwnedBrowser.AgentObservation {
+        let document = try await browser.acquireObservedDocument(taskID: taskID)
+        return try await browser.captureAgentObservation(document: document)
+    }
+
+    func validateAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {
+        try await browser.validateAgentObservation(observation)
+    }
+
+    func performAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation,
+                           willBeginEffect: () throws -> Void) async throws {
+        try await browser.performAgentInput(action, observation: observation, willBeginEffect: willBeginEffect)
+    }
+
     func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
         try await browser.prepareLinkNavigation(linkID: linkID, evidence: evidence)
     }

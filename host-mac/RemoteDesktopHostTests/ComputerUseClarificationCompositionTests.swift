@@ -20,19 +20,36 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         try await runSingleModelTLSLogin(earlyResume: true)
     }
 
-    private func runSingleModelTLSLogin(earlyResume: Bool) async throws {
-        guard ProcessInfo.processInfo.environment["RUN_SINGLE_MODEL_TLS_LOGIN_ACCEPTANCE"] == "1" else {
+    func testOptInShippedClientFaraActionsResumeThroughTLSLoginWithoutRepeatingInput() async throws {
+        try await runSingleModelTLSLogin(earlyResume: true, fara: true)
+    }
+
+    func testOptInShippedClientFaraModelResumesThroughTLSLoginWithoutRepeatingInput() async throws {
+        try await runSingleModelTLSLogin(earlyResume: true, fara: true, realFara: true)
+    }
+
+    private func runSingleModelTLSLogin(earlyResume: Bool, fara: Bool = false, realFara: Bool = false) async throws {
+        let optIn = realFara ? "RUN_FARA_TLS_MODEL_ACCEPTANCE" : fara ? "RUN_FARA_TLS_LOGIN_ACCEPTANCE" : "RUN_SINGLE_MODEL_TLS_LOGIN_ACCEPTANCE"
+        guard ProcessInfo.processInfo.environment[optIn] == "1" else {
             throw XCTSkip("Opt-in: one local-model goal, visible fixture, shipped client and real loopback TLS")
         }
         let nativeInstaller = ComputerUseInstaller.nativeText()
-        let installation = await nativeInstaller.currentInstallation()
-        _ = try XCTUnwrap(installation, "This test requires the existing model; it must not download one")
+        if !fara {
+            let installation = await nativeInstaller.currentInstallation()
+            _ = try XCTUnwrap(installation, "This test requires the existing model; it must not download one")
+        }
         let runtime = OSAtlasLlamaRuntime()
         let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let faraInputs = realFara ? try await FaraTestAssets.inputs(environment: ProcessInfo.processInfo.environment) : nil
+        let faraLayout = fara ? """
+            <style>p,h1 {display:none} label,textarea {position:fixed!important;left:20vw!important;margin:0!important}
+            textarea {width:60vw!important;height:10vh!important} #origin {top:20vh} #destination {top:55vh}
+            label[for=origin] {top:12vh} label[for=destination] {top:47vh}</style>
+            """ : ""
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/form": .init(body: FormOracle.form(id: "model-login", initial: [
                 "origin": "old origin", "destination": "old destination"
-            ]) + """
+            ]) + faraLayout + """
                 <script>
                 originField.addEventListener('input', () => {
                     if (sessionStorage.fixtureAccount === 'retained') return;
@@ -60,7 +77,33 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
         let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
         var ownedBrowser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), nativeTextInstaller: nativeInstaller,
+        var faraCalls = 0
+        var faraResponses: [String] = []
+        let request = fara ? "First replace the Origin with Tokyo. Then replace the Destination with Kyoto."
+            : "Please replace the Origin with Tokyo and the Destination with Kyoto."
+        let faraExecutor: ComputerUseFaraBrowserExecutor? = try fara ? .init(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            XCTAssertEqual(input.goal, request)
+            XCTAssertEqual(input.history.count, faraCalls, "Resume must retain native action history")
+            if let faraInputs {
+                let endpoint = try await runtime.activateFara(faraInputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                faraCalls += 1; faraResponses.append(proposal.response)
+                return proposal
+            }
+            let actions = [
+                #"{"action":"left_click","coordinate":[500,250]}"#,
+                #"{"action":"key","keys":["CTRL","A"]}"#,
+                #"{"action":"type","text":"Tokyo"}"#,
+                #"{"action":"left_click","coordinate":[500,600]}"#,
+                #"{"action":"key","keys":["CTRL","A"]}"#,
+                #"{"action":"type","text":"Kyoto"}"#,
+                #"{"action":"terminate","answer":"Set Origin to Tokyo and Destination to Kyoto."}"#]
+            guard faraCalls < actions.count else { throw CompositionFailure.incomplete("Fara actions were replayed") }
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + actions[faraCalls] + "}</tool_call>"
+            faraCalls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, finishRun: { await runtime.shutdown() }) : nil
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: faraExecutor, nativeTextInstaller: nativeInstaller,
             nativeTextLoader: { receipt, tools, progress in
                 try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
                     journalDirectory: directory.appendingPathComponent("text"), progress: progress)
@@ -86,6 +129,31 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let pendingStore = CompositionPendingStore()
         let client = ClientModel(hostName: "Local Model Fixture Mac", pairingCode: pairingCode, hostID: hostID,
             sessionID: sessionID, pendingStore: pendingStore, channel: clientChannel, promptRefreshInterval: .seconds(600))
+        let modelStart = Date()
+        let memory = realFara ? Task.detached { () -> (UInt64, Int) in
+            var peak: UInt64 = 0, count = 0
+            while !Task.isCancelled {
+                for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: runtimeDirectory.appendingPathComponent("llama-server"))) ?? [] {
+                    if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) { peak = max(peak, bytes); count += 1 }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return (peak, count)
+        } : nil
+        func finishFaraEvidence() async {
+            guard let memory else { return }
+            memory.cancel()
+            let samples = await memory.value
+            let report: [String: Any] = ["modelCalls":faraCalls,"responses":faraResponses,
+                "peakSampledProcessMemoryBytes":samples.0,"memorySamples":samples.1,
+                "totalSeconds":Date().timeIntervalSince(modelStart),"wholeApp12GBQualified":false]
+            if let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]),
+               let string = String(data: data, encoding: .utf8) {
+                let attachment = XCTAttachment(string: string)
+                attachment.name = "Actual Fara TLS model resources and proposals"; attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
         var stage = "setup"
         func reach(_ nextStage: String, seconds: Double = 12, _ condition: () -> Bool) async throws {
             stage = nextStage
@@ -104,7 +172,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         func evidence(_ result: String) {
             let observed = FormOracle.states(server, id: "model-login")
             let attachment = XCTAttachment(string: "\(result); stage=\(stage); client=\(client.state); status=\(client.statusText); host=\(manager.activity); fixtureStates=\(observed); loginShown=\(server.count("/login-shown")); loginReturned=\(server.count("/logged-in"))")
-            attachment.name = "Actual local model client TLS browser login"
+            attachment.name = fara ? (realFara ? "Actual Fara client TLS browser login" : "Scripted Fara actions client TLS browser login") : "Actual local model client TLS browser login"
             attachment.lifetime = .keepAlways
             add(attachment)
         }
@@ -117,7 +185,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             try await reach("visible form open") { !client.hasActivePrompt }
             XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
             XCTAssertTrue(browser.isFrontmostWindow)
-            let prompt = "Please replace the Origin with Tokyo and the Destination with Kyoto."
+            let prompt = request
             XCTAssertTrue(client.sendPrompt(prompt))
             let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
             try await reach("login pause after first edit", seconds: 45) {
@@ -130,6 +198,9 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             XCTAssertEqual(paused.map { $0["target"]! }, ["", "origin"])
             XCTAssertEqual(paused.last?["origin"], "Tokyo")
             XCTAssertEqual(paused.last?["destination"], "old destination")
+            let pausedFaraCalls = faraCalls
+            if fara { XCTAssertGreaterThan(faraCalls, 0) }
+            if fara && !realFara { XCTAssertEqual(faraCalls, 3) }
             if earlyResume {
                 client.resumeAI()
                 XCTAssertFalse(client.hasHostPauseAcknowledgement)
@@ -140,6 +211,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
                 XCTAssertEqual(FormOracle.states(server, id: "model-login"), paused)
                 XCTAssertEqual(server.count("/login-shown"), 1)
                 XCTAssertEqual(server.count("/logged-in"), 0)
+                if fara { XCTAssertEqual(faraCalls, pausedFaraCalls, "Early Resume cannot invoke Fara during login") }
             }
             server.releaseHeldResponses()
             // This login changes only the DOM. hasPageAwaitingHandback tracks
@@ -158,13 +230,15 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
                 edits: [["field": 0, "mode": "replaceAll", "value": "Tokyo"], ["field": 1, "mode": "replaceAll", "value": "Kyoto"]])
             XCTAssertTrue(FormOracle.matches(observed, expected: expected), "Exactly one edit per field, preserving every intermediate state")
             XCTAssertEqual(server.count("/form"), 1)
+            if fara { XCTAssertGreaterThan(faraCalls, pausedFaraCalls) }
+            if fara && !realFara { XCTAssertEqual(faraCalls, 7) }
             XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
             let ledger = ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
             guard case .completed = try ledger.claim(taskID: pending.messageID, senderID: clientID,
                 sessionID: sessionID, promptBody: pending.exactWireBody) else {
                 throw CompositionFailure.incomplete("Completion was not durable for the original task")
             }
-            evidence("Verified model → visible browser first edit → login pause → shipped client Resume over TLS → second edit; exact original task completed")
+            evidence("Verified \(fara && !realFara ? "scripted Fara actions" : "actual model") → visible browser first edit → login pause → shipped client Resume over TLS → second edit; exact original task completed")
             client.stop()
             await manager.shutdown()
             await runtime.shutdown()
@@ -173,8 +247,10 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             client.stop()
             await manager.shutdown()
             await runtime.shutdown()
+            await finishFaraEvidence()
             throw error
         }
+        await finishFaraEvidence()
         XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: runtimeDirectory.appendingPathComponent("llama-server")).isEmpty)
     }
 
