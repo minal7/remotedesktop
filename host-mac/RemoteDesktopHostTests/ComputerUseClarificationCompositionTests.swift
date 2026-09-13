@@ -12,6 +12,153 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testOptInShippedClientLocalModelResumesVisibleFormThroughTLSLoginHandback() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SINGLE_MODEL_TLS_LOGIN_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: one local-model goal, visible fixture, shipped client and real loopback TLS")
+        }
+        let nativeInstaller = ComputerUseInstaller.nativeText()
+        let installation = await nativeInstaller.currentInstallation()
+        _ = try XCTUnwrap(installation, "This test requires the existing model; it must not download one")
+        let runtime = OSAtlasLlamaRuntime()
+        let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/form": .init(body: FormOracle.form(id: "model-login", initial: [
+                "origin": "old origin", "destination": "old destination"
+            ]) + """
+                <script>
+                originField.addEventListener('input', () => {
+                    if (sessionStorage.fixtureAccount === 'retained') return;
+                    const password = document.createElement('input');
+                    password.id = 'password'; password.type = 'password';
+                    password.value = 'private-fixture-password';
+                    document.querySelector('main').prepend(password);
+                    fetch('/login-shown');
+                    fetch('/release-login').then(() => {
+                        password.remove(); sessionStorage.fixtureAccount = 'retained';
+                        fetch('/logged-in');
+                    });
+                });
+                </script>
+                """),
+            "/release-login": .init(held: true),
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ModelTLSLogin-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        var ownedBrowser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), nativeTextInstaller: nativeInstaller,
+            nativeTextLoader: { receipt, tools, progress in
+                try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
+                    journalDirectory: directory.appendingPathComponent("text"), progress: progress)
+            }, macControlInstaller: NoCompositionHelperInstaller(),
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                let browser = ComputerUseOwnedBrowser(mayAct: mayAct)
+                ownedBrowser = browser
+                return .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
+            }, channelFactory: { _ in channel })
+        let browser = try XCTUnwrap(ownedBrowser)
+        defer { browser.close() }
+        let key = Data(repeating: 0x6D, count: 32)
+        let broker = LocalComputerUseBrokerServer(
+            credential: try RemoteDesktopHost.LocalComputerUseCredential(rawKey: key), hostID: hostID, channel: channel,
+            authorizePeer: { peer in manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in manager.revokePeerAuthorization() })
+        let port = try await broker.start()
+        defer { broker.stop() }
+        let clientChannel = RemoteDesktopClientCore.LocalComputerUseBrokerClient(
+            endpoint: .init(host: "127.0.0.1", port: port),
+            credential: try RemoteDesktopClientCore.LocalComputerUseCredential(rawKey: key),
+            pairingCode: pairingCode, sessionID: sessionID, senderID: clientID, targetID: hostID)
+        let pendingStore = CompositionPendingStore()
+        let client = ClientModel(hostName: "Local Model Fixture Mac", pairingCode: pairingCode, hostID: hostID,
+            sessionID: sessionID, pendingStore: pendingStore, channel: clientChannel, promptRefreshInterval: .seconds(600))
+        var stage = "setup"
+        func reach(_ nextStage: String, seconds: Double = 12, _ condition: () -> Bool) async throws {
+            stage = nextStage
+            let deadline = ContinuousClock.now + .seconds(seconds)
+            while !condition() {
+                if case .error(let detail) = manager.modelState { throw CompositionFailure.incomplete(detail) }
+                if !client.hasActivePrompt && client.latestTerminalOutcome == .unableToComplete {
+                    throw CompositionFailure.incomplete("\(stage): \(client.statusText)")
+                }
+                guard ContinuousClock.now < deadline else {
+                    throw CompositionFailure.incomplete("\(stage): client=\(client.state), status=\(client.statusText), host=\(manager.activity)")
+                }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        func evidence(_ result: String) {
+            let observed = FormOracle.states(server, id: "model-login")
+            let attachment = XCTAttachment(string: "\(result); stage=\(stage); client=\(client.state); status=\(client.statusText); host=\(manager.activity); fixtureStates=\(observed); loginShown=\(server.count("/login-shown")); loginReturned=\(server.count("/logged-in"))")
+            attachment.name = "Actual local model client TLS browser login"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        do {
+            manager.start(pairingCode: pairingCode, additionalChannels: [channel], includeDefaultChannel: false)
+            try await clientChannel.handshake()
+            try await reach("model ready", seconds: 45) { if case .ready = manager.modelState { return true }; return false }
+            client.start()
+            XCTAssertTrue(client.sendPrompt("Open \(base.appendingPathComponent("form").absoluteString)"))
+            try await reach("visible form open") { !client.hasActivePrompt }
+            XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
+            XCTAssertTrue(browser.isFrontmostWindow)
+            let prompt = "Please replace the Origin with Tokyo and the Destination with Kyoto."
+            XCTAssertTrue(client.sendPrompt(prompt))
+            let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            try await reach("login pause after first edit", seconds: 45) {
+                client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+            }
+            XCTAssertTrue(client.hasActivePrompt)
+            XCTAssertEqual(client.latestTerminalOutcome, .userInterventionRequired)
+            XCTAssertEqual(server.count("/login-shown"), 1)
+            let paused = FormOracle.states(server, id: "model-login").sorted { $0["sequence"]! < $1["sequence"]! }
+            XCTAssertEqual(paused.map { $0["target"]! }, ["", "origin"])
+            XCTAssertEqual(paused.last?["origin"], "Tokyo")
+            XCTAssertEqual(paused.last?["destination"], "old destination")
+            server.releaseHeldResponses()
+            // This login changes only the DOM. hasPageAwaitingHandback tracks
+            // navigation during user control and is false for this retained page.
+            try await reach("simulated login return") { server.count("/logged-in") == 1 }
+            XCTAssertEqual(FormOracle.states(server, id: "model-login"), paused, "Login alone cannot resume AI input")
+            client.resumeAI()
+            try await reach("resumed completion", seconds: 45) {
+                !client.hasActivePrompt && client.latestTerminalOutcome == .taskCompleted && manager.activity == .idle
+            }
+            XCTAssertEqual(client.state, .ready)
+            XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            try await reach("independent edit receipts") { FormOracle.states(server, id: "model-login").count >= 3 }
+            let observed = FormOracle.states(server, id: "model-login").sorted { $0["sequence"]! < $1["sequence"]! }
+            let expected = try FormOracle.expectedSequence(initial: ["origin": "old origin", "destination": "old destination"],
+                edits: [["field": 0, "mode": "replaceAll", "value": "Tokyo"], ["field": 1, "mode": "replaceAll", "value": "Kyoto"]])
+            XCTAssertTrue(FormOracle.matches(observed, expected: expected), "Exactly one edit per field, preserving every intermediate state")
+            XCTAssertEqual(server.count("/form"), 1)
+            XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
+            let ledger = ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
+            guard case .completed = try ledger.claim(taskID: pending.messageID, senderID: clientID,
+                sessionID: sessionID, promptBody: pending.exactWireBody) else {
+                throw CompositionFailure.incomplete("Completion was not durable for the original task")
+            }
+            evidence("Verified model → visible browser first edit → login pause → shipped client Resume over TLS → second edit; exact original task completed")
+            client.stop()
+            await manager.shutdown()
+            await runtime.shutdown()
+        } catch {
+            evidence("Failed: \(error)")
+            client.stop()
+            await manager.shutdown()
+            await runtime.shutdown()
+            throw error
+        }
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: runtimeDirectory.appendingPathComponent("llama-server")).isEmpty)
+    }
+
     func testShippedClientCompletesLocalBrowserWorkflowThroughTLSLoginHandback() async throws {
         try await runShippedClientTLSLoginWorkflow(stopAtLogin: false)
     }
