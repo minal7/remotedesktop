@@ -1884,9 +1884,9 @@ enum ComputerUseBrowserDOM {
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
-            // Native Find changes host chrome, never a page control. Retain the
-            // document/snapshot and fresh authentication gate above; native code
-            // verifies its window, query, selection and focus before dispatch.
+            // Native Find and explicit URL/search navigation do not activate
+            // a page control. Retain the document/snapshot and fresh login gate;
+            // native code verifies its owner/window and any Find editing state.
             if (command === 'validateAgentChrome') return reply(lastPageSnapshot.agentState ? 'agent-chrome-current' : 'unsupported');
             const scopedAgentTarget = ['agentTarget','agentFragmentScroll','validateAgentScroll','agentScroll'].includes(command) && !!lastPageSnapshot.agentState;
             if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {

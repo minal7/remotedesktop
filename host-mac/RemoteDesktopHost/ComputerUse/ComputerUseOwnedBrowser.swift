@@ -976,6 +976,22 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private func readAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
         let predicted = try predictedAgentAction(action, observation: observation)
+        switch action {
+        case .visitURL, .webSearch:
+            // An explicit URL/search uses native browser navigation rather
+            // than a page control. Keep the captured document, source, owner,
+            // window and login gates while allowing unrelated page updates.
+            let current = try await callDOM(.validateAgentChrome,
+                arguments: ["documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id],
+                document: observation.evidence.document)
+            lastAgentTargetStatus = current.status
+            guard current.status == "agent-chrome-current", current.documentID == observation.evidence.documentID,
+                  try predictedAgentAction(action, observation: observation) == predicted else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            return nil
+        default: break
+        }
         if case .scroll(let horizontal, let pixels) = action {
             guard pixels.isFinite, abs(pixels) <= 10_000,
                   let viewport = observation.evidence.page.viewport, viewport.isWellFormed,
@@ -1086,10 +1102,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         try check()
         switch action {
-        case .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll:
+        case .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll, .visitURL:
             // The isolated target read below verifies the original control,
             // or scroll command verifies its point, geometry and authentication,
             // even when other content changes.
+            // Explicit navigation retains the same document/login gate.
             break
         default: try await validatePageEvidence(observation.evidence)
         }

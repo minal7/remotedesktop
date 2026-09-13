@@ -1,0 +1,1367 @@
+{
+  "scope": "Explicit browser navigation on changing pages, native focus recovery, strict completion replanning, and bounded Fara Q6 movie retry",
+  "sourceParent": "c346f8814644adf0b9a9874743d7dd3209b8cf54",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "5cff19244876a5f80f0a38cd689c25f100ec7c90b7f535dcfd7c1195f5c567e7",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "e937694ce752cdcc32e4265223392837d2547e5578c8fe77758ec1f1e449da1a",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "f96fb15e6efab478f7e5023827e421a3bdbce9088bea9b8397d9ec80f5342197",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "edb45cc9474e5d80c52fe577a8936beb8b0260f84c61211cd1f355129fa5fc7a"
+  },
+  "currentBuild": "native-navigation-completion-regressions-01",
+  "targetMacRAMGB": 12,
+  "wholeApp12GBQualified": false,
+  "productionSelectedModel": "Fara1.5-4B Q4",
+  "productionModelChanged": false,
+  "productionMemoryCapGiB": 4,
+  "diagnosticQ6MemoryCapGiB": 5,
+  "installedAppReplaced": false,
+  "fullMovieTaskAccepted": false,
+  "fullSuiteRun": false,
+  "uniqueNewSuccessfulMacMethods": 3,
+  "historicalMinimumSuccessfulMacMethods": 280,
+  "repairs": [
+    "Explicit visit_url and web_search no longer require all page content, controls and layout to remain unchanged. Preflight and native dispatch reuse the existing document/snapshot and fresh authentication gate used for browser chrome, with native owner/source/window/Find-state checks before and after the asynchronous read.",
+    "Real navigation still consumes the captured observation, uses an exact native navigation receipt and binds to the same original document. Source restrictions, cancellation and final admission remain active. History traversal, DOM control activation and terminal answers keep their existing separate checks.",
+    "The changing-page completion fixture had an obsolete immediate-error expectation. It now proposes a distinguishable stale answer (Loading), requires rejection feedback and a new screenshot, then accepts only the fresh answer (Loaded). No production completion or retry-budget behavior changed."
+  ],
+  "tests": [
+    {
+      "label": "native-navigation-countdown-red-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789338793.837,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338764.612,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Background update rejected explicit navigation: The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraSearchAndVisitSurviveBackgroundPageUpdates()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraSearchAndVisitSurviveBackgroundPageUpdates",
+          "testName": "testOptInFaraSearchAndVisitSurviveBackgroundPageUpdates()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-navigation-countdown-green-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789338872.656,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789338848.579,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-navigation-authority-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789339036.898,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339014.572,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-search-focus-recovery-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 1,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789339058.205,
+      "passedTests": 1,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339056.344,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    },
+    {
+      "label": "native-navigation-lifecycle-regressions-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789339089.072,
+      "passedTests": 3,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339080.778,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "XCTAssertTrue failed - Completion was accepted from a stale screenshot",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 2,
+          "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraRejectsCompletionFromChangedPage()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraRejectsCompletionFromChangedPage",
+          "testName": "testOptInFaraRejectsCompletionFromChangedPage()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 4
+    },
+    {
+      "label": "native-navigation-completion-regressions-01",
+      "mode": "build-and-test",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 2,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789339203.6,
+      "passedTests": 2,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339180.001,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 2
+    },
+    {
+      "label": "native-navigation-source-regressions-01",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 0,
+          "passedTests": 3,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 0,
+      "finishTime": 1789339218.226,
+      "passedTests": 3,
+      "result": "Passed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339215.774,
+      "statistics": [],
+      "testFailures": [],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    {
+      "label": "fara-q6-live-movie-04",
+      "mode": "test-without-building",
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 0,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1789339459.665,
+      "passedTests": 0,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1789339261.822,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "failed - Live ticket task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink",
+          "testName": "testOptInFaraQ6FindsLiveRoxieMovieTimePriceAndTicketLink()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 1
+    }
+  ],
+  "navigationBoundaries": [
+    "replaced observation",
+    "new document",
+    "replaced document root",
+    "changed URL",
+    "new login field",
+    "revoked source before dispatch",
+    "revoked source at final callback",
+    "replacement task owner",
+    "Take Control then reopened gate",
+    "cancellation",
+    "resized window",
+    "Stop",
+    "Close"
+  ],
+  "movie04": {
+    "failure": "",
+    "finalDocumentURL": "https://www.bing.com/search?q=Roxie+Theater+official+tickets+Gotix&FORM=QBLH",
+    "goal": "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing.",
+    "lastAgentCaptureStage": "complete",
+    "lastAgentTargetStatus": "stale-agent-link",
+    "model": "Fara1.5-4B-Q6_K",
+    "nativeAttemptOutcomes": [
+      "documentCommitted",
+      "documentCommitted",
+      "documentCommitted",
+      "documentCommitted",
+      "documentCommitted"
+    ],
+    "nativeDispatchJournalStatuses": [
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ],
+      [
+        "verified"
+      ]
+    ],
+    "nativeObservations": [
+      "4:locationChanged:pendingSlot:observed",
+      "5:navigationAction:pendingSlot:allowed",
+      "6:provisionalStart:exactPendingNavigation:observed",
+      "7:response:pendingSlot:allowed",
+      "8:documentCommitStarted:exactPendingNavigation:observed",
+      "9:documentFinished:exactPendingNavigation:observed",
+      "11:navigationAction:none:allowed",
+      "12:locationChanged:none:observed",
+      "13:provisionalStart:exactObservedNavigation:observed",
+      "14:response:observedSlot:allowed",
+      "15:documentCommitStarted:exactObservedNavigation:observed",
+      "16:documentFinished:exactObservedNavigation:observed",
+      "17:observedNavigationEnded:exactObservedNavigation:observed",
+      "21:locationChanged:pendingSlot:observed",
+      "22:navigationAction:pendingSlot:allowed",
+      "23:provisionalStart:exactPendingNavigation:observed",
+      "24:response:pendingSlot:allowed",
+      "25:documentCommitStarted:exactPendingNavigation:observed",
+      "26:documentFinished:exactPendingNavigation:observed",
+      "29:locationChanged:pendingSlot:observed",
+      "30:navigationAction:pendingSlot:allowed",
+      "31:provisionalStart:exactPendingNavigation:observed",
+      "32:response:pendingSlot:allowed",
+      "33:documentCommitStarted:exactPendingNavigation:observed",
+      "34:documentFinished:exactPendingNavigation:observed",
+      "37:locationChanged:pendingSlot:observed",
+      "38:navigationAction:pendingSlot:allowed",
+      "39:provisionalStart:exactPendingNavigation:observed",
+      "40:response:pendingSlot:allowed",
+      "41:documentCommitStarted:exactPendingNavigation:observed",
+      "42:documentFinished:exactPendingNavigation:observed",
+      "44:navigationAction:none:allowed",
+      "45:locationChanged:none:observed",
+      "46:provisionalStart:exactObservedNavigation:observed",
+      "47:response:observedSlot:allowed",
+      "48:documentCommitStarted:exactObservedNavigation:observed",
+      "49:documentFinished:exactObservedNavigation:observed",
+      "50:observedNavigationEnded:exactObservedNavigation:observed",
+      "54:locationChanged:pendingSlot:observed",
+      "55:navigationAction:pendingSlot:allowed",
+      "56:provisionalStart:exactPendingNavigation:observed",
+      "57:response:pendingSlot:allowed",
+      "58:documentCommitStarted:exactPendingNavigation:observed",
+      "59:documentFinished:exactPendingNavigation:observed"
+    ],
+    "oracleCheckedOn": "2026-09-13",
+    "oracleURL": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c",
+    "ownedProcessExited": true,
+    "progress": [
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Reading the browser…",
+      "Using the browser…",
+      "Reading the browser…"
+    ],
+    "proposalLimit": 24,
+    "responses": [
+      {
+        "actionError": "",
+        "currentURL": "",
+        "historyCount": 0,
+        "seconds": 10.79163408279419,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "visit_url",
+              "url": "https://www.theroxie.org"
+            }
+          }
+        ],
+        "responseSHA256": "b38cdeadc6e14e5a78558134c9dae7770ab2689b75c6046050d523330ec3f4c7"
+      },
+      {
+        "actionError": "visit_url to https://www.theroxie.org failed: BrowserSourcePolicy: The destination is not permitted for this task.",
+        "currentURL": "",
+        "historyCount": 1,
+        "seconds": 12.608461022377014,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "site:theroxie.org OR site:ticket.theroxie.org OR site:gotix.com \"The Cycle of Love\" \"September 17, 2026\" Roxie San Francisco official tickets"
+            }
+          }
+        ],
+        "responseSHA256": "47a5e4dcf4fc0dc1886663e6290d71c009dc6ccada927d0e2dd462e143485a71"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+OR+site%3Aticket.theroxie.org+OR+site%3Agotix.com+%22The+Cycle+of+Love%22+%22September+17%2C+2026%22+Roxie+San+Francisco+official+tickets&FORM=QBLH",
+        "historyCount": 2,
+        "seconds": 13.114004015922546,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 2
+            }
+          }
+        ],
+        "responseSHA256": "ccb274b1029ccc0b40cc33a083e5a8799ec94ad1dcec539ab11c21c7ebed359f"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+OR+site%3Aticket.theroxie.org+OR+site%3Agotix.com+%22The+Cycle+of+Love%22+%22September+17%2C+2026%22+Roxie+San+Francisco+official+tickets&FORM=QBLH&rdr=1&rdrig=6C974786F6494AA49DA0CD127ABA0B87",
+        "historyCount": 3,
+        "seconds": 13.336658954620361,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "\"The Cycle of Love\" \"Roxie\" \"September 17, 2026\" tickets"
+            }
+          }
+        ],
+        "responseSHA256": "8ad367e5e3fcc5c7c2ab80f2f0f132be785f7631b6e2180edac442d54853c503"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+%22Roxie%22+%22September+17%2C+2026%22+tickets&FORM=QBLH",
+        "historyCount": 4,
+        "seconds": 12.786639928817749,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "\"The Cycle of Love\" Roxie San Francisco September 17 2026 tickets"
+            }
+          }
+        ],
+        "responseSHA256": "5af7d4c8a452e60648f3fc2cce058a6756635e60a74605d7cae42da9a784136a"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026+tickets&FORM=QBLH",
+        "historyCount": 5,
+        "seconds": 13.12428605556488,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                669,
+                504
+              ]
+            }
+          }
+        ],
+        "responseSHA256": "a0e6d1601db482e5202dad41777b373770564e1bdfe6af0a17f3b4c2bb40f1ad"
+      },
+      {
+        "actionError": "left_click at [669.0, 504.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026+tickets&FORM=QBLH",
+        "historyCount": 6,
+        "seconds": 13.423072934150696,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                665,
+                504
+              ]
+            }
+          }
+        ],
+        "responseSHA256": "c5eb212bb61dbf88f1c7328df5a5d574a069b67992a9902344f22db10a5e6752"
+      },
+      {
+        "actionError": "left_click at [665.0, 504.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026+tickets&FORM=QBLH",
+        "historyCount": 7,
+        "seconds": 13.787649035453796,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "site:theroxie.org \"The Cycle of Love\" Roxie San Francisco September 17 2026"
+            }
+          }
+        ],
+        "responseSHA256": "507ef390ece55551d409a954a3c2e46ec33233c0a498ebd3033d0fcb3b27341d"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026&FORM=QBLH",
+        "historyCount": 8,
+        "seconds": 13.827435970306396,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "Roxie Theater Gotix tickets official"
+            }
+          }
+        ],
+        "responseSHA256": "23f074a75241d52b59a51c57cd0085fb2eaa0ef06e614ae89e16a4f60de5e732"
+      },
+      {
+        "actionError": "The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026&FORM=QBLH&rdr=1&rdrig=7C50DE3FBC584611A45A4573023D6B30",
+        "historyCount": 9,
+        "seconds": 13.821417093276978,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 2
+            }
+          }
+        ],
+        "responseSHA256": "97a566a6904882b1528b867be3bfdfe05380f2aef677e02808e9d447910d89f5"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=site%3Atheroxie.org+%22The+Cycle+of+Love%22+Roxie+San+Francisco+September+17+2026&FORM=QBLH&rdr=1&rdrig=7C50DE3FBC584611A45A4573023D6B30",
+        "historyCount": 10,
+        "seconds": 14.714192032814026,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "Roxie Theater official tickets Gotix"
+            }
+          }
+        ],
+        "responseSHA256": "7d8de121572e931b5b83b2e78efa7114e906a599ccdfe3dc106f42c9c489c4ec"
+      },
+      {
+        "actionError": "",
+        "currentURL": "https://www.bing.com/search?q=Roxie+Theater+official+tickets+Gotix&FORM=QBLH",
+        "historyCount": 11,
+        "seconds": 15.161687016487122,
+        "nativeCalls": [
+          {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                81,
+                448
+              ]
+            }
+          }
+        ],
+        "responseSHA256": "7185ffbb2e2de55378e31ffd7820922fef897b05dcc657dc72bb4ae4af562314"
+      }
+    ],
+    "result": "Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+    "seconds": 183.30735802650452,
+    "timeoutSeconds": 300
+  },
+  "movie04Workers": [
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "63b0e1100c3599c5a1a25e658dd759e153f5e403f707fd9d59f50c944005fa3f",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4950638592,
+      "memorySamples": 31,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46279,
+      "startupSeconds": 1.5660282920580357,
+      "generationSeconds": 6.481363500002772,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 143,
+        "prompt_tokens": 2607,
+        "total_tokens": 2750,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 8.191936167073436
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "493ed7b7c79a528dc85269db0abb3ea0a0edf1acad6e8ce31be4f0b37122043b",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4980031488,
+      "memorySamples": 39,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46285,
+      "startupSeconds": 1.3128935840213671,
+      "generationSeconds": 8.828843750059605,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 163,
+        "prompt_tokens": 3617,
+        "total_tokens": 3780,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.230577417067252
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "a65b357ec4dc13436fe610f8effc837b30f8e2f2f27e7fed614f7ec1bfb4b003",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 5002379264,
+      "memorySamples": 40,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46293,
+      "startupSeconds": 1.3145724170608446,
+      "generationSeconds": 9.11654037493281,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 80,
+        "prompt_tokens": 4440,
+        "total_tokens": 4520,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.58055879198946
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "824474a717598259a8b4708a443b8be87f0a50a24f21dd7c644b254a4c04a58b",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4988616704,
+      "memorySamples": 41,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46618,
+      "startupSeconds": 1.3081678330199793,
+      "generationSeconds": 9.348740707966499,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 119,
+        "prompt_tokens": 4398,
+        "total_tokens": 4517,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.79072016698774
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "c45fcdcd76b403835d58b05b25d6b5acf3175952425133c88102e518947371be",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4965220352,
+      "memorySamples": 39,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46623,
+      "startupSeconds": 1.308363249991089,
+      "generationSeconds": 8.871555958059616,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 110,
+        "prompt_tokens": 4327,
+        "total_tokens": 4437,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.2642868750263
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "c03e1672470e077f3dbb41d48149645e78cb3bd84609312363d6a77ce410b9ad",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4969267200,
+      "memorySamples": 40,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 46629,
+      "startupSeconds": 1.314892249996774,
+      "generationSeconds": 9.21964745898731,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 112,
+        "prompt_tokens": 4513,
+        "total_tokens": 4625,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.623548375093378
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "79d81f7b02171fe79a7020ad49f70f67d9f9b5bf392c4c64549b34ef730953a7",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4970921984,
+      "memorySamples": 41,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 47259,
+      "startupSeconds": 1.3161300420761108,
+      "generationSeconds": 9.41006845899392,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 109,
+        "prompt_tokens": 4756,
+        "total_tokens": 4865,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 10.856437417096458
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "5443d018f5a748eb98c6a630db7db6cd0f9983db063ce8cb7ad972fbd3afd251",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4971495424,
+      "memorySamples": 43,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 47577,
+      "startupSeconds": 1.301317291916348,
+      "generationSeconds": 9.890841874992475,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 119,
+        "prompt_tokens": 4996,
+        "total_tokens": 5115,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.27268258400727
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "d5c376a43fa69f0f130523996f7e9c7cc3db3708224feba46b72bd0c8db648b3",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4970397696,
+      "memorySamples": 43,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 47895,
+      "startupSeconds": 1.302843666053377,
+      "generationSeconds": 9.862567667034455,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 99,
+        "prompt_tokens": 5198,
+        "total_tokens": 5297,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.252239500056021
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "adfbb7717fce8a2bd42e177ddadd995b66933559cb92fec19a316d1bf521d0dd",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4969758720,
+      "memorySamples": 43,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 47910,
+      "startupSeconds": 1.297755292034708,
+      "generationSeconds": 9.909754166030325,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 78,
+        "prompt_tokens": 5458,
+        "total_tokens": 5536,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 11.296648708055727
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "c4655ab2ea8563956d2a3aba9905164b0dc95fe6f6199cbc6ed5b2a5c19831a6",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4969463808,
+      "memorySamples": 46,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 48228,
+      "startupSeconds": 1.3014303339878097,
+      "generationSeconds": 10.778362957993522,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 110,
+        "prompt_tokens": 5656,
+        "total_tokens": 5766,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 12.212311791954562
+    },
+    {
+      "scope": "one-native-Fara-Q6-protocol-proposal-no-tool-execution",
+      "requestSHA256": "c3405442ab6eb4e9ac42eb4fbcefe7af4330c6dbb6acf4d51726ab763067da93",
+      "modelAssets": {
+        "repository": "bartowski/Fara1.5-4B-GGUF",
+        "revision": "b97f335231e01efbbad37bb89b5310340fc10735",
+        "upstream": "microsoft/Fara1.5-4B",
+        "upstreamRevision": "776a33ae5b2ad503796a97ae20fdc66f61d2feea",
+        "precision": "Q6_K",
+        "files": [
+          {
+            "name": "Fara1.5-4B-Q6_K.gguf",
+            "bytes": 3677181024,
+            "sha256": "8f7683880f82f7f84f421e4bd0e45cdf1f0281054fe8d61716b378e3380673ea"
+          },
+          {
+            "name": "mmproj-Fara1.5-4B-f16.gguf",
+            "bytes": 672423584,
+            "sha256": "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"
+          }
+        ]
+      },
+      "binarySHA256": "7cc62eb524959f1320e9e77133b083a1944da745af33be67b0ff9a2e4a0ffa9f",
+      "targetMacRAMGB": 12,
+      "wholeApp12GBQualified": false,
+      "selectedProductionModelChanged": false,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memoryStopLimitBytes": 5368709120,
+      "diagnosticMemoryLimitOnly": true,
+      "productionMemoryLimitChanged": false,
+      "peakSampledProcessMemoryBytes": 4969709568,
+      "memorySamples": 48,
+      "startupDeadlineSeconds": 45,
+      "generationDeadlineSeconds": 45,
+      "totalDeadlineSeconds": 100,
+      "runnerExecutesNoActions": true,
+      "minimumImageTokensEnvironment": null,
+      "pid": 48234,
+      "startupSeconds": 1.3002717499621212,
+      "generationSeconds": 11.181431208038703,
+      "responseReceived": true,
+      "usage": {
+        "completion_tokens": 121,
+        "prompt_tokens": 5821,
+        "total_tokens": 5942,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "finishReason": "stop",
+      "exitCode": 0,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "totalSeconds": 12.61598000000231
+    }
+  ],
+  "inspectionImages": {
+    ".build/repair-verification/fara-q6-live-movie-04/request-11-inspection.png": "cc7c06596132899d5e421b767647bc47e20b3c244f36a60df3f5898838b3d793",
+    ".build/repair-verification/fara-q6-live-movie-04/request-10-inspection.png": "9bf7c23a2d75a796ee2998b96045c0bf1f8da66437b925d9434b4eb3e1a82b42"
+  },
+  "decisions": [
+    "The new complete local search/source/report test fails before and passes after the repair. The exact Unicode/punctuation query is preserved, each destination loads once, all three journals are verified, no click/key/input event is posted into the page and re-entering the completed task replays nothing.",
+    "All thirteen navigation authority variants reject with zero destination requests; only the explicit late-source-revocation case reaches its final pre-dispatch callback. One browser window is retained across the cases until explicit Close.",
+    "The new focus-recovery fixture rejects Select All after the captured field loses focus, with zero attempted input or page events. Fresh native click, Select All and exact Unicode insertion then succeed with one edit; old authority remains unusable. This proves controlled recovery, not the precise cause of the preceding movie03 stale-agent-point.",
+    "Existing exact search/navigation, replay/cancellation/revocation, login/early Resume and source-rejection/uncertain-redirect regressions pass. Strict stale-completion and wait tests pass after correcting the obsolete fixture expectation.",
+    "The Q6 full movie04 retry still fails after twelve proposals and 183.307358 seconds. Five native navigations verify. One search proposal is rejected across an observed Bing redirect, and three clicks are rejected before effect. It hands back under the unchanged cumulative four-rejection bound with lastAgentTargetStatus stale-agent-link.",
+    "One retained screenshot shows irrelevant dictionary results for a restricted film query. The final screenshot instead shows the correct official Roxie Ticket Info result. The final proposed normalized point [81,448] lies visibly on that result label; native point validation reaches the later link-binding rejection. Do not call this last failure a demonstrated grounding miss.",
+    "Next isolate stale-agent-link into its existing individual checks, then use a controlled no-inference link reproduction and a short public read-only probe if necessary. The present diagnostic does not distinguish retirement, base/signature, navigation kind, fragment identity, layout or label/destination mismatch. Do not relax link identity or raise the retry budget based on a generic status.",
+    "All twelve sequential model workers exit and remove temporary credentials. Peak sampled max(RSS,physical footprint) is 5002379264 bytes under the diagnostic 5 GiB cap. No ticket selection occurs. No total application memory, thermal or production qualification is claimed.",
+    "Eight build/test bundles are retained: five passing and three failing (the intended navigation red, obsolete completion expectation, and incomplete movie task). There is no compiler-only failure or runtime-warning result in this checkpoint; existing Swift compile warnings remain.",
+    "Keep Fara Q4 selected and Q6 diagnostic. Full movie/travel, real provider login, physical phone, remaining native behavior, total 12 GB/heat and production acceptance remain open."
+  ]
+}

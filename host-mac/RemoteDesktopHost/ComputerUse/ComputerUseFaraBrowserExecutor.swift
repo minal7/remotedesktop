@@ -396,9 +396,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             var nativeTarget: ComputerUseOwnedBrowser.AgentTarget?
             do {
                 switch proposal.action {
-                case .wait, .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll:
+                case .wait, .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll, .visitURL, .webSearch:
                     // Waiting posts no input. Input reads its exact retained
                     // target below; unrelated content need not stay frozen.
+                    // Explicit navigation checks its native document and fresh
+                    // authentication gate, without targeting page content.
                     break
                 case .remember:
                     try tools.validateOwnedBrowserAgentMemoryObservation(observation)

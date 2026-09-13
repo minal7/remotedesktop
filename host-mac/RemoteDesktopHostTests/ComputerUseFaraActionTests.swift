@@ -4148,30 +4148,42 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let ready = ContinuousClock.now + .seconds(3)
         while server.count("/change") == 0 && ContinuousClock.now < ready { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(server.count("/change"), 1)
-        var calls = 0
+        var calls = 0, firstImage: Data?
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
             guard calls < 2 else { throw ComputerUseFaraAction.Failure.invalidResponse }
             XCTAssertEqual(input.history.count, calls)
             if calls == 0 {
+                firstImage = input.screenshotPNG
                 server.releaseHeldResponses()
                 let changed = ContinuousClock.now + .seconds(3)
                 while server.count("/changed") == 0 && ContinuousClock.now < changed { try await Task.sleep(for: .milliseconds(20)) }
                 XCTAssertEqual(server.count("/changed"), 1)
+            } else {
+                XCTAssertNotEqual(input.screenshotPNG, firstImage, "The final answer needs the changed page")
+                XCTAssertEqual(input.history.first?.screenshotPNG, firstImage)
+                XCTAssertEqual(input.history.first?.currentURL, base.appendingPathComponent("start"))
+                if waitForChange { XCTAssertNil(input.actionError) }
+                else {
+                    XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
+                    XCTAssertTrue(input.history.first?.response.contains("Loading") == true)
+                }
             }
-            let action = calls == 0 && waitForChange ? #"{"action":"wait","time":0}"# : #"{"action":"terminate","answer":"Loaded"}"#
+            let action = calls == 0
+                ? (waitForChange ? #"{"action":"wait","time":0}"# : #"{"action":"terminate","answer":"Loading"}"#)
+                : #"{"action":"terminate","answer":"Loaded"}"#
             let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
             calls += 1
             return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
         })
         do {
             let result = try await executor.execute(taskID: "fara-wait", prompt: "Wait for the page to load.", trustedUserPrompt: "Wait for the page to load.", tools: tools, progress: { _ in })
-            XCTAssertTrue(waitForChange, "Completion was accepted from a stale screenshot")
             XCTAssertEqual(result, .completed("Loaded"))
             XCTAssertEqual(calls, 2)
-        } catch ComputerUseBrowserError.pageChanged {
-            XCTAssertFalse(waitForChange, "Read-only waiting required the page to stay unchanged")
-            XCTAssertEqual(calls, 1)
         } catch { XCTFail("Changed-page proposal failed after \(calls) proposals: \(error)") }
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.count, 1, "Read-only waiting/replanning cannot create a native input attempt")
+        XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
     }
 
     @MainActor
@@ -4287,6 +4299,171 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertEqual(journals.first { $0.stepIDs == ["native-dispatch-returned"] }?.statuses, [login ? .verified : .uncertain])
         XCTAssertEqual(journals.first { $0.stepIDs == ["model-assessed-completion"] }?.statuses, [.attempted])
         XCTAssertFalse(records.contains { String(decoding: $0, as: UTF8.self).contains("private-fictional-password") })
+    }
+
+    @MainActor
+    func testOptInExplicitNavigationRetainsDocumentLoginAndControlBoundaries() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: explicit navigation authority boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/page": .init(body: "<!doctype html><h1>Public page</h1><p id='clock'>10:00</p>"),
+            "/next": .init(body: "<!doctype html><h1>Different document</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        var allowed = true, retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+        let modes = ["observation", "navigation", "root", "url", "login", "source", "source-at-dispatch", "owner", "take-control", "cancelled", "resized", "stop", "closed"]
+        for mode in modes {
+            allowed = true
+            let session = try browser.prepareWorkflowSession(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            let observation = try await browser.captureAgentObservation(document: document)
+            _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:59'")
+            func revokeSource() throws {
+                let goal = try ComputerUseBrowserGoalInput(taskID: mode, prompt: "Open another public page", referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles")
+                try browser.installSourcePolicy(.init(goal: goal, allowedOrigins: []), replacing: nil, session: session)
+            }
+            switch mode {
+            case "observation": _ = try await browser.captureAgentObservation(document: document)
+            case "navigation": _ = try await browser.navigate(taskID: mode, operationID: "next", to: base.appendingPathComponent("next"))
+            case "root": _ = try await web.evaluateJavaScript("document.documentElement.replaceWith(document.documentElement.cloneNode(true))")
+            case "url": _ = try await web.evaluateJavaScript("history.replaceState(null,'','/changed-location')")
+            case "login": _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
+            case "source": try revokeSource()
+            case "owner": try browser.claim(taskID: "successor")
+            case "take-control": allowed = false; browser.prepareForUserControl(taskID: mode); allowed = true
+            case "resized": window.setContentSize(NSSize(width: window.contentView!.bounds.width - 20, height: window.contentView!.bounds.height))
+            case "stop": browser.stop()
+            case "closed": browser.close()
+            default: break
+            }
+            var attempts = 0
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try await browser.performAgentInput(.visitURL(base.appendingPathComponent("must-not-load")), observation: observation,
+                    operationID: "denied-" + mode, willBeginEffect: {
+                        attempts += 1
+                        if mode == "source-at-dispatch" { try revokeSource() }
+                    })
+            }
+            do { try await work.value; return XCTFail("Navigation accepted changed authority: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else if mode == "login" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else if mode.hasPrefix("source") { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
+                else { XCTAssertTrue([ComputerUseBrowserError.pageChanged, .ownershipLost].contains(error as? ComputerUseBrowserError ?? .busy), "\(mode): \(error)") }
+            }
+            XCTAssertEqual(attempts, mode == "source-at-dispatch" ? 1 : 0, mode)
+            XCTAssertEqual(server.count("/must-not-load"), 0, mode)
+        }
+        XCTAssertEqual(server.count("/page"), modes.count); XCTAssertEqual(server.count("/next"), 1)
+    }
+
+    @MainActor
+    func testOptInNativeSearchRecoversAfterFocusWasLostBeforeSelectAll() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: rejected stale focus followed by fresh native recovery") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{height:300vh}input{position:fixed;left:10vw;top:10vh;width:50vw;height:60px}</style>
+            <label>Search<input id='query' value='Earlier query'></label><script>window.edits=0;window.keys=0;query.addEventListener('input',()=>edits++);document.addEventListener('keydown',()=>keys++);query.focus();</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "focus-recovery")
+        let document = try await browser.navigate(taskID: "focus-recovery", operationID: "fixture", to: base.appendingPathComponent("page"))
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+        let stale = try await browser.captureAgentObservation(document: document)
+        _ = try await web.evaluateJavaScript("query.blur()")
+        var rejectedAttempts = 0
+        do {
+            try await browser.performAgentInput(.key(["Control", "a"]), observation: stale, willBeginEffect: { rejectedAttempts += 1 })
+            return XCTFail("Select All was sent after the captured field lost focus")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(rejectedAttempts, 0)
+        let untouched = try await web.evaluateJavaScript("query.value==='Earlier query' && edits===0 && keys===0")
+        XCTAssertEqual(untouched as? Bool, true)
+        let coordinates = try await web.evaluateJavaScript("(()=>{const r=query.getBoundingClientRect();return [(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]})()")
+        let point = try XCTUnwrap(coordinates as? [Double])
+        let replacement = "東京 café 🎵 A+B & tickets"
+        let actions: [ComputerUseFaraAction] = [.pointer(.leftClick, .init(x: point[0], y: point[1])), .key(["Control", "a"]), .typeText(replacement)]
+        var attempts = 0
+        for action in actions {
+            let observation = try await browser.captureAgentObservation(document: document)
+            do { try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 }) }
+            catch { return XCTFail("Fresh focus recovery failed: \(error); \(browser.lastAgentTargetStatus ?? "none")") }
+            XCTAssertTrue(NSApp.keyWindow === window)
+        }
+        let value = try await web.evaluateJavaScript("query.value"), edits = try await web.evaluateJavaScript("edits")
+        XCTAssertEqual(value as? String, replacement); XCTAssertEqual(edits as? Int, 1); XCTAssertEqual(attempts, 3)
+        do { try await browser.performAgentInput(.typeText("replay"), observation: stale); XCTFail("Focus recovery revived old input") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+    }
+
+    @MainActor
+    func testOptInFaraSearchAndVisitSurviveBackgroundPageUpdates() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: explicit navigation on a changing page") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let query = "東京 concerts A+B & tickets"
+        let searchPath = "/search?q=%E6%9D%B1%E4%BA%AC%20concerts%20A%2BB%20%26%20tickets"
+        let clock = "<p>Time remaining: <span id='clock'>10:00</span></p><script>for(const t of ['input','click','keydown'])document.addEventListener(t,()=>fetch('/unexpected-input'))</script>"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><h1>Ready to search</h1>" + clock),
+            searchPath: .init(body: "<!doctype html><h1>Search results</h1><a href='/details'>Tokyo Music Hall</a>" + clock),
+            "/details": .init(body: "<!doctype html><h1>Tokyo Music Hall</h1><p>Friday, 7 pm. Tickets: 2400 JPY.</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraNavigationCountdown-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "navigation-countdown")
+        _ = try await browser.navigate(taskID: "navigation-countdown", operationID: "fixture", to: base.appendingPathComponent("start"))
+        let originalWindow = try XCTUnwrap(NSApp.keyWindow)
+        let answer = "Tokyo Music Hall: Friday, 7 pm, 2400 JPY. Source: " + base.appendingPathComponent("details").absoluteString
+        let actions: [[String: Any]] = [["action": "web_search", "query": query],
+            ["action": "visit_url", "url": base.appendingPathComponent("details").absoluteString], ["action": "terminate", "answer": answer]]
+        var calls = 0
+        let goal = "Find a Tokyo concert and report its venue, time, ticket price and source."
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { input in
+                guard calls < actions.count else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                guard input.actionError == nil else {
+                    XCTFail("Background update rejected explicit navigation: \(input.actionError ?? "")")
+                    throw ComputerUseFaraBrowserExecutor.Failure.stepLimit
+                }
+                XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
+                XCTAssertTrue(NSApp.keyWindow === originalWindow)
+                let expectedURLs = [base.appendingPathComponent("start"), URL(string: base.absoluteString + searchPath)!, base.appendingPathComponent("details")]
+                XCTAssertEqual(input.currentURL, expectedURLs[calls])
+                if calls < 2 {
+                    @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+                    let web = try XCTUnwrap(originalWindow.contentView.flatMap { webViews($0).first })
+                    _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:59';document.body.classList.add('background-ready')")
+                }
+                let json = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": actions[calls]])
+                let response = "<tool_call>" + String(decoding: json, as: UTF8.self) + "</tool_call>"
+                calls += 1
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+        let result: ComputerUseExecutionResult
+        do { result = try await executor.execute(taskID: "navigation-countdown", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+        catch { return XCTFail("Changing-page navigation failed after \(calls) proposals: \(error)") }
+        XCTAssertEqual(result, .completed(answer)); XCTAssertEqual(calls, 3)
+        let repeated = try await executor.execute(taskID: "navigation-countdown", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(repeated, result); XCTAssertEqual(calls, 3)
+        XCTAssertEqual(server.requestedPaths.filter { $0 == "/start" || $0 == searchPath || $0 == "/details" }, ["/start", searchPath, "/details"])
+        XCTAssertEqual(server.count("/unexpected-input"), 0)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.count, 3); XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
     }
 
     @MainActor
