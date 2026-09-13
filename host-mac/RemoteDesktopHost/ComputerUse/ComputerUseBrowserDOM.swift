@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget, validateAgentChrome
-    case scrollViewport, viewportScrollReceipt, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
+    case scrollViewport, viewportScrollReceipt, validateAgentScroll, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
@@ -1844,7 +1844,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'validateAgentChrome', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1869,7 +1869,7 @@ enum ComputerUseBrowserDOM {
             // document/snapshot and fresh authentication gate above; native code
             // verifies its window, query, selection and focus before dispatch.
             if (command === 'validateAgentChrome') return reply(lastPageSnapshot.agentState ? 'agent-chrome-current' : 'unsupported');
-            const scopedAgentTarget = ['agentTarget','agentFragmentScroll','agentScroll'].includes(command) && !!lastPageSnapshot.agentState;
+            const scopedAgentTarget = ['agentTarget','agentFragmentScroll','validateAgentScroll','agentScroll'].includes(command) && !!lastPageSnapshot.agentState;
             if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {
               if (lastPageSnapshot.invalidated) return reply('stale-agent-bindings');
               if (serialized !== lastPageSnapshot.serialized) return reply('stale-agent-content');
@@ -1917,12 +1917,12 @@ enum ComputerUseBrowserDOM {
                 return reply('agent-scroll-dispatched');
               } catch (_) { return reply('uncertain'); }
             }
-            if (command === 'agentScroll') {
+            if (command === 'agentScroll' || command === 'validateAgentScroll') {
               if (!lastPageSnapshot.agentState || typeof args.horizontal !== 'boolean' || !Number.isFinite(args.pixels)
                   || Math.abs(args.pixels) > 10000 || !Number.isFinite(args.x) || !Number.isFinite(args.y)
-                  || args.x < 0 || args.y < 0 || args.x >= innerWidth || args.y >= innerHeight
-                  || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
-                  || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64) return reply('unsupported');
+                  || args.x < 0 || args.y < 0 || args.x >= innerWidth || args.y >= innerHeight) return reply('unsupported');
+              if (command === 'agentScroll' && (typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
+                  || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64)) return reply('unsupported');
               if (!agentPointStateMatches(lastPageSnapshot.agentState,agentState,args.x,args.y)) return reply('stale');
               let hit = doc.elementFromPoint(args.x,args.y);
               for (let depth=0; hit?.shadowRoot && depth<16; depth++) {
@@ -1958,6 +1958,9 @@ enum ComputerUseBrowserDOM {
                 }
               }
               if (!scroller) return reply('unsupported');
+              // Preflight reads exactly the same target without recording an
+              // operation or retiring its snapshot. Dispatch repeats all checks.
+              if (command === 'validateAgentScroll') return reply('agent-scroll-current');
               agentScrollOperations.add(args.operationID);
               lastPageSnapshot = null; formQueries.clear();
               try {

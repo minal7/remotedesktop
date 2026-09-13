@@ -68,20 +68,10 @@ final class ComputerUseHoloModelTests: XCTestCase {
             defer { calls += 1 }
             XCTAssertEqual(input.goal, goal)
             let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
-            let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
+            _ = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
             let response: Data
             if actualModel {
-                let requestFile = directory.appendingPathComponent("request-\(calls).json")
-                try XCTUnwrap(request.httpBody).write(to: requestFile)
-                let output = directory.appendingPathComponent("proposal-\(calls)")
-                let probe = HoloProbeProcess()
-                try probe.start(python: try XCTUnwrap(environment["HOLO_PYTHON"]), script: try XCTUnwrap(environment["HOLO_PROBE_SCRIPT"]),
-                    arguments: [requestFile.path, output.path, try XCTUnwrap(environment["HOLO_ASSETS"]), try XCTUnwrap(environment["HOLO_BINARY"]), "5"])
-                let status = try await probe.finish()
-                let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String: Any])
-                XCTAssertEqual(report["ownedProcessExited"] as? Bool, true)
-                guard status == 0 else { throw ComputerUseFaraAction.Failure.invalidResponse }
-                response = try Data(contentsOf: output.appendingPathComponent("response.json"))
+                return try await HoloTestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment)
             } else if calls == 0 {
                 response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseHoloModel.modelAlias, "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": "I will inspect the form."]]]])
             } else {
@@ -258,9 +248,37 @@ final class ComputerUseHoloModelTests: XCTestCase {
         XCTAssertEqual(try ComputerUseHoloModel.decode(packet("answer", arguments: #"{"content":"Observed result"}"#, content: "Wrong result")).action, .reportCompletion("Observed result"))
         XCTAssertEqual(try ComputerUseHoloModel.decode(packet("click", arguments: #"{"element":"Destination","x":0,"y":1000}"#)).action, .pointer(.leftClick, .init(x: 0, y: 1000)))
         XCTAssertEqual(try ComputerUseHoloModel.decode(packet("key", arguments: #"{"keys":["Control","f"]}"#)).action, .key(["Control", "f"]))
-        XCTAssertEqual(try ComputerUseHoloModel.decode(packet("scroll", arguments: #"{"pixels":-500.5}"#)).action, .scroll(horizontal: false, pixels: -500.5))
+        XCTAssertEqual(try ComputerUseHoloModel.decode(packet("scroll", arguments: #"{"direction":"down","distance":500.5}"#)).action, .scroll(horizontal: false, pixels: -500.5))
         XCTAssertEqual(try ComputerUseHoloModel.decode(packet("wait", arguments: #"{"time":0.2}"#)).action, .wait(0.2))
         XCTAssertEqual(try ComputerUseHoloModel.decode(packet("web_search", arguments: #"{"query":"Roxie showtimes"}"#)).action, .webSearch("Roxie showtimes"))
+    }
+
+    func testScrollDeclaresDirectionAndMapsUnsignedDistanceWithoutGuessing() throws {
+        for (direction, horizontal, sign) in [("down", false, -1.0), ("up", false, 1.0), ("left", true, -1.0), ("right", true, 1.0)] {
+            for distance in [0.0, 400.5, 10_000.0] {
+                let args = "{\"direction\":\"\(direction)\",\"distance\":\(distance)}"
+                let proposal = try ComputerUseHoloModel.decode(packet("scroll", arguments: args))
+                XCTAssertEqual(proposal.action, .scroll(horizontal: horizontal, pixels: sign * distance))
+                XCTAssertTrue(proposal.response.contains(direction))
+            }
+        }
+        for args in [#"{"pixels":400}"#, #"{"direction":"down","distance":-400}"#,
+                     #"{"direction":"down","distance":10001}"#, #"{"direction":"down","distance":true}"#,
+                     #"{"direction":"down","distance":"400"}"#, #"{"direction":"Down","distance":400}"#,
+                     #"{"direction":"down","distance":400,"pixels":-400}"#,
+                     #"{"direction":"down","direction":"up","distance":400}"#] {
+            XCTAssertThrowsError(try ComputerUseHoloModel.decode(packet("scroll", arguments: args)), args)
+        }
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint,
+            input: .init(goal: "Read the page.", screenshotPNG: png, history: []))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let functions = try XCTUnwrap(body["tools"] as? [[String: Any]]).compactMap { $0["function"] as? [String: Any] }
+        let scroll = try XCTUnwrap(functions.first { $0["name"] as? String == "scroll" })
+        let parameters = try XCTUnwrap(scroll["parameters"] as? [String: Any])
+        XCTAssertEqual(parameters["required"] as? [String], ["direction", "distance"])
     }
 
     func testMalformedOrAmbiguousCallsNeverBecomeActions() throws {
@@ -298,6 +316,27 @@ final class ComputerUseHoloModelTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseHoloModel.decode(Data(#"{"model":"holo-browser-v1","model":"holo-browser-v1","choices":[]}"#.utf8)))
         XCTAssertThrowsError(try ComputerUseHoloModel.decode(Data(valid.dropLast())))
         XCTAssertThrowsError(try ComputerUseHoloModel.decode(Data(repeating: 32, count: 1_048_577)))
+    }
+}
+
+@MainActor
+enum HoloTestProposalRunner {
+    static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int,
+                        environment: [String: String]) async throws -> ComputerUseFaraModel.Proposal {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
+        let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
+        let requestFile = directory.appendingPathComponent("request-\(index).json")
+        guard !FileManager.default.fileExists(atPath: requestFile.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        try XCTUnwrap(request.httpBody).write(to: requestFile)
+        let output = directory.appendingPathComponent("proposal-\(index)")
+        let probe = HoloProbeProcess()
+        try probe.start(python: try XCTUnwrap(environment["HOLO_PYTHON"]), script: try XCTUnwrap(environment["HOLO_PROBE_SCRIPT"]),
+            arguments: [requestFile.path, output.path, try XCTUnwrap(environment["HOLO_ASSETS"]), try XCTUnwrap(environment["HOLO_BINARY"]), "5"])
+        let status = try await probe.finish()
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String: Any])
+        XCTAssertEqual(report["ownedProcessExited"] as? Bool, true)
+        guard status == 0 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        return try ComputerUseHoloModel.decode(Data(contentsOf: output.appendingPathComponent("response.json")))
     }
 }
 

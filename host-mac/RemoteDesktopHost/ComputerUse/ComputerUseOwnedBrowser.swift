@@ -973,7 +973,26 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func readAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
-        guard let predicted = try predictedAgentAction(action, observation: observation) else { return nil }
+        let predicted = try predictedAgentAction(action, observation: observation)
+        if case .scroll(let horizontal, let pixels) = action {
+            guard pixels.isFinite, abs(pixels) <= 10_000,
+                  let viewport = observation.evidence.page.viewport, viewport.isWellFormed,
+                  let view = browser, let window else { throw ComputerUseBrowserError.viewportScrollUnavailable }
+            let position = try agentClickTarget(agentPointer, observation: observation, view: view, window: window).location
+            let local = view.convert(position, from: nil)
+            let result = try await callDOM(.validateAgentScroll, arguments: [
+                "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
+                "x": (local.x - view.bounds.minX) / view.bounds.width * viewport.width,
+                "y": (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height,
+                "horizontal": horizontal, "pixels": pixels], document: observation.evidence.document)
+            lastAgentTargetStatus = result.status
+            _ = try predictedAgentAction(action, observation: observation)
+            guard result.status == "agent-scroll-current", result.documentID == observation.evidence.documentID else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            return nil
+        }
+        guard let predicted else { return nil }
         guard let view = browser, let window else { throw ComputerUseBrowserError.pageChanged }
         if let command = try findAction(action, observation: observation) {
             // Browser chrome is native host UI. Its identity, exact query,
@@ -1183,6 +1202,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 "x": (local.x - view.bounds.minX) / view.bounds.width * viewport.width,
                 "y": (view.isFlipped ? local.y - view.bounds.minY : view.bounds.maxY - local.y) / view.bounds.height * viewport.height,
                 "horizontal": horizontal, "pixels": pixels], validateContext: { (try? check()) != nil })
+            lastAgentTargetStatus = result.status
             guard result.status == "agent-scroll-dispatched", result.documentID == observation.evidence.documentID else {
                 throw ComputerUseBrowserError.viewportScrollUncertain
             }

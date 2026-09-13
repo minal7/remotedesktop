@@ -100,7 +100,9 @@ enum ComputerUseHoloModel {
             tool("answer", "Provide a final answer", ["content": ["type": "string", "description": "The answer content"]]),
             tool("type", "Insert the supplied text into the currently focused editor using its existing selection. In the Find bar, typing updates the page search. This does not add Enter or select-all.", ["text": string]),
             tool("key", "Perform the explicitly supplied key or key chord through the browser adapter. Control+f opens the native Find bar. Do not add other keys.", ["keys": ["type": "array", "items": string, "minItems": 1]]),
-            tool("scroll", "Scroll vertically using a virtual viewport height of 1000. Negative pixels scroll down; positive pixels scroll up.", ["pixels": ["type": "number"]]),
+            tool("scroll", "Scroll in the explicit direction by an unsigned distance. A distance of 1000 is one viewport height for up/down or one viewport width for left/right.", [
+                "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
+                "distance": ["type": "number", "minimum": 0, "maximum": 10_000]]),
             tool("wait", "Wait for the supplied time in seconds, from 0 to 30.", ["time": ["type": "number"]]),
             tool("web_search", "Search the web for the supplied query.", ["query": string]),
             tool("visit_url", "Navigate the owned browser to an HTTP or HTTPS URL.", ["url": string]),
@@ -196,8 +198,11 @@ enum ComputerUseHoloModel {
             try keys("time"); let seconds = try number("time")
             guard (0...30).contains(seconds) else { throw invalid }; action = .wait(seconds)
         case "scroll":
-            try keys("pixels"); let pixels = try number("pixels")
-            guard abs(pixels) <= 10_000 else { throw invalid }; action = .scroll(horizontal: false, pixels: pixels)
+            try keys("direction", "distance")
+            let direction = try text("direction"), distance = try number("distance")
+            guard ["up", "down", "left", "right"].contains(direction), (0...10_000).contains(distance) else { throw invalid }
+            action = .scroll(horizontal: direction == "left" || direction == "right",
+                pixels: (direction == "down" || direction == "left") ? -distance : distance)
         case "key":
             try keys("keys")
             guard case .array(let values)? = args["keys"], (1...8).contains(values.count) else { throw invalid }

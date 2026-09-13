@@ -7,6 +7,142 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInScrollStillStopsWhenTargetChangesAfterAttemptBegins() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scroll dispatch race") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>body{margin:0;height:300vh}#point{position:fixed;inset:0;pointer-events:none}</style><div id=point></div><script>document.addEventListener('scroll',()=>fetch('/scrolled'))</script>")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "scroll-dispatch-race")
+        let document = try await browser.navigate(taskID: "scroll-dispatch-race", operationID: "fixture", to: base.appendingPathComponent("page"))
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+        let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+        let observation = try await browser.captureAgentObservation(document: document)
+        var attempts = 0, replaced = false
+        do {
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation, willBeginEffect: {
+                attempts += 1
+                web.evaluateJavaScript("(()=>{const p=document.getElementById('point');p.replaceWith(p.cloneNode(true));return true})()", completionHandler: { value, error in
+                    XCTAssertNil(error); replaced = value as? Bool == true
+                })
+            })
+            XCTFail("The dispatch-time target change must remain uncertain")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .viewportScrollUncertain) }
+        XCTAssertTrue(replaced); XCTAssertEqual(attempts, 1); XCTAssertEqual(browser.lastAgentTargetStatus, "stale")
+        do {
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation, willBeginEffect: { attempts += 1 })
+            XCTFail("Uncertain scroll must not replay")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(attempts, 1); XCTAssertEqual(server.count("/scrolled"), 0)
+    }
+
+    @MainActor
+    func testOptInScrollReplansChangedPointWithoutAttemptingInput() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native scroll preflight and bounded recovery") }
+        var stage = "start"
+        defer { let a = XCTAttachment(string: stage); a.name = "Scroll preflight stage"; a.lifetime = .keepAlways; add(a) }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for recovers in [true, false] {
+            stage = "fixture \(recovers)"
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>body{margin:0;height:300vh}#point{position:fixed;inset:0;background:transparent;pointer-events:none}#price{position:absolute;top:110vh}</style><div id=point></div><p id=price>Admission $15.62</p><script>document.addEventListener('scroll',()=>fetch('/scrolled'));document.addEventListener('wheel',()=>fetch('/wheel'));document.addEventListener('click',()=>fetch('/click'))</script>")])
+            let base = try await server.start(); defer { server.stop() }
+            stage = "tools \(recovers)"
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ScrollPreflight-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let taskID = "scroll-preflight-\(recovers)", goal = "Read the admission price."
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: taskID)
+            stage = "navigate \(recovers)"
+            _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
+            stage = "window \(recovers)"
+            try requireSameNativeWindow(&retainedWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+            let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+            var calls = 0, originalImage: Data?
+            let scrollResponse = self.call(#"{"action":"scroll","pixels":-700}"#)
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                calls += 1
+                stage = "proposal \(calls), recovers \(recovers)"
+                guard calls <= (recovers ? 3 : 4) else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                if calls == 1 { originalImage = input.screenshotPNG }
+                if calls > 1 && (!recovers || calls == 2) {
+                    XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
+                    XCTAssertEqual(input.history.count, calls - 1)
+                    XCTAssertEqual(input.history.first?.response, scrollResponse)
+                    XCTAssertEqual(input.history.first?.screenshotPNG, originalImage)
+                    XCTAssertEqual(server.count("/scrolled"), 0)
+                }
+                if !recovers || calls == 1 {
+                    stage = "replace point \(calls)"
+                    let replaced = try await web.evaluateJavaScript("(()=>{const p=document.getElementById('point');p.replaceWith(p.cloneNode(true));return true})()")
+                    XCTAssertEqual(replaced as? Bool, true)
+                    stage = "point replaced \(calls)"
+                }
+                if recovers && calls == 3 {
+                    XCTAssertNil(input.actionError)
+                    let visible = try await web.evaluateJavaScript("scrollY>300 && document.getElementById('price').getBoundingClientRect().bottom<innerHeight")
+                    XCTAssertEqual(visible as? Bool, true)
+                }
+                let response = recovers && calls == 3 ? self.call(#"{"action":"terminate","answer":"Admission $15.62"}"#) : scrollResponse
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            stage = "execute \(recovers)"
+            let result: ComputerUseExecutionResult
+            do { result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+            catch {
+                return XCTFail("Scroll recovery failed after \(calls) proposals, stage \(stage), native status \(browser.lastAgentTargetStatus ?? "none"), browser error \(String(describing: error as? ComputerUseBrowserError)), error type \(String(reflecting: type(of: error)))")
+            }
+            if recovers {
+                XCTAssertEqual(result, .completed("Admission $15.62")); XCTAssertEqual(calls, 3)
+                let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(replay, result); XCTAssertEqual(calls, 3)
+            } else {
+                guard case .userInterventionRequired = result else { return XCTFail("Four rejected scrolls must pause") }
+                XCTAssertEqual(calls, 4)
+            }
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+                .filter { $0.stepIDs == ["native-dispatch-returned"] }
+            XCTAssertEqual(journals.count, recovers ? 1 : 0)
+            XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
+            XCTAssertEqual(server.count("/scrolled"), recovers ? 1 : 0)
+            XCTAssertEqual(server.count("/wheel"), 0); XCTAssertEqual(server.count("/click"), 0)
+        }
+    }
+
+    @MainActor
+    func testOptInNativeDelayedBingScrollAtTopRetainsKnownOutcome() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one read-only native scroll, no model") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "delayed-bing-scroll")
+        let url = try XCTUnwrap(URL(string: "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH"))
+        let document = try await browser.navigate(taskID: "delayed-bing-scroll", operationID: "fixture", to: url)
+        let observation = try await browser.captureAgentObservation(document: document)
+        let screenshot = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+        screenshot.name = "Delayed scroll original observation"; screenshot.lifetime = .keepAlways; add(screenshot)
+        try await Task.sleep(for: .seconds(10))
+        var attempts = 0, failure: Error?
+        do {
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: 400), observation: observation,
+                willBeginEffect: { attempts += 1 })
+        } catch { failure = error }
+        let report: [String: Any] = ["failure": failure.map { String(reflecting: $0) } ?? "", "attempts": attempts,
+            "targetStatus": browser.lastAgentTargetStatus ?? "none", "initialY": observation.approvalPageEvidence.page.viewport?.y ?? -1]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Delayed native Bing scroll"; attachment.lifetime = .keepAlways; add(attachment)
+        if let failure { return XCTFail("Scroll failed: \(failure), native status: \(browser.lastAgentTargetStatus ?? "none")") }
+        XCTAssertEqual(attempts, 1)
+        let current = try await browser.observePage(document: document)
+        XCTAssertEqual(current.page.viewport?.y, 0)
+    }
+
+    @MainActor
     func testOptInFaraReplaysFrozenRejectedSearchHeading() async throws {
         try await runFrozenFaraProposal(ticketAnswer: false)
     }
@@ -112,14 +248,15 @@ final class ComputerUseFaraActionTests: XCTestCase {
             case "closed": browser.close()
             default: break
             }
+            var attempts = 0
             do {
-                try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation)
+                try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation, willBeginEffect: { attempts += 1 })
                 return XCTFail("Scroll admitted changed authority or target: \(mode)")
             } catch {
-                let expected: ComputerUseBrowserError = mode == "login" ? .authenticationRequired
-                    : ["owner", "observation", "closed"].contains(mode) ? .pageChanged : .viewportScrollUncertain
+                let expected: ComputerUseBrowserError = mode == "login" ? .authenticationRequired : .pageChanged
                 XCTAssertEqual(error as? ComputerUseBrowserError, expected, mode)
             }
+            XCTAssertEqual(attempts, 0, mode)
             if mode != "closed" {
                 let unchanged = try await web.evaluateJavaScript("scrollY===0 && document.getElementById('panel').scrollTop===0")
                 XCTAssertEqual(unchanged as? Bool, true, mode)
@@ -2889,14 +3026,25 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runLiveTicketTrial(movie: Bool) async throws {
+    func testOptInHoloFindsLiveRoxieMovieTimePriceAndTicketLink() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_NATIVE_TRIAL"] == "1" else { throw XCTSkip("Opt-in: native Holo read-only movie comparison") }
+        try await runLiveTicketTrial(movie: true, holo: true)
+    }
+
+    @MainActor
+    private func runLiveTicketTrial(movie: Bool, holo: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: bounded public website ticket-information trial, no purchase") }
-        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        var inputs: ComputerUseFaraRuntimeInputs?
+        if !holo { inputs = try await FaraTestAssets.inputs(environment: environment) }
+        let executable = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment["HOLO_BINARY"]))
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLiveTicket-" + UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let directory = holo ? URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_TRIAL_DIRECTORY"]))
+            : FileManager.default.temporaryDirectory.appendingPathComponent("FaraLiveTicket-" + UUID().uuidString)
+        guard !FileManager.default.fileExists(atPath: directory.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { if !holo { try? FileManager.default.removeItem(at: directory) } }
         let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
             browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
@@ -2921,8 +3069,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let screenshot = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
             screenshot.name = "Live browser observation \(responses.count + 1)"; screenshot.lifetime = .keepAlways; self.add(screenshot)
             let began = Date()
-            let endpoint = try await runtime.activateFara(inputs)
-            let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            let proposal: ComputerUseFaraModel.Proposal
+            if holo {
+                proposal = try await HoloTestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
+            } else {
+                let endpoint = try await runtime.activateFara(XCTUnwrap(inputs))
+                proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            }
             responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? "",
                 "actionError": input.actionError ?? "", "historyCount": input.history.count])
             if movie, input.currentURL?.host == "ticketing.uswest.veezi.com" {
@@ -2937,6 +3090,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             }
             return proposal
         }, readPage: { reading in
+                guard let inputs else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
                 let endpoint = try await runtime.activateFara(inputs)
                 return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
             }, finishRun: { await runtime.shutdown() })
@@ -2945,11 +3099,11 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var result: ComputerUseExecutionResult?, failure: Error?
         do { result = try await run.value } catch { failure = error }
         timeout.cancel(); await runtime.shutdown()
-        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+        let exited = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
         let history = try? browser.navigationDispatchHistory(taskID: taskID)
         let journals = (try? FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }) ?? []
-        let report: [String: Any] = ["goal": goal, "responses": responses, "progress": progress, "result": String(reflecting: result),
+        let report: [String: Any] = ["model": holo ? "Holo-3.1-4B" : "Fara1.5-4B", "goal": goal, "responses": responses, "progress": progress, "result": String(reflecting: result),
             "proposalLimit": proposalLimit, "timeoutSeconds": timeoutSeconds,
             "lastAgentTargetStatus": browser.lastAgentTargetStatus ?? "none",
             "lastAgentCaptureStage": browser.lastAgentCaptureStage ?? "none",
@@ -2961,8 +3115,10 @@ final class ComputerUseFaraActionTests: XCTestCase {
             "oracleCheckedOn": "2026-09-13", "oracleURL": movie
                 ? "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c"
                 : "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/"]
-        let evidence = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
-        evidence.name = movie ? "Live Roxie Fara ticket trial" : "Live SFJAZZ Fara ticket trial"; evidence.lifetime = .keepAlways; add(evidence)
+        let reportData = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        if holo { try reportData.write(to: directory.appendingPathComponent("workflow.json")) }
+        let evidence = XCTAttachment(data: reportData, uniformTypeIdentifier: "public.json")
+        evidence.name = holo ? "Live Roxie Holo ticket trial" : movie ? "Live Roxie Fara ticket trial" : "Live SFJAZZ Fara ticket trial"; evidence.lifetime = .keepAlways; add(evidence)
         XCTAssertTrue(exited)
         if let failure { return XCTFail("Live ticket task failed after \(responses.count) proposals: \(failure)") }
         guard case .completed(let answer) = result else { return XCTFail("Live ticket task did not complete: \(String(reflecting: result))") }
