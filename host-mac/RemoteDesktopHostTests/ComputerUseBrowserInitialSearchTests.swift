@@ -4,6 +4,24 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserInitialSearchTests: XCTestCase {
+    func testFaraBingFormatMatchesUpstreamWithoutChangingQueryBytesOrOtherProviders() throws {
+        let endpoint = try XCTUnwrap(URL(string: "https://www.bing.com/search"))
+        let provider = try ComputerUseBrowserSearchProvider(endpoint: endpoint, queryParameter: "q", queryFormat: .faraBing)
+        let query = "C++ & cafés e\u{301} 😀 #1=50%"
+        let url = try provider.destination(query: query)
+        XCTAssertEqual(url.absoluteString, "https://www.bing.com/search?q=C%2B%2B+%26+caf%C3%A9s+e%CC%81+%F0%9F%98%80+%231%3D50%25&FORM=QBLH")
+        let parts = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
+        let encoded = try XCTUnwrap(parts.percentEncodedQuery?.components(separatedBy: "&").first?.dropFirst(2))
+        XCTAssertTrue(String(encoded).replacingOccurrences(of: "+", with: " ").removingPercentEncoding?.utf8.elementsEqual(query.utf8) == true)
+        XCTAssertEqual(parts.queryItems?.map(\.name), ["q", "FORM"])
+        XCTAssertNil(parts.fragment); XCTAssertNil(parts.user); XCTAssertNil(parts.password)
+        let standard = try ComputerUseBrowserSearchProvider(endpoint: endpoint, queryParameter: "q")
+        XCTAssertNotEqual(provider.digest, standard.digest, "A changed search URL contract cannot reuse an earlier provider identity")
+        XCTAssertEqual(try standard.destination(query: "two words").absoluteString, "https://www.bing.com/search?q=two%20words")
+        XCTAssertThrowsError(try ComputerUseBrowserSearchProvider(endpoint: XCTUnwrap(URL(string: "https://example.com/search")), queryParameter: "q", queryFormat: .faraBing))
+        XCTAssertThrowsError(try ComputerUseBrowserSearchProvider(endpoint: endpoint, queryParameter: "other", queryFormat: .faraBing))
+    }
+
     func testInitialSearchBindsWholeGoalAndHostProviderWithoutQueryInjection() async throws {
         let text = "C++ & cafés e\u{301} 😀 #1=50%"
         let proposal = try await BrowserResearchGoalFixture().propose(goal(prompt: "Find " + text))

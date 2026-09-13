@@ -34,6 +34,7 @@ enum ComputerUseFaraModel {
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
         var userResponse: String? = nil
+        var actionError: String? = nil
     }
     struct Input: Equatable, Sendable {
         let goal: String
@@ -42,6 +43,7 @@ enum ComputerUseFaraModel {
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
         var userResponse: String? = nil
+        var actionError: String? = nil
     }
     struct Proposal: Equatable, Sendable {
         let response: String
@@ -81,6 +83,12 @@ enum ComputerUseFaraModel {
                 // Preserve the native browser observation alongside its image,
                 // including when that image ages out of the three-image window.
                 if userResponse == nil || index >= earliestImage { observationText.append("Current URL: " + currentURL.absoluteString) }
+            }
+            if let actionError = index == input.history.count ? input.actionError : input.history[index].actionError {
+                guard !actionError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      actionError.utf8.count <= 16_384 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                readingBytes += actionError.utf8.count
+                observationText.append(actionError)
             }
             if let reading = index == input.history.count ? input.pageReading : input.history[index].pageReading {
                 try validatePageReading(reading)

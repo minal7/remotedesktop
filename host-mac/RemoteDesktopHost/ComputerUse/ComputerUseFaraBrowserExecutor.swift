@@ -45,6 +45,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var question: ComputerUseNativeTextExecutor.Clarification?
         var answerOriginID: String?
         var userResponse: String?
+        var actionError: String?
         var journal: ComputerUseTaskJournal
         var history: [ComputerUseFaraModel.Step] = []
         var pageReading: ComputerUseFaraModel.PageReading?
@@ -74,7 +75,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         store = try .init(directory: journalDirectory)
         self.propose = propose
         self.readPage = readPage
-        self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q")
+        self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q", queryFormat: .faraBing)
         self.finishRun = finishRun
         self.now = now
     }
@@ -150,7 +151,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let lease = try store.acquireExecution(taskID: session.journal.taskID, expected: session.journal)
         defer { lease.release() }
         do {
-            try await dispatch(pending.proposal, observation: pending.observation, session: session, tools: tools,
+            _ = try await dispatch(pending.proposal, observation: pending.observation, session: session, tools: tools,
                 nativeTarget: pending.continuation.nativeBrowserTarget,
                 approvedFingerprint: fingerprint, willBeginEffect: willBeginEffect, assertRootOwnership: { try lease.assertOwnership() })
             pending.performed = true
@@ -189,9 +190,10 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading, userResponse: session.userResponse))
+        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading, userResponse: session.userResponse, actionError: session.actionError))
         session.pageReading = nil
         session.userResponse = nil
+        session.actionError = nil
         while session.history.count > 20 {
             // Keep the bounded clarification pairs after their screenshots age
             // out, so an answer never loses the question that gives it meaning.
@@ -212,7 +214,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         defer { lease.release() }
         try lease.assertOwnership()
         progress("Reading the browser…")
-        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history, userResponse: session.userResponse)
+        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history, userResponse: session.userResponse, actionError: session.actionError)
         let propose = self.propose
         let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
         try Task.checkCancellation(); try lease.assertOwnership()
@@ -255,15 +257,29 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 var uncertain = attempted; uncertain.statuses = [.uncertain]
                 try? store.save(uncertain, replacing: attempted)
                 session.terminal = .unableToComplete(Failure.uncertainAction.localizedDescription)
+            } else if let rejection = undispatchedURLRejection(error, proposal: proposal) {
+                try Task.checkCancellation(); try lease.assertOwnership()
+                try tools.validateOwnedBrowserInitialAgentObservation(observation)
+                record(proposal, png: observation.png, currentURL: nil, session: session)
+                session.actionError = rejection
+                return
             }
             throw error
         }
     }
 
+    private func undispatchedURLRejection(_ error: Error, proposal: ComputerUseFaraModel.Proposal) -> String? {
+        guard error as? ComputerUseBrowserError == .sourceNotAllowed,
+              case .visitURL(let url) = proposal.action else { return nil }
+        // Match Fara's visit_url failure observation without exposing raw
+        // exceptions or treating web_search/uncertain input as recoverable.
+        return "visit_url to \(url.absoluteString) failed: BrowserSourcePolicy: The destination is not permitted for this task."
+    }
+
     private func dispatch(_ proposal: ComputerUseFaraModel.Proposal, observation: ComputerUseOwnedBrowser.AgentObservation,
         session: Session, tools: ComputerUseHostTools, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil,
         approvedFingerprint: ComputerUseApprovalFingerprint? = nil,
-        willBeginEffect: () -> Void = {}, assertRootOwnership: () throws -> Void) async throws {
+        willBeginEffect: () -> Void = {}, assertRootOwnership: () throws -> Void) async throws -> (message: String, observation: ComputerUseOwnedBrowser.AgentObservation)? {
         let actionID = ComputerUseTaskContract.digest([session.journal.taskID, "native-dispatch", String(session.turns)])
         let dispatchLease = try store.acquireExecution(taskID: actionID, expected: nil)
         defer { dispatchLease.release() }
@@ -287,12 +303,21 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             })
             var dispatched = attempted; dispatched.statuses = [.verified]
             try store.save(dispatched, replacing: attempted)
+            return nil
         } catch {
             if began {
                 var uncertain = attempted; uncertain.statuses = [.uncertain]
                 try? store.save(uncertain, replacing: attempted)
                 session.terminal = .unableToComplete(Failure.uncertainAction.localizedDescription)
                 if approvedFingerprint != nil { throw ComputerUseHostTools.ToolError.approvedActionEffectMayHaveOccurred }
+            } else if approvedFingerprint == nil, let rejection = undispatchedURLRejection(error, proposal: proposal) {
+                try Task.checkCancellation(); try assertRootOwnership()
+                // A rejected input retires its observation. Acquire fresh
+                // evidence while retaining task/owner/takeover identity;
+                // revoked sources, login, lost focus and cancellation still fail.
+                let fresh = try await tools.captureOwnedBrowserAgentObservation(taskID: session.taskID, preserving: observation)
+                try Task.checkCancellation(); try assertRootOwnership()
+                return (rejection, fresh)
             }
             throw error
         }
@@ -358,7 +383,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
             progress("Reading the browser…")
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
-                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading, userResponse: session.userResponse)
+                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading, userResponse: session.userResponse, actionError: session.actionError)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
@@ -403,6 +428,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 return result
             }
             var nextReading: ComputerUseFaraModel.PageReading?
+            var rejection: (message: String, observation: ComputerUseOwnedBrowser.AgentObservation)?
             switch proposal.action {
             case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch, .scroll, .historyBack:
                 if let nativeTarget, nativeTarget.context.isEmpty {
@@ -415,7 +441,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     return pending.result
                 }
                 progress("Using the browser…")
-                try await dispatch(proposal, observation: observation, session: session, tools: tools, nativeTarget: nativeTarget,
+                rejection = try await dispatch(proposal, observation: observation, session: session, tools: tools, nativeTarget: nativeTarget,
                     assertRootOwnership: { try lease.assertOwnership() })
             case .wait(let seconds):
                 try await Task.sleep(for: .seconds(seconds))
@@ -452,6 +478,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             record(proposal, observation: observation, session: session)
             session.pageReading = nextReading
+            session.actionError = rejection?.message
+            if let rejection { observation = rejection.observation; continue }
             do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
             catch ComputerUseBrowserError.authenticationRequired {
                 return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")

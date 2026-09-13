@@ -6,8 +6,10 @@ enum ComputerUseBrowserInitialSearchError: Error, Equatable { case invalidReques
 /// Choosing a provider consistently with the complete goal remains the
 /// driver's responsibility. Constructing this value does not select one.
 struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+    enum QueryFormat: String, Sendable { case percentEncoded, faraBing }
     private let endpoint: URL
     private let parameter: String
+    private let queryFormat: QueryFormat
     let digest: String
     var description: String { "BrowserSearchProvider" }
     var debugDescription: String { description }
@@ -16,7 +18,7 @@ struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConver
         guard policy.permits(endpoint) else { throw ComputerUseBrowserError.sourceNotAllowed }
     }
 
-    init(endpoint: URL, queryParameter: String) throws {
+    init(endpoint: URL, queryParameter: String, queryFormat: QueryFormat = .percentEncoded) throws {
         guard endpoint.absoluteString.utf8.count <= 1_024,
               let parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false),
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
@@ -28,8 +30,12 @@ struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConver
               queryParameter.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95 }) else {
             throw ComputerUseBrowserInitialSearchError.invalidRequest
         }
-        self.endpoint = endpoint; parameter = queryParameter
-        digest = ComputerUseTaskContract.digest(["browser-search-provider-v1", endpoint.absoluteString, queryParameter])
+        guard queryFormat != .faraBing || (endpoint.absoluteString == "https://www.bing.com/search" && queryParameter == "q") else {
+            throw ComputerUseBrowserInitialSearchError.invalidRequest
+        }
+        self.endpoint = endpoint; parameter = queryParameter; self.queryFormat = queryFormat
+        digest = ComputerUseTaskContract.digest(["browser-search-provider-v1", endpoint.absoluteString, queryParameter]
+            + (queryFormat == .percentEncoded ? [] : ["fara-bing-query-v1"]))
     }
 
     func destination(query: String) throws -> URL {
@@ -39,12 +45,15 @@ struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConver
         // Encode bytes, including literal '+', so form-query decoding cannot
         // turn source punctuation into spaces or extra query parameters.
         let encoded = query.utf8.map { byte -> String in
+            if queryFormat == .faraBing && byte == 32 { return "+" }
             if (65...90).contains(byte) || (97...122).contains(byte) || (48...57).contains(byte) || [45, 46, 95, 126].contains(byte) {
                 return String(UnicodeScalar(byte))
             }
             return String(format: "%%%02X", byte)
         }.joined()
-        parts.percentEncodedQuery = parameter + "=" + encoded
+        // Matches Microsoft's pinned Fara search URL (quote_plus + FORM).
+        // a675d6d61c41c47ae87bacefeab22caad18e3e84/fara15_agent.py:807-812
+        parts.percentEncodedQuery = parameter + "=" + encoded + (queryFormat == .faraBing ? "&FORM=QBLH" : "")
         guard let url = parts.url, url.absoluteString.utf8.count <= 8_192,
               ComputerUseOwnedBrowser.validatedURL(url) == url else { throw ComputerUseBrowserInitialSearchError.invalidRequest }
         return url
