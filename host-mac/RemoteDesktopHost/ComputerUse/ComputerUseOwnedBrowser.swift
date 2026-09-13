@@ -862,6 +862,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return (location, .click(x: globalX, y: globalY, button: 0, count: 1))
     }
 
+    private static func agentKeyStroke(_ keys: [String]) -> (usage: Int, keyCode: UInt16, text: String, shift: Bool)? {
+        switch keys.map({ $0.uppercased() }) {
+        case ["ENTER"], ["RETURN"]: return (0x28, 36, "\r", false)
+        case ["TAB"]: return (0x2B, 48, "\t", false)
+        case ["SHIFT", "TAB"]: return (0x2B, 48, "\t", true)
+        default: return nil
+        }
+    }
+
     func predictedAgentAction(_ action: ComputerUseFaraAction, observation: AgentObservation) throws -> ComputerUsePredictedAction? {
         try validateSourceDocument(observation.evidence.document)
         guard agentObservationID == observation.id, validate(observation.evidence.document),
@@ -871,8 +880,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         switch action {
         case .pointer(.leftClick, let point): return try agentClickTarget(point, observation: observation, view: view, window: window).action
         case .typeText(let text): return .typeText(text)
-        case .key(let keys) where keys.count == 1 && ["ENTER", "RETURN"].contains(keys[0].uppercased()):
-            return .key(usage: 0x28, modifiers: 0)
+        case .key(let keys) where Self.agentKeyStroke(keys) != nil:
+            let key = Self.agentKeyStroke(keys)!
+            return .key(usage: key.usage, modifiers: key.shift ? 1 << 1 : 0)
         case .key(let keys) where keys.count == 2 && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased()) && keys[1].uppercased() == "A":
             return .key(usage: 0x04, modifiers: 1 << 3)
         default: return nil
@@ -1044,17 +1054,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 // WebKit input events. It never adds select-all or Return.
                 client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
             }
-        case .key(let keys) where keys.count == 1 && ["ENTER", "RETURN"].contains(keys[0].uppercased()):
-            guard let responder = window.firstResponder as? NSView,
+        case .key(let keys) where Self.agentKeyStroke(keys) != nil:
+            guard let key = Self.agentKeyStroke(keys), let responder = window.firstResponder as? NSView,
                   responder === view || responder.isDescendant(of: view),
                   let client = responder as? any NSTextInputClient, !client.hasMarkedText() else {
                 throw ComputerUseBrowserError.pageChanged
             }
             let time = ProcessInfo.processInfo.systemUptime
-            guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: time,
-                windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36),
-                  let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: [], timestamp: time + 0.001,
-                windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36) else {
+            let flags: NSEvent.ModifierFlags = key.shift ? [.shift] : []
+            guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: time,
+                windowNumber: window.windowNumber, context: nil, characters: key.text, charactersIgnoringModifiers: key.text, isARepeat: false, keyCode: key.keyCode),
+                  let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: flags, timestamp: time + 0.001,
+                windowNumber: window.windowNumber, context: nil, characters: key.text, charactersIgnoringModifiers: key.text, isARepeat: false, keyCode: key.keyCode) else {
                 throw ComputerUseBrowserError.pageEvidenceUnavailable
             }
             // Preserve WebKit's key/form behavior. Admission and the durable

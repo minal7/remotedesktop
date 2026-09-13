@@ -6,6 +6,129 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    @MainActor
+    func testOptInFaraTabRejectsStaleFocusLoginAndRetiredControl() async throws {
+        try await runTabBoundaries(modes: ["focus-changed", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"])
+    }
+
+    @MainActor
+    func testOptInNativeMarkedTextPreconditionForFaraTab() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_MARKED_TEXT_PROBE"] == "1" else { throw XCTSkip("Unqualified native experiment: establish actual WebKit marked text before testing focus-key rejection") }
+        try await runTabBoundaries(modes: ["composition"])
+    }
+
+    @MainActor
+    private func runTabBoundaries(modes: [String]) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native focus-key boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in modes {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                <!doctype html><label>Origin<input id='origin'></label><label>Destination<input id='destination'></label>
+                <script>document.addEventListener('keydown',()=>fetch('/key',{keepalive:true}));requestAnimationFrame(()=>{document.getElementById('origin').focus();fetch('/ready')});</script>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            var allowed = true, attempts = 0
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("form"))
+            let deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/ready"), 1, mode)
+            // The experiment only operates on this test's native owned view.
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let initial = try await browser.captureAgentObservation(document: document)
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            let view = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            if mode == "composition" {
+                let coordinates = try await view.evaluateJavaScript("(()=>{const r=document.getElementById('origin').getBoundingClientRect();return [(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]})()")
+                let point = try XCTUnwrap(coordinates as? [Double])
+                try await browser.performAgentInput(.pointer(.leftClick, .init(x: point[0], y: point[1])), observation: initial)
+                let client = try XCTUnwrap(window.firstResponder as? any NSTextInputClient)
+                client.setMarkedText("draft", selectedRange: NSRange(location: 5, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+                let compositionDeadline = ContinuousClock.now + .seconds(1)
+                while !client.hasMarkedText() && ContinuousClock.now < compositionDeadline { try await Task.sleep(for: .milliseconds(10)) }
+                guard client.hasMarkedText() else { return XCTFail("Native composition fixture did not establish marked text") }
+            }
+            let observation = try await browser.captureAgentObservation(document: document)
+            switch mode {
+            case "focus-changed": _ = try await view.evaluateJavaScript("document.getElementById('destination').focus()")
+            case "login": _ = try await view.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
+            case "revoked": allowed = false
+            case "replacement": try browser.claim(taskID: "successor")
+            default: break
+            }
+            let keys = mode == "unsupported-modifier" ? ["Control", "Tab"] : ["Shift", "Tab"]
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                try await browser.performAgentInput(.key(keys), observation: observation, willBeginEffect: {
+                    attempts += 1
+                    if mode == "admission-revoked" { allowed = false }
+                })
+            }
+            do { try await work.value; XCTFail("Rejected focus key dispatched: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, mode == "login" ? .authenticationRequired : mode == "unsupported-modifier" ? .unsupportedDocument : .pageChanged, mode) }
+            }
+            XCTAssertEqual(attempts, mode == "admission-revoked" ? 1 : 0, mode)
+            XCTAssertEqual(server.count("/key"), 0, mode)
+            if mode == "replacement" { XCTAssertEqual(browser.taskID, "successor") }
+        }
+    }
+
+    @MainActor
+    func testOptInFaraTabAndShiftTabSelectFieldsBeforeExactTyping() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native browser focus traversal") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><label>Origin<input id='origin'></label><input disabled aria-label='Unavailable'><label>Destination<input id='destination'></label>
+            <script>
+            document.addEventListener('keydown',e=>fetch('/key?key='+e.key+'&shift='+e.shiftKey+'&trusted='+e.isTrusted,{keepalive:true}));
+            document.addEventListener('input',e=>fetch('/edit?field='+e.target.id+'&value='+encodeURIComponent(e.target.value),{keepalive:true}));
+            requestAnimationFrame(()=>{document.getElementById('origin').focus();fetch('/ready')});
+            </script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraTab-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "tab")
+        _ = try await browser.navigate(taskID: "tab", operationID: "open", to: base.appendingPathComponent("form"))
+        let deadline = ContinuousClock.now + .seconds(2)
+        while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(server.count("/ready"), 1)
+        let actions = [#"{"action":"key","keys":["Tab"]}"#, #"{"action":"type","text":"Tokyo"}"#,
+            #"{"action":"key","keys":["Shift","Tab"]}"#, #"{"action":"type","text":"Kyoto"}"#,
+            #"{"action":"terminate","answer":"Both fields filled."}"#]
+        let goal = "Enter Tokyo in Destination, then Kyoto in Origin using Tab and Shift+Tab."
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard calls < actions.count else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + actions[calls] + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            let result = try await executor.execute(taskID: "tab", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Both fields filled."))
+            let replay = try await executor.execute(taskID: "tab", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result)
+        } catch { return XCTFail("Focus traversal failed after \(calls) proposals: \(String(reflecting: error))") }
+        XCTAssertEqual(calls, 5)
+        XCTAssertEqual(server.count("/edit?field=destination&value=Tokyo"), 1)
+        XCTAssertEqual(server.count("/edit?field=origin&value=Kyoto"), 1)
+        XCTAssertEqual(server.count("/key?key=Tab&shift=false&trusted=true"), 1)
+        XCTAssertEqual(server.count("/key?key=Tab&shift=true&trusted=true"), 1)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            .filter { $0.stepIDs == ["native-dispatch-returned"] }
+        XCTAssertEqual(journals.count, 4); XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
+    }
+
     func testFaraBrowserBackShortcutUsesHistoryWithoutBroadeningOtherKeys() throws {
         func decode(_ keys: [String]) throws -> ComputerUseFaraAction {
             let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": ["action": "key", "keys": keys]])
