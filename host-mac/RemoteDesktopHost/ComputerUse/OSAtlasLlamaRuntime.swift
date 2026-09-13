@@ -388,6 +388,14 @@ struct OSAtlasLlamaResourceProfile: Equatable, Sendable {
         minimumLaunchMemoryBytes: 6 * 1_024 * 1_024 * 1_024,
         minimumInferenceMemoryBytes: 2 * 1_024 * 1_024 * 1_024)
 
+    // The native-format trial used this context/batch size. Retain the existing
+    // compact memory ceiling until managed physical-footprint evidence exists.
+    static let fara = OSAtlasLlamaResourceProfile(
+        tier: .compact, contextSize: 8_192, logicalBatchSize: 512, physicalBatchSize: 128,
+        maximumResidentMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 1 * 1_024 * 1_024 * 1_024)
+
     let tier: Tier
     let contextSize: Int
     let logicalBatchSize: Int
@@ -601,6 +609,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let resourceProfile: OSAtlasLlamaResourceProfile
     let routerPresetFile: OSAtlasLlamaRouterPresetFile?
     let authenticationFile: OSAtlasLlamaPrivateFile?
+    let isFara: Bool
 
     init(
         executableURL: URL,
@@ -620,6 +629,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.resourceProfile = resourceProfile
         routerPresetFile = nil
         authenticationFile = nil
+        isFara = false
     }
 
     init(
@@ -641,6 +651,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.resourceProfile = resourceProfile
         self.routerPresetFile = routerPresetFile
         authenticationFile = nil
+        isFara = false
     }
 
     init(nativeTextInputs: ComputerUseNativeTextRuntimeInputs,
@@ -655,9 +666,37 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         resourceProfile = .compact
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
+        isFara = false
+    }
+
+    init(faraInputs: ComputerUseFaraRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = faraInputs.llamaServerURL
+        workingDirectoryURL = faraInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = faraInputs.modelURL
+        multimodalProjectorURL = faraInputs.projectorURL
+        self.port = port; self.bearerToken = bearerToken
+        resourceProfile = .fara
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        isFara = true
     }
 
     var arguments: [String] {
+        if isFara, let authenticationFile, let multimodalProjectorURL {
+            return [
+                "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
+                "--alias", ComputerUseFaraRuntimeInputs.modelAlias,
+                "--host", Self.host, "--port", String(port), "--api-key-file", authenticationFile.fileURL.path,
+                "--offline", "--no-ui", "--log-disable", "--parallel", "1", "--no-cont-batching",
+                "--ctx-size", String(resourceProfile.contextSize), "--no-context-shift",
+                "--batch-size", String(resourceProfile.logicalBatchSize), "--ubatch-size", String(resourceProfile.physicalBatchSize),
+                "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
+                "--image-max-tokens", "1536", "--mtmd-batch-max-tokens", "1536", "--jinja",
+            ]
+        }
         if let authenticationFile {
             // The Qwen3.5 form configuration, without a projector or
             // visual template. Its credential remains in an owner-only file.
@@ -1111,6 +1150,7 @@ actor OSAtlasLlamaRuntime {
     private enum RuntimeInputs: Equatable, Sendable {
         case visual(OSAtlasLlamaRuntimeInputs)
         case nativeText(ComputerUseNativeTextRuntimeInputs)
+        case fara(ComputerUseFaraRuntimeInputs)
         case router(
             visual: OSAtlasLlamaRuntimeInputs,
             semanticModelURL: URL)
@@ -1119,13 +1159,18 @@ actor OSAtlasLlamaRuntime {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
-            case .nativeText:
+            case .nativeText, .fara:
                 return nil
             }
         }
 
         var nativeText: ComputerUseNativeTextRuntimeInputs? {
             if case .nativeText(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var fara: ComputerUseFaraRuntimeInputs? {
+            if case .fara(let inputs) = self { return inputs }
             return nil
         }
 
@@ -1244,6 +1289,10 @@ actor OSAtlasLlamaRuntime {
         try await activateResolved(.nativeText(inputs))
     }
 
+    func activateFara(_ inputs: ComputerUseFaraRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.fara(inputs))
+    }
+
     /// Starts one b9992 router process with exactly two generated presets.
     /// Autoload is disabled: standard hosts explicitly load both fixed workers,
     /// while compact hosts load visual first and switch one worker on demand.
@@ -1266,6 +1315,8 @@ actor OSAtlasLlamaRuntime {
             try Self.validateLocalInputs(visualInputs)
         } else if let textInputs = inputs.nativeText {
             try Self.validateNativeTextInputs(textInputs)
+        } else if let faraInputs = inputs.fara {
+            try Self.validateFaraInputs(faraInputs)
         }
         if let semanticModelURL = inputs.semanticModelURL {
             try Self.validateSemanticModelURL(semanticModelURL)
@@ -1413,6 +1464,31 @@ actor OSAtlasLlamaRuntime {
                 try await stopActiveServerUnserialized()
             }
             throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+    }
+
+    /// Fara's native multimodal request uses the same serialized model owner.
+    /// No caller-supplied URL, action or model alias bypasses this boundary.
+    func proposeFara(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return try ComputerUseFaraModel.decode(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
         }
     }
 
@@ -1990,7 +2066,7 @@ actor OSAtlasLlamaRuntime {
             do {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
-                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil)
+                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil, fara: inputs.fara != nil)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -2000,7 +2076,11 @@ actor OSAtlasLlamaRuntime {
                     string: "http://\(OSAtlasLlamaLaunchConfiguration.host):\(port)")!
                 try Self.validateLoopbackEndpoint(baseURL)
                 let configuration: OSAtlasLlamaLaunchConfiguration
-                if let textInputs = inputs.nativeText {
+                if let faraInputs = inputs.fara {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(faraInputs: faraInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let textInputs = inputs.nativeText {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
                     configuration = OSAtlasLlamaLaunchConfiguration(
@@ -2056,7 +2136,7 @@ actor OSAtlasLlamaRuntime {
                     transport: transport,
                     routerPresetFile: pendingPresetFile,
                     authenticationFile: pendingAuthenticationFile,
-                    residentModels: inputs.isRouter || inputs.nativeText != nil
+                    residentModels: inputs.isRouter || inputs.nativeText != nil || inputs.fara != nil
                         ? []
                         : [.visualGrounder],
                     residencyGeneration: inputs.isRouter ? 0 : 1)
@@ -2223,8 +2303,11 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch(nativeText: Bool = false) throws -> OSAtlasLlamaResourceProfile {
+    private func resourceProfileForLaunch(nativeText: Bool = false, fara: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
+        guard !fara || snapshot.physicalMemoryBytes >= 12 * 1_024 * 1_024 * 1_024 else {
+            throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
+        }
         guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(
             physicalMemoryBytes: snapshot.physicalMemoryBytes
         ) else {
@@ -2232,7 +2315,7 @@ actor OSAtlasLlamaRuntime {
         }
         // Text always uses the measured 4K context and a single 4 GiB process
         // ceiling. This budget is not a claim of physical 8 GiB qualification.
-        let profile: OSAtlasLlamaResourceProfile = nativeText ? .compact : hardwareProfile
+        let profile: OSAtlasLlamaResourceProfile = fara ? .fara : nativeText ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
@@ -2327,6 +2410,18 @@ actor OSAtlasLlamaRuntime {
               inputs.llamaServerURL.isFileURL,
               inputs.llamaServerURL.lastPathComponent == "llama-server",
               !inputs.llamaServerURL.path.contains("\0") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateFaraInputs(_ inputs: ComputerUseFaraRuntimeInputs) throws {
+        try validateSemanticModelURL(inputs.modelURL)
+        try validateSemanticModelURL(inputs.projectorURL)
+        guard inputs.modelURL.lastPathComponent == ComputerUseFaraRuntimeInputs.modelFileName,
+              inputs.projectorURL.lastPathComponent == ComputerUseFaraRuntimeInputs.projectorFileName,
+              inputs.modelURL != inputs.projectorURL,
+              inputs.llamaServerURL.isFileURL, inputs.llamaServerURL.lastPathComponent == "llama-server",
+              !inputs.llamaServerURL.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
         }
     }

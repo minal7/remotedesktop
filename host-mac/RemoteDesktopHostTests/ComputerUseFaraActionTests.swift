@@ -1,10 +1,135 @@
 import Foundation
+import CryptoKit
 import AppKit
 import WebKit
 import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    func testOptInManagedFaraProposesFrozenTargetAndReleasesWorker() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MANAGED_FARA_PROPOSAL"] == "1" else { throw XCTSkip("Opt-in: one managed Fara image proposal without input effects") }
+        let assets = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MODEL_DIRECTORY"]))
+        let fixture = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_FROZEN_FIXTURE_DIRECTORY"]))
+        let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MANAGED_REPORT_PATH"]))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        for (name, expected) in [(ComputerUseFaraRuntimeInputs.modelFileName, "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51"),
+                                 (ComputerUseFaraRuntimeInputs.projectorFileName, "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d")] {
+            let file = try FileHandle(forReadingFrom: assets.appendingPathComponent(name))
+            defer { try? file.close() }
+            var hash = SHA256()
+            while let chunk = try file.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+        }
+        let directory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let executable = directory.appendingPathComponent("llama-server")
+        guard try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+        let inputs = ComputerUseFaraRuntimeInputs(modelURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
+            projectorURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName), llamaServerURL: executable)
+        let oracle = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: fixture.appendingPathComponent("oracle.json"))) as? [String: Any])
+        let goal = try XCTUnwrap(oracle["goal"] as? String)
+        guard goal == "Click the Destination field." else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        let input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: try Data(contentsOf: fixture.appendingPathComponent("browser.png")))
+        let runtime = OSAtlasLlamaRuntime(), worker = ComputerUsePlanningWorker()
+        let began = Date()
+        var report: [String: Any] = ["scope": "managed-native-Fara-frozen-image-no-effects", "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false, "memoryMetric": "sampled max of process resident size and physical footprint", "status": "running"]
+        let memory = Task.detached { () -> (UInt64, Int) in
+            var peak: UInt64 = 0, count = 0
+            while !Task.isCancelled {
+                for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: executable)) ?? [] {
+                    if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) {
+                        peak = max(peak, bytes); count += 1
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return (peak, count)
+        }
+        var failure: Error?
+        do {
+            let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
+            report["startupSeconds"] = Date().timeIntervalSince(began)
+            let startedGeneration = Date()
+            let proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+            report["generationSeconds"] = Date().timeIntervalSince(startedGeneration)
+            guard case .pointer(.leftClick, let point) = proposal.action else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            let width = try XCTUnwrap(oracle["imageWidth"] as? Int), height = try XCTUnwrap(oracle["imageHeight"] as? Int)
+            let bounds = try XCTUnwrap(oracle["destination"] as? [String: Double])
+            let pixel = try point.pixel(width: width, height: height)
+            let x = Double(pixel.x) * (try XCTUnwrap(bounds["viewportWidth"])) / Double(width)
+            let y = Double(pixel.y) * (try XCTUnwrap(bounds["viewportHeight"])) / Double(height)
+            let left = try XCTUnwrap(bounds["left"]), top = try XCTUnwrap(bounds["top"])
+            guard x > left + 8, x < left + (try XCTUnwrap(bounds["width"])) - 8,
+                  y > top + 8, y < top + (try XCTUnwrap(bounds["height"])) - 8 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            report["normalizedCoordinate"] = [point.x, point.y]
+            report["status"] = "passed"
+        } catch { failure = error; report["status"] = "failed"; report["failure"] = String(describing: error) }
+        await runtime.shutdown()
+        memory.cancel()
+        let measured = await memory.value
+        report["peakSampledProcessMemoryBytes"] = measured.0
+        report["memorySamples"] = measured.1
+        let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
+        report["ownedProcessExited"] = gone
+        report["totalSeconds"] = Date().timeIntervalSince(began)
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .atomic)
+        XCTAssertTrue(gone)
+        if let failure { throw failure }
+    }
+
+    private func smallPNG() throws -> Data {
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+    }
+
+    func testModelRequestPreservesGoalAndActionHistoryWithOnlyLatestThreeImages() throws {
+        let png = try smallPNG()
+        let click = call(#"{"action":"left_click","coordinate":[392,540]}"#)
+        let history = (0..<4).map { ComputerUseFaraModel.Step(screenshotPNG: png, response: "Observation \($0).\n" + click) }
+        let input = ComputerUseFaraModel.Input(goal: "  Type 東京 exactly.  ", screenshotPNG: png, history: history)
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "test-only-token")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, ComputerUseFaraRuntimeInputs.modelAlias)
+        XCTAssertEqual(body["reasoning_format"] as? String, "none")
+        XCTAssertEqual(body["max_tokens"] as? Int, 1024)
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["role"] as? String, "system")
+        XCTAssertEqual(messages.last?["role"] as? String, "user")
+        let userParts = messages.filter { $0["role"] as? String == "user" }.compactMap { $0["content"] as? [[String: Any]] }
+        XCTAssertEqual(userParts.flatMap { $0 }.filter { $0["type"] as? String == "image_url" }.count, 3)
+        XCTAssertEqual(userParts.first?.last?["text"] as? String, input.goal)
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.compactMap { $0["content"] as? String }, history.map(\.response))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer test-only-token")
+        XCTAssertFalse(String(decoding: request.httpBody!, as: UTF8.self).contains("test-only-token"))
+        XCTAssertEqual(request.timeoutInterval, 45)
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: .init(goal: "", screenshotPNG: png)))
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: .init(goal: "Click", screenshotPNG: Data("not an image".utf8))))
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: .init(goal: "Click", screenshotPNG: png,
+            history: [.init(screenshotPNG: png, response: "Malformed earlier action")])))
+    }
+
+    func testModelResponseRequiresCorrectAliasRoleFinishAndNativeAction() throws {
+        let content = "The field is visible.\n" + call(#"{"action":"left_click","coordinate":[392,540]}"#)
+        func response(model: String = ComputerUseFaraRuntimeInputs.modelAlias, role: String = "assistant", finish: String = "stop", text: String? = nil) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": model, "choices": [["finish_reason": finish,
+                "message": ["role": role, "content": text ?? content]]]])
+        }
+        let result = try ComputerUseFaraModel.decode(response())
+        XCTAssertEqual(result.response, content)
+        XCTAssertEqual(result.action, .pointer(.leftClick, .init(x: 392, y: 540)))
+        for data in try [response(model: "native-form-planner-v2"), response(role: "user"), response(finish: "length"),
+                         response(text: ""), response(text: content + " trailing text")] {
+            XCTAssertThrowsError(try ComputerUseFaraModel.decode(data))
+        }
+    }
+
     func testOptInDecodeFrozenModelProposalAgainstIndependentDOMOracle() throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_FROZEN_PROPOSAL_CHECK"] == "1" else { throw XCTSkip("Opt-in: inspect a recorded model proposal without input effects") }

@@ -2,9 +2,9 @@ import Foundation
 
 /// Fara's native tool proposal, before any app-owned action admission.
 /// Parsing a proposal never dispatches input or verifies task completion.
-enum ComputerUseFaraAction: Equatable {
-    enum PointerKind: String { case mouseMove = "mouse_move", leftClick = "left_click", rightClick = "right_click", doubleClick = "double_click", tripleClick = "triple_click", drag = "left_click_drag" }
-    struct Point: Equatable {
+enum ComputerUseFaraAction: Equatable, Sendable {
+    enum PointerKind: String, Sendable { case mouseMove = "mouse_move", leftClick = "left_click", rightClick = "right_click", doubleClick = "double_click", tripleClick = "triple_click", drag = "left_click_drag" }
+    struct Point: Equatable, Sendable {
         let x: Double
         let y: Double
         func pixel(width: Int, height: Int) throws -> (x: Int, y: Int) {

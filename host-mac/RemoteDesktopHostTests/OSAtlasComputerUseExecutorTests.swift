@@ -10614,10 +10614,104 @@ final class OSAtlasModelAccessGateTests: XCTestCase {
 
 final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
+    private var faraInputs: ComputerUseFaraRuntimeInputs {
+        .init(modelURL: URL(fileURLWithPath: "/models/Fara1.5-4B-Q4_K_M.gguf"),
+              projectorURL: URL(fileURLWithPath: "/models/mmproj-Fara1.5-4B-f16.gguf"),
+              llamaServerURL: nativeTextInputs.llamaServerURL)
+    }
+
+    func testFaraUsesSharedLifecycleWithNativeVisionProfileAndPrivateCredential() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events)
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            _ = try await runtime.activateNativeText(nativeTextInputs)
+            let endpoint = try await runtime.activateFara(faraInputs)
+            let cached = try await runtime.activateFara(faraInputs)
+            XCTAssertEqual(cached, endpoint); XCTAssertNil(endpoint.variant)
+            let configurations = await launcher.configurations()
+            XCTAssertEqual(configurations.count, 2)
+            let configuration = try XCTUnwrap(configurations.last)
+            let credential = try XCTUnwrap(configuration.authenticationFile)
+            try credential.verify()
+            let arguments = configuration.arguments
+            for (flag, value) in [("--mmproj", faraInputs.projectorURL.path), ("--ctx-size", "8192"),
+                                  ("--alias", ComputerUseFaraRuntimeInputs.modelAlias), ("--image-max-tokens", "1536"),
+                                  ("--parallel", "1"), ("--poll", "0"), ("--cache-ram", "0")] {
+                let index = try XCTUnwrap(arguments.firstIndex(of: flag))
+                XCTAssertEqual(arguments[index + 1], value)
+            }
+            XCTAssertFalse(arguments.contains("--chat-template"))
+            XCTAssertFalse(arguments.contains("--no-mmproj"))
+            XCTAssertFalse(arguments.contains("--reasoning-budget"))
+            XCTAssertFalse(arguments.contains(endpoint.bearerToken))
+            XCTAssertTrue(arguments.contains("--no-context-shift"))
+            XCTAssertEqual(configuration.maximumProcessCount, 1)
+            do {
+                _ = try await runtime.proposeNativeText(endpoint: endpoint, prompt: "Set Origin to Oslo.", fields: nativeTextFields)
+                XCTFail("The Fara worker must never receive a general-model text contract")
+            } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+            let values = await events.values()
+            XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Qwen3.5-4B-Q4_K_M.gguf")),
+                              try XCTUnwrap(values.firstIndex(of: "launch:Fara1.5-4B-Q4_K_M.gguf")))
+            await runtime.shutdown()
+            XCTAssertFalse(FileManager.default.fileExists(atPath: credential.directoryURL.path))
+            XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
+        } catch { await runtime.shutdown(); throw error }
+    }
+
     private var nativeTextInputs: ComputerUseNativeTextRuntimeInputs {
         ComputerUseNativeTextRuntimeInputs(
             modelURL: URL(fileURLWithPath: "/models/Qwen3.5-4B-Q4_K_M.gguf"),
             llamaServerURL: URL(fileURLWithPath: "/app/Contents/Helpers/llama-server"))
+    }
+
+    func testFaraCancellationJoinsWorkerBeforeReplacementAndRejectsLateOldCancellation() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
+        let runtime = textRuntime(launcher, transports: transport)
+        let png = try XCTUnwrap(NSBitmapImageRep(data: makeTestJPEG(width: 4, height: 4))?.representation(using: .png, properties: [:]))
+        let endpoint = try await runtime.activateFara(faraInputs)
+        let proposal = Task { try await runtime.proposeFara(endpoint: endpoint, input: .init(goal: "Click Destination.", screenshotPNG: png)) }
+        await transport.waitUntilCompletionStarted()
+        proposal.cancel()
+        do { _ = try await proposal.value; XCTFail("Cancelled Fara output cannot return to an executor") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let replacement = try await runtime.activateNativeText(nativeTextInputs)
+        await runtime.cancel(endpoint: endpoint)
+        let cached = try await runtime.activateNativeText(nativeTextInputs)
+        XCTAssertEqual(cached, replacement)
+        do {
+            _ = try await runtime.proposeFara(endpoint: endpoint, input: .init(goal: "Click Destination.", screenshotPNG: png))
+            XCTFail("A stale Fara endpoint cannot reach its replacement")
+        } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        let values = await events.values()
+        XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Fara1.5-4B-Q4_K_M.gguf")),
+                          try XCTUnwrap(values.firstIndex(of: "launch:Qwen3.5-4B-Q4_K_M.gguf")))
+        await runtime.shutdown()
+    }
+
+    func testFaraRejectsWrongProjectorAndUnder12GBBeforeLaunching() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let runtime = textRuntime(launcher, transports: FakeTransportMaker(events: events))
+        do {
+            _ = try await runtime.activateFara(.init(modelURL: faraInputs.modelURL,
+                projectorURL: URL(fileURLWithPath: "/models/mmproj-OSAtlas-f16.gguf"), llamaServerURL: faraInputs.llamaServerURL))
+            XCTFail("An unrelated projector must be rejected before launch")
+        } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .invalidLocalInstallation) }
+        let limited = OSAtlasLlamaRuntime(launcher: launcher, transportMaker: FakeTransportMaker(events: events),
+            portProvider: FixedPortProvider(port: 43123), tokenProvider: FixedTokenProvider(token: "fixture"),
+            readinessAttempts: 1, readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector(snapshotValue: .init(physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024 - 1,
+                reclaimableMemoryBytes: .max)))
+        do {
+            _ = try await limited.activateFara(faraInputs)
+            XCTFail("The trained-model launch must honor the 12 GB target")
+        } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .insufficientPhysicalMemory) }
+        let configurations = await launcher.configurations()
+        XCTAssertTrue(configurations.isEmpty)
+        await runtime.shutdown(); await limited.shutdown()
     }
 
     private var nativeTextFields: [ComputerUseTextField] {
