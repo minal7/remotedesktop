@@ -1515,6 +1515,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             requiresPresentation: required || hasRequiredPresentation || hasOpenSignInWindow)
     }
 
+    func matchesAgentSession(taskID: String, identity: String) -> Bool {
+        browser != nil && self.taskID == taskID
+            && ComputerUseTaskContract.digest([contextID, taskID, ownershipEpoch.uuidString]) == identity
+    }
+
     private func validateSessionIdentity(_ requirement: ComputerUseBrowserHandbackRequirement, taskID: String) throws {
         guard requirement.taskID == taskID, requirement.contextID == contextID,
               requirement.sessionID == browserSessionID, requirement.ownershipEpoch == ownershipEpoch,

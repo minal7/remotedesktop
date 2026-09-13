@@ -5,6 +5,43 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: all Fara question executor layers") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraMCPQuestion-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var calls = 0, admissions = 0, loads = 0
+        let original = "Find concert tickets."
+        let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            XCTAssertEqual(input.goal, original); XCTAssertEqual(input.history.count, calls)
+            guard calls < 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 { XCTAssertEqual(input.userResponse, "Kyoto") }
+            let question = calls == 0 ? "Which city?" : "Which date?"
+            calls += 1
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"ask_user_question\",\"question\":\"\(question)\"}}</tool_call>"
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
+        let planner = StubMCPPlanner(mode: .repeatFocusedApp)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: deferred, planner: planner, clientPool: pool)
+        let capability = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in admissions += 1; return nil }, desktopFactory: { _ in mcp })
+        let first = try await capability.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { _ in })
+        XCTAssertEqual(first, .clarificationRequired("Which city?"))
+        let pending = try XCTUnwrap(capability.clarification(taskID: "root"))
+        let goal = try pending.goal.answering(pending.question, with: "Kyoto")
+        let second = try await capability.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
+        XCTAssertEqual(second, .clarificationRequired("Which date?"))
+        XCTAssertEqual(try capability.clarification(taskID: "answer")?.goal, goal)
+        XCTAssertEqual(planner.proposedToolNames.count, 1); XCTAssertEqual(admissions, 1); XCTAssertEqual(loads, 1); XCTAssertEqual(calls, 2)
+        capability.invalidateClarification(taskID: "answer")
+        XCTAssertNil(try capability.clarification(taskID: "answer"))
+        await pool.cancelAll()
+    }
+
     func testOptInProductionNativeLoaderRoutesBrowserTaskThroughMacToolsToFara() async throws {
         try await runProductionBrowserComposition(reusesPriorTaskPage: false)
     }

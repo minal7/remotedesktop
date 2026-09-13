@@ -270,23 +270,26 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
-        guard route == .native, self.taskID == taskID else { return nil }
-        return try nativeClarification?.clarification(taskID: taskID)
+        guard self.taskID == taskID else { return nil }
+        if route == .native { return try nativeClarification?.clarification(taskID: taskID) }
+        if route == .desktop { return try (desktop as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID) }
+        return nil
     }
 
     func invalidateClarification(taskID: String?) {
         nativeClarification?.invalidateClarification(taskID: taskID)
+        (desktop as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
     }
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        guard route == .native, let native = nativeClarification else { throw RoutingError.missingContinuation }
+        guard route == .native && nativeClarification != nil || route == .desktop && desktop is any ComputerUseTextClarificationContinuing else { throw RoutingError.missingContinuation }
         let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
         } else {
-            guard self.taskID == originatingTaskID, let pending = try native.clarification(taskID: originatingTaskID),
+            guard self.taskID == originatingTaskID, let pending = try clarification(taskID: originatingTaskID),
                   let answer = goal.userTurns.last,
                   try pending.goal.answering(pending.question, with: answer) == goal else { throw RoutingError.missingContinuation }
             self.taskID = taskID
@@ -294,10 +297,14 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         }
         isExecuting = true
         defer { isExecuting = false }
-        // A scoped answer never enters navigation, desktop fallback or a
-        // general conversation route, including on decline and resume.
-        let result = try await native.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
-            goal: goal, progress: progress)
+        // Continue only the retained capability; a scoped answer never repeats
+        // native admission or invokes a new desktop/structured planner.
+        let result: ComputerUseExecutionResult
+        if route == .native, let native = nativeClarification {
+            result = try await native.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+        } else if let continuing = desktop as? any ComputerUseTextClarificationContinuing {
+            result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+        } else { throw RoutingError.missingContinuation }
         try rejectUnroutedResearchQuestion(result)
         return result
     }
@@ -360,7 +367,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 /// it. The same loaded executor handles resume and approval continuation; a
 /// continuation never performs another load or enters the planner again.
 @MainActor
-final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
+final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
     typealias Loader = @MainActor @Sendable (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
     typealias Abandon = @MainActor @Sendable (any ComputerUseExecuting) async -> Void
     private let loader: Loader?
@@ -380,6 +387,33 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
     var hasAdditionalSetup: Bool { loader == nil }
     var runtimeName: String { isReady ? "Visual control is available on demand" : "Visual control needs setup" }
     var readyDetail: String { runtimeName }
+
+    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        guard self.taskID == taskID else { return nil }
+        return try (loaded as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID)
+    }
+
+    func invalidateClarification(taskID: String?) {
+        (loaded as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
+    }
+
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ComputerUseCapabilityExecutor.RoutingError.alreadyExecuting }
+        guard let continuing = loaded as? any ComputerUseTextClarificationContinuing else { throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation }
+        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        if self.taskID == taskID {
+            guard promptDigest == digest else { throw ComputerUseCapabilityExecutor.RoutingError.taskChanged }
+        } else {
+            guard self.taskID == originatingTaskID, let pending = try continuing.clarification(taskID: originatingTaskID),
+                  let answer = goal.userTurns.last, try pending.goal.answering(pending.question, with: answer) == goal else { throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation }
+            self.taskID = taskID; promptDigest = digest
+        }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+    }
 
     func execute(prompt: String, tools: ComputerUseHostTools,
                  progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {

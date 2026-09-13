@@ -33,6 +33,7 @@ enum ComputerUseFaraModel {
         let response: String
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
+        var userResponse: String? = nil
     }
     struct Input: Equatable, Sendable {
         let goal: String
@@ -40,6 +41,7 @@ enum ComputerUseFaraModel {
         var history: [Step] = []
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
+        var userResponse: String? = nil
     }
     struct Proposal: Equatable, Sendable {
         let response: String
@@ -66,13 +68,19 @@ enum ComputerUseFaraModel {
                 content.append(["type": "image_url", "image_url": ["url": "data:image/png;base64," + png.base64EncodedString()]])
             }
             let currentURL = index == input.history.count ? input.currentURL : input.history[index].currentURL
+            let userResponse = index == input.history.count ? input.userResponse : input.history[index].userResponse
+            if let userResponse {
+                guard !userResponse.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      userResponse.utf8.count <= 8_192 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                readingBytes += userResponse.utf8.count
+            }
             if let currentURL {
                 guard ComputerUseOwnedBrowser.validatedURL(currentURL) == currentURL else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
                 // Preserve the native browser observation alongside its image,
                 // including when that image ages out of the three-image window.
-                observationText.append("Current URL: " + currentURL.absoluteString)
+                if userResponse == nil || index >= earliestImage { observationText.append("Current URL: " + currentURL.absoluteString) }
             }
             if let reading = index == input.history.count ? input.pageReading : input.history[index].pageReading {
                 try validatePageReading(reading)
@@ -91,7 +99,8 @@ enum ComputerUseFaraModel {
                 readingBytes += text.utf8.count
                 observationText.append(text)
             }
-            if index > 0 { observationText.append("Here is the next screenshot. Think about what to do next.") }
+            if let userResponse { observationText.append(userResponse) }
+            else if index > 0 { observationText.append("Here is the next screenshot. Think about what to do next.") }
             if !observationText.isEmpty { content.append(["type": "text", "text": observationText.joined(separator: "\n")]) }
             if index == 0 { content.append(["type": "text", "text": input.goal]) }
             else if content.isEmpty { content.append(["type": "text", "text": "[Earlier screenshot omitted]"]) }

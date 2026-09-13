@@ -7,6 +7,174 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraQuestionLimitAndStaleControlsPreserveLatestAnswerOwner() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: successive Fara answer ownership and turn limit") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraAnswerOwnership-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var allowsActions = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowsActions }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowsActions }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            calls += 1
+            guard calls <= 4 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"ask_user_question\",\"question\":\"Question \(calls)?\"}}</tool_call>"
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        _ = try await executor.execute(taskID: "root", prompt: "Find tickets.", trustedUserPrompt: "Find tickets.", tools: tools, progress: { _ in })
+        var origin = "root"
+        for index in 1...2 {
+            let question = try XCTUnwrap(executor.clarification(taskID: origin))
+            let goal = try question.goal.answering(question.question, with: "Answer \(index)")
+            _ = try await executor.continueClarification(taskID: "answer\(index)", originatingTaskID: origin, goal: goal, progress: { _ in })
+            origin = "answer\(index)"
+        }
+        let retained = try XCTUnwrap(executor.clarification(taskID: "answer2"))
+        XCTAssertEqual(retained.goal.userTurns, ["Find tickets.", "Answer 1", "Answer 2"])
+        XCTAssertEqual(tools.ownedBrowserTaskID(forExecution: "answer2"), "root")
+        XCTAssertEqual(tools.ownedBrowserTaskID(forExecution: "answer1"), "answer1")
+        let captured = try await browser.captureInitialAgentObservation(taskID: "root", expectedSessionIdentity: nil)
+        let observation = try XCTUnwrap(captured)
+        for stale in ["root", "answer1", "unrelated"] {
+            executor.invalidateClarification(taskID: stale)
+            allowsActions = false
+            tools.pauseOwnedBrowserForUserControl(taskID: stale)
+            tools.stopOwnedBrowserActivity(taskID: stale)
+            allowsActions = true
+            XCTAssertNoThrow(try browser.validateInitialAgentObservation(observation), "A stale Pause must not retire the current answer's observation")
+            XCTAssertEqual(browser.taskID, "root")
+            XCTAssertEqual(try executor.clarification(taskID: "answer2")?.question, retained.question)
+        }
+        let finalGoal = try retained.goal.answering(retained.question, with: "Answer 3")
+        do {
+            _ = try await executor.continueClarification(taskID: "answer3", originatingTaskID: "answer2", goal: finalGoal, progress: { _ in })
+            XCTFail("A fourth question would exceed the retained user-turn limit")
+        } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .invalidQuestion) }
+        XCTAssertEqual(calls, 4); XCTAssertNil(try executor.clarification(taskID: "answer3"))
+        tools.stopOwnedBrowserActivity(taskID: "answer2"); XCTAssertEqual(browser.taskID, "root")
+        tools.stopOwnedBrowserActivity(taskID: "answer3"); XCTAssertNil(browser.taskID)
+    }
+
+    @MainActor
+    func testOptInFaraDoesNotAskQuestionWithoutBudgetToReadTheAnswer() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: cumulative Fara question budget") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraQuestionLimit-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            guard calls < 64 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let args = calls == 63 ? #"{"action":"ask_user_question","question":"Which city?"}"# : #"{"action":"wait","time":0}"#
+            calls += 1
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + args + "}</tool_call>"
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            _ = try await executor.execute(taskID: "limit", prompt: "Find tickets.", trustedUserPrompt: "Find tickets.", tools: tools, progress: { _ in })
+            XCTFail("The last allowed turn must not publish an unanswerable question")
+        } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .stepLimit) }
+        XCTAssertEqual(calls, 64); XCTAssertNil(try executor.clarification(taskID: "limit"))
+    }
+
+    @MainActor
+    func testOptInFaraQuestionRejectsExpiredChangedCancelledAndMismatchedAnswers() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: retained question boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["expired", "changed-browser", "cancelled", "invalidated", "wrong-goal", "wrong-question", "wrong-origin", "blank-answer", "oversized-answer"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraQuestionBoundary-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            var calls = 0, now = Date(timeIntervalSince1970: 1_800_000_000)
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+                calls += 1
+                guard calls == 1 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"ask_user_question","question":"Which city?"}}</tool_call>"#
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }, now: { now })
+            let result = try await executor.execute(taskID: mode, prompt: "Find tickets.", trustedUserPrompt: "Find tickets.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .clarificationRequired("Which city?"))
+            let pending = try XCTUnwrap(executor.clarification(taskID: mode))
+            let answer = mode == "blank-answer" ? " \n " : mode == "oversized-answer" ? "x" + String(repeating: "\u{301}", count: 4_100) : "Kyoto"
+            let original = mode == "wrong-goal" ? try ComputerUseUnresolvedTextGoal(userRequest: "A different task") : pending.goal
+            let goal = try original.answering(mode == "wrong-question" ? "A different question?" : pending.question, with: answer)
+            if mode == "expired" { now.addTimeInterval(601) }
+            if mode == "changed-browser" { try browser.claim(taskID: "successor") }
+            if mode == "invalidated" { executor.invalidateClarification(taskID: mode) }
+            let work = Task { @MainActor in
+                if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                return try await executor.continueClarification(taskID: "answer", originatingTaskID: mode == "wrong-origin" ? "another-root" : mode,
+                    goal: goal, progress: { _ in })
+            }
+            do { _ = try await work.value; XCTFail("Invalid answer was accepted: \(mode)") }
+            catch {
+                if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .invalidQuestion, mode) }
+            }
+            XCTAssertEqual(calls, 1, mode)
+            XCTAssertEqual(browser.taskID, mode == "changed-browser" ? "successor" : mode)
+            let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(records.count, 1); XCTAssertEqual(records.first?.stepIDs, ["model-assessed-completion"])
+        }
+    }
+
+    @MainActor
+    func testOptInFaraKeepsQuestionAndExactAnswerWhenHistoryAndImagesAgeOut() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded Fara answer history") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraAnswerHistory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let original = "Find tickets after asking for the destination.", answer = "  Kyoto e\u{301} 😀\n  "
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            XCTAssertEqual(input.goal, original); XCTAssertLessThanOrEqual(input.history.count, 20)
+            guard calls <= 25 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 { XCTAssertTrue(input.userResponse?.utf8.elementsEqual(answer.utf8) == true) }
+            if calls == 25 {
+                XCTAssertNil(input.userResponse)
+                XCTAssertEqual(input.history.count, 20)
+                XCTAssertEqual(input.history.filter { $0.userResponse != nil }.count, 1)
+                XCTAssertTrue(input.history.contains { $0.response.contains("Which city?") })
+                let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                let matching = messages.filter { message in
+                    guard message["role"] as? String == "user", let content = message["content"] as? [[String: Any]] else { return false }
+                    return content.contains { ($0["text"] as? String)?.utf8.elementsEqual(answer.utf8) == true }
+                }
+                XCTAssertEqual(matching.count, 1, "The old answer remains exact text after image and ordinary-history eviction")
+                XCTAssertFalse((matching.first?["content"] as? [[String: Any]] ?? []).contains { $0["type"] as? String == "image_url" })
+            }
+            let args = calls == 0 ? #"{"action":"ask_user_question","question":"Which city?"}"#
+                : calls == 25 ? #"{"action":"ask_user_question","question":"Any other constraints?"}"# : #"{"action":"wait","time":0}"#
+            calls += 1
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + args + "}</tool_call>"
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        _ = try await executor.execute(taskID: "history", prompt: original, trustedUserPrompt: original, tools: tools, progress: { _ in })
+        let pending = try XCTUnwrap(executor.clarification(taskID: "history"))
+        let goal = try pending.goal.answering(pending.question, with: answer)
+        let result = try await executor.continueClarification(taskID: "answer", originatingTaskID: "history", goal: goal, progress: { _ in })
+        XCTAssertEqual(result, .clarificationRequired("Any other constraints?")); XCTAssertEqual(calls, 26)
+        XCTAssertEqual(try executor.clarification(taskID: "answer")?.goal, goal)
+        let replay = try await executor.continueClarification(taskID: "answer", originatingTaskID: "history", goal: goal, progress: { _ in })
+        XCTAssertEqual(replay, result); XCTAssertEqual(calls, 26)
+        do { _ = try await executor.continueClarification(taskID: "another-answer", originatingTaskID: "history", goal: goal, progress: { _ in }); XCTFail("Consumed question accepted a second answer") }
+        catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .invalidQuestion) }
+    }
+
+    @MainActor
     func testOptInFaraTabRejectsStaleFocusLoginAndRetiredControl() async throws {
         try await runTabBoundaries(modes: ["focus-changed", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"])
     }

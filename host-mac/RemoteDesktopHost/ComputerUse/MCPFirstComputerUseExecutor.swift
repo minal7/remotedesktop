@@ -75,7 +75,8 @@ private final class MCPGenerationCancellationJoin: @unchecked Sendable {
 final class MCPFirstComputerUseExecutor:
     ComputerUseTaskAwareExecuting,
     MCPApprovalContinuing,
-    ComputerUseVisualApprovalContinuing {
+    ComputerUseVisualApprovalContinuing,
+    ComputerUseTextClarificationContinuing {
     enum ExecutorError: Error, LocalizedError, Equatable {
         case requiredToolsMissing
         case alreadyExecuting
@@ -607,6 +608,23 @@ final class MCPFirstComputerUseExecutor:
             return try MCPApprovedActionResult.verified(call: prepared.call,
                 result: result, trustedUserPrompt: state.trustedUserPrompt)
         }
+    }
+
+    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        try (visualFallback as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID)
+    }
+
+    func invalidateClarification(taskID: String?) {
+        (visualFallback as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
+    }
+
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
+        try await waitForStartedCancellation()
+        guard let continuing = visualFallback as? any ComputerUseTextClarificationContinuing else { throw ExecutorError.visualApprovalContinuationUnavailable }
+        return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
     }
 
     func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,

@@ -3,11 +3,11 @@ import Foundation
 /// Fara's native image/action loop inside the app-owned browser. The host
 /// manager remains responsible for user control, Resume and terminal delivery.
 @MainActor
-final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
+final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
     typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal
     typealias ReadPage = @MainActor @Sendable (ComputerUseFaraModel.PageReading) async throws -> String
     enum Failure: Error, LocalizedError, Equatable {
-        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval
+        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion
         var errorDescription: String? {
             switch self {
             case .changedTask: return "The original request changed. Start a new task with the complete request."
@@ -17,6 +17,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             case .stepLimit: return "The browser task reached its step limit. Check its progress before starting another request."
             case .browserChanged: return "The task's browser session changed. Check the page before starting another request."
             case .invalidApproval: return "This approval no longer matches the pending browser action."
+            case .invalidQuestion: return "This answer no longer matches the browser's pending question. Start a new request with the complete instruction."
             }
         }
     }
@@ -39,6 +40,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let taskID: String
         let goal: String
         let browserIdentity: String
+        var executionTaskID: String
+        var clarifiedGoal: ComputerUseUnresolvedTextGoal?
+        var question: ComputerUseNativeTextExecutor.Clarification?
+        var answerOriginID: String?
+        var userResponse: String?
         var journal: ComputerUseTaskJournal
         var history: [ComputerUseFaraModel.Step] = []
         var pageReading: ComputerUseFaraModel.PageReading?
@@ -49,6 +55,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var isStarting = false
         init(taskID: String, goal: String, browserIdentity: String, journal: ComputerUseTaskJournal) {
             self.taskID = taskID; self.goal = goal; self.browserIdentity = browserIdentity; self.journal = journal
+            executionTaskID = taskID
         }
     }
     private let store: ComputerUseTaskJournalStore
@@ -58,20 +65,60 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
+    private var sessionTools: ComputerUseHostTools?
+    private let now: @MainActor () -> Date
     private var isExecuting = false
     init(journalDirectory: URL, searchProvider: ComputerUseBrowserSearchProvider? = nil, propose: @escaping Propose,
          readPage: @escaping ReadPage = { _ in throw Failure.unsupportedAction },
-         finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
+         finishRun: @escaping @MainActor @Sendable () async -> Void = {}, now: @escaping @MainActor () -> Date = Date.init) throws {
         store = try .init(directory: journalDirectory)
         self.propose = propose
         self.readPage = readPage
         self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q")
         self.finishRun = finishRun
+        self.now = now
     }
     let isReady = true
     let requiresMacControlHelper = false
     let runtimeName = "Fara browser computer use"
     let readyDetail = "Browser computer use is ready"
+
+    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        guard let session, session.executionTaskID == taskID, let question = session.question else { return nil }
+        guard session.terminal == nil, question.expiresAt > now(),
+              sessionTools?.matchesOwnedBrowserAgentSession(taskID: session.taskID, identity: session.browserIdentity) == true else { throw Failure.invalidQuestion }
+        return question
+    }
+
+    func invalidateClarification(taskID: String?) {
+        guard let session, taskID == nil || session.executionTaskID == taskID, session.question != nil else { return }
+        session.question = nil
+        session.terminal = .unableToComplete(Failure.invalidQuestion.localizedDescription)
+    }
+
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
+        try Task.checkCancellation()
+        guard let session, let tools = sessionTools, taskID != originatingTaskID else { throw Failure.invalidQuestion }
+        if session.executionTaskID == taskID {
+            guard session.answerOriginID == originatingTaskID, session.clarifiedGoal == goal else { throw Failure.invalidQuestion }
+        } else {
+            guard session.executionTaskID == originatingTaskID, let pending = try clarification(taskID: originatingTaskID),
+                  let answer = goal.userTurns.last, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  answer.utf8.count <= 8_192, try pending.goal.answering(pending.question, with: answer) == goal else { throw Failure.invalidQuestion }
+            // Bind the new transport request to the original browser before any
+            // suspension. A replay cannot consume this answer twice or reset work.
+            try tools.bindOwnedBrowserAgentContinuation(rootTaskID: session.taskID, executionTaskID: taskID,
+                previousExecutionTaskID: originatingTaskID, sessionIdentity: session.browserIdentity)
+            session.executionTaskID = taskID
+            session.answerOriginID = originatingTaskID
+            session.clarifiedGoal = goal
+            session.userResponse = answer
+            session.question = nil
+        }
+        return try await execute(taskID: session.taskID, prompt: session.goal, trustedUserPrompt: session.goal, tools: tools, progress: progress)
+    }
 
     func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         try await execute(taskID: UUID().uuidString, prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: progress)
@@ -142,9 +189,19 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading))
+        session.history.append(.init(screenshotPNG: png, response: proposal.response, currentURL: currentURL, pageReading: session.pageReading, userResponse: session.userResponse))
         session.pageReading = nil
-        if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
+        session.userResponse = nil
+        while session.history.count > 20 {
+            // Keep the bounded clarification pairs after their screenshots age
+            // out, so an answer never loses the question that gives it meaning.
+            guard let index = session.history.firstIndex(where: {
+                if $0.userResponse != nil { return false }
+                if case .some(.askUser(_)) = try? ComputerUseFaraAction.decodeNativeMessage($0.response) { return false }
+                return true
+            }) else { break }
+            session.history.remove(at: index)
+        }
     }
 
     private func start(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation, session: Session,
@@ -155,13 +212,16 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         defer { lease.release() }
         try lease.assertOwnership()
         progress("Reading the browser…")
-        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history)
+        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history, userResponse: session.userResponse)
         let propose = self.propose
         let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
         try Task.checkCancellation(); try lease.assertOwnership()
         try tools.validateOwnedBrowserInitialAgentObservation(observation)
         let destination: URL
         switch proposal.action {
+        case .askUser(let question):
+            try retainQuestion(question, proposal: proposal, png: observation.png, currentURL: nil, session: session, tools: tools)
+            return
         case .visitURL(let url): destination = url
         case .webSearch(let query): destination = try searchProvider.destination(query: query)
         case .wait(let seconds):
@@ -244,6 +304,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         if let session, session.taskID == taskID {
             guard session.goal.utf8.elementsEqual(goal.utf8) else { throw Failure.changedTask }
             if let terminal = session.terminal { return terminal }
+            if let pending = try clarification(taskID: session.executionTaskID) { return .clarificationRequired(pending.question) }
             if let pending = session.approval {
                 guard !pending.performed else { throw Failure.invalidApproval }
                 return pending.result
@@ -251,6 +312,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         } else {
             session = nil
         }
+        sessionTools = tools
         if let result = try await tools.executeOwnedBrowserTaskIfSupported(taskID: taskID, prompt: goal, progress: progress) {
             return result
         }
@@ -272,6 +334,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             guard let session else { throw Failure.browserChanged }
             try await start(initial, session: session, tools: tools, progress: progress)
+            if let pending = try clarification(taskID: session.executionTaskID) { return .clarificationRequired(pending.question) }
         }
         let first: ComputerUseOwnedBrowser.AgentObservation
         do { first = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
@@ -295,7 +358,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
             progress("Reading the browser…")
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
-                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading)
+                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading, userResponse: session.userResponse)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
@@ -347,7 +410,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 }
                 if let predicted = try tools.predictedOwnedBrowserAgentAction(proposal.action, observation: observation),
                    let reason = tools.approvalReason(for: predicted, nativeTarget: nativeTarget) {
-                    let pending = PendingApproval(taskID: taskID, action: predicted, message: reason, proposal: proposal, observation: observation, nativeTarget: nativeTarget)
+                    let pending = PendingApproval(taskID: session.executionTaskID, action: predicted, message: reason, proposal: proposal, observation: observation, nativeTarget: nativeTarget)
                     session.approval = pending
                     return pending.result
                 }
@@ -357,6 +420,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             case .wait(let seconds):
                 try await Task.sleep(for: .seconds(seconds))
             case .remember: break
+            case .askUser(let question):
+                try retainQuestion(question, proposal: proposal, png: observation.png, currentURL: observation.currentURL, session: session, tools: tools)
+                return .clarificationRequired(question)
             case .readPageQuestion(let question):
                 guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       question.utf8.count <= 1024 else { throw Failure.unsupportedAction }
@@ -392,5 +458,22 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
         }
         throw Failure.stepLimit
+    }
+
+    private func retainQuestion(_ question: String, proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?,
+                                session: Session, tools: ComputerUseHostTools) throws {
+        // Publishing the question promises that its accepted answer can reach
+        // at least one further proposal under the same cumulative turn budget.
+        guard session.turns + 1 < 64 else { throw Failure.stepLimit }
+        let goal = try session.clarifiedGoal ?? ComputerUseUnresolvedTextGoal(userRequest: session.goal)
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, question.utf8.count <= 8_192,
+              goal.userTurns.count < ComputerUseUnresolvedTextGoal.maximumUserTurns else { throw Failure.invalidQuestion }
+        try tools.bindOwnedBrowserAgentContinuation(rootTaskID: session.taskID, executionTaskID: session.executionTaskID,
+            previousExecutionTaskID: session.executionTaskID, sessionIdentity: session.browserIdentity)
+        let pending = ComputerUseNativeTextExecutor.Clarification(taskID: session.executionTaskID, goal: goal, question: question,
+            scope: ComputerUseTaskContract.digest([session.browserIdentity, UUID().uuidString]), expiresAt: now().addingTimeInterval(600))
+        record(proposal, png: png, currentURL: currentURL, session: session)
+        session.clarifiedGoal = goal
+        session.question = pending
     }
 }

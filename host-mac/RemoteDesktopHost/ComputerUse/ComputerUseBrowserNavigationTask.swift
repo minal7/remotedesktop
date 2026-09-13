@@ -213,11 +213,46 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         })
     }
 
+    private struct AgentContinuation {
+        let rootTaskID: String
+        let executionTaskID: String
+        let sessionIdentity: String
+    }
+    private var agentContinuation: AgentContinuation?
+
+    func matchesAgentSession(taskID: String, identity: String) -> Bool {
+        browser.matchesAgentSession(taskID: taskID, identity: identity)
+    }
+
+    func bindAgentContinuation(rootTaskID: String, executionTaskID: String, previousExecutionTaskID: String, sessionIdentity: String) throws {
+        try Task.checkCancellation()
+        guard matchesAgentSession(taskID: rootTaskID, identity: sessionIdentity), !executionTaskID.isEmpty else {
+            throw ComputerUseBrowserError.ownershipLost
+        }
+        if let current = agentContinuation, matchesAgentSession(taskID: current.rootTaskID, identity: current.sessionIdentity) {
+            guard current.rootTaskID == rootTaskID, current.sessionIdentity == sessionIdentity,
+                  current.executionTaskID == previousExecutionTaskID else { throw ComputerUseBrowserError.ownershipLost }
+        } else {
+            guard rootTaskID == executionTaskID, rootTaskID == previousExecutionTaskID else { throw ComputerUseBrowserError.ownershipLost }
+        }
+        agentContinuation = .init(rootTaskID: rootTaskID, executionTaskID: executionTaskID, sessionIdentity: sessionIdentity)
+    }
+
+    private var currentAgentContinuation: AgentContinuation? {
+        guard let current = agentContinuation, matchesAgentSession(taskID: current.rootTaskID, identity: current.sessionIdentity) else { return nil }
+        return current
+    }
+
     func researchTask(taskID: String) -> ComputerUseBrowserResearchTask? { research?.taskID == taskID ? research : nil }
     func browserTaskID(forExecution taskID: String) -> String {
-        research?.executionTaskID == taskID ? (research?.taskID ?? taskID) : taskID
+        if let current = currentAgentContinuation, current.executionTaskID == taskID { return current.rootTaskID }
+        return research?.executionTaskID == taskID ? (research?.taskID ?? taskID) : taskID
     }
     func pauseForUserControl(taskID: String) {
+        if let current = currentAgentContinuation {
+            if current.executionTaskID == taskID { browser.prepareForUserControl(taskID: current.rootTaskID); return }
+            if current.rootTaskID == taskID { return }
+        }
         if let research, research.executionTaskID == taskID {
             // An accepted answer may own a different execution ID from the
             // browser root. A stale root command cannot pause that successor.
@@ -243,6 +278,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     func stopBrowserActivity() { research?.retire(); browser.stop() }
 
     func stopBrowserActivity(taskID: String) {
+        if let current = currentAgentContinuation, current.rootTaskID == taskID, current.executionTaskID != taskID { return }
         let browserTaskID = browserTaskID(forExecution: taskID)
         retireResearchTask(taskID: taskID)
         guard browser.taskID == browserTaskID else { return }

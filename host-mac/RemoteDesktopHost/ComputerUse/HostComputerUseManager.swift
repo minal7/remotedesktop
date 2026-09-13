@@ -1263,6 +1263,16 @@ final class ComputerUseHostTools {
     func ownedBrowserResearch(taskID: String) -> ComputerUseBrowserResearchTask? { browserNavigationTask?.researchTask(taskID: taskID) }
     func ownedBrowserTaskID(forExecution taskID: String) -> String { browserNavigationTask?.browserTaskID(forExecution: taskID) ?? taskID }
 
+    func matchesOwnedBrowserAgentSession(taskID: String, identity: String) -> Bool {
+        browserNavigationTask?.matchesAgentSession(taskID: taskID, identity: identity) == true
+    }
+
+    func bindOwnedBrowserAgentContinuation(rootTaskID: String, executionTaskID: String, previousExecutionTaskID: String, sessionIdentity: String) throws {
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try browserNavigationTask.bindAgentContinuation(rootTaskID: rootTaskID, executionTaskID: executionTaskID,
+            previousExecutionTaskID: previousExecutionTaskID, sessionIdentity: sessionIdentity)
+    }
+
     /// Read-only evidence for browser capabilities. It does not open a window,
     /// claim that a search finished, or feed raw destinations into a model.
     func observeOwnedBrowserPage(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {

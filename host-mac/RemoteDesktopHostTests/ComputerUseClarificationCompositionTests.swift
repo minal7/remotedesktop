@@ -12,6 +12,252 @@ private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
 final class ComputerUseClarificationCompositionTests: XCTestCase {
+    func testOptInShippedClientAnswersFaraQuestionWithoutRepeatingEarlierEdit() async throws {
+        try await runFaraQuestionComposition(initialQuestion: false)
+    }
+
+    func testOptInShippedClientAnswersFaraQuestionBeforeFirstNavigation() async throws {
+        try await runFaraQuestionComposition(initialQuestion: true)
+    }
+
+    func testOptInShippedClientFaraAnswerRetainsLoginUntilExplicitResume() async throws {
+        try await runFaraQuestionComposition(initialQuestion: false, login: .resume)
+    }
+
+    func testOptInShippedClientStopRetiresFaraAnsweredBrowserDuringLogin() async throws {
+        try await runFaraQuestionComposition(initialQuestion: false, login: .stop)
+    }
+
+    private enum FaraQuestionLogin { case resume, stop }
+
+    private func runFaraQuestionComposition(initialQuestion: Bool, login: FaraQuestionLogin? = nil) async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native Fara question/client continuation") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><style>label,input{position:fixed;left:20vw}input{width:60vw;height:10vh}#origin{top:20vh}#destination{top:55vh}</style>
+            <label for='origin' style='top:12vh'>Origin</label><input id='origin'>
+            <label for='destination' style='top:47vh'>Destination</label><input id='destination'>
+            <script>document.addEventListener('input',e=>fetch('/edit?field='+e.target.id+'&value='+encodeURIComponent(e.target.value),{keepalive:true}));</script>
+            """ + (login == nil ? "" : """
+            <script>fetch('/hold-for-login').then(()=>{
+                const password=document.createElement('input');password.type='password';password.value='private-fixture-password';
+                document.body.prepend(password);fetch('/login-shown');
+                fetch('/hold-for-return').then(()=>{password.remove();fetch('/logged-in')});
+            });</script>
+            """)), "/hold-for-login": .init(held: true), "/hold-for-return": .init(held: true)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraQuestion-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let mailbox = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
+        let original = "In the browser, enter Tokyo in Origin. Ask me for the destination city, then fill Destination with my answer."
+        let question = "Which city should I enter in Destination?", answer = "Kyoto"
+        var actions = ["{\"action\":\"visit_url\",\"url\":\"\(base.appendingPathComponent("form").absoluteString)\"}",
+            #"{"action":"left_click","coordinate":[500,250]}"#, #"{"action":"type","text":"Tokyo"}"#,
+            "{\"action\":\"ask_user_question\",\"question\":\"\(question)\"}",
+            #"{"action":"left_click","coordinate":[500,600]}"#, #"{"action":"type","text":"Kyoto"}"#,
+            #"{"action":"terminate","answer":"Origin is Tokyo and Destination is Kyoto."}"#]
+        if initialQuestion { actions.insert(actions.remove(at: 3), at: 0) }
+        var calls = 0, nativeAdmissions = 0, loads = 0, finishedRuns = 0
+        let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard calls < actions.count else { throw CompositionFailure.incomplete("Question continuation replayed work") }
+            XCTAssertEqual(input.goal, original); XCTAssertEqual(input.history.count, calls)
+            if calls == (initialQuestion ? 1 : 4) {
+                let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                let content = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+                XCTAssertEqual(content.last?["text"] as? String, initialQuestion ? answer : "Current URL: \(base.appendingPathComponent("form").absoluteString)\n\(answer)")
+                XCTAssertTrue(input.history.last?.response.contains("ask_user_question") == true)
+            }
+            let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + actions[calls] + "}</tool_call>"
+            calls += 1
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, finishRun: { finishedRuns += 1 })
+        let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeAdmissions += 1; return nil }, desktopFactory: { _ in deferred })
+        var browser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
+                return .init(browser: owned, journalDirectory: directory.appendingPathComponent("browser"))
+            }, allowsExternalServices: false, channelFactory: { _ in mailbox })
+        let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
+            pendingStore: CompositionPendingStore(), channel: bridge, promptRefreshInterval: .seconds(600))
+        defer { client.stop(); manager.stop() }
+        manager.authorizePeer(senderID: clientID); client.start()
+        XCTAssertTrue(client.sendPrompt(original))
+        try await pumpHost(manager, mailbox: mailbox) { !client.hasActivePrompt }
+        XCTAssertEqual(calls, initialQuestion ? 1 : 4); XCTAssertEqual(finishedRuns, 1)
+        XCTAssertEqual(server.count("/edit?field=origin&value=Tokyo"), initialQuestion ? 0 : 1)
+        guard case .answer(let reference, _) = client.composerMode else {
+            return XCTFail("Fara's question must retain an answer reference: \(client.messages.map(\.text))")
+        }
+        XCTAssertEqual(client.messages.last(where: { $0.author == .assistant })?.text, question)
+        let rootID = reference.taskID
+        XCTAssertEqual(browser?.taskID, rootID)
+        if login != nil {
+            try await pumpHost(manager, mailbox: mailbox) { server.count("/hold-for-login") == 1 }
+            server.releaseHeldResponses()
+            try await pumpHost(manager, mailbox: mailbox) { server.count("/login-shown") == 1 && server.count("/hold-for-return") == 1 }
+        }
+        XCTAssertTrue(client.sendPrompt(answer))
+        if let login {
+            try await pumpHost(manager, mailbox: mailbox) {
+                client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+            }
+            XCTAssertTrue(client.hasActivePrompt); XCTAssertEqual(calls, 4)
+            XCTAssertEqual(browser?.taskID, rootID)
+            XCTAssertEqual(server.count("/edit?field=destination&value=Kyoto"), 0)
+            if login == .stop {
+                client.stopCurrentTask(); XCTAssertTrue(client.isCancellationPending)
+                client.resumeAI(); XCTAssertTrue(client.isCancellationPending)
+                server.releaseHeldResponses()
+                try await pumpHost(manager, mailbox: mailbox) {
+                    !client.hasActivePrompt && client.latestTerminalOutcome == .unableToComplete && manager.activity == .idle
+                }
+                XCTAssertNil(browser?.taskID); XCTAssertNil(browser?.taskControls)
+                XCTAssertEqual(client.messages.last(where: { $0.author == .assistant })?.text, ComputerUseTaskLedger.stoppedResponse)
+                client.resumeAI(); XCTAssertFalse(client.hasActivePrompt); XCTAssertFalse(client.isCancellationPending)
+                XCTAssertEqual(client.state, .ready); XCTAssertEqual(calls, 4)
+                XCTAssertEqual(server.count("/edit?field=origin&value=Tokyo"), 1)
+                XCTAssertEqual(server.count("/edit?field=destination&value=Kyoto"), 0)
+                let prompts = await bridge.prompts(), sent = try XCTUnwrap(prompts.last)
+                let ledger = ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
+                XCTAssertEqual(try ledger.claim(taskID: sent.id, senderID: clientID, sessionID: sessionID,
+                    promptBody: sent.body), .completed(ComputerUseTaskLedger.stoppedResponse))
+                return
+            }
+            client.resumeAI()
+            try await pumpHost(manager, mailbox: mailbox) {
+                client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+            }
+            XCTAssertEqual(calls, 4); XCTAssertEqual(server.count("/logged-in"), 0)
+            server.releaseHeldResponses()
+            try await pumpHost(manager, mailbox: mailbox) { server.count("/logged-in") == 1 }
+            XCTAssertEqual(calls, 4, "Finishing login cannot consume the retained answer before explicit Resume")
+            client.resumeAI()
+        }
+        try await pumpHost(manager, mailbox: mailbox) { !client.hasActivePrompt }
+        XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted)
+        XCTAssertEqual(client.composerMode, .request); XCTAssertEqual(calls, 7)
+        XCTAssertEqual(nativeAdmissions, 1); XCTAssertEqual(loads, 1); XCTAssertEqual(finishedRuns, login == nil ? 2 : 4)
+        XCTAssertFalse(client.messages.contains { $0.text.contains("private-fixture-password") })
+        XCTAssertEqual(server.count("/form"), 1)
+        XCTAssertEqual(server.count("/edit?field=origin&value=Tokyo"), 1)
+        XCTAssertEqual(server.count("/edit?field=destination&value=Kyoto"), 1)
+        let prompts = await bridge.prompts(), sent = try XCTUnwrap(prompts.last)
+        let decoded = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(sent.body)
+        XCTAssertEqual(decoded.clarification, reference); XCTAssertNotEqual(sent.id, rootID)
+        let before = await bridge.terminals(taskID: sent.id).count
+        try await bridge.replay(sent)
+        try await pumpHost(manager, mailbox: mailbox) { await bridge.terminals(taskID: sent.id).count > before }
+        XCTAssertEqual(calls, 7); XCTAssertEqual(server.count("/edit?field=origin&value=Tokyo"), 1)
+    }
+
+    func testOptInRealFaraAsksAndUsesClientAnswerThroughTLSWithoutRepeatingInput() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_QUESTION_MODEL_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: one actual Fara question/answer task through shipped client TLS and native WebKit")
+        }
+        let assets = try await FaraTestAssets.inputs(environment: environment)
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body:
+            FormOracle.form(id: "fara-question", initial: ["origin": "", "destination": ""]) + """
+            <style>p,h1{display:none}label,textarea{position:fixed!important;left:20vw!important;margin:0!important}
+            textarea{width:60vw!important;height:10vh!important}#origin{top:20vh}#destination{top:55vh}
+            label[for=origin]{top:12vh}label[for=destination]{top:47vh}</style>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraQuestionModel-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let goal = "Visit \(base.appendingPathComponent("form").absoluteString). Set Origin to Tokyo. Ask me which city to enter in Destination; wait for my answer, then enter that city. Leave the form open."
+        let runtime = OSAtlasLlamaRuntime()
+        var responses: [String] = [], answeredObservations = 0, nativeAdmissions = 0, loads = 0
+        let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            guard responses.count < 16 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, responses.count)
+            if let answer = input.userResponse { XCTAssertEqual(answer, "Kyoto"); answeredObservations += 1 }
+            let screenshot = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+            screenshot.name = "Fara question observation \(responses.count + 1)"; screenshot.lifetime = .keepAlways; self.add(screenshot)
+            let endpoint = try await runtime.activateFara(assets)
+            let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            responses.append(proposal.response)
+            return proposal
+        }, finishRun: { await runtime.shutdown() })
+        let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeAdmissions += 1; return nil }, desktopFactory: { _ in deferred })
+        let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        var browser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
+                let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
+                return .init(browser: owned, journalDirectory: directory.appendingPathComponent("browser"))
+            }, channelFactory: { _ in channel })
+        let key = Data(repeating: 0x6D, count: 32)
+        let broker = LocalComputerUseBrokerServer(credential: try RemoteDesktopHost.LocalComputerUseCredential(rawKey: key),
+            hostID: hostID, channel: channel, authorizePeer: { peer in manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in manager.revokePeerAuthorization() })
+        let port = try await broker.start(); defer { broker.stop() }
+        let clientChannel = RemoteDesktopClientCore.LocalComputerUseBrokerClient(endpoint: .init(host: "127.0.0.1", port: port),
+            credential: try RemoteDesktopClientCore.LocalComputerUseCredential(rawKey: key), pairingCode: pairingCode,
+            sessionID: sessionID, senderID: clientID, targetID: hostID)
+        let pendingStore = CompositionPendingStore()
+        let client = ClientModel(hostName: "Fara Question Fixture", pairingCode: pairingCode, hostID: hostID,
+            sessionID: sessionID, pendingStore: pendingStore, channel: clientChannel, promptRefreshInterval: .seconds(600))
+        var stage = "startup", failure: Error?
+        let started = Date()
+        func reach(_ next: String, _ condition: () -> Bool) async throws {
+            stage = next
+            let deadline = ContinuousClock.now + .seconds(60)
+            while !condition() {
+                if case .error(let detail) = manager.modelState { throw CompositionFailure.incomplete(detail) }
+                guard ContinuousClock.now < deadline else { throw CompositionFailure.incomplete("\(stage): \(client.statusText); host=\(manager.activity)") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+        }
+        do {
+            manager.start(pairingCode: pairingCode, additionalChannels: [channel], includeDefaultChannel: false)
+            try await clientChannel.handshake()
+            try await reach("ready") { if case .ready = manager.modelState { return true }; return false }
+            client.start(); XCTAssertTrue(client.sendPrompt(goal))
+            try await reach("model question") { !client.hasActivePrompt }
+            guard case .answer(let reference, _) = client.composerMode else {
+                throw CompositionFailure.incomplete("No retained model question: \(client.statusText)")
+            }
+            XCTAssertEqual(browser?.taskID, reference.taskID)
+            let paused = FormOracle.states(server, id: "fara-question").sorted { $0["sequence"]! < $1["sequence"]! }
+            XCTAssertEqual(paused.map { $0["target"]! }, ["", "origin"])
+            XCTAssertEqual(paused.last?["origin"], "Tokyo"); XCTAssertEqual(paused.last?["destination"], "")
+            XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: assets.llamaServerURL).isEmpty)
+            XCTAssertTrue(client.sendPrompt("Kyoto"))
+            let answerRequest = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            XCTAssertNotEqual(answerRequest.messageID, reference.taskID)
+            try await reach("answered task completion") { !client.hasActivePrompt }
+            XCTAssertEqual(client.latestTerminalOutcome, .taskCompleted); XCTAssertEqual(client.composerMode, .request)
+            let expected = try FormOracle.expectedSequence(initial: ["origin": "", "destination": ""],
+                edits: [["field": 0, "mode": "replaceAll", "value": "Tokyo"], ["field": 1, "mode": "replaceAll", "value": "Kyoto"]])
+            let actual = FormOracle.states(server, id: "fara-question").sorted { $0["sequence"]! < $1["sequence"]! }
+            XCTAssertTrue(FormOracle.matches(actual, expected: expected), "Exactly one native edit per field is required")
+            XCTAssertEqual(server.count("/form"), 1); XCTAssertEqual(answeredObservations, 1)
+            XCTAssertEqual(nativeAdmissions, 1); XCTAssertEqual(loads, 1)
+            guard case .completed = try ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("ledger.json"))
+                .claim(taskID: answerRequest.messageID, senderID: clientID, sessionID: sessionID, promptBody: answerRequest.exactWireBody) else {
+                throw CompositionFailure.incomplete("Answer completion was not durable")
+            }
+        } catch { failure = error }
+        client.stop(); await manager.shutdown(); await runtime.shutdown()
+        XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: assets.llamaServerURL).isEmpty)
+        let evidence = XCTAttachment(string: "Stage: \(stage)\nGoal: \(goal)\nProposals: \(responses)\nAnswer observations: \(answeredObservations)\nMessages: \(client.messages.filter { $0.author == .assistant }.map(\.text))\nNative field receipts: \(FormOracle.states(server, id: "fara-question"))\nSeconds: \(Date().timeIntervalSince(started))\nFailure: \(String(reflecting: failure))")
+        evidence.name = "Actual Fara retained question through client TLS"; evidence.lifetime = .keepAlways; add(evidence)
+        if let failure { throw failure }
+    }
+
     func testOptInProductionStartupCompletesClientConcertTaskThroughTLSAndFara() async throws {
         try await runProductionStartupTLS(login: false)
     }
