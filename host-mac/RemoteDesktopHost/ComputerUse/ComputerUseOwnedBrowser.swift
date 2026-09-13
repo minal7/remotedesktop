@@ -756,16 +756,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// Created only from a current isolated-world target read. This is host
     /// evidence, never model output or a serialized controller payload.
     struct AgentTarget: Equatable, Sendable {
+        enum Navigation: String, Sendable { case document, fragment }
         fileprivate let observation: AgentObservation
         fileprivate let proposal: ComputerUseFaraAction
         let action: ComputerUsePredictedAction
         let context: String
         let isSearchSubmission: Bool
+        let navigation: Navigation?
         fileprivate let elementID: String
         var pageEvidence: ComputerUseBrowserPageEvidence { observation.evidence }
         var fingerprint: ComputerUseApprovalFingerprint {
             .init(action: action, applicationID: "owned-browser:\(observation.sessionIdentity)",
-                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission)]), visualDigest: nil)
+                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission), navigation?.rawValue ?? "activation"]), visualDigest: nil)
         }
     }
     private var agentObservationID: UUID?
@@ -922,9 +924,15 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               id.utf8.count <= 65, context.utf8.count <= 8_192 else { throw ComputerUseBrowserError.pageChanged }
         let searchLabel = result.agentTargetSearchLabel
         guard searchLabel == nil || searchLabel!.utf8.count <= 256 else { throw ComputerUseBrowserError.pageChanged }
+        let navigation = result.agentTargetNavigationKind.flatMap(AgentTarget.Navigation.init(rawValue:))
+        if let kind = result.agentTargetNavigationKind {
+            guard navigation != nil, navigation?.rawValue == kind, searchLabel == nil,
+                  case .pointer(.leftClick, _) = action,
+                  observation.evidence.page.links.contains(where: { $0.id == id }) else { throw ComputerUseBrowserError.pageChanged }
+        }
         return AgentTarget(observation: observation, proposal: action, action: predicted,
             context: context + (searchLabel.map { " • " + $0 } ?? ""),
-            isSearchSubmission: searchLabel != nil, elementID: id)
+            isSearchSubmission: searchLabel != nil, navigation: navigation, elementID: id)
     }
 
     func validateAgentTarget(_ target: AgentTarget) async throws {
@@ -972,7 +980,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                   inspectedTarget == target else { throw ComputerUseBrowserError.pageChanged }
             try check()
         }
-        if case .visitURL(let url) = action {
+        let destination: URL?
+        if case .visitURL(let url) = action { destination = url }
+        else if inspectedTarget?.navigation == .document, let linkID = inspectedTarget?.elementID {
+            guard let link = observation.evidence.page.links.first(where: { $0.id == linkID }),
+                  let url = URL(string: link.destination).flatMap(Self.validatedURL) else { throw ComputerUseBrowserError.pageChanged }
+            destination = url
+        } else { destination = nil }
+        if let url = destination {
             guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
             // Use the existing exact WKNavigation receipt path. Retire the
             // screenshot before load so it cannot authorize a second request.
@@ -980,8 +995,21 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 to: url, from: observation.evidence.document, willBeginEffect: {
                     try willBeginEffect()
                     try check()
+                    if case .pointer(.leftClick, let point) = action { self.agentPointer = point }
                     self.agentObservationID = nil
                 })
+            return
+        }
+        if inspectedTarget?.navigation == .fragment, let linkID = inspectedTarget?.elementID {
+            guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
+            try willBeginEffect(); try check()
+            if case .pointer(.leftClick, let point) = action { agentPointer = point }
+            let result = try await callDOM(.agentFragmentScroll, arguments: [
+                "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
+                "operationID": operationID, "linkID": linkID], validateContext: { (try? check()) != nil })
+            guard result.status == "agent-scroll-dispatched", result.documentID == observation.evidence.documentID else {
+                throw ComputerUseBrowserError.viewportScrollUncertain
+            }
             return
         }
         if case .historyBack = action {

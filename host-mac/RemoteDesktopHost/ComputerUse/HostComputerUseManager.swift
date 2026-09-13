@@ -2027,7 +2027,7 @@ final class ComputerUseHostTools {
     func approvalReason(for action: ComputerUsePredictedAction, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) -> String? {
         if let nativeTarget, nativeTarget.action == action {
             return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context,
-                verifiedSearchSubmission: nativeTarget.isSearchSubmission)
+                verifiedSearchSubmission: nativeTarget.isSearchSubmission, verifiedLinkNavigation: nativeTarget.navigation != nil)
         }
         return ComputerUseActionSafetyPolicy.approvalReason(
             for: action,
@@ -2333,7 +2333,8 @@ final class ComputerUseHostTools {
             try Task.checkCancellation()
             guard mayAct(), nativeTarget.action == action else { throw ToolError.approvalTargetChanged }
             return ComputerUsePreparedApproval(message: ComputerUseActionSafetyPolicy.approvalReason(
-                for: action, accessibilityContext: nativeTarget.context, forceConfirmation: true) ?? "Perform this exact browser action",
+                for: action, accessibilityContext: nativeTarget.context, forceConfirmation: true,
+                verifiedLinkNavigation: nativeTarget.navigation != nil) ?? "Perform this exact browser action",
                 fingerprint: nativeTarget.fingerprint)
         }
         let target = try approvalTarget(for: action)

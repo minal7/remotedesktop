@@ -3,7 +3,7 @@ import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget
-    case scrollViewport, viewportScrollReceipt, agentScroll, validatePageLink, finishPendingChange, continueUnsentInput
+    case scrollViewport, viewportScrollReceipt, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
@@ -532,6 +532,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     var agentTargetID: String? = nil
     var agentTargetContext: String? = nil
     var agentTargetSearchLabel: String? = nil
+    var agentTargetNavigationKind: String? = nil
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
     let formStateProof: ComputerUseBrowserFormStateProof.Reply?
@@ -572,7 +573,7 @@ enum ComputerUseBrowserDOM {
       const formQueries = new Map();
       const preparedFieldRevisions = new Map(), formStateProofs = new Map();
       let lastPageSnapshot = null;
-      const linkIdentityAttributes = new Set(['href', 'target', 'download', 'ping', 'rel', 'referrerpolicy', 'hreflang', 'type']);
+      const linkIdentityAttributes = new Set(['href', 'target', 'download', 'ping', 'rel', 'referrerpolicy', 'hreflang', 'type', 'role', 'aria-disabled']);
       const pageControlIDs = new WeakMap(), pageFormIDs = new WeakMap(), pageOptionIDs = new WeakMap();
       let nextPageControlID = 0, nextPageFormID = 0, nextPageOptionID = 0;
       const protectedTypes = new Set(['password', 'hidden', 'file']);
@@ -610,7 +611,7 @@ enum ComputerUseBrowserDOM {
           }
           if (lastPageSnapshot) {
             for (const binding of [...lastPageSnapshot.links.values(), ...lastPageSnapshot.controls.values()]) {
-              if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element)))
+              if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element) || (binding.fragmentTarget && contains(node, binding.fragmentTarget))))
                   || (record.type === 'attributes' && contains(record.target, binding.element))
                   || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
                 if (lastPageSnapshot.agentState) {
@@ -1309,7 +1310,21 @@ enum ComputerUseBrowserDOM {
           // downloads, pings and other browsing contexts need other contracts.
           const canOpen = !anchor.hasAttribute('download') && !(anchor.getAttribute('ping') || '').trim()
             && ['', '_self'].includes(target.toLowerCase()) && source.href !== destination.href;
-          linkBindings.set(id, {element: anchor, base, signature, canOpen, metadata:{label,destination:url.href}});
+          // Agent link navigation suppresses activation handlers. New-context
+          // links open in the same owned browser; fragment links only reveal
+          // an existing section, without changing the URL or firing hashchange.
+          const agentCanNavigate = !anchor.hasAttribute('download') && !(anchor.getAttribute('ping') || '').trim()
+            && ['', '_self', '_blank'].includes(target.toLowerCase())
+            && ['', 'link'].includes((anchor.getAttribute('role') || '').toLowerCase())
+            && anchor.getAttribute('aria-disabled') !== 'true';
+          let fragmentTarget = null;
+          if (agentCanNavigate && source.href === destination.href && url.hash.length > 1) {
+            try { fragmentTarget = doc.getElementById(decodeURIComponent(url.hash.slice(1))); } catch (_) {}
+            if (fragmentTarget && !visibleInPage(fragmentTarget)) fragmentTarget = null;
+          }
+          const agentNavigationKind = !agentCanNavigate ? null : source.href !== destination.href
+            ? (target.toLowerCase() === '_blank' ? 'document' : null) : fragmentTarget ? 'fragment' : null;
+          linkBindings.set(id, {element: anchor, base, signature, canOpen, agentNavigationKind, fragmentTarget, metadata:{label,destination:url.href}});
         }
         // Observe supported native control metadata in a separate bounded
         // pass: the text walker deliberately excludes inputs and options.
@@ -1829,7 +1844,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'agentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply('stale');
@@ -1875,6 +1890,22 @@ enum ComputerUseBrowserDOM {
                     || previous.signature !== binding.signature;
                 }))) return reply('stale');
             if (command === 'validatePageSnapshot') return reply('page-current');
+            if (command === 'agentFragmentScroll') {
+              const previous = lastPageSnapshot.links.get(args.linkID), current = links.get(args.linkID);
+              if (!lastPageSnapshot.agentState || !previous || previous.retired || !current
+                  || previous.element !== current.element || previous.signature !== current.signature
+                  || previous.agentNavigationKind !== 'fragment' || current.agentNavigationKind !== 'fragment'
+                  || !previous.fragmentTarget || previous.fragmentTarget !== current.fragmentTarget
+                  || typeof args.operationID !== 'string' || !/^[a-f0-9]{64}$/.test(args.operationID)
+                  || agentScrollOperations.has(args.operationID) || agentScrollOperations.size >= 64) return reply('stale');
+              const destination = current.fragmentTarget;
+              agentScrollOperations.add(args.operationID);
+              lastPageSnapshot = null; formQueries.clear();
+              try {
+                destination.scrollIntoView({behavior:'instant',block:'start',inline:'nearest'});
+                return reply('agent-scroll-dispatched');
+              } catch (_) { return reply('uncertain'); }
+            }
             if (command === 'agentScroll') {
               if (!lastPageSnapshot.agentState || typeof args.horizontal !== 'boolean' || !Number.isFinite(args.pixels)
                   || Math.abs(args.pixels) > 10000 || !Number.isFinite(args.x) || !Number.isFinite(args.y)
@@ -1992,10 +2023,11 @@ enum ComputerUseBrowserDOM {
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);
                   if (!previous || previous[1].retired || previous[1].base !== binding.base || previous[1].signature !== binding.signature
+                      || previous[1].agentNavigationKind !== binding.agentNavigationKind || previous[1].fragmentTarget !== binding.fragmentTarget
                       || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)
                       || JSON.stringify(previous[1].metadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-link');
                   const link = content.links.find(link => link.id === id);
-                  if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:previous[0],agentTargetContext:'AXLink • '+link.label};
+                  if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:previous[0],agentTargetContext:'AXLink • '+link.label,agentTargetNavigationKind:args.focused === true ? null : binding.agentNavigationKind};
                 }
               }
               return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};

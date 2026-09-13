@@ -9,7 +9,8 @@ enum ComputerUseActionSafetyPolicy {
         for action: ComputerUsePredictedAction,
         accessibilityContext: String,
         forceConfirmation: Bool = false,
-        verifiedSearchSubmission: Bool = false
+        verifiedSearchSubmission: Bool = false,
+        verifiedLinkNavigation: Bool = false
     ) -> String? {
         let context = accessibilityContext.lowercased()
 
@@ -19,9 +20,15 @@ enum ComputerUseActionSafetyPolicy {
                 for: proposedAction,
                 accessibilityContext: accessibilityContext,
                 forceConfirmation: true,
-                verifiedSearchSubmission: verifiedSearchSubmission)
+                verifiedSearchSubmission: verifiedSearchSubmission,
+                verifiedLinkNavigation: verifiedLinkNavigation)
 
         case .click:
+            // The owned browser executes a bound destination load or section
+            // scroll, not the link's click handlers, forms or popup scripts.
+            if verifiedLinkNavigation {
+                return forceConfirmation ? described("Follow this exact browser link", context: accessibilityContext) : nil
+            }
             let keywords = verifiedSearchSubmission ? highImpactKeywords.filter { $0 != "submit" } : highImpactKeywords
             if containsAny(keywords, in: context) {
                 return described(

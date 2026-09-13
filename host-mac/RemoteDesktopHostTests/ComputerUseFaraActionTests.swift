@@ -6,6 +6,185 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    @MainActor
+    func testOptInFaraNewContextLinkCannotLeaveAllowedSources() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: source admission for observed new-context links") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let blocked = try OwnedBrowserHTTPFixture(), destination = try await blocked.start(); defer { blocked.stop() }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><a href='\(destination.absoluteString)/details' target='_blank' style='position:fixed;left:10vw;top:10vh;width:20vw;height:10vh'>Buy Tickets</a>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLinkSource-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let goal = "Read the screening details."
+        let session = try browser.prepareWorkflowSession(taskID: "source")
+        let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: "source", prompt: goal, referenceDate: Date(), timeZoneIdentifier: "UTC"), allowedOrigins: [ComputerUseBrowserSourceOrigin(base)])
+        try browser.installSourcePolicy(policy, replacing: nil, session: session)
+        _ = try await browser.navigate(taskID: "source", operationID: "fixture", to: base.appendingPathComponent("page"))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            calls += 1
+            guard calls == 1 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let response = self.call(#"{"action":"left_click","coordinate":[200,150]}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        do {
+            _ = try await executor.execute(taskID: "source", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTFail("New-context link navigation bypassed the source restriction")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
+        XCTAssertEqual(calls, 1); XCTAssertEqual(blocked.requestCount, 0); XCTAssertEqual(server.count("/page"), 1)
+        let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertFalse(records.contains { $0.stepIDs == ["native-dispatch-returned"] })
+    }
+
+    @MainActor
+    func testOptInFaraNavigationKeepsPurchaseControlsAndUnsupportedLinksGated() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: navigation classification is not purchase authorization") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for markup in [
+            "<button onclick=\"fetch('/selected')\">Buy Tickets</button>",
+            "<a href='/details'>Buy Tickets</a>",
+            "<a href='/details' target='_blank' role='button'>Buy Tickets</a>",
+            "<a href='/details' target='_blank' download>Buy Tickets</a>",
+            "<a href='/details' target='_blank' ping='/selected'>Buy Tickets</a>",
+            "<a href='/details' target='account'>Buy Tickets</a>",
+            "<a href='#'>Buy Tickets</a>",
+            "<a href='#missing'>Buy Tickets</a>",
+            "<a href='#hidden'>Buy Tickets</a><section id='hidden' hidden>Details</section>"
+        ] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>a,button{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}</style>" + markup)])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraTicketGate-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory.appendingPathComponent("browser"))
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+            try browser.claim(taskID: "gate")
+            _ = try await browser.navigate(taskID: "gate", operationID: "fixture", to: base.appendingPathComponent("page"))
+            let observation = try await navigation.captureAgentObservation(taskID: "gate")
+            let inspected = try await browser.inspectAgentTarget(.pointer(.leftClick, .init(x: 200, y: 150)), observation: observation)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertNil(target.navigation, markup)
+            XCTAssertNotNil(tools.approvalReason(for: target.action, nativeTarget: target), markup)
+            var calls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+                calls += 1
+                guard calls == 1 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                let response = self.call(#"{"action":"left_click","coordinate":[200,150]}"#)
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            let result = try await executor.execute(taskID: "gate", prompt: "Read the screening details.", trustedUserPrompt: "Read the screening details.", tools: tools, progress: { _ in })
+            guard case .approvalRequired = result else { return XCTFail("Purchase control lost its approval gate: \(markup): \(result)") }
+            XCTAssertEqual(calls, 1); XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/details"), 0); XCTAssertEqual(server.count("/selected"), 0)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraLinkNavigationRejectsChangedTargetsCancellationAndReusedInput() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native link navigation lifetime") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["href", "target", "role", "fragment-replaced", "fragment-reinserted", "cancelled", "paused", "owner"] {
+            let fragment = mode.hasPrefix("fragment")
+            let changes = ["href":"link.href='/changed'", "target":"link.target='account'", "role":"link.role='button'",
+                "fragment-replaced":"section.replaceWith(section.cloneNode(true))", "fragment-reinserted":"section.remove();document.body.append(section)"]
+            let mutation = changes[mode].map { "fetch('/release').then(()=>{const link=document.getElementById('link'),section=document.getElementById('showtimes');\($0);fetch('/changed')})" } ?? ""
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0}a{position:absolute;left:10vw;top:10vh;width:20vw;height:10vh;display:block;font:24px system-ui}section{margin-top:150vh;height:100vh}</style>
+                <a id='link' href='\(fragment ? "#showtimes" : "/details")' target='\(fragment ? "_self" : "_blank")' onclick="fetch('/selected')">Buy Tickets</a><section id='showtimes'>Details</section>
+                <script>\(mutation)</script>
+                """), "/release": .init(held: true)])
+            let base = try await server.start(); defer { server.stop() }
+            var allowsActions = true
+            let browser = ComputerUseOwnedBrowser(mayAct: { allowsActions }); defer { browser.close() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 200, y: 150))
+            let inspected = try await browser.inspectAgentTarget(action, observation: observation)
+            let target = try XCTUnwrap(inspected)
+            XCTAssertNotNil(target.navigation)
+            if changes[mode] != nil {
+                let deadline = ContinuousClock.now + .seconds(2)
+                while server.count("/release") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                server.releaseHeldResponses()
+                while server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+                XCTAssertEqual(server.count("/changed"), 1)
+            }
+            if mode == "paused" { allowsActions = false }
+            if mode == "owner" { try browser.claim(taskID: "successor") }
+            var effects = 0
+            let work = Task { @MainActor in
+                try await browser.performAgentInput(action, observation: observation,
+                    operationID: ComputerUseTaskContract.digest([mode, "input"]), target: target, willBeginEffect: { effects += 1 })
+            }
+            if mode == "cancelled" { work.cancel() }
+            do { try await work.value; XCTFail("Retired link dispatched: \(mode)") }
+            catch { if mode == "cancelled" { XCTAssertTrue(error is CancellationError) } }
+            do {
+                try await browser.performAgentInput(action, observation: observation,
+                    operationID: ComputerUseTaskContract.digest([mode, "replay"]), target: target, willBeginEffect: { effects += 1 })
+                XCTFail("Rejected input was reused: \(mode)")
+            } catch { }
+            XCTAssertEqual(effects, 0, mode); XCTAssertEqual(server.count("/details"), 0); XCTAssertEqual(server.count("/selected"), 0)
+            if mode == "owner" { XCTAssertEqual(browser.taskID, "successor") }
+        }
+    }
+
+    @MainActor
+    func testOptInFaraRevealsShowtimesAndOpensTicketDetailsWithoutActivatingPurchaseHandlers() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: observed fragment and new-context link navigation") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for fragment in [true, false] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{margin:0}a{position:absolute;left:10vw;top:10vh;width:20vw;height:10vh;display:block;font:24px system-ui}section{margin-top:150vh;height:100vh}</style>
+                <a href='\(fragment ? "#showtimes" : "/details")' target='\(fragment ? "_self" : "_blank")' onclick="fetch('/selected')">Buy Tickets</a>
+                <section id='showtimes'><h1>Screening details</h1><p>Thursday, 6:20 PM. Stop before selecting tickets.</p></section>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraTicketNavigation-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let taskID = "ticket-navigation", goal = "Read the screening details. Stop before selecting tickets or purchasing."
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
+            var calls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                guard calls < 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
+                if calls == 1 {
+                    XCTAssertEqual(input.currentURL, base.appendingPathComponent(fragment ? "page" : "details"))
+                    XCTAssertEqual(server.count("/selected"), 0, "Navigation must not invoke link click handlers")
+                    XCTAssertFalse(browser.hasOpenSignInWindow)
+                    if fragment {
+                        func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap(webViews) }
+                        let view = try XCTUnwrap(NSApp.windows.filter { $0.isVisible && $0.title == "AI Browser — Remote Desktop" }.compactMap(\.contentView).flatMap(webViews).first)
+                        let revealed = try await view.evaluateJavaScript("scrollY > 500 && Math.abs(document.getElementById('showtimes').getBoundingClientRect().top) < 2 && location.hash === ''")
+                        XCTAssertEqual(revealed as? Bool, true, "The existing section must be revealed without routing or activating the link")
+                    }
+                }
+                let response = self.call(calls == 0 ? #"{"action":"left_click","coordinate":[200,150]}"# : #"{"action":"terminate","answer":"Screening details are visible."}"#)
+                calls += 1
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            guard result == .completed("Screening details are visible.") else { return XCTFail("Observed ticket navigation stopped as \(result), fragment=\(fragment)") }
+            let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result); XCTAssertEqual(calls, 2)
+            XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/details"), fragment ? 0 : 1); XCTAssertEqual(server.count("/selected"), 0)
+            let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            let dispatches = records.filter { $0.stepIDs == ["native-dispatch-returned"] }
+            XCTAssertEqual(dispatches.count, 1); XCTAssertEqual(dispatches.first?.statuses, [.verified])
+        }
+    }
+
     func testFaraActionFailureWirePreservesObservationHistoryAndBoundsText() throws {
         let png = try smallPNG(), source = URL(string: "https://example.com/start")!
         let failure = "visit_url to https://blocked.example/ failed: BrowserSourcePolicy: The destination is not permitted for this task."
@@ -1672,6 +1851,30 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInNativeRoxieTicketLinkMetadata() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: inspect public movie link metadata without clicking") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("RoxieLinkMetadata-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        let taskID = "roxie-link-metadata", url = URL(string: "https://roxie.com/film/the-cycle-of-love/")!
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "open", to: url)
+        let observation = try await navigation.captureAgentObservation(taskID: taskID)
+        let links = observation.approvalPageEvidence.page.links.filter { $0.label.lowercased().contains("buy tickets") }
+        XCTAssertFalse(links.isEmpty)
+        func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap(webViews) }
+        let view = try XCTUnwrap(NSApp.windows.filter { $0.isVisible && $0.title == "AI Browser — Remote Desktop" }.compactMap(\.contentView).flatMap(webViews).first)
+        let attributes = try await view.evaluateJavaScript("""
+            JSON.stringify(Array.from(document.querySelectorAll('a')).filter(a=>a.textContent.toLowerCase().includes('buy tickets')).map(a=>({text:a.textContent.trim(),attributes:Array.from(a.attributes).map(v=>[v.name,v.value]),destination:a.href,fragmentTarget:a.hash ? document.getElementById(decodeURIComponent(a.hash.slice(1)))?.outerHTML.slice(0,2048) : null})))
+            """)
+        let text = links.map { "\($0.id): \($0.label) -> \($0.destination)" }.joined(separator: "\n") + "\n" + String(describing: attributes)
+        let attachment = XCTAttachment(string: text); attachment.name = "Roxie Buy Tickets native link metadata"; attachment.lifetime = .keepAlways; add(attachment)
+    }
+
+    @MainActor
     func testOptInNativeBingSearchFindsOfficialMovieListing() async throws {
         try await runMovieSearchProbe(endpoint: "https://www.bing.com/search")
     }
@@ -2773,14 +2976,21 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runFaraSearchOutcome(login: Bool) async throws {
+    func testOptInFaraNewContextTicketLinkStopsBeforeReadingLoginAndRejectsEarlyResume() async throws {
+        try await runFaraSearchOutcome(login: true, viaLink: true)
+    }
+
+    @MainActor
+    private func runFaraSearchOutcome(login: Bool, viaLink: Bool = false) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: native search reaches an error or simulated login")
         }
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        let server = try OwnedBrowserHTTPFixture(routes: ["/search?q=concerts": .init(status: login ? 200 : 500,
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><a href='/search?q=concerts' target='_blank' style='position:fixed;left:20vw;top:20vh;width:60vw;height:10vh'>Buy Tickets</a>"),
+            "/search?q=concerts": .init(status: login ? 200 : 500,
             body: login ? "<!doctype html><title>Fictional login</title><label>Password<input type='password' value='private-fictional-password'></label>" : "<!doctype html><title>Unavailable</title><h1>Try later</h1>")])
         let base = try await server.start()
         defer { server.stop() }
@@ -2797,7 +3007,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
             searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { _ in
                 guard calls == 0 else { throw ComputerUseFaraAction.Failure.invalidResponse }
                 calls += 1
-                let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"web_search","query":"concerts"}}</tool_call>"#
+                let response = viaLink
+                    ? #"<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[500,250]}}</tool_call>"#
+                    : #"<tool_call>{"name":"computer_use","arguments":{"action":"web_search","query":"concerts"}}</tool_call>"#
                 return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
             })
         func run() async throws -> ComputerUseExecutionResult {
