@@ -1055,9 +1055,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         try check()
         switch action {
-        case .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key:
+        case .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll:
             // The isolated target read below verifies the original control,
-            // input geometry and authentication even when other content changes.
+            // or scroll command verifies its point, geometry and authentication,
+            // even when other content changes.
             break
         default: try await validatePageEvidence(observation.evidence)
         }

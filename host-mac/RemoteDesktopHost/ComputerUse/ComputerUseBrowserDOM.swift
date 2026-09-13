@@ -1865,7 +1865,7 @@ enum ComputerUseBrowserDOM {
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
-            const scopedAgentTarget = ['agentTarget','agentFragmentScroll'].includes(command) && !!lastPageSnapshot.agentState;
+            const scopedAgentTarget = ['agentTarget','agentFragmentScroll','agentScroll'].includes(command) && !!lastPageSnapshot.agentState;
             if (command === 'validatePageSnapshot' && lastPageSnapshot.agentState) {
               if (lastPageSnapshot.invalidated) return reply('stale-agent-bindings');
               if (serialized !== lastPageSnapshot.serialized) return reply('stale-agent-content');

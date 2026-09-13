@@ -7,6 +7,148 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFaraScrollRejectsChangedPointLoginAndRetiredObservation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scoped scroll ownership and geometry") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["cover", "transparent-cover", "replaced", "focus", "login", "owner", "observation", "closed"] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>body{margin:0;height:300vh}#panel{position:fixed;inset:0;overflow:auto}#inside{height:300vh}</style><div id=panel><div id=inside>Results<input id=field></div></div><script>document.addEventListener('scroll',()=>fetch('/scrolled'),true)</script>")])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+            let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+            let observation = try await browser.captureAgentObservation(document: document)
+            switch mode {
+            case "cover", "transparent-cover": _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<div style=\"position:fixed;inset:0;background:red;pointer-events:\(mode == "cover" ? "auto" : "none")\">Overlay</div>')")
+            case "replaced": _ = try await web.evaluateJavaScript("const p=document.getElementById('panel');p.replaceWith(p.cloneNode(true))")
+            case "focus": _ = try await web.evaluateJavaScript("document.getElementById('field').focus()")
+            case "login": _ = try await web.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
+            case "owner": try browser.claim(taskID: "successor")
+            case "observation": _ = try await browser.captureAgentObservation(document: document)
+            case "closed": browser.close()
+            default: break
+            }
+            do {
+                try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation)
+                return XCTFail("Scroll admitted changed authority or target: \(mode)")
+            } catch {
+                let expected: ComputerUseBrowserError = mode == "login" ? .authenticationRequired
+                    : ["owner", "observation", "closed"].contains(mode) ? .pageChanged : .viewportScrollUncertain
+                XCTAssertEqual(error as? ComputerUseBrowserError, expected, mode)
+            }
+            if mode != "closed" {
+                let unchanged = try await web.evaluateJavaScript("scrollY===0 && document.getElementById('panel').scrollTop===0")
+                XCTAssertEqual(unchanged as? Bool, true, mode)
+            }
+            XCTAssertEqual(server.count("/scrolled"), 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraScrollSurvivesUnrelatedCountdownWithoutPostingOtherInput() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scroll a changing ticket page") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>body{margin:0;height:300vh}#clock{position:fixed;right:0;top:0}#price{position:absolute;top:110vh}</style><h1>Showtime: 6:20 PM</h1><span id=clock>10:00</span><p id=price>General admission $15.62 including $1.62 fee</p><script>document.addEventListener('input',()=>fetch('/edit'));document.addEventListener('click',()=>fetch('/click'));document.addEventListener('wheel',()=>fetch('/wheel'))</script>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraScrollCountdown-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "scroll-countdown")
+        _ = try await browser.navigate(taskID: "scroll-countdown", operationID: "fixture", to: base.appendingPathComponent("page"))
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { if let web = view as? WKWebView { return [web] }; return view.subviews.flatMap { webViews($0) } }
+        let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1
+            guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 { _ = try await web.evaluateJavaScript("document.getElementById('clock').textContent='09:59'") }
+            else {
+                guard input.history.count == 1 else { XCTFail("Unrelated countdown text discarded a valid scroll"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                let visible = try await web.evaluateJavaScript("scrollY > 300 && document.getElementById('price').getBoundingClientRect().bottom < innerHeight")
+                XCTAssertEqual(visible as? Bool, true)
+            }
+            let response = self.call(calls == 1 ? #"{"action":"scroll","pixels":-700}"# : #"{"action":"terminate","answer":"$15.62 including $1.62 fee"}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let goal = "Read the general admission price and fee without selecting tickets."
+        let result = try await executor.execute(taskID: "scroll-countdown", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("$15.62 including $1.62 fee"))
+        let replay = try await executor.execute(taskID: "scroll-countdown", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(replay, result); XCTAssertEqual(calls, 2)
+        XCTAssertEqual(server.count("/page"), 1)
+        for route in ["/edit", "/click", "/wheel"] { XCTAssertEqual(server.count(route), 0) }
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            .filter { $0.stepIDs == ["native-dispatch-returned"] }
+        XCTAssertEqual(journals.count, 1); XCTAssertEqual(journals.first?.statuses, [.verified])
+    }
+
+    @MainActor
+    func testOptInFaraExplainsUnsentTargetAndBoundsRepeatedRejections() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native rejected-target feedback") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for recovers in [true, false] {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><style>h1,a{position:fixed;left:10vw;width:40vw;height:10vh;margin:0}h1{top:10vh}a{top:40vh}</style><h1>Plain result heading</h1><a href='/details'>Official details</a>"), "/details": .init(body: "<!doctype html><h1>Showtime: 6:20 PM</h1>")])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraRejectedTarget-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let taskID = "target-\(recovers)", goal = "Read the showtime from the official details."
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            var calls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                calls += 1
+                guard calls <= (recovers ? 3 : 4) else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                XCTAssertEqual(input.goal, goal)
+                if calls > 1 && (!recovers || calls == 2) {
+                    guard let error = input.actionError else { XCTFail("A rejected native target must explain that no input was sent"); throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                    XCTAssertTrue(error.contains("left_click")); XCTAssertTrue(error.contains("300.0, 150.0")); XCTAssertTrue(error.contains("No input was sent"))
+                    XCTAssertTrue(input.history.isEmpty, "An unsent click cannot become an executed action")
+                    XCTAssertEqual(server.count("/details"), 0)
+                    let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                    let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                    XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains(error))
+                }
+                if recovers && calls == 3 {
+                    XCTAssertNil(input.actionError); XCTAssertEqual(input.history.count, 1)
+                    XCTAssertNotNil(input.history.last?.actionError)
+                    XCTAssertEqual(input.currentURL, base.appendingPathComponent("details"))
+                }
+                let action = !recovers || calls == 1 ? #"{"action":"left_click","coordinate":[300,150]}"#
+                    : calls == 2 ? #"{"action":"left_click","coordinate":[300,450]}"# : #"{"action":"terminate","answer":"6:20 PM"}"#
+                let response = self.call(action)
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            if recovers {
+                XCTAssertEqual(result, .completed("6:20 PM")); XCTAssertEqual(calls, 3)
+                let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(replay, result); XCTAssertEqual(calls, 3)
+            } else {
+                guard case .userInterventionRequired = result else { return XCTFail("Repeated rejected targets must stop") }
+                XCTAssertEqual(calls, 4)
+            }
+            XCTAssertEqual(server.count("/page"), 1); XCTAssertEqual(server.count("/details"), recovers ? 1 : 0)
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+                .filter { $0.stepIDs == ["native-dispatch-returned"] }
+            XCTAssertEqual(journals.count, recovers ? 1 : 0)
+            XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
+        }
+    }
+
+    @MainActor
     func testOptInFaraRemembersObservedFactWhenBackgroundCountdownChanges() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: retained facts are bound to their observation") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
@@ -144,6 +286,16 @@ final class ComputerUseFaraActionTests: XCTestCase {
 
     @MainActor
     func testOptInNativeVeeziMemoryRemainsBoundWhileCountdownChanges() async throws {
+        try await runNativeVeeziCountdown(scroll: false)
+    }
+
+    @MainActor
+    func testOptInNativeVeeziScrollRevealsPricesWhileCountdownChanges() async throws {
+        try await runNativeVeeziCountdown(scroll: true)
+    }
+
+    @MainActor
+    private func runNativeVeeziCountdown(scroll: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one read-only public ticket-page observation experiment") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
@@ -164,6 +316,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertNoThrow(try browser.validateAgentMemoryObservation(first))
         let keyWindowRetained = NSApp.keyWindow === window
         let currentSourceValid = (try? browser.validateSourceDocument(document)) != nil
+        if scroll { try await browser.performAgentInput(.scroll(horizontal: false, pixels: -647), observation: first) }
         let second = try await navigation.captureAgentObservation(taskID: "read-lifetime", preserving: first)
         func publicReading(_ page: ComputerUseBrowserPageSnapshot) throws -> String {
             let data = try JSONSerialization.data(withJSONObject: ["texts": page.texts.map(\.text),
@@ -172,7 +325,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             return String(decoding: data, as: UTF8.self)
         }
         let before = first.approvalPageEvidence.page, after = second.approvalPageEvidence.page
-        let report = XCTAttachment(string: "validationFailure=\(failure ?? "none")\nkeyWindowRetained=\(keyWindowRetained)\ncurrentSourceValid=\(currentSourceValid)\nviewportEqual=\(before.viewport == after.viewport)\ncontrolsEqual=\(before.controls == after.controls)\nBEFORE\n\(try publicReading(before))\nAFTER\n\(try publicReading(after))")
+        if scroll {
+            XCTAssertGreaterThan(try XCTUnwrap(after.viewport?.y), try XCTUnwrap(before.viewport?.y))
+            XCTAssertEqual(second.currentURL, url)
+            XCTAssertTrue(after.texts.map(\.text).joined(separator: " ").contains("15.62"))
+            XCTAssertTrue(after.texts.map(\.text).joined(separator: " ").contains("1.62"))
+        }
+        let report = XCTAttachment(string: "scrollPerformed=\(scroll)\nvalidationFailure=\(failure ?? "none")\nkeyWindowRetained=\(keyWindowRetained)\ncurrentSourceValid=\(currentSourceValid)\nviewportEqual=\(before.viewport == after.viewport)\ncontrolsEqual=\(before.controls == after.controls)\nBEFORE\n\(try publicReading(before))\nAFTER\n\(try publicReading(after))")
         report.name = "Public Veezi observation lifetime"; report.lifetime = .keepAlways; add(report)
         for (name, png) in [("Before reading", first.png), ("After reading", second.png)] {
             let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
@@ -2255,6 +2414,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: stale-proposal recovery with real native input") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
         for mode in ["once", "continuous", "replacement"] {
             let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
                 <!doctype html><style>body{margin:0;height:100vh}button{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh;font:24px system-ui}</style>
@@ -2264,11 +2425,11 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let base = try await server.start(); defer { server.stop() }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraStaleProposal-" + UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
-            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
                 browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
             try browser.claim(taskID: mode)
             _ = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
             let goal = "Click Search once."
             var calls = 0, historyCounts: [Int] = []
             let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
@@ -2923,6 +3084,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
         for lockedElement in ["html", "body"] {
             let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
                 <!doctype html><style>\(lockedElement){overflow:hidden}body{margin:0;height:300vh}.overlay{position:fixed;inset:0;background:#eee}</style>
@@ -2930,10 +3093,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 """)])
             let base = try await server.start()
             defer { server.stop() }
-            let browser = ComputerUseOwnedBrowser(mayAct: { true })
-            defer { browser.close() }
             try browser.claim(taskID: lockedElement)
             let document = try await browser.navigate(taskID: lockedElement, operationID: "open", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
             let observation = try await browser.captureAgentObservation(document: document)
             try await browser.performAgentInput(.scroll(horizontal: false, pixels: -500), observation: observation)
             let current = try await browser.observePage(document: document)
@@ -2950,12 +3112,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><body style='height:300vh'>Scroll rejection fixture</body>")])
         let base = try await server.start()
         defer { server.stop() }
+        var allowed = true, retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
         for mode in ["nan", "infinite", "over-limit", "cancelled", "revoked", "revoked-at-dispatch"] {
-            var allowed = true
-            let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
-            defer { browser.close() }
+            allowed = true
             try browser.claim(taskID: mode)
             let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
             let observation = try await browser.captureAgentObservation(document: document)
             let pixels: Double = mode == "nan" ? .nan : mode == "infinite" ? .infinity : mode == "over-limit" ? 10_001 : -500
             if mode == "revoked" { allowed = false }

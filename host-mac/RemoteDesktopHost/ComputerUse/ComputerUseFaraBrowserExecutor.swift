@@ -392,7 +392,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             var nativeTarget: ComputerUseOwnedBrowser.AgentTarget?
             do {
                 switch proposal.action {
-                case .wait, .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key:
+                case .wait, .pointer(.leftClick, _), .pointer(.doubleClick, _), .typeText, .key, .scroll:
                     // Waiting posts no input. Input reads its exact retained
                     // target below; unrelated content need not stay frozen.
                     break
@@ -417,8 +417,16 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 }
                 session.staleProposals += 1
                 guard session.staleProposals <= 3 else {
-                    return .userInterventionRequired("The page keeps changing before I can use its controls. Complete this step in the browser, then choose Resume.")
+                    return .userInterventionRequired("I couldn't verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.")
                 }
+                // A fresh image alone can be identical after a rejected click
+                // on plain text. Explain the unsent proposal without recording
+                // it as an executed action or repeating model-provided text.
+                let description: String
+                if case .pointer(let kind, let point) = proposal.action {
+                    description = "\(kind.rawValue) at [\(point.x), \(point.y)]"
+                } else { description = "The browser proposal" }
+                session.actionError = "\(description) was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate."
                 continue
             }
             if case .reportCompletion(let answer) = proposal.action {
