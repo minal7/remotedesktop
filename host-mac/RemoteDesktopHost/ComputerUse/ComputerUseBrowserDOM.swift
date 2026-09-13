@@ -531,6 +531,7 @@ struct ComputerUseBrowserDOMReply: Decodable {
     let page: ComputerUseBrowserPageSnapshot?
     var agentTargetID: String? = nil
     var agentTargetContext: String? = nil
+    var agentTargetSearchLabel: String? = nil
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
     let formStateProof: ComputerUseBrowserFormStateProof.Reply?
@@ -1961,7 +1962,32 @@ enum ComputerUseBrowserDOM {
                   const role = ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
                     : kind === 'textarea' ? 'AXTextArea'
                     : kind === 'select' ? 'AXComboBox' : kind.includes('checkbox') ? 'AXCheckBox' : kind.includes('radio') ? 'AXRadioButton' : 'AXButton';
-                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+binding.metadata.label};
+                  // An icon submitter needs its actual form's search context.
+                  // Keep this narrow: one observed query field, one submitter,
+                  // same-origin GET search endpoint, and unchanged field identity.
+                  // Neither the model nor a generic "submit" label supplies this proof.
+                  let searchLabel = null;
+                  if (kind === 'submit' && binding.form && binding.metadata.form?.method === 'get') {
+                    const metadata = binding.metadata.form, destination = new URL(metadata.action);
+                    const collection = formElements.call(binding.form);
+                    const members = collection.length === 2 ? Array.from(collection) : [];
+                    const fields = Array.from(controls).filter(([key,item]) => item.form === binding.form && item.element !== binding.element);
+                    if (destination.origin === new URL(doc.URL).origin && !destination.username && !destination.password
+                        && !destination.search && !destination.hash
+                        && /\/(search|results)\/?$/i.test(destination.pathname)
+                        && ['', '_self'].includes(metadata.target.toLowerCase())
+                        && ['', '_self'].includes((binding.element.getAttribute('formtarget') ?? binding.form.getAttribute('target') ?? doc.querySelector('base[target]')?.getAttribute('target') ?? '').toLowerCase())
+                        && members.length === 2 && members.includes(binding.element) && fields.length === 1) {
+                      const [fieldID,field] = fields[0], oldField = lastPageSnapshot.controls.get(fieldID);
+                      if (members.includes(field.element) && ['text','search'].includes(field.metadata.kind)
+                          && !field.metadata.disabled && !field.metadata.readOnly && field.metadata.name
+                          && /\bsearch\b/i.test(field.metadata.label)
+                          && oldField && !oldField.retired && oldField.element === field.element && oldField.form === field.form
+                          && oldField.signature === field.signature && JSON.stringify(oldField.metadata) === JSON.stringify(field.metadata)
+                          && agentElementStateMatches(lastPageSnapshot.agentState,agentState,field.element)) searchLabel = field.metadata.label;
+                    }
+                  }
+                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+binding.metadata.label,agentTargetSearchLabel:searchLabel};
                 }
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);

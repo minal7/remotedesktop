@@ -8,7 +8,8 @@ enum ComputerUseActionSafetyPolicy {
     static func approvalReason(
         for action: ComputerUsePredictedAction,
         accessibilityContext: String,
-        forceConfirmation: Bool = false
+        forceConfirmation: Bool = false,
+        verifiedSearchSubmission: Bool = false
     ) -> String? {
         let context = accessibilityContext.lowercased()
 
@@ -17,10 +18,12 @@ enum ComputerUseActionSafetyPolicy {
             return approvalReason(
                 for: proposedAction,
                 accessibilityContext: accessibilityContext,
-                forceConfirmation: true)
+                forceConfirmation: true,
+                verifiedSearchSubmission: verifiedSearchSubmission)
 
         case .click:
-            if containsAny(highImpactKeywords, in: context) {
+            let keywords = verifiedSearchSubmission ? highImpactKeywords.filter { $0 != "submit" } : highImpactKeywords
+            if containsAny(keywords, in: context) {
                 return described(
                     "Click a control that may send, purchase, save, delete, share, or change an account",
                     context: accessibilityContext)

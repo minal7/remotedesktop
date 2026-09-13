@@ -280,15 +280,20 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     }
 
     func captureAgentObservation(taskID: String, preserving session: ComputerUseOwnedBrowser.AgentObservation? = nil) async throws -> ComputerUseOwnedBrowser.AgentObservation {
-        // Live pages can apply sticky layout after a multi-second anchor
-        // transition. Bound fresh reads while that layout settles; retain
-        // immediate cancellation/ownership failure and never replay input.
-        let retryDeadline = ContinuousClock.now + .seconds(8)
+        // Navigation has its own deadline. Give the first loaded document
+        // the bounded layout retry period instead of spending it on loading.
+        // Renew this allowance once; further page changes cannot extend it.
+        var retryDeadline = ContinuousClock.now + .seconds(8)
+        var acquiredFirstDocument = false
         while true {
             do {
                 if let session { try browser.validateAgentSession(session) }
                 let document = try await browser.acquireObservedDocument(taskID: taskID)
                 if let session { try browser.validateAgentSession(session) }
+                if !acquiredFirstDocument {
+                    retryDeadline = .now + .seconds(8)
+                    acquiredFirstDocument = true
+                }
                 return try await browser.captureAgentObservation(document: document)
             } catch let error as ComputerUseBrowserError {
                 // A native click can start navigation between acquiring the

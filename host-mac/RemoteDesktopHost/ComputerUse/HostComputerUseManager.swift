@@ -2016,7 +2016,8 @@ final class ComputerUseHostTools {
 
     func approvalReason(for action: ComputerUsePredictedAction, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) -> String? {
         if let nativeTarget, nativeTarget.action == action {
-            return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context)
+            return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context,
+                verifiedSearchSubmission: nativeTarget.isSearchSubmission)
         }
         return ComputerUseActionSafetyPolicy.approvalReason(
             for: action,

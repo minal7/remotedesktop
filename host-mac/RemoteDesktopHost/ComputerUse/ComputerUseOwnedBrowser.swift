@@ -760,11 +760,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         fileprivate let proposal: ComputerUseFaraAction
         let action: ComputerUsePredictedAction
         let context: String
+        let isSearchSubmission: Bool
         fileprivate let elementID: String
         var pageEvidence: ComputerUseBrowserPageEvidence { observation.evidence }
         var fingerprint: ComputerUseApprovalFingerprint {
             .init(action: action, applicationID: "owned-browser:\(observation.sessionIdentity)",
-                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context]), visualDigest: nil)
+                accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission)]), visualDigest: nil)
         }
     }
     private var agentObservationID: UUID?
@@ -909,7 +910,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
               result.status == "agent-target", result.documentID == observation.evidence.documentID,
               let id = result.agentTargetID, let context = result.agentTargetContext,
               id.utf8.count <= 65, context.utf8.count <= 8_192 else { throw ComputerUseBrowserError.pageChanged }
-        return AgentTarget(observation: observation, proposal: action, action: predicted, context: context, elementID: id)
+        let searchLabel = result.agentTargetSearchLabel
+        guard searchLabel == nil || searchLabel!.utf8.count <= 256 else { throw ComputerUseBrowserError.pageChanged }
+        return AgentTarget(observation: observation, proposal: action, action: predicted,
+            context: context + (searchLabel.map { " • " + $0 } ?? ""),
+            isSearchSubmission: searchLabel != nil, elementID: id)
     }
 
     func validateAgentTarget(_ target: AgentTarget) async throws {
