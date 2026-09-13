@@ -1044,19 +1044,19 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .proModelRequired:
             return "OS-Atlas Pro 4B is required for AI Computer Use."
         case .invalidLocalInstallation:
-            return "The installed OS-Atlas runtime could not be verified. Choose Retry to repair it."
+            return "The installed local AI runtime could not be verified. Choose Retry to repair it."
         case .invalidEndpoint:
-            return "The local OS-Atlas endpoint was rejected because it was not loopback-only."
+            return "The local AI endpoint was rejected because it was not loopback-only."
         case .serverFailedToStart:
-            return "The local OS-Atlas model could not start."
+            return "The local AI model could not start."
         case .inactiveSession:
-            return "The local OS-Atlas model changed while this task was running. Please retry."
+            return "The local AI model changed while this task was running. Please retry."
         case .invalidResponse:
-            return "The local OS-Atlas model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
+            return "The local AI model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .invalidVisionInput:
             return "The screenshot exceeded the safe local-model image limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
-            return "AI Computer Use requires a Mac with at least 8 GB of memory."
+            return "AI Computer Use requires a Mac with at least 12 GB of memory."
         case .insufficientAvailableMemory:
             return "There is not enough free memory for AI Computer Use. Close some apps, then choose Retry."
         case .resourceInspectionFailed:

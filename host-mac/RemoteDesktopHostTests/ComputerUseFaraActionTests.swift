@@ -467,10 +467,15 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
-    private func runManagedFaraConcertResult(scrollFirst: Bool) async throws {
+    func testOptInProductionFaraLoaderActivatesThenOpensConcertResultAndReleasesWorker() async throws {
+        try await runManagedFaraConcertResult(scrollFirst: false, productionLoader: true)
+    }
+
+    @MainActor
+    private func runManagedFaraConcertResult(scrollFirst: Bool, productionLoader: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_FARA_SEARCH_MODEL_ACCEPTANCE"] == "1" else {
-            throw XCTSkip("Opt-in: at most six actual Fara proposals on a fictional search and concert page")
+            throw XCTSkip("Opt-in: actual Fara on a fictional search and concert page")
         }
         let inputs = try await FaraTestAssets.inputs(environment: environment)
         let previousPolicy = NSApp.activationPolicy()
@@ -513,7 +518,21 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let goal = (scrollFirst ? "Scroll down to find the Tokyo Music Hall concert in these search results. " : "Find the Tokyo Music Hall concert in these search results. ")
             + "Open its details and report the ticket price and start time with the source URL."
         let started = Date()
-        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+        let executor: any ComputerUseExecuting
+        if productionLoader {
+            let loader = OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: directory.appendingPathComponent("fara"))
+            let receipt = ComputerUseInstallationReceipt(installationVersion: ComputerUseArtifactManifest.current.installationVersion,
+                modelVariant: .fara15_4B, modelDirectory: inputs.modelURL.deletingLastPathComponent().path, installedAt: Date())
+            executor = ComputerUseDeferredVisualExecutor(loader: { progress in
+                let loaded = try await loader.load(receipt: receipt, progress: progress)
+                XCTAssertTrue(loaded is ComputerUseFaraBrowserExecutor)
+                XCTAssertTrue(loaded.isReady)
+                XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty,
+                    "Verified setup must leave the model worker idle until a task needs it.")
+                return loaded
+            }, abandon: { _ in await loader.deactivate() })
+        } else {
+            executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
             searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"), propose: { input in
                 guard responses.count < 6 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 let began = Date()
@@ -523,6 +542,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     "currentURL": input.currentURL?.absoluteString ?? ""])
                 return proposal
             }, finishRun: { await runtime.shutdown() })
+        }
         var result: ComputerUseExecutionResult?, failure: Error?
         do {
             result = try await executor.execute(taskID: "fara-search-model", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
@@ -531,8 +551,11 @@ final class ComputerUseFaraActionTests: XCTestCase {
         memory.cancel()
         let measured = await memory.value
         let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
-        let report: [String: Any] = ["scope": scrollFirst ? "actual-Fara-controlled-scroll-concert-result" : "actual-Fara-controlled-concert-result-navigation", "targetMacRAMGB": 12,
+        let reportedAnswer: String
+        if case .completed(let answer) = result { reportedAnswer = answer } else { reportedAnswer = "" }
+        let report: [String: Any] = ["scope": productionLoader ? "production-Fara-loader-controlled-concert-result" : (scrollFirst ? "actual-Fara-controlled-scroll-concert-result" : "actual-Fara-controlled-concert-result-navigation"), "targetMacRAMGB": 12,
             "wholeApp12GBQualified": false, "liveWebsiteQualified": false, "responses": responses,
+            "reportedAnswer": reportedAnswer,
             "requests": server.requestedPaths, "elapsedSeconds": Date().timeIntervalSince(started),
             "peakSampledProcessMemoryBytes": measured.0, "memorySamples": measured.1, "ownedProcessExited": gone,
             "failure": failure.map { String(describing: $0) } ?? ""]
@@ -542,8 +565,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
         if let failure { XCTFail("Controlled Fara search failed: \(failure)"); return }
         guard case .completed(let answer) = result else { XCTFail("Fara did not return a completed research answer"); return }
         let normalized = answer.lowercased().replacingOccurrences(of: ",", with: "")
-        XCTAssertTrue(normalized.contains("2400"))
-        XCTAssertTrue(normalized.contains("7") || normalized.contains("19:00"))
+        XCTAssertNotNil(normalized.range(of: #"(?:\b2400\s*(?:jpy|yen)\b|(?:\bjpy\s*|¥\s*)2400\b)"#, options: .regularExpression))
+        XCTAssertNotNil(normalized.range(of: #"\b(?:7(?::00)?\s*p\.?m\.?|19:00)\b"#, options: .regularExpression))
         XCTAssertTrue(answer.contains(base.appendingPathComponent("details").absoluteString))
         XCTAssertEqual(server.count(searchPath), 0)
         XCTAssertEqual(server.count("/details"), 1)

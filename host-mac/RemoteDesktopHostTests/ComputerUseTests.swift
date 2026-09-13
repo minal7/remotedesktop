@@ -3269,15 +3269,40 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(try restored.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID), record)
     }
 
-    func test_manifestPinsAuditedRepositoriesRevisionsAndHashes() {
+    func test_defaultComputerUsePackageSelectsPinnedFaraForTwelveGBMacs() throws {
         let manifest = ComputerUseArtifactManifest.current
+        XCTAssertEqual(manifest.modelVariant.rawValue, "fara15-4b")
+        XCTAssertEqual(manifest.installationVersion, "fara15-4b-q4-k-m-b9992")
+        XCTAssertEqual(manifest.modelRepository, "bartowski/Fara1.5-4B-GGUF")
+        XCTAssertEqual(manifest.modelRevision, "b97f335231e01efbbad37bb89b5310340fc10735")
+        XCTAssertEqual(manifest.minimumMemoryBytes, 12 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.modelArtifacts.map(\.fileName), ["Fara1.5-4B-Q4_K_M.gguf", "mmproj-Fara1.5-4B-f16.gguf"])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [2_884_850_784, 672_423_584])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), [
+            "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51",
+            "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d"])
+        for artifact in manifest.modelArtifacts {
+            XCTAssertEqual(artifact.downloadURL.host, "huggingface.co")
+            XCTAssertTrue(artifact.downloadURL.path.contains("/resolve/" + manifest.modelRevision + "/"))
+        }
+        XCTAssertTrue(manifest.legalArtifacts.contains { $0.fileName == "FARA-MIT-LICENSE.txt" })
+        for artifact in manifest.legalArtifacts {
+            let url = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
+            let data = try Data(contentsOf: url)
+            XCTAssertEqual(Int64(data.count), artifact.byteCount)
+            XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), artifact.sha256)
+        }
+    }
 
-        XCTAssertEqual(manifest, ComputerUseArtifactManifest.legacyVisualOnly)
+    func test_manifestPinsAuditedRepositoriesRevisionsAndHashes() {
+        let manifest = ComputerUseArtifactManifest.legacyVisualOnly
+
+        XCTAssertNotEqual(manifest, ComputerUseArtifactManifest.current)
         XCTAssertEqual(manifest.installationVersion, "os-atlas-pro-4b-q4-k-m-b9992")
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
             ComputerUseArtifactManifest.ModelVariant.allCases,
-            [.pro4B, .base4B, .nativeText4B])
+            [.pro4B, .base4B, .nativeText4B, .fara15_4B])
         XCTAssertEqual(manifest.modelRepository, "OS-Copilot/OS-Atlas-Pro-4B")
         XCTAssertEqual(
             manifest.modelRevision,
@@ -10227,6 +10252,53 @@ final class ComputerUseInstallerMigrationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root
             .appendingPathComponent(
                 ComputerUseInstaller.runtimeActivationSuccessMarkerName).path))
+    }
+
+    func testFaraReplacementPreservesLegacyPackageUntilActivationAndRestoresOnFailure() async throws {
+        for activates in [false, true] {
+            let fixture = try makeMigrationFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let originalReceipt = try Data(contentsOf: fixture.receiptURL)
+            let artifacts = ComputerUseArtifactManifest.fara15.modelArtifacts.map {
+                ComputerUseArtifactManifest.DownloadableArtifact(kind: $0.kind, fileName: $0.fileName,
+                    byteCount: Int64(fixture.payload.count), sha256: Self.sha256Hex(fixture.payload),
+                    downloadURL: URL(string: "https://model.test/" + $0.fileName)!)
+            }
+            let manifest = ComputerUseArtifactManifest(installationVersion: "fara-replacement", modelVariant: .fara15_4B,
+                modelRepository: "test/fara", modelRevision: "pinned-test", modelArtifacts: artifacts, minimumMemoryBytes: 0)
+            for artifact in manifest.legalArtifacts {
+                let destination = fixture.legalDirectory.appendingPathComponent(artifact.fileName)
+                if !FileManager.default.fileExists(atPath: destination.path) {
+                    let source = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
+                    try FileManager.default.copyItem(at: source, to: destination)
+                }
+            }
+            RangeServingURLProtocol.configure(payload: fixture.payload)
+            defer { RangeServingURLProtocol.reset() }
+            let session = makeSession()
+            defer { session.invalidateAndCancel() }
+            let installer = ComputerUseInstaller(manifest: manifest, rootDirectory: fixture.root,
+                legalResourceDirectory: fixture.legalDirectory, downloadSession: session,
+                downloadChunkByteCount: Int64(fixture.payload.count), legacyManifest: fixture.legacyManifest,
+                launchIdentifier: "fara-migration")
+            let replacement = try await installer.install { _ in }
+            XCTAssertEqual(replacement.modelVariant, .fara15_4B)
+            XCTAssertEqual(Set(RangeServingURLProtocol.requestedURLs().map(\.lastPathComponent)), Set(artifacts.map(\.fileName)))
+            for artifact in fixture.legacyManifest.modelArtifacts {
+                XCTAssertEqual(try Data(contentsOf: fixture.legacyDirectory.appendingPathComponent(artifact.fileName)), fixture.payload)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: URL(fileURLWithPath: replacement.modelDirectory).appendingPathComponent(artifact.fileName).path))
+            }
+            if activates {
+                try await installer.recordRuntimeActivationSuccess(for: replacement)
+                XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.legacyDirectory.path))
+                let installed = await installer.currentInstallation()
+                XCTAssertEqual(installed, replacement)
+            } else {
+                try await installer.restorePreviousInstallation(afterFailedActivationOf: replacement)
+                XCTAssertEqual(try Data(contentsOf: fixture.receiptURL), originalReceipt)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.legacyDirectory.path))
+            }
+        }
     }
 
     func testFailedRuntimeActivationRestoresVerifiedPriorReceiptAndPackage()

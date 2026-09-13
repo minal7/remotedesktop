@@ -6,13 +6,11 @@ import Foundation
 /// package can become active.
 struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     enum ModelVariant: String, Codable, CaseIterable, Sendable {
-        /// Agentic, single-step GUI action model. This is the production
-        /// default because OS-Atlas documents Pro as the action-generation
-        /// checkpoint; Base remains available for a future grounding-only
-        /// package without allowing both models to be selected together.
+        /// Retained receipt identities for legacy packages and rollback.
         case pro4B = "os-atlas-pro-4b"
         case base4B = "os-atlas-base-4b"
         case nativeText4B = "qwen35-native-text-4b"
+        case fara15_4B = "fara15-4b"
     }
 
     struct DownloadableArtifact: Codable, Equatable, Sendable {
@@ -86,9 +84,21 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         ],
         minimumMemoryBytes: 8 * 1_024 * 1_024 * 1_024)
 
-    // Keep the production package unchanged until the fine-tuned semantic
-    // GGUF's immutable URL, byte count, and digest are available.
-    static let current = legacyVisualOnly
+    /// Browser-trained replacement, already exercised with this exact GGUF pair.
+    static let fara15 = ComputerUseArtifactManifest(
+        installationVersion: "fara15-4b-q4-k-m-b9992",
+        modelVariant: .fara15_4B,
+        modelRepository: "bartowski/Fara1.5-4B-GGUF",
+        modelRevision: "b97f335231e01efbbad37bb89b5310340fc10735",
+        modelArtifacts: [
+            .init(kind: .textModelShard, fileName: "Fara1.5-4B-Q4_K_M.gguf", byteCount: 2_884_850_784,
+                sha256: "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51",
+                downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-4B-GGUF/resolve/b97f335231e01efbbad37bb89b5310340fc10735/Fara1.5-4B-Q4_K_M.gguf")!),
+            .init(kind: .visionProjector, fileName: "mmproj-Fara1.5-4B-f16.gguf", byteCount: 672_423_584,
+                sha256: "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d",
+                downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-4B-GGUF/resolve/b97f335231e01efbbad37bb89b5310340fc10735/mmproj-Fara1.5-4B-f16.gguf")!)],
+        minimumMemoryBytes: 12 * 1_024 * 1_024 * 1_024)
+    static let current = fara15
 
     /// Separate installation/receipt from the visual package. The native form
     /// planner does not require its projector, helper or Apple Intelligence.
@@ -108,15 +118,25 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     static let qwen35License = BundledArtifact(
         fileName: "QWEN35-APACHE-2.0-LICENSE.txt", byteCount: 11_544,
         sha256: "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a")
+    static let qwen35LicenseURL = URL(string: "https://huggingface.co/Qwen/Qwen3.5-4B/blob/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/LICENSE")!
     static let qwen35Notice = BundledArtifact(
         fileName: "QWEN35-NOTICE.txt", byteCount: 1_030,
         sha256: "b560a5da0265ef822c3b3f4ab1c29e562fe2db4a9ca5ff10e98907a5a6aca253")
 
     var legalArtifacts: [BundledArtifact] {
-        modelVariant == .nativeText4B
-            ? [Self.qwen35License, Self.llamaCPPLicense, Self.qwen35Notice]
-            : Self.modelLegalArtifacts
+        switch modelVariant {
+        case .fara15_4B: return [Self.faraLicense, Self.qwen35License, Self.llamaCPPLicense, Self.faraNotice]
+        case .nativeText4B: return [Self.qwen35License, Self.llamaCPPLicense, Self.qwen35Notice]
+        default: return Self.modelLegalArtifacts
+        }
     }
+
+    static let faraLicense = BundledArtifact(fileName: "FARA-MIT-LICENSE.txt", byteCount: 1066,
+        sha256: "98a96c38494df4963951e32b81ec4effebe4c8a812ab8d9e7d185d59e86fe2fc")
+    static let faraNotice = BundledArtifact(fileName: "FARA-NOTICE.txt", byteCount: 1284,
+        sha256: "21dc5548710abe9fcb7b2bac5afaf2e1702cbeeb92eb32c5fdf5d43c6a175dfb")
+    static let faraLicenseURL = URL(string: "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/LICENSE")!
+    static var displayedFaraLicenseURL: URL { bundledLegalDocumentURL(faraLicense) ?? faraLicenseURL }
 
     static let osAtlasLicenseRevision =
         "bad08407ab54b5bf6c17a69fe1ced476b9494926"

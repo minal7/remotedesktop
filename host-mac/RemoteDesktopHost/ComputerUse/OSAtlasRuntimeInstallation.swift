@@ -34,11 +34,10 @@ struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
     let semanticRouterModelURL: URL
 }
 
-/// The verified model receipt can describe either the currently shipped
-/// visual package or a future visual + semantic package. Keeping that choice
-/// explicit prevents a visual-only receipt from being rejected before the
-/// existing on-device Foundation planner can be composed around OS-Atlas.
+/// The verified receipt selects the trained browser model or a supported
+/// legacy package. Each model family resolves through its own exact shape.
 enum OSAtlasResolvedRuntimePackage: Equatable, Sendable {
+    case fara(ComputerUseFaraRuntimeInputs)
     case visualOnly(OSAtlasLlamaRuntimeInputs)
     case visualAndSemantic(OSAtlasResolvedRuntimeInstallation)
 }
@@ -201,13 +200,17 @@ struct OSAtlasRuntimeInputResolver {
     }
 
     /// Resolves exactly the package shape declared by the pinned manifest.
-    /// Zero semantic artifacts is the supported visual-only release shape;
-    /// exactly one activates the two-model path. Any other count fails closed.
+    /// Fara uses its two-file shape. Legacy visual packages may additionally
+    /// contain exactly one semantic artifact; other shapes fail closed.
     func resolveAvailablePackage(
         receipt: ComputerUseInstallationReceipt,
         runtimeDirectoryURL: URL,
         enclosingBundleURL: URL
     ) throws -> OSAtlasResolvedRuntimePackage {
+        if manifest.modelVariant == .fara15_4B {
+            return .fara(try resolveFara(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
+                enclosingBundleURL: enclosingBundleURL))
+        }
         let semanticArtifactCount = manifest.modelArtifacts.filter {
             $0.kind == .semanticRouterModel
         }.count
@@ -258,6 +261,34 @@ struct OSAtlasRuntimeInputResolver {
         }
         return ComputerUseNativeTextRuntimeInputs(modelURL: model, llamaServerURL:
             try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+    }
+
+    /// Installer verification supplies the content hashes. Activation rechecks
+    /// the exact two-file shape, receipt identity and current file containment.
+    func resolveFara(receipt: ComputerUseInstallationReceipt,
+        runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> ComputerUseFaraRuntimeInputs {
+        guard manifest.modelVariant == .fara15_4B, receipt.modelVariant == .fara15_4B,
+              receipt.installationVersion == manifest.installationVersion,
+              (receipt.modelDirectory as NSString).isAbsolutePath,
+              manifest.modelArtifacts.count == 2,
+              manifest.modelArtifacts.filter({ $0.kind == .textModelShard && $0.fileName == ComputerUseFaraRuntimeInputs.modelFileName }).count == 1,
+              manifest.modelArtifacts.filter({ $0.kind == .visionProjector && $0.fileName == ComputerUseFaraRuntimeInputs.projectorFileName }).count == 1 else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+        let directory = URL(fileURLWithPath: receipt.modelDirectory, isDirectory: true).standardizedFileURL
+        guard isStrictDirectory(directory) else { throw OSAtlasRuntimeInstallationError.invalidReceipt }
+        for artifact in manifest.modelArtifacts {
+            let url = directory.appendingPathComponent(artifact.fileName)
+            guard contains(directory, url),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  artifact.byteCount > 0, Int64(values.fileSize ?? -1) == artifact.byteCount else {
+                throw OSAtlasRuntimeInstallationError.invalidModelArtifact(artifact.fileName)
+            }
+        }
+        return ComputerUseFaraRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
+            projectorURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName),
+            llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
     }
 
     private func resolveBundledExecutable(runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> URL {
@@ -341,6 +372,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let resolver: OSAtlasRuntimeInputResolver
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
+    private let faraJournalDirectory: URL
     private let browserActionAttestationLedger:
         ComputerUseBrowserActionAttestationLedger
 
@@ -348,6 +380,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         resolver: OSAtlasRuntimeInputResolver = OSAtlasRuntimeInputResolver(),
         bundle: Bundle = .main,
         runtime: OSAtlasLlamaRuntime = .shared,
+        faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
+            .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         browserActionAttestationLedger:
             ComputerUseBrowserActionAttestationLedger =
                 ComputerUseBrowserActionAttestationLedger()
@@ -355,6 +389,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.resolver = resolver
         self.bundle = bundle
         self.runtime = runtime
+        self.faraJournalDirectory = faraJournalDirectory
         self.browserActionAttestationLedger =
             browserActionAttestationLedger
     }
@@ -369,6 +404,25 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: bundle.bundleURL)
         switch package {
+        case .fara(let inputs):
+            progress("Checking Fara browser computer use…")
+            do {
+                // Setup may retire its rollback package only after the pinned
+                // runtime has actually loaded both model data files.
+                _ = try await runtime.activateFara(inputs)
+                try Task.checkCancellation()
+                await runtime.shutdown()
+                try Task.checkCancellation()
+                let runtime = self.runtime
+                return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
+                    propose: { input in
+                        let endpoint = try await runtime.activateFara(inputs)
+                        return try await runtime.proposeFara(endpoint: endpoint, input: input)
+                    }, finishRun: { await runtime.shutdown() })
+            } catch {
+                await runtime.shutdown()
+                throw error
+            }
         case .visualOnly(let inputs):
             return try await OSAtlasComputerUseExecutor.load(
                 inputs: inputs,

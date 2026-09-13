@@ -76,17 +76,17 @@ struct HostSettingsView: View {
                 title: "AI Computer Use",
                 subtitle: computerUseStatusDetail)
 
-            GroupBox("Visual Fallback") {
+            GroupBox("Browser Computer Use") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label("OS-Atlas Pro 4B", systemImage: "eye")
+                        Label("Fara 1.5 4B", systemImage: "globe")
                             .font(.headline)
                         Spacer()
                         Text(modelStatus)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(modelStatusColor)
                     }
-                    Text("Used locally when a task needs visual control that the Mac’s structured tools cannot complete.")
+                    Text("Reads browser screenshots and performs browser tasks locally. Requires a Mac with at least 12 GB of memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -135,6 +135,18 @@ struct HostSettingsView: View {
 
             GroupBox {
                 VStack(spacing: 0) {
+                    licenseRow(
+                        name: "Fara 1.5 4B",
+                        license: "MIT License",
+                        destination: ComputerUseArtifactManifest.displayedFaraLicenseURL)
+                    Divider().padding(.vertical, 10)
+                    licenseRow(
+                        name: "Qwen 3.5 base model and local text planner",
+                        license: "Apache License 2.0",
+                        destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                            ComputerUseArtifactManifest.qwen35License)
+                            ?? ComputerUseArtifactManifest.qwen35LicenseURL)
+                    Divider().padding(.vertical, 10)
                     licenseRow(
                         name: "OS-Atlas Pro 4B",
                         license: "Apache License 2.0",

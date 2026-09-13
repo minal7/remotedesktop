@@ -3,6 +3,68 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
+    func testFaraReceiptResolvesCurrentTwoFilePackageWithoutLegacyModels() throws {
+        let fixture = try makeFaraFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let resolver = OSAtlasRuntimeInputResolver(manifest: fixture.manifest)
+        let package = try resolver.resolveAvailablePackage(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory)
+        guard case .fara(let inputs) = package else { return XCTFail("The current package must activate Fara.") }
+        XCTAssertEqual(inputs.modelURL, fixture.modelDirectory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName))
+        XCTAssertEqual(inputs.projectorURL, fixture.modelDirectory.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName))
+        XCTAssertEqual(inputs.llamaServerURL, fixture.runtimeDirectory.appendingPathComponent("llama-server"))
+        XCTAssertEqual(Set(try FileManager.default.contentsOfDirectory(atPath: fixture.modelDirectory.path)),
+            Set([ComputerUseFaraRuntimeInputs.modelFileName, ComputerUseFaraRuntimeInputs.projectorFileName]))
+    }
+
+    func testFaraResolverRejectsStaleReceiptMissingChangedSymlinkedDataAndExternalRuntime() throws {
+        for scenario in ["stale", "variant", "missing", "truncated", "symlink", "external-runtime", "extra-artifact"] {
+            let fixture = try makeFaraFixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var receipt = fixture.receipt
+            var manifest = fixture.manifest
+            var runtime = fixture.runtimeDirectory
+            let model = fixture.modelDirectory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName)
+            switch scenario {
+            case "stale", "variant":
+                receipt = .init(installationVersion: scenario == "stale" ? "old" : manifest.installationVersion,
+                    modelVariant: scenario == "variant" ? .pro4B : .fara15_4B,
+                    modelDirectory: fixture.modelDirectory.path, installedAt: Date())
+            case "missing": try FileManager.default.removeItem(at: model)
+            case "truncated": try Data([1]).write(to: model)
+            case "symlink":
+                let external = fixture.root.appendingPathComponent("outside.gguf")
+                try FileManager.default.moveItem(at: model, to: external)
+                try FileManager.default.createSymbolicLink(at: model, withDestinationURL: external)
+            case "external-runtime": runtime = fixture.modelDirectory
+            case "extra-artifact":
+                manifest = self.manifest(from: manifest, artifacts: manifest.modelArtifacts + [manifest.modelArtifacts[0]])
+            default: break
+            }
+            XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(manifest: manifest).resolveAvailablePackage(
+                receipt: receipt, runtimeDirectoryURL: runtime, enclosingBundleURL: fixture.bundleDirectory), scenario)
+        }
+    }
+
+    private func makeFaraFixture() throws -> Fixture {
+        let fixture = try makeFixture()
+        for artifact in fixture.manifest.modelArtifacts {
+            try FileManager.default.removeItem(at: fixture.modelDirectory.appendingPathComponent(artifact.fileName))
+        }
+        let artifacts = ComputerUseArtifactManifest.fara15.modelArtifacts.map {
+            ComputerUseArtifactManifest.DownloadableArtifact(kind: $0.kind, fileName: $0.fileName,
+                byteCount: 3, sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                downloadURL: $0.downloadURL)
+        }
+        for artifact in artifacts { try Data([1, 2, 3]).write(to: fixture.modelDirectory.appendingPathComponent(artifact.fileName)) }
+        let manifest = ComputerUseArtifactManifest(installationVersion: "fara-fixture", modelVariant: .fara15_4B,
+            modelRepository: "test/fara", modelRevision: "test-revision", modelArtifacts: artifacts, minimumMemoryBytes: 0)
+        return Fixture(root: fixture.root, bundleDirectory: fixture.bundleDirectory,
+            runtimeDirectory: fixture.runtimeDirectory, modelDirectory: fixture.modelDirectory, manifest: manifest,
+            receipt: .init(installationVersion: manifest.installationVersion, modelVariant: .fara15_4B,
+                modelDirectory: fixture.modelDirectory.path, installedAt: Date()))
+    }
+
     func testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage() throws {
         let fixture = try makeNativeTextFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

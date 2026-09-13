@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00102 /* FARA-NOTICE.txt */; };
+		E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */; };
 		FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */; };
 		B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */; };
 		E4FF598034094C418706CA54 /* ComputerUseSignInNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */; };
@@ -296,6 +298,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E0F001F001F001F001F00102 /* FARA-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-NOTICE.txt"; sourceTree = "<group>"; };
+		E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraBrowserExecutor.swift; sourceTree = "<group>"; };
 		B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
 		B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSignInNavigation.swift; sourceTree = "<group>"; };
@@ -575,6 +579,8 @@
 				7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */,
 				F144A5766AF6CD0F4844FCE2 /* QWEN35-APACHE-2.0-LICENSE.txt */,
 				74BAA05E5EEF67FEE4C9E15B /* QWEN35-NOTICE.txt */,
+				E0F001F001F001F001F00102 /* FARA-NOTICE.txt */,
+				E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */,
 			);
 			path = ThirdPartyNotices;
 			sourceTree = "<group>";
@@ -1031,6 +1037,8 @@
 				2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */,
 				17A6F88D8EC53C06727CF4BD /* QWEN35-APACHE-2.0-LICENSE.txt in Resources */,
 				C2CF8FD36B956E505B66B5FF /* QWEN35-NOTICE.txt in Resources */,
+				E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */,
+				E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
