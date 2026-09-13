@@ -1286,12 +1286,12 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.validateAgentObservation(observation)
     }
 
-    func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation,
+    func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
                                       willBeginEffect: () throws -> Void) async throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.performAgentInput(action, observation: observation, willBeginEffect: willBeginEffect)
+        try await browserNavigationTask.performAgentInput(action, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func scrollOwnedBrowserViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,

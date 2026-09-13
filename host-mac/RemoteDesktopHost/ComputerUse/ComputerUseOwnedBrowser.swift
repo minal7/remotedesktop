@@ -659,6 +659,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         fileprivate let windowFrame: NSRect
         var sessionIdentity: String { ComputerUseTaskContract.digest([evidence.document.contextID, evidence.document.taskID, ownership.uuidString]) }
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
+        var currentURL: URL { evidence.document.committedURL }
     }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
@@ -694,7 +695,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageEvidenceUnavailable
         }
         // Existing page admission detects credentials before screenshotting.
-        // The host retains this evidence; the model receives only the image.
+        // The host retains DOM evidence; the model receives the image and current URL.
         let evidence = try await observePage(document: expected, forAgentInput: true)
         let configuration = WKSnapshotConfiguration()
         configuration.rect = view.bounds
@@ -720,7 +721,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     /// Delivers one already-admitted action to the owned native view. Returning
     /// means dispatch, not goal verification. The executor journals its attempt
     /// in willBeginEffect and observes the result before planning another action.
-    func performAgentInput(_ action: ComputerUseFaraAction, observation: AgentObservation,
+    func performAgentInput(_ action: ComputerUseFaraAction, observation: AgentObservation, operationID: String? = nil,
                            willBeginEffect: () throws -> Void = {}) async throws {
         guard agentObservationID == observation.id else { throw ComputerUseBrowserError.pageChanged }
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
@@ -739,6 +740,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try check()
         try await validatePageEvidence(observation.evidence)
         try check()
+        if case .visitURL(let url) = action {
+            guard let operationID, !operationID.isEmpty else { throw ComputerUseBrowserError.unsupportedDocument }
+            // Use the existing exact WKNavigation receipt path. Retire the
+            // screenshot before load so it cannot authorize a second request.
+            _ = try await navigate(taskID: observation.evidence.document.taskID, operationID: operationID,
+                to: url, from: observation.evidence.document, willBeginEffect: {
+                    try willBeginEffect()
+                    try check()
+                    self.agentObservationID = nil
+                })
+            return
+        }
         guard let view = browser, let window else { throw ComputerUseBrowserError.closed }
         let dispatch: () throws -> Void
         switch action {

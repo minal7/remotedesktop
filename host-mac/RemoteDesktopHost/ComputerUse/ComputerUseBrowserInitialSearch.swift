@@ -32,7 +32,7 @@ struct ComputerUseBrowserSearchProvider: Equatable, Sendable, CustomStringConver
         digest = ComputerUseTaskContract.digest(["browser-search-provider-v1", endpoint.absoluteString, queryParameter])
     }
 
-    fileprivate func destination(query: String) throws -> URL {
+    func destination(query: String) throws -> URL {
         guard var parts = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
             throw ComputerUseBrowserInitialSearchError.invalidRequest
         }

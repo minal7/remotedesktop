@@ -32,14 +32,16 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting {
     }
     private let store: ComputerUseTaskJournalStore
     private let propose: Propose
+    private let searchProvider: ComputerUseBrowserSearchProvider
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
     private var isExecuting = false
-    init(journalDirectory: URL, propose: @escaping Propose,
+    init(journalDirectory: URL, searchProvider: ComputerUseBrowserSearchProvider? = nil, propose: @escaping Propose,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory)
         self.propose = propose
+        self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q")
         self.finishRun = finishRun
     }
     let isReady = true
@@ -101,13 +103,18 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting {
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
             progress("Reading the browser…")
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
-                history: Array(session.history.suffix(20)))
+                history: Array(session.history.suffix(20)), currentURL: observation.currentURL)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.
             // Native dispatch receipts below do not themselves prove the goal.
-            try await tools.validateOwnedBrowserAgentObservation(observation)
+            if case .wait = proposal.action {
+                // Waiting posts no input. A loading page changing while the
+                // model thinks is precisely why it can ask for a fresh view.
+            } else {
+                try await tools.validateOwnedBrowserAgentObservation(observation)
+            }
             if case .reportCompletion(let answer) = proposal.action {
                 var completed = session.journal; completed.statuses = [.verified]
                 try store.save(completed, replacing: session.journal)
@@ -117,17 +124,21 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting {
                 return result
             }
             switch proposal.action {
-            case .pointer(.leftClick, _), .typeText, .key:
+            case .pointer(.leftClick, _), .typeText, .key, .visitURL, .webSearch:
                 let actionID = ComputerUseTaskContract.digest([rootID, "native-dispatch", String(session.turns)])
                 let dispatchLease = try store.acquireExecution(taskID: actionID, expected: nil)
                 defer { dispatchLease.release() }
                 let attempted = ComputerUseTaskJournal(taskID: actionID, promptDigest: session.journal.promptDigest,
                     contractDigest: ComputerUseTaskContract.digest([observation.authorityDigest, proposal.response]),
                     stepIDs: ["native-dispatch-returned"], statuses: [.attempted])
+                let action: ComputerUseFaraAction
+                if case .webSearch(let query) = proposal.action {
+                    action = .visitURL(try searchProvider.destination(query: query))
+                } else { action = proposal.action }
                 var began = false
                 progress("Using the browser…")
                 do {
-                    try await tools.performOwnedBrowserAgentInput(proposal.action, observation: observation, willBeginEffect: {
+                    try await tools.performOwnedBrowserAgentInput(action, observation: observation, operationID: actionID, willBeginEffect: {
                         try lease.assertOwnership(); try dispatchLease.assertOwnership()
                         try self.store.save(attempted, replacing: nil)
                         began = true
@@ -150,7 +161,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting {
             default: throw Failure.unsupportedAction
             }
             session.turns += 1
-            session.history.append(.init(screenshotPNG: observation.png, response: proposal.response))
+            session.history.append(.init(screenshotPNG: observation.png, response: proposal.response, currentURL: observation.currentURL))
             if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
             do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID) }
             catch ComputerUseBrowserError.authenticationRequired {

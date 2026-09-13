@@ -21,11 +21,13 @@ enum ComputerUseFaraModel {
     struct Step: Equatable, Sendable {
         let screenshotPNG: Data
         let response: String
+        var currentURL: URL? = nil
     }
     struct Input: Equatable, Sendable {
         let goal: String
         let screenshotPNG: Data
         var history: [Step] = []
+        var currentURL: URL? = nil
     }
     struct Proposal: Equatable, Sendable {
         let response: String
@@ -36,7 +38,8 @@ enum ComputerUseFaraModel {
         guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
               !input.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               input.goal.utf8.count <= 8_192, input.history.count <= 20,
-              input.history.reduce(input.goal.utf8.count, { $0 + $1.response.utf8.count }) <= 65_536 else {
+              input.history.reduce(input.goal.utf8.count + (input.currentURL?.absoluteString.utf8.count ?? 0),
+                { $0 + $1.response.utf8.count + ($1.currentURL?.absoluteString.utf8.count ?? 0) }) <= 65_536 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         var messages: [[String: Any]] = [["role": "system", "content": officialSystemPrompt]]
@@ -47,6 +50,15 @@ enum ComputerUseFaraModel {
             if index >= earliestImage {
                 try validatePNG(png)
                 content.append(["type": "image_url", "image_url": ["url": "data:image/png;base64," + png.base64EncodedString()]])
+            }
+            let currentURL = index == input.history.count ? input.currentURL : input.history[index].currentURL
+            if let currentURL {
+                guard ComputerUseOwnedBrowser.validatedURL(currentURL) == currentURL else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+                // Preserve the native browser observation alongside its image,
+                // including when that image ages out of the three-image window.
+                content.append(["type": "text", "text": "Current URL: " + currentURL.absoluteString])
             }
             if index == 0 { content.append(["type": "text", "text": input.goal]) }
             else if content.isEmpty { content.append(["type": "text", "text": "[Earlier screenshot omitted]"]) }

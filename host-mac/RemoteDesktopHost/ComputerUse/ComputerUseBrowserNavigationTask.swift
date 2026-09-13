@@ -278,17 +278,29 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     }
 
     func captureAgentObservation(taskID: String) async throws -> ComputerUseOwnedBrowser.AgentObservation {
-        let document = try await browser.acquireObservedDocument(taskID: taskID)
-        return try await browser.captureAgentObservation(document: document)
+        let retryDeadline = ContinuousClock.now + .seconds(3)
+        while true {
+            do {
+                let document = try await browser.acquireObservedDocument(taskID: taskID)
+                return try await browser.captureAgentObservation(document: document)
+            } catch let error as ComputerUseBrowserError {
+                // A native click can start navigation between acquiring the
+                // document and taking its image. Retry only this read, never
+                // the click, proposal or navigation. Ownership, sign-in and
+                // source-policy failures still return immediately.
+                guard (error == .pageChanged || error == .busy), ContinuousClock.now < retryDeadline else { throw error }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
     }
 
     func validateAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) async throws {
         try await browser.validateAgentObservation(observation)
     }
 
-    func performAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation,
+    func performAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
                            willBeginEffect: () throws -> Void) async throws {
-        try await browser.performAgentInput(action, observation: observation, willBeginEffect: willBeginEffect)
+        try await browser.performAgentInput(action, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
     }
 
     func prepareLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
