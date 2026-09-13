@@ -647,6 +647,122 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
 /// receipts come from the exact WKNavigation owned by the current task.
 @MainActor
 final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    struct AgentObservation {
+        let png: Data
+        let pixelWidth: Int
+        let pixelHeight: Int
+        let viewportSize: NSSize
+        fileprivate let id: UUID
+        fileprivate let evidence: ComputerUseBrowserPageEvidence
+        fileprivate let ownership: UUID
+        fileprivate let takeover: UUID
+        fileprivate let windowFrame: NSRect
+    }
+    private var agentObservationID: UUID?
+    private var agentOperationInProgress = false
+
+    func captureAgentObservation(document expected: ComputerUseBrowserDocument) async throws -> AgentObservation {
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        agentObservationID = nil
+        defer { agentOperationInProgress = false }
+        try Task.checkCancellation()
+        guard validate(expected), let view = browser, let window, hasRequiredPresentation else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let ownership = ownershipEpoch, takeover = takeoverEpoch
+        let frame = window.frame, size = view.bounds.size
+        guard size.width > 0, size.height > 0, window.backingScaleFactor > 0 else {
+            throw ComputerUseBrowserError.pageEvidenceUnavailable
+        }
+        // Existing page admission detects credentials before screenshotting.
+        // The host retains this evidence; the model receives only the image.
+        let evidence = try await observePage(document: expected, forAgentInput: true)
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = view.bounds
+        let scale = min(1, 1188 / max(size.width, size.height))
+        configuration.snapshotWidth = NSNumber(value: size.width * scale / window.backingScaleFactor)
+        let image = try await view.takeSnapshot(configuration: configuration)
+        try await validatePageEvidence(evidence)
+        try Task.checkCancellation()
+        guard validate(expected), self.browser === view, self.window === window,
+              ownershipEpoch == ownership, takeoverEpoch == takeover,
+              window.frame == frame, view.bounds.size == size, hasRequiredPresentation,
+              let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        try ComputerUseFaraModel.validatePNG(png)
+        let id = UUID()
+        agentObservationID = id
+        return AgentObservation(png: png, pixelWidth: bitmap.pixelsWide, pixelHeight: bitmap.pixelsHigh,
+            viewportSize: size, id: id, evidence: evidence, ownership: ownership, takeover: takeover, windowFrame: frame)
+    }
+
+    /// Delivers one already-admitted action to the owned native view. Returning
+    /// means dispatch, not goal verification. The executor journals its attempt
+    /// in willBeginEffect and observes the result before planning another action.
+    func performAgentInput(_ action: ComputerUseFaraAction, observation: AgentObservation,
+                           willBeginEffect: () throws -> Void = {}) async throws {
+        guard agentObservationID == observation.id else { throw ComputerUseBrowserError.pageChanged }
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        defer {
+            agentOperationInProgress = false
+            if agentObservationID == observation.id { agentObservationID = nil }
+        }
+        func check() throws {
+            try Task.checkCancellation()
+            guard agentObservationID == observation.id, validate(observation.evidence.document),
+                  ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
+                  browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
+        }
+        try check()
+        try await validatePageEvidence(observation.evidence)
+        try check()
+        guard let view = browser, let window else { throw ComputerUseBrowserError.closed }
+        let dispatch: () throws -> Void
+        switch action {
+        case .pointer(.leftClick, let point):
+            let pixel = try point.pixel(width: observation.pixelWidth, height: observation.pixelHeight)
+            let x = CGFloat(pixel.x) / CGFloat(observation.pixelWidth) * view.bounds.width
+            let y = CGFloat(pixel.y) / CGFloat(observation.pixelHeight) * view.bounds.height
+            let local = NSPoint(x: view.bounds.minX + x, y: view.isFlipped ? view.bounds.minY + y : view.bounds.maxY - y)
+            let location = view.convert(local, to: nil)
+            let time = ProcessInfo.processInfo.systemUptime
+            guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: [],
+                timestamp: time, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1),
+                  let up = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [],
+                timestamp: time + 0.001, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0) else {
+                throw ComputerUseBrowserError.pageEvidenceUnavailable
+            }
+            dispatch = {
+                window.sendEvent(down)
+                // Release the same native button even if a callback revokes
+                // control. No subsequent action may reuse this observation.
+                window.sendEvent(up)
+            }
+        case .typeText(let text):
+            guard text.utf8.count <= 32_768, let responder = window.firstResponder as? NSView,
+                  responder === view || responder.isDescendant(of: view),
+                  let client = responder as? any NSTextInputClient, !client.hasMarkedText() else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            dispatch = {
+                // Native insertion uses the current selection and generates
+                // WebKit input events. It never adds select-all or Return.
+                client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            }
+        default:
+            throw ComputerUseBrowserError.unsupportedDocument
+        }
+        try willBeginEffect()
+        try check()
+        agentObservationID = nil
+        try dispatch()
+    }
+
     private typealias NavigationHistory = ComputerUseBrowserNavigationDispatchHistory
     let contextID = UUID().uuidString
     private let presentation = ComputerUseBrowserPresentation()
@@ -1308,9 +1424,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try await callDOM(command, arguments: arguments, document: expected, retaining: capture, validateContext: { self.validate(expected) })
     }
 
-    func observePage(document expected: ComputerUseBrowserDocument, includingControlState: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
+    func observePage(document expected: ComputerUseBrowserDocument, includingControlState: Bool = false,
+                     forAgentInput: Bool = false) async throws -> ComputerUseBrowserPageEvidence {
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
-        let result = try await callDOM(.pageSnapshot, arguments: includingControlState ? ["includeControlState":true] : [:], document: expected)
+        var arguments: [String: Any] = [:]
+        if includingControlState { arguments["includeControlState"] = true }
+        if forAgentInput { arguments["agentInput"] = true }
+        let result = try await callDOM(.pageSnapshot, arguments: arguments, document: expected)
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
               let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState,

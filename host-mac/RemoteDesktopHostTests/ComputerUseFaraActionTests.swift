@@ -6,6 +6,421 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    @MainActor
+    func testOptInOwnedBrowserNativeClickAndUnicodeInputStopAtLogin() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: native events in a visible local fictional browser form")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var stage = "create loopback fixture"
+        defer {
+            let attachment = XCTAttachment(string: "Native browser input checkpoint: \(stage)")
+            attachment.name = "Fara browser input stage"; attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><html><head><meta charset="utf-8"><title>Local native input</title><style>
+            body {font:22px system-ui; background:white; margin:0} label {position:absolute;left:60px}
+            input,textarea {position:absolute;left:60px;width:500px;box-sizing:border-box;font:22px system-ui}
+            #origin {top:70px;height:50px} #destination {top:180px;height:96px}
+            </style></head><body><label style="top:30px" for="origin">Origin</label><input id="origin" value="Seattle">
+            <label style="top:140px" for="destination">Destination</label><textarea id="destination"></textarea>
+            <script>
+            const originField = document.getElementById('origin'), destinationField = document.getElementById('destination');
+            let inputTimer;
+            function record(event) { fetch('/event?' + new URLSearchParams({kind:event.type,
+              target:event.target.id, trusted:String(event.isTrusted), value:event.target.value || ''}));
+              if (event.type === 'input') {
+                clearTimeout(inputTimer);
+                inputTimer = setTimeout(() => fetch('/state?' + new URLSearchParams({origin:originField.value,
+                  destination:destinationField.value,password:document.getElementById('password')?.value || ''})), 0);
+              }
+            }
+            for (const kind of ['click','input','keydown','keyup']) document.addEventListener(kind, record);
+            destinationField.addEventListener('input', () => {
+              const login = document.createElement('input'); login.id='password'; login.type='password';
+              login.style.top='350px'; login.value='private-fixture-password'; document.body.append(login);
+              fetch('/login-shown');
+            }, {once:true});
+            </script></body></html>
+            """)])
+        stage = "start loopback fixture"
+        let base = try await server.start()
+        defer {
+            let attachment = XCTAttachment(string: server.requestedPaths.joined(separator: "\n"))
+            attachment.name = "Fara native fixture events"; attachment.lifetime = .keepAlways
+            add(attachment)
+            server.stop()
+        }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        stage = "claim browser"
+        try browser.claim(taskID: "fara-native-input")
+        stage = "navigate local form"
+        let document = try await browser.navigate(taskID: "fara-native-input", operationID: "open", to: base.appendingPathComponent("form"))
+        stage = "capture first observation"
+        let observation = try await browser.captureAgentObservation(document: document)
+        XCTAssertTrue(browser.isFrontmostWindow)
+        let point = ComputerUseFaraAction.Point(x: 310 / observation.viewportSize.width * 1000, y: 228 / observation.viewportSize.height * 1000)
+        stage = "native click"
+        try await browser.performAgentInput(.pointer(.leftClick, point), observation: observation)
+        func events(_ kind: String) -> [[String: String]] {
+            server.requestedPaths.compactMap { path -> [String: String]? in
+                guard path.hasPrefix("/event?"), let items = URLComponents(string: path.replacingOccurrences(of: "+", with: "%20"))?.queryItems else { return nil }
+                let value = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+                return value["kind"] == kind ? value : nil
+            }
+        }
+        let clickDeadline = ContinuousClock.now + .seconds(3)
+        while events("click").isEmpty && ContinuousClock.now < clickDeadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(events("click").count, 1)
+        XCTAssertEqual(events("click").first?["target"], "destination")
+        XCTAssertEqual(events("click").first?["trusted"], "true")
+        stage = "capture focused field"
+        let focused = try await browser.captureAgentObservation(document: document)
+        let exact = "  東京 e\u{301} 😀\n  "
+        stage = "native Unicode input"
+        var inputDispatches = 0
+        try await browser.performAgentInput(.typeText(exact), observation: focused, willBeginEffect: { inputDispatches += 1 })
+        let inputDeadline = ContinuousClock.now + .seconds(3)
+        while (!server.requestedPaths.contains { $0.hasPrefix("/state?") } || server.count("/login-shown") == 0) && ContinuousClock.now < inputDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let inputs = events("input")
+        XCTAssertEqual(inputDispatches, 1)
+        XCTAssertFalse(inputs.isEmpty)
+        for input in inputs {
+            XCTAssertEqual(input["target"], "destination")
+            XCTAssertEqual(input["trusted"], "true")
+            XCTAssertTrue(try XCTUnwrap(input["value"]).utf8.elementsEqual(exact.utf8))
+        }
+        let statePath = try XCTUnwrap(server.requestedPaths.last { $0.hasPrefix("/state?") })
+        let stateItems = try XCTUnwrap(URLComponents(string: statePath.replacingOccurrences(of: "+", with: "%20"))?.queryItems)
+        let state = Dictionary(uniqueKeysWithValues: stateItems.map { ($0.name, $0.value ?? "") })
+        XCTAssertEqual(state["origin"], "Seattle")
+        XCTAssertTrue(try XCTUnwrap(state["destination"]).utf8.elementsEqual(exact.utf8))
+        XCTAssertEqual(state["password"], "private-fixture-password")
+        XCTAssertTrue(events("keydown").isEmpty, "Text insertion cannot imply an Enter key or form submission")
+        stage = "login and replay rejection"
+        do { _ = try await browser.captureAgentObservation(document: document); XCTFail("Login must stop the next screenshot") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+        do { try await browser.performAgentInput(.typeText("duplicate"), observation: focused); XCTFail("Consumed input cannot be replayed") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(events("input").count, inputs.count)
+        XCTAssertEqual(inputDispatches, 1)
+    }
+
+    @MainActor
+    func testOptInOwnedBrowserRejectsMovedTargetAndChangedTextFocus() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: stale observation checks in a visible local fictional form")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mutation in ["geometry", "focus", "selection", "value", "overlay"] {
+            let scripts = ["geometry": """
+                for (const rule of document.styleSheets[0].cssRules) {
+                  if (rule.selectorText === '#origin') rule.style.top='180px';
+                  if (rule.selectorText === '#destination') rule.style.top='70px';
+                }
+                """, "focus": "document.getElementById('origin').focus()",
+                "selection": "document.getElementById('destination').setSelectionRange(0,2)",
+                "value": "document.getElementById('destination').value='Changed elsewhere'",
+                "overlay": "for (const rule of document.styleSheets[0].cssRules) { if (rule.selectorText === '#cover') rule.style.left='60px'; }"]
+            let script = try XCTUnwrap(scripts[mutation])
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                <!doctype html><html><head><title>Local stale target</title><style>
+                body {font:22px system-ui; background:white; margin:0}
+                input {position:absolute;left:60px;width:500px;height:50px;box-sizing:border-box;font:22px system-ui}
+                #origin {top:70px} #destination {top:180px}
+                #cover {position:absolute;left:9000px;top:180px;width:500px;height:50px;z-index:9}
+                </style></head><body><input id="origin" aria-label="Origin" value="Seattle">
+                <input id="destination" aria-label="Destination" value="Paris">
+                <div id="cover"></div>
+                <script>
+                document.addEventListener('click', () => fetch('/click'));
+                document.addEventListener('input', () => fetch('/input'));
+                document.getElementById('destination').focus();
+                fetch('/mutate').then(() => { \(script); document.getElementById('destination').getBoundingClientRect(); fetch('/mutated'); });
+                </script></body></html>
+                """), "/mutate": .init(held: true)])
+            let base = try await server.start()
+            defer { server.stop() }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true })
+            defer { browser.close() }
+            try browser.claim(taskID: "stale-\(mutation)")
+            let document = try await browser.navigate(taskID: "stale-\(mutation)", operationID: "open", to: base.appendingPathComponent("form"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let waiting = ContinuousClock.now + .seconds(3)
+            while server.count("/mutate") == 0 && ContinuousClock.now < waiting { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(server.count("/mutate"), 1)
+            server.releaseHeldResponses()
+            let changed = ContinuousClock.now + .seconds(3)
+            while server.count("/mutated") == 0 && ContinuousClock.now < changed { try await Task.sleep(for: .milliseconds(20)) }
+            XCTAssertEqual(server.count("/mutated"), 1)
+            guard server.count("/mutated") == 1 else { return }
+            let action: ComputerUseFaraAction = ["geometry", "overlay"].contains(mutation)
+                ? .pointer(.leftClick, .init(x: 310 / observation.viewportSize.width * 1000, y: 205 / observation.viewportSize.height * 1000))
+                : .typeText("must not enter Origin")
+            var attempts = 0
+            do {
+                try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 })
+                XCTFail("The \(mutation) changed after capture; stale input must not dispatch")
+                return
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(attempts, 0)
+            XCTAssertEqual(server.count("/click"), 0)
+            XCTAssertEqual(server.count("/input"), 0)
+        }
+    }
+
+    @MainActor
+    func testOptInOwnedBrowserRetiresCancelledAndRevokedAgentObservations() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: authority and replay checks in a visible local fictional form")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><title>Local input ownership</title><input aria-label="Destination" style="position:absolute;left:60px;top:180px;width:500px;height:50px">
+            <script>document.addEventListener('click', () => fetch('/click'));
+            window.addEventListener('resize', () => fetch('/resized'));</script>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed })
+        defer { browser.close() }
+        var stage = "claim retirement browser"
+        defer {
+            let attachment = XCTAttachment(string: stage)
+            attachment.name = "Fara retirement stage"; attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        do {
+        try browser.claim(taskID: "observation-retirement")
+        stage = "navigate retirement form"
+        let document = try await browser.navigate(taskID: "observation-retirement", operationID: "open", to: base.appendingPathComponent("form"))
+        for scenario in ["cancel", "takeover", "closed-gate", "resize", "unsupported", "gate-at-attempt"] {
+            stage = "capture \(scenario)"
+            let observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.pointer(.leftClick,
+                .init(x: 310 / observation.viewportSize.width * 1000, y: 205 / observation.viewportSize.height * 1000))
+            var attempts = 0
+            var expected: ComputerUseBrowserError? = .pageChanged
+            stage = "attempt \(scenario)"
+            switch scenario {
+            case "cancel":
+                expected = nil
+                let work = Task { @MainActor in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    try await browser.performAgentInput(action, observation: observation, willBeginEffect: { attempts += 1 })
+                }
+                do { try await work.value; XCTFail("Cancelled input cannot dispatch"); return }
+                catch { XCTAssertTrue(error is CancellationError) }
+            case "takeover":
+                allowed = false
+                browser.prepareForUserControl(taskID: "observation-retirement")
+                allowed = true
+            case "closed-gate": allowed = false
+            case "resize":
+                XCTAssertTrue(browser.isFrontmostWindow)
+                let window = try XCTUnwrap(NSApp.keyWindow)
+                var frame = window.frame; frame.size.width -= 20
+                window.setFrame(frame, display: true)
+            case "unsupported": expected = .unsupportedDocument
+            default: break
+            }
+            if let expected {
+                do {
+                    try await browser.performAgentInput(scenario == "unsupported" ? .key(["UnsupportedKey"]) : action,
+                        observation: observation, willBeginEffect: {
+                            attempts += 1
+                            if scenario == "gate-at-attempt" {
+                                allowed = false; browser.prepareForUserControl(taskID: "observation-retirement")
+                            }
+                        })
+                    XCTFail("\(scenario) input cannot dispatch"); return
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, expected) }
+            }
+            allowed = true
+            stage = "reject replay \(scenario)"
+            do { try await browser.performAgentInput(action, observation: observation); XCTFail("\(scenario) observation cannot revive"); return }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+            XCTAssertEqual(attempts, scenario == "gate-at-attempt" ? 1 : 0)
+            XCTAssertEqual(server.count("/click"), 0)
+            if scenario == "resize" {
+                stage = "wait for WebKit resize acknowledgement"
+                let deadline = ContinuousClock.now + .seconds(3)
+                while server.count("/resized") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+                XCTAssertGreaterThan(server.count("/resized"), 0)
+            }
+        }
+        // Rejecting an old result must not retire a newer observation.
+        stage = "capture old observation"
+        let old = try await browser.captureAgentObservation(document: document)
+        stage = "capture current observation"
+        let current = try await browser.captureAgentObservation(document: document)
+        let click = ComputerUseFaraAction.pointer(.leftClick,
+            .init(x: 310 / current.viewportSize.width * 1000, y: 205 / current.viewportSize.height * 1000))
+        do { try await browser.performAgentInput(click, observation: old); XCTFail("Old image cannot act"); return }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        stage = "dispatch current click"
+        try await browser.performAgentInput(click, observation: current)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while server.count("/click") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        XCTAssertEqual(server.count("/click"), 1)
+        stage = "capture before Stop"
+        let stopped = try await browser.captureAgentObservation(document: document)
+        stage = "Stop and reject"
+        browser.stop()
+        do { try await browser.performAgentInput(click, observation: stopped); XCTFail("Stopped browser cannot act"); return }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        XCTAssertEqual(server.count("/click"), 1)
+        } catch {
+            stage += "; underlying error before teardown: \(error)"
+            throw error
+        }
+    }
+
+    @MainActor
+    func testOptInManagedFaraTypesIntoOwnedBrowserAndStopsAtLogin() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MANAGED_FARA_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: at most two Fara proposals in a local fictional browser form")
+        }
+        let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MANAGED_REPORT_PATH"]))
+        guard !FileManager.default.fileExists(atPath: reportURL.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        let inputs = try await verifiedFaraRuntimeInputs(environment: environment)
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+            <!doctype html><html><head><meta charset="utf-8"><title>Local travel form</title><style>
+            body {font:22px system-ui;background:white;margin:0} label {position:absolute;left:60px}
+            input {position:absolute;left:60px;width:500px;height:50px;box-sizing:border-box;font:22px system-ui}
+            #origin {top:70px} #destination {top:180px}
+            </style></head><body><label for="origin" style="top:30px">Origin</label><input id="origin" value="Seattle">
+            <label for="destination" style="top:140px">Destination</label><input id="destination" value="">
+            <script>
+            document.addEventListener('click', event => fetch('/clicked?target='+encodeURIComponent(event.target.id)));
+            document.addEventListener('input', event => {
+              const destination = document.getElementById('destination'), origin = document.getElementById('origin');
+              fetch('/edited?' + new URLSearchParams({target:event.target.id,trusted:String(event.isTrusted),destination:destination.value,origin:origin.value}));
+              if (!document.getElementById('password')) {
+                const password = document.createElement('input'); password.id='password'; password.type='password';
+                password.style.top='350px'; password.value='private-fixture-password'; document.body.append(password);
+                fetch('/login-shown');
+              }
+            });
+            </script></body></html>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "managed-fara-browser")
+        let document = try await browser.navigate(taskID: "managed-fara-browser", operationID: "open", to: base.appendingPathComponent("form"))
+        let runtime = OSAtlasLlamaRuntime(), worker = ComputerUsePlanningWorker()
+        let began = Date()
+        var report: [String: Any] = ["scope":"managed-Fara-native-browser-input-login-admission", "targetMacRAMGB":12,
+            "wholeApp12GBQualified":false, "fullTaskResumeQualified":false, "status":"running"]
+        let executable = inputs.llamaServerURL
+        let memory = Task.detached { () -> (UInt64, Int) in
+            var peak: UInt64 = 0, count = 0
+            while !Task.isCancelled {
+                for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: executable)) ?? [] {
+                    if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) { peak = max(peak, bytes); count += 1 }
+                }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            return (peak, count)
+        }
+        var failure: Error?, responses: [[String: Any]] = []
+        do {
+            let endpoint = try await worker.perform(timeout: 30) { try await runtime.activateFara(inputs) }
+            report["startupSeconds"] = Date().timeIntervalSince(began)
+            var history: [ComputerUseFaraModel.Step] = []
+            var typed = false
+            for _ in 0..<2 {
+                let observation = try await browser.captureAgentObservation(document: document)
+                let input = ComputerUseFaraModel.Input(goal: "In the Destination field, type Tokyo. Leave Origin as Seattle.",
+                    screenshotPNG: observation.png, history: history)
+                let start = Date()
+                let proposal = try await worker.perform(timeout: 25) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+                responses.append(["response":proposal.response,"generationSeconds":Date().timeIntervalSince(start),
+                    "imageWidth":observation.pixelWidth,"imageHeight":observation.pixelHeight])
+                if case .typeText(let text) = proposal.action {
+                    guard text.utf8.elementsEqual("Tokyo".utf8) else { throw ComputerUseFaraAction.Failure.invalidResponse }
+                    typed = true
+                } else if case .pointer(.leftClick, _) = proposal.action { }
+                else { throw ComputerUseBrowserError.unsupportedDocument }
+                let prefix = typed ? "/edited?" : "/clicked?"
+                let previousEvents = server.requestedPaths.filter { $0.hasPrefix(prefix) }.count
+                try await browser.performAgentInput(proposal.action, observation: observation)
+                history.append(.init(screenshotPNG: observation.png, response: proposal.response))
+                let deadline = ContinuousClock.now + .seconds(3)
+                while server.requestedPaths.filter({ $0.hasPrefix(prefix) }).count <= previousEvents && ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard server.requestedPaths.filter({ $0.hasPrefix(prefix) }).count > previousEvents else { throw ComputerUseFaraAction.Failure.invalidResponse }
+                let path = try XCTUnwrap(server.requestedPaths.last { $0.hasPrefix(prefix) })
+                let items = try XCTUnwrap(URLComponents(string: path.replacingOccurrences(of: "+", with: "%20"))?.queryItems)
+                let fields = Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
+                guard fields["target"] == "destination" else { throw ComputerUseFaraAction.Failure.invalidResponse }
+                if typed {
+                    guard fields["destination"] == "Tokyo", fields["origin"] == "Seattle", fields["trusted"] == "true" else {
+                        throw ComputerUseFaraAction.Failure.invalidResponse
+                    }
+                    break
+                }
+            }
+            guard typed else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            let deadline = ContinuousClock.now + .seconds(3)
+            while server.count("/login-shown") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            guard server.count("/login-shown") == 1 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+            do { _ = try await browser.captureAgentObservation(document: document); throw ComputerUseFaraAction.Failure.invalidResponse }
+            catch ComputerUseBrowserError.authenticationRequired { }
+            report["status"] = "passed"
+        } catch { failure = error; report["status"] = "failed"; report["failure"] = String(describing: error) }
+        await runtime.shutdown()
+        memory.cancel()
+        let measured = await memory.value
+        let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty
+        report["responses"] = responses
+        report["fixtureRequests"] = server.requestedPaths
+        report["peakSampledProcessMemoryBytes"] = measured.0
+        report["memorySamples"] = measured.1
+        report["ownedProcessExited"] = gone
+        report["totalSeconds"] = Date().timeIntervalSince(began)
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]).write(to: reportURL, options: .atomic)
+        XCTAssertTrue(gone)
+        if let failure { throw failure }
+    }
+
+    private func verifiedFaraRuntimeInputs(environment: [String: String]) async throws -> ComputerUseFaraRuntimeInputs {
+        let assets = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_MODEL_DIRECTORY"]))
+        for (name, expected) in [(ComputerUseFaraRuntimeInputs.modelFileName, "aedd3e6ed7071eb0941a9d86de0f35c16f76eedb9e15dbefa2b4a4e5e7838e51"),
+                                 (ComputerUseFaraRuntimeInputs.projectorFileName, "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d")] {
+            let file = try FileHandle(forReadingFrom: assets.appendingPathComponent(name))
+            defer { try? file.close() }
+            var hash = SHA256()
+            while let chunk = try file.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+        }
+        let directory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let executable = directory.appendingPathComponent("llama-server")
+        guard try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+        return ComputerUseFaraRuntimeInputs(modelURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
+            projectorURL: assets.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName), llamaServerURL: executable)
+    }
+
     func testOptInManagedFaraProposesFrozenTargetAndReleasesWorker() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_FARA_PROPOSAL"] == "1" else { throw XCTSkip("Opt-in: one managed Fara image proposal without input effects") }

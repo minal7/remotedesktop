@@ -1040,6 +1040,38 @@ enum ComputerUseBrowserDOM {
         return ['text','search','date','datetime-local','month','week','time','number','select','checkbox','radio'].includes(control.kind)
           && !!control.label.trim() && !researchValueProtected(element, control);
       }
+      // Image coordinates and native insertion need layout/focus evidence in
+      // addition to the semantic page projection. This stays in the isolated
+      // world, is opt-in for agent input, and never enters model context.
+      function agentInputState() {
+        const elements = [], layout = [], roots = [doc];
+        let visited = 0;
+        while (roots.length) {
+          const walker = doc.createTreeWalker(roots.pop(), NodeFilter.SHOW_ELEMENT);
+          let element;
+          while ((element = walker.nextNode())) {
+            if (++visited > 10000) return null;
+            if (element.shadowRoot) roots.push(element.shadowRoot);
+            const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+            if (!rect.width || !rect.height || style.display === 'none' || style.visibility !== 'visible') continue;
+            elements.push(element);
+            layout.push([rect.x,rect.y,rect.width,rect.height,style.pointerEvents,style.zIndex,style.opacity]);
+          }
+        }
+        let focused = doc.activeElement;
+        for (let depth = 0; focused?.shadowRoot?.activeElement && depth < 16; depth++) focused = focused.shadowRoot.activeElement;
+        const textField = focused instanceof HTMLTextAreaElement || (focused instanceof HTMLInputElement && textTypes.has(focused.type));
+        const field = textField ? [valueGetters[focused instanceof HTMLTextAreaElement ? 1 : 0].call(focused),
+          focused.selectionStart,focused.selectionEnd,focused.selectionDirection] : [];
+        const selection = doc.getSelection();
+        return {elements,layout:JSON.stringify(layout),focused,field:JSON.stringify(field),
+          anchor:selection?.anchorNode,focus:selection?.focusNode,start:selection?.anchorOffset,end:selection?.focusOffset};
+      }
+      function agentInputStateMatches(previous, current) {
+        return !!current && previous.layout === current.layout && previous.focused === current.focused && previous.field === current.field
+          && previous.anchor === current.anchor && previous.focus === current.focus && previous.start === current.start && previous.end === current.end
+          && previous.elements.length === current.elements.length && previous.elements.every((element,index) => element === current.elements[index]);
+      }
       function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
         // The text pass reads rendered text nodes, never form values,
         // innerHTML, scripts or frame documents. A separate opt-in pass below
@@ -1704,12 +1736,16 @@ enum ComputerUseBrowserDOM {
           const includeControlState = command === 'pageSnapshot' ? args.includeControlState === true : lastPageSnapshot?.includeControlState === true;
           const scopedControlIDs = command === 'pageSnapshot' ? [] : lastPageSnapshot?.scopedControlIDs || [];
           const content = pageContent(links, controls, containers, includeControlState, scopedControlIDs), serialized = JSON.stringify(content);
+          const needsAgentState = command === 'pageSnapshot' ? args.agentInput === true : !!lastPageSnapshot?.agentState;
+          const agentState = needsAgentState ? agentInputState() : null;
+          if (needsAgentState && !agentState) { lastPageSnapshot = null; return reply('unsupported'); }
           if (command !== 'pageSnapshot') {
             // Re-read the projection, including rendering and resolved URLs.
             // Mutation records alone miss CSSOM/value-property changes.
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement || serialized !== lastPageSnapshot.serialized
+                || (lastPageSnapshot.agentState && !agentInputStateMatches(lastPageSnapshot.agentState, agentState))
                 || containers.size !== lastPageSnapshot.containers.size
                 || Array.from(containers).some(([id, binding]) => {
                   const previous = lastPageSnapshot.containers.get(id);
@@ -1907,7 +1943,7 @@ enum ComputerUseBrowserDOM {
           }
           const id = nonce();
           formQueries.clear();
-          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
+          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, agentState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');
