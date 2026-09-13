@@ -624,10 +624,10 @@ enum ComputerUseBrowserDOM {
                   // page assessments still reject this changed snapshot.
                   binding.retired = true;
                   const presentationOnly = record.type === 'attributes' && ['class','style'].includes(record.attributeName);
-                  binding.editingRetired = !!binding.editingRetired || !presentationOnly;
+                  binding.nonPresentationRetired = !!binding.nonPresentationRetired || !presentationOnly;
                   const cause = [record.type,record.attributeName || '',record.target.localName || '',record.target === binding.element ? 'self' : 'ancestor'].join('-');
                   binding.retiredCause = binding.retiredCause || cause;
-                  if (!presentationOnly) binding.editingRetiredCause = binding.editingRetiredCause || cause;
+                  if (!presentationOnly) binding.nonPresentationRetiredCause = binding.nonPresentationRetiredCause || cause;
                   lastPageSnapshot.invalidated = true;
                 } else {
                   lastPageSnapshot = null;
@@ -2039,8 +2039,8 @@ enum ComputerUseBrowserDOM {
                   // recipient. Fresh hit, visibility, geometry, value, selection,
                   // metadata and container checks still apply. Activation keeps
                   // the stricter retirement rule, as do identity mutations.
-                  if (previous.retired && (!nativeTextEditing || previous.editingRetired)) return reply('stale-agent-control-retired-'
-                    + ((nativeTextEditing ? previous.editingRetiredCause : previous.retiredCause) || 'unknown'));
+                  if (previous.retired && (!nativeTextEditing || previous.nonPresentationRetired)) return reply('stale-agent-control-retired-'
+                    + ((nativeTextEditing ? previous.nonPresentationRetiredCause : previous.retiredCause) || 'unknown'));
                   if (!agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)) return reply('stale-agent-control-layout');
                   if (!sameSignature) return reply('stale-agent-control-signature');
                   // Catalogue numbers are local to each semantic page read.
@@ -2087,10 +2087,20 @@ enum ComputerUseBrowserDOM {
                 }
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);
-                  if (!previous || previous[1].retired || previous[1].base !== binding.base || previous[1].signature !== binding.signature
-                      || previous[1].agentNavigationKind !== binding.agentNavigationKind || previous[1].fragmentTarget !== binding.fragmentTarget
-                      || !agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)
-                      || JSON.stringify(previous[1].metadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-link');
+                  if (!previous) return reply('stale-agent-link-identity');
+                  // New-context links use the retained URL through native
+                  // navigation, without activating page handlers. Presentation
+                  // updates can preserve that capability; identity, URL, label,
+                  // geometry and point checks still apply. Keys and ordinary
+                  // activation/fragment links retain strict retirement.
+                  const nativeDocumentNavigation = args.focused !== true && binding.agentNavigationKind === 'document';
+                  if (previous[1].retired && (!nativeDocumentNavigation || previous[1].nonPresentationRetired)) return reply('stale-agent-link-retired-' + (previous[1].retiredCause || 'unknown')
+                    + '-nonpresentation-' + (previous[1].nonPresentationRetiredCause || 'none'));
+                  if (previous[1].base !== binding.base) return reply('stale-agent-link-base');
+                  if (previous[1].signature !== binding.signature) return reply('stale-agent-link-signature');
+                  if (previous[1].agentNavigationKind !== binding.agentNavigationKind || previous[1].fragmentTarget !== binding.fragmentTarget) return reply('stale-agent-link-navigation');
+                  if (!agentElementStateMatches(lastPageSnapshot.agentState,agentState,binding.element)) return reply('stale-agent-link-layout');
+                  if (JSON.stringify(previous[1].metadata) !== JSON.stringify(binding.metadata)) return reply('stale-agent-link-metadata');
                   const link = content.links.find(link => link.id === id);
                   if (link?.label.trim()) return {...reply('agent-target'),agentTargetID:previous[0],agentTargetContext:'AXLink • '+link.label,agentTargetNavigationKind:args.focused === true ? null : binding.agentNavigationKind};
                 }

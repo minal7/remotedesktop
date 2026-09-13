@@ -3054,6 +3054,146 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInNativeDocumentLinksSurvivePresentationChangesWithoutActivation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native document link presentation changes") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["body-class", "body-style", "link-style"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/page": .init(body: """
+                    <!doctype html><style>body{height:300vh}a{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh}</style>
+                    <a id='ticket' href='/details' target='_blank' onclick="fetch('/activated')">Ticket Info</a>
+                    """), "/details": .init(body: "<!doctype html><h1>Public ticket information</h1>")])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+            let observation = try await browser.captureAgentObservation(document: document)
+            let mutation = mode == "body-class" ? "document.body.classList.add('background-ready')"
+                : mode == "body-style" ? "document.body.style.backgroundColor='rgb(250,250,250)'" : "ticket.style.color='rgb(10,20,30)'"
+            _ = try await web.evaluateJavaScript(mutation)
+            let action = ComputerUseFaraAction.pointer(mode == "link-style" ? .doubleClick : .leftClick, .init(x: 200, y: 150))
+            var attempts = 0
+            do {
+                let target = try await browser.inspectAgentTarget(action, observation: observation)
+                XCTAssertEqual(target?.navigation, .document)
+                try await browser.performAgentInput(action, observation: observation, operationID: "details", target: target, willBeginEffect: { attempts += 1 })
+            } catch { return XCTFail("Presentation change blocked native document link (\(mode)): \(error); \(browser.lastAgentTargetStatus ?? "none")") }
+            XCTAssertEqual(browser.currentDocument(taskID: mode)?.committedURL, base.appendingPathComponent("details"))
+            XCTAssertEqual(server.count("/details"), 1); XCTAssertEqual(server.count("/activated"), 0); XCTAssertEqual(attempts, 1)
+            do { try await browser.performAgentInput(action, observation: observation, operationID: "replay"); return XCTFail("A native link could replay its observation") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        }
+    }
+
+    @MainActor
+    func testOptInNativeDocumentLinkPresentationExceptionRetainsTargetBoundaries() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: link presentation and activation boundaries") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        let modes = ["href", "href-restored", "target", "target-restored", "role", "role-restored", "ping", "download", "disabled", "label", "replacement", "remove-restore", "base", "hidden", "opacity", "moved", "covered", "ordinary", "enter", "fragment"]
+        for mode in modes {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+                <!doctype html><style>body{height:300vh}a{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh}</style>
+                <a id='ticket' href='/details' target='_blank' onclick="fetch('/activated')">Ticket Info</a>
+                <div id='cover' style='position:fixed;left:-9999px;top:0;width:100vw;height:100vh;z-index:999'></div><h2 id='screenings' style='position:absolute;top:200vh'>Showtimes</h2>
+                <script>window.effects=0;for(const t of ['input','keydown','click'])document.addEventListener(t,()=>effects++);</script>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+            if mode == "ordinary" { _ = try await web.evaluateJavaScript("ticket.target='_self'") }
+            if mode == "enter" { _ = try await web.evaluateJavaScript("ticket.focus()") }
+            if mode == "fragment" { _ = try await web.evaluateJavaScript("ticket.href='#screenings'") }
+            let observation = try await browser.captureAgentObservation(document: document)
+            let mutation: String
+            switch mode {
+            case "href": mutation = "ticket.href='/changed'"
+            case "href-restored": mutation = "ticket.setAttribute('href','/changed');ticket.setAttribute('href','/details')"
+            case "target": mutation = "ticket.target='_self'"
+            case "target-restored": mutation = "ticket.target='_self';ticket.target='_blank'"
+            case "role": mutation = "ticket.setAttribute('role','button')"
+            case "role-restored": mutation = "ticket.setAttribute('role','button');ticket.removeAttribute('role')"
+            case "ping": mutation = "ticket.setAttribute('ping','/tracking')"
+            case "download": mutation = "ticket.setAttribute('download','')"
+            case "disabled": mutation = "ticket.setAttribute('aria-disabled','true')"
+            case "label": mutation = "ticket.textContent='Purchase tickets'"
+            case "replacement": mutation = "ticket.replaceWith(ticket.cloneNode(true))"
+            case "remove-restore": mutation = "const e=ticket;e.remove();document.body.append(e)"
+            case "base": mutation = "document.head.insertAdjacentHTML('beforeend','<base target=_self>')"
+            case "hidden": mutation = "ticket.hidden=true"
+            case "opacity": mutation = "ticket.style.opacity='0'"
+            case "moved": mutation = "ticket.style.transform='translateX(100px)'"
+            case "covered": mutation = "cover.style.left='0px'"
+            default: mutation = "void 0"
+            }
+            _ = try await web.evaluateJavaScript("document.body.classList.add('background-ready');" + mutation)
+            let action: ComputerUseFaraAction = mode == "enter" ? .key(["Enter"]) : .pointer(.leftClick, .init(x: 200, y: 150))
+            var attempts = 0
+            do {
+                try await browser.performAgentInput(action, observation: observation, operationID: "denied", willBeginEffect: { attempts += 1 })
+                return XCTFail("Link presentation exception admitted \(mode)")
+            } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mode) }
+            XCTAssertEqual(attempts, 0, mode)
+            let effects = try await web.evaluateJavaScript("effects")
+            XCTAssertEqual(effects as? Int, 0, mode)
+            XCTAssertEqual(server.count("/details"), 0, mode); XCTAssertEqual(server.count("/changed"), 0, mode)
+            XCTAssertEqual(server.count("/activated"), 0, mode); XCTAssertEqual(server.count("/tracking"), 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInBingOfficialTicketInfoLinkAfterBackgroundDelay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: read-only public link validation, no model or input") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BingTicketInfoLink-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        try browser.claim(taskID: "bing-ticket-info")
+        _ = try await browser.navigate(taskID: "bing-ticket-info", operationID: "fixture", to: URL(string: "https://www.bing.com/search?q=Roxie+Theater+official+tickets+Gotix&FORM=QBLH")!)
+        let observation = try await navigation.captureAgentObservation(taskID: "bing-ticket-info")
+        let screenshot = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+        screenshot.name = "Bing official Ticket Info link"; screenshot.lifetime = .keepAlways; add(screenshot)
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+        let metadata = """
+            JSON.stringify((()=>{
+              const e=Array.from(document.querySelectorAll('a')).find(e=>{
+                const r=e.getBoundingClientRect();return /Ticket Info.*Roxie/i.test(e.textContent)&&r.width>0&&r.height>0&&r.x+r.width/2>0&&r.x+r.width/2<innerWidth&&r.y+r.height/2>0&&r.y+r.height/2<innerHeight;
+              });if(!e)return null;const r=e.getBoundingClientRect();return {label:e.textContent,href:e.href,attributes:Array.from(e.attributes).map(a=>[a.name,a.value]),rect:[r.x,r.y,r.width,r.height],point:[(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]};
+            })())
+            """
+        let beforeValue = try await web.evaluateJavaScript(metadata)
+        let before = try XCTUnwrap(beforeValue as? String)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(before.utf8)) as? [String: Any])
+        let point = try XCTUnwrap(object["point"] as? [Double])
+        try await Task.sleep(for: .seconds(8))
+        let afterValue = try await web.evaluateJavaScript(metadata)
+        let after = try XCTUnwrap(afterValue as? String)
+        var target: ComputerUseOwnedBrowser.AgentTarget?, failure: Error?
+        do { target = try await browser.inspectAgentTarget(.pointer(.leftClick, .init(x: point[0], y: point[1])), observation: observation) }
+        catch { failure = error }
+        let report: [String: Any] = ["before": before, "after": after, "point": point, "status": browser.lastAgentTargetStatus ?? "",
+            "context": target?.context ?? "", "navigation": target?.navigation?.rawValue ?? "", "failure": failure.map { String(reflecting: $0) } ?? "", "modelCalls": 0, "inputCalls": 0]
+        let evidence = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        evidence.name = "Bing delayed link validation"; evidence.lifetime = .keepAlways; add(evidence)
+        XCTAssertNil(failure, "Delayed official link failed: \(browser.lastAgentTargetStatus ?? "none")")
+        XCTAssertEqual(target?.navigation, .document)
+        XCTAssertTrue(target?.context.contains("Ticket Info") == true)
+    }
+
+    @MainActor
     func testOptInNativeRoxieTicketLinkMetadata() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: inspect public movie link metadata without clicking") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
