@@ -195,7 +195,7 @@ struct ComputerUseBrowserNavigationDispatchHistory: Equatable, Sendable, CustomS
     enum CommitBasis: String, Sendable { case responseAndFinish, historyItemAndFinish, instantBackHistoryItem }
     enum Phase: String, Sendable {
         case navigationAction, response, serverRedirect, historyRequest, popupRequest
-        case provisionalStart, documentCommitStarted, documentFinished, navigationFailure, webContentTerminated
+        case provisionalStart, clientRedirectAdmitted, documentCommitStarted, documentFinished, navigationFailure, webContentTerminated
         case locationChanged, unorderedLocationChange
         case observedNavigationEnded
     }
@@ -1470,6 +1470,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
 
     private struct PendingNavigation {
         let id: UUID
+        var navigationCorrelationID = UUID()
         let taskID: String
         let generation: UInt64
         let operationID: String
@@ -1480,6 +1481,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var navigation: WKNavigation?
         var successfulResponseURL: URL?
         var receivedSuccessfulResponse: Bool { successfulResponseURL != nil }
+        var committedURL: URL?
+        var allowedClientRedirectURL: URL?
+        var followedClientRedirect = false
         var readOnlyRequests = true
         var historyOperationID: String?
         var instantBackApproved = false
@@ -3291,7 +3295,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             : (observed != nil ? .observedSlot : .none)
         recordNavigationObservation(phase, decision: decision, url: url, binding: binding, control: control,
             policyCheck: policyCheck, surface: surface, instantBack: instantBack, attemptID: pending?.sourceAttemptID,
-            navigationCorrelationID: pending?.id ?? observed?.id)
+            navigationCorrelationID: pending?.navigationCorrelationID ?? observed?.id)
     }
 
     private func recordNavigationCallback(_ phase: NavigationHistory.Phase, in view: WKWebView, navigation: WKNavigation?,
@@ -3304,7 +3308,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard view === browser else { return }
         if let navigation, let pending, navigation === pending.navigation {
             recordNavigationObservation(phase, url: view.url, binding: .exactPendingNavigation, control: control,
-                attemptID: pending.sourceAttemptID, navigationCorrelationID: pending.id)
+                attemptID: pending.sourceAttemptID, navigationCorrelationID: pending.navigationCorrelationID)
         } else if let navigation, let observed = observedNavigation, navigation === observed.navigation {
             recordNavigationObservation(phase, url: view.url, binding: .exactObservedNavigation, control: control,
                 navigationCorrelationID: observed.id)
@@ -3473,6 +3477,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             else { publish(.issue(.sourceBlocked)) }
             return
         }
+        // A script may replace its document before subresources finish. Only
+        // an allowed GET/HEAD from the exact committed main frame can reserve
+        // a successor. Policy callbacks are slot-bound, not WKNavigation-bound.
+        if let pending, isCurrentNavigationCallback(callback) {
+            self.pending?.allowedClientRedirectURL = nil
+            if pending.historyOperationID == nil, let committed = pending.committedURL,
+               webView.url == committed, navigationAction.sourceFrame.isMainFrame,
+               navigationAction.sourceFrame.request.url == committed, navigationAction.navigationType == .other,
+               ["GET", "HEAD"].contains((navigationAction.request.httpMethod ?? "").uppercased()) {
+                self.pending?.allowedClientRedirectURL = url
+            }
+        }
         decide(.allow, control: appliesPolicy ? .automationAllowed : .userControl,
             policyCheck: appliesPolicy ? (sourcePolicy == nil ? .unconfigured : .permitted) : .notChecked)
     }
@@ -3634,7 +3650,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         if recordCallback { recordNavigationCallback(.provisionalStart, in: webView, navigation: navigation) }
-        guard navigation === pending.navigation else { failPending(id: pending.id, error: .pageChanged); return }
+        guard navigation !== pending.navigation else { return }
+        guard let navigation, let destination = pending.allowedClientRedirectURL,
+              webView.url == destination, pending.committedURL != nil,
+              hasOwnership(taskID: pending.taskID), pending.generation == generation,
+              self.pending?.id == pending.id, sourcePolicy?.permits(destination) != false else {
+            failPending(id: pending.id, error: .pageChanged)
+            return
+        }
+        // Continue the original operation without replaying load() or moving
+        // its deadline. Retire the old native object and require a new response
+        // and commit; old callbacks cannot complete this successor.
+        self.pending?.navigation = navigation
+        self.pending?.navigationCorrelationID = UUID()
+        self.pending?.successfulResponseURL = nil
+        self.pending?.committedURL = nil
+        self.pending?.allowedClientRedirectURL = nil
+        self.pending?.followedClientRedirect = true
+        recordNavigationObservation(.clientRedirectAdmitted, url: destination, binding: .pendingSlot,
+            control: .automationAllowed, attemptID: pending.sourceAttemptID, navigationCorrelationID: self.pending?.navigationCorrelationID)
     }
 
     func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
@@ -3657,6 +3691,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func acceptObservedCommit(in view: WKWebView, navigation: WKNavigation?, url: URL?) {
+        if !isNativeCleanupActive, view === browser, let pending, let navigation,
+           navigation === pending.navigation, pending.generation == generation, taskID == pending.taskID,
+           let url, Self.responseURL(pending.successfulResponseURL, matchesDocumentURL: url) {
+            self.pending?.committedURL = url
+        }
         guard !isNativeCleanupActive, view === browser, let observed = observedNavigation,
               navigation === observed.navigation, observed.generation == generation, taskID == observed.taskID,
               observed.ownershipEpoch == ownershipEpoch, let url,
@@ -3715,6 +3754,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             return
         }
         guard let pending, navigation === pending.navigation else { return }
+        guard pending.allowedClientRedirectURL == nil else { return }
         guard hasOwnership(taskID: pending.taskID), pending.generation == generation else {
             failPending(id: pending.id, error: .ownershipLost)
             return
@@ -3723,7 +3763,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // delivered a response callback for the cached traversal. This reads
         // the existing predicate; admission still requires response OR item.
         let restoredHistory = isCurrentHistoryRestoration(pending)
-        guard pending.receivedSuccessfulResponse || restoredHistory,
+        guard (pending.receivedSuccessfulResponse || restoredHistory),
+              (!pending.followedClientRedirect || pending.committedURL != nil),
               let url = webView.url, Self.validatedURL(url) != nil else {
             failPending(id: pending.id, error: .ownershipLost)
             return

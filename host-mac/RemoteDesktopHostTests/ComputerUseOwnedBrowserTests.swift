@@ -3121,6 +3121,159 @@ final class ComputerUseOwnedBrowserTests: XCTestCase {
         XCTAssertEqual(server.count("/popup"), 0)
     }
 
+    func testCommittedPageCanRedirectBeforeItsSubresourcesFinish() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: """
+                <!doctype html><h1>Redirecting</h1><img src="/slow">
+                <script>document.addEventListener('DOMContentLoaded', () => location.replace('/landing'));</script>
+                """),
+            "/slow": .init(held: true),
+            "/landing": .init(body: "<!doctype html><h1>Final destination</h1>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, navigationTimeout: .seconds(5), mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "client-redirect")
+        let requested = base.appendingPathComponent("start")
+        do {
+            let document = try await browser.navigate(taskID: "client-redirect", operationID: "navigation", to: requested)
+            XCTAssertEqual(document.requestedURL, requested)
+            XCTAssertEqual(document.committedURL, base.appendingPathComponent("landing"))
+            XCTAssertTrue(browser.validate(document))
+            XCTAssertEqual(browser.receipt(taskID: "client-redirect", operationID: "navigation"), document)
+        } catch {
+            let history = try browser.navigationDispatchHistory(taskID: "client-redirect")
+            XCTFail("Client redirect failed: \(error); native trace: \(history.observations.map { "\($0.phase):\($0.binding)" })")
+        }
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(server.count("/slow"), 1)
+        XCTAssertEqual(server.count("/landing"), 1)
+        let history = try browser.navigationDispatchHistory(taskID: "client-redirect")
+        XCTAssertEqual(history.attempts.count, 1)
+        XCTAssertEqual(history.attempts.first?.commitBasis, .responseAndFinish)
+        let commits = history.observations.filter { $0.phase == .documentCommitStarted }
+        XCTAssertEqual(commits.count, 2)
+        XCTAssertNotEqual(commits.first?.navigationCorrelationID, commits.last?.navigationCorrelationID,
+            "The redirect is a different native navigation, not another commit from the original object")
+    }
+
+    func testFragmentDuringPendingLoadDoesNotReserveANewNavigation() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: """
+            <!doctype html><h1 id="section">Section</h1><img src="/slow">
+            <script>document.addEventListener('DOMContentLoaded', () => { location.hash = 'section'; fetch('/changed'); });</script>
+            """), "/slow": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, navigationTimeout: .seconds(3), mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "fragment-loading")
+        let loading = Task { try await browser.navigate(taskID: "fragment-loading", operationID: "open", to: base.appendingPathComponent("start")) }
+        defer { loading.cancel() }
+        try await waitUntil { server.count("/changed") == 1 && server.count("/slow") == 1 }
+        server.releaseHeldResponses()
+        do {
+            let document = try await loading.value
+            XCTAssertEqual(document.committedURL.fragment, "section")
+            XCTAssertTrue(browser.validate(document))
+        } catch { XCTFail("A same-document fragment cannot leave a phantom redirect pending: \(error)") }
+        XCTAssertEqual(server.count("/start"), 1)
+    }
+
+    func testClientRedirectRequiresFreshResponseAndPreservesInterruption() async throws {
+        for mode in ["http-failure", "timeout", "cancel", "take-control", "stop"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/start": .init(body: """
+                    <!doctype html><h1>Redirecting</h1><img src="/slow">
+                    <script>document.addEventListener('DOMContentLoaded', () => location.replace('/landing'));</script>
+                    """), "/slow": .init(held: true),
+                "/landing": .init(status: mode == "http-failure" ? 404 : 200, held: mode != "http-failure")])
+            let base = try await server.start()
+            defer { server.stop() }
+            var allowed = true
+            let browser = ComputerUseOwnedBrowser(presentsWindow: false,
+                navigationTimeout: mode == "timeout" ? .milliseconds(900) : .seconds(5), mayAct: { allowed })
+            defer { browser.close() }
+            try browser.claim(taskID: mode)
+            var effects = 0
+            let loading = Task { try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("start"), willBeginEffect: { effects += 1 }) }
+            defer { loading.cancel() }
+            try await waitUntil { server.count("/landing") == 1 }
+            switch mode {
+            case "cancel": loading.cancel()
+            case "take-control": allowed = false; browser.prepareForUserControl(taskID: mode)
+            case "stop": browser.stop()
+            default: break
+            }
+            do { _ = try await loading.value; XCTFail("\(mode) cannot inherit the first page's success") }
+            catch {
+                if mode == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError,
+                    mode == "http-failure" ? .navigationFailed : (mode == "timeout" ? .deadlineExceeded : .ownershipLost), mode) }
+            }
+            allowed = true
+            server.releaseHeldResponses()
+            try await Task.sleep(for: .milliseconds(60))
+            XCTAssertNil(browser.receipt(taskID: mode, operationID: "open"), mode)
+            XCTAssertNil(browser.currentDocument(taskID: mode), mode)
+            XCTAssertEqual(effects, 1, mode)
+            XCTAssertEqual(server.count("/start"), 1, mode)
+            XCTAssertEqual(server.count("/landing"), 1, mode)
+        }
+    }
+
+    func testClientRedirectRetiresOriginalCallbacksBeforeLandingResponse() async throws {
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: """
+                <!doctype html><h1>Redirecting</h1><img src="/slow">
+                <script>document.addEventListener('DOMContentLoaded', () => location.replace('/landing'));</script>
+                """), "/slow": .init(held: true), "/landing": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop() }
+        var dispatched: (WKWebView, WKNavigation)?
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, nativeNavigationDidDispatch: { view, navigation in
+            if let navigation { dispatched = (view, navigation) }
+        }, mayAct: { true })
+        defer { browser.close() }
+        try browser.claim(taskID: "old-redirect-callbacks")
+        let loading = Task { try await browser.navigate(taskID: "old-redirect-callbacks", operationID: "open", to: base.appendingPathComponent("start")) }
+        defer { loading.cancel() }
+        try await waitUntil { (try? browser.navigationDispatchHistory(taskID: "old-redirect-callbacks").observations.contains { $0.phase == .clientRedirectAdmitted }) == true && server.count("/landing") == 1 }
+        let old = try XCTUnwrap(dispatched)
+        let before = try browser.navigationDispatchHistory(taskID: "old-redirect-callbacks")
+        replayNativeCallbacks(old.1, in: old.0, to: browser)
+        XCTAssertEqual(try browser.navigationDispatchHistory(taskID: "old-redirect-callbacks"), before)
+        XCTAssertNil(browser.receipt(taskID: "old-redirect-callbacks", operationID: "open"))
+        XCTAssertTrue(browser.isLoadingPage)
+        server.releaseHeldResponses()
+        let document = try await loading.value
+        XCTAssertTrue(browser.validate(document))
+        XCTAssertEqual(document.committedURL, base.appendingPathComponent("landing"))
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(server.count("/landing"), 1)
+    }
+
+    func testClientRedirectCannotLeaveAllowedSources() async throws {
+        let outside = try OwnedBrowserHTTPFixture(), outsideURL = try await outside.start()
+        let server = try OwnedBrowserHTTPFixture(routes: ["/start": .init(body: """
+            <!doctype html><h1>Redirecting</h1><img src="/slow">
+            <script>document.addEventListener('DOMContentLoaded', () => location.replace('\(outsideURL.absoluteString)'));</script>
+            """), "/slow": .init(held: true)])
+        let base = try await server.start()
+        defer { server.stop(); outside.stop() }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: { true })
+        defer { browser.close() }
+        let goal = try ComputerUseBrowserGoalInput(taskID: "redirect-source", prompt: "Read the local page", referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles")
+        let session = try browser.prepareWorkflowSession(taskID: goal.taskID)
+        try browser.installSourcePolicy(.init(goal: goal, allowedOrigins: [ComputerUseBrowserSourceOrigin(base)]), replacing: nil, session: session)
+        do {
+            _ = try await browser.navigate(taskID: goal.taskID, operationID: "open", to: base.appendingPathComponent("start"))
+            XCTFail("A client redirect cannot bypass source restrictions")
+        } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
+        XCTAssertEqual(server.count("/start"), 1)
+        XCTAssertEqual(outside.requestCount, 0)
+        XCTAssertNil(browser.receipt(taskID: goal.taskID, operationID: "open"))
+    }
+
     func testHTTPFailureDoesNotProduceSuccessReceipt() async throws {
         let server = try OwnedBrowserHTTPFixture(routes: ["/missing": .init(status: 404)])
         let base = try await server.start()
