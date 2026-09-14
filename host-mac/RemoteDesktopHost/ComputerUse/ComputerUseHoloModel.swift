@@ -1,6 +1,20 @@
 import Foundation
 
-/// Holo's OpenAI tool protocol. The existing browser executor admits effects.
+/// Resolved data-only Holo weights and the signed bundled executable.
+struct ComputerUseHoloRuntimeInputs: Equatable, Sendable {
+    static let modelFileName = "Holo-3.1-4B.Q4_K_M.gguf"
+    static let projectorFileName = "Holo-3.1-4B.mmproj-f16.gguf"
+    let modelURL: URL
+    let projectorURL: URL
+    let llamaServerURL: URL
+    init(modelURL: URL, projectorURL: URL, llamaServerURL: URL) {
+        self.modelURL = modelURL.standardizedFileURL
+        self.projectorURL = projectorURL.standardizedFileURL
+        self.llamaServerURL = llamaServerURL.standardizedFileURL
+    }
+}
+
+/// Holo's OpenAI tool protocol; the selected browser or desktop executor admits effects.
 enum ComputerUseHoloModel {
     static let modelAlias = "holo-browser-v1"
 

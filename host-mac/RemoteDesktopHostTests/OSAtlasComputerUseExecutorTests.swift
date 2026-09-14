@@ -10614,6 +10614,117 @@ final class OSAtlasModelAccessGateTests: XCTestCase {
 
 final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
+    private var holoInputs: ComputerUseHoloRuntimeInputs {
+        .init(modelURL: URL(fileURLWithPath: "/models/Holo-3.1-4B.Q4_K_M.gguf"),
+              projectorURL: URL(fileURLWithPath: "/models/Holo-3.1-4B.mmproj-f16.gguf"),
+              llamaServerURL: nativeTextInputs.llamaServerURL)
+    }
+
+    func testHoloSharesManagedLifecycleButKeepsItsOwnToolProtocol() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseHoloModel.modelAlias,
+            "choices": [["finish_reason": "tool_calls", "message": ["role": "assistant", "content": "", "tool_calls": [
+                ["id": "scroll-1", "type": "function", "function": ["name": "scroll", "arguments": "{\"x\":250,\"y\":500,\"direction\":\"down\",\"distance\":240}"]]]]]]])
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            _ = try await runtime.activateFara(faraInputs)
+            let endpoint = try await runtime.activateHolo(holoInputs)
+            let cached = try await runtime.activateHolo(holoInputs)
+            XCTAssertEqual(endpoint, cached); XCTAssertNil(endpoint.variant)
+            let configurations = await launcher.configurations()
+            XCTAssertEqual(configurations.count, 2)
+            let configuration = try XCTUnwrap(configurations.last), credential = try XCTUnwrap(configuration.authenticationFile)
+            try credential.verify()
+            for (flag, expected) in [("--model", holoInputs.modelURL.path), ("--mmproj", holoInputs.projectorURL.path),
+                ("--alias", ComputerUseHoloModel.modelAlias), ("--ctx-size", "8192"), ("--image-max-tokens", "1536"), ("--parallel", "1"), ("--poll", "0")] {
+                let index = try XCTUnwrap(configuration.arguments.firstIndex(of: flag)); XCTAssertEqual(configuration.arguments[index + 1], expected)
+            }
+            XCTAssertFalse(configuration.arguments.contains(endpoint.bearerToken)); XCTAssertFalse(configuration.arguments.contains("--chat-template"))
+            XCTAssertEqual(configuration.maximumProcessCount, 1)
+            XCTAssertEqual(configuration.resourceProfile.maximumResidentMemoryBytes, 4 * 1_024 * 1_024 * 1_024)
+            let png = try XCTUnwrap(NSBitmapImageRep(data: makeTestJPEG(width: 4, height: 4))?.representation(using: .png, properties: [:]))
+            let input = ComputerUseFaraModel.Input(goal: "Scroll the current pane down.", screenshotPNG: png, surface: .desktop)
+            let proposal = try await runtime.proposeHolo(endpoint: endpoint, input: input)
+            XCTAssertEqual(proposal.action, .scrollAt(horizontal: false, pixels: -240, point: .init(x: 250, y: 500)))
+            do { _ = try await runtime.proposeFara(endpoint: endpoint, input: input); XCTFail("Fara protocol reached Holo") }
+            catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+            let request = try XCTUnwrap(transport.recordedCompletionRequests().first)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, ComputerUseHoloModel.modelAlias)
+            XCTAssertNotNil(body["tools"]); XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+            let values = await events.values()
+            XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Fara1.5-4B-Q4_K_M.gguf")),
+                              try XCTUnwrap(values.firstIndex(of: "launch:Holo-3.1-4B.Q4_K_M.gguf")))
+            await runtime.shutdown(); XCTAssertFalse(FileManager.default.fileExists(atPath: credential.directoryURL.path))
+        } catch { await runtime.shutdown(); throw error }
+    }
+
+    func testHoloCancellationJoinsWorkerAndCannotCancelItsFaraReplacement() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateHolo(holoInputs)
+        let png = try XCTUnwrap(NSBitmapImageRep(data: makeTestJPEG(width: 4, height: 4))?.representation(using: .png, properties: [:]))
+        let input = ComputerUseFaraModel.Input(goal: "Inspect the document.", screenshotPNG: png, surface: .desktop)
+        let proposal = Task { try await runtime.proposeHolo(endpoint: endpoint, input: input) }
+        await transport.waitUntilCompletionStarted(); proposal.cancel()
+        do { _ = try await proposal.value; XCTFail("Cancelled Holo output returned") } catch { XCTAssertTrue(error is CancellationError) }
+        let replacement = try await runtime.activateFara(faraInputs)
+        await runtime.cancel(endpoint: endpoint)
+        let cached = try await runtime.activateFara(faraInputs); XCTAssertEqual(cached, replacement)
+        do { _ = try await runtime.proposeHolo(endpoint: replacement, input: input); XCTFail("Holo protocol reached Fara") }
+        catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+        let values = await events.values()
+        XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Holo-3.1-4B.Q4_K_M.gguf")),
+                          try XCTUnwrap(values.firstIndex(of: "launch:Fara1.5-4B-Q4_K_M.gguf")))
+        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        await runtime.shutdown()
+    }
+
+    func testHoloRejectsWrongDataAndUnder12GBBeforeLaunching() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let runtime = textRuntime(launcher, transports: FakeTransportMaker(events: events))
+        for inputs in [ComputerUseHoloRuntimeInputs(modelURL: faraInputs.modelURL, projectorURL: holoInputs.projectorURL, llamaServerURL: holoInputs.llamaServerURL),
+            .init(modelURL: holoInputs.modelURL, projectorURL: faraInputs.projectorURL, llamaServerURL: holoInputs.llamaServerURL),
+            .init(modelURL: holoInputs.modelURL, projectorURL: holoInputs.projectorURL, llamaServerURL: URL(string: "https://example.invalid/llama-server")!)] {
+            do { _ = try await runtime.activateHolo(inputs); XCTFail("Mismatched/untrusted Holo paths launched") }
+            catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .invalidLocalInstallation) }
+        }
+        let limited = OSAtlasLlamaRuntime(launcher: launcher, transportMaker: FakeTransportMaker(events: events),
+            portProvider: FixedPortProvider(port: 43123), tokenProvider: FixedTokenProvider(token: "fixture"), readinessAttempts: 1, readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector(snapshotValue: .init(physicalMemoryBytes: 12 * 1_024 * 1_024 * 1_024 - 1, reclaimableMemoryBytes: .max)))
+        do { _ = try await limited.activateHolo(holoInputs); XCTFail("12 GB floor ignored") }
+        catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .insufficientPhysicalMemory) }
+        let configurations = await launcher.configurations(); XCTAssertTrue(configurations.isEmpty)
+        await runtime.shutdown(); await limited.shutdown()
+    }
+
+    func testHoloInvalidRequestsAndResponsesStopWorkerBeforeAnotherModelLoads() async throws {
+        for scenario in ["invalid request", "malformed response", "wrong protocol"] {
+            let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+            let wrongProtocol = try JSONSerialization.data(withJSONObject: ["choices": [["finish_reason": "stop", "message": [
+                "role": "assistant", "content": "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"wait\",\"seconds\":0}}</tool_call>"]]]])
+            let transport = FakeTransportMaker(events: events, completionDataResponses: [scenario == "wrong protocol" ? wrongProtocol : Data("invalid JSON".utf8)])
+            let runtime = textRuntime(launcher, transports: transport)
+            let endpoint = try await runtime.activateHolo(holoInputs)
+            let configurations = await launcher.configurations(), credential = try XCTUnwrap(configurations.first?.authenticationFile)
+            let png = try XCTUnwrap(NSBitmapImageRep(data: makeTestJPEG(width: 4, height: 4))?.representation(using: .png, properties: [:]))
+            let input = ComputerUseFaraModel.Input(goal: scenario == "invalid request" ? "" : "Inspect the document.", screenshotPNG: png, surface: .desktop)
+            do { _ = try await runtime.proposeHolo(endpoint: endpoint, input: input); XCTFail("Invalid contract returned an action: \(scenario)") } catch { }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: credential.directoryURL.path), scenario)
+            let stop = await runtime.lastWorkerStop; XCTAssertEqual(stop?.cleanupSucceeded, true)
+            _ = try await runtime.activateFara(faraInputs)
+            do { _ = try await runtime.proposeHolo(endpoint: endpoint, input: input); XCTFail("A failed request reached the replacement") }
+            catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+            let values = await events.values()
+            XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Holo-3.1-4B.Q4_K_M.gguf")),
+                              try XCTUnwrap(values.firstIndex(of: "launch:Fara1.5-4B-Q4_K_M.gguf")))
+            XCTAssertEqual(transport.recordedCompletionRequests().count, scenario == "invalid request" ? 0 : 1)
+            await runtime.shutdown()
+        }
+    }
+
     private var faraInputs: ComputerUseFaraRuntimeInputs {
         .init(modelURL: URL(fileURLWithPath: "/models/Fara1.5-4B-Q4_K_M.gguf"),
               projectorURL: URL(fileURLWithPath: "/models/mmproj-Fara1.5-4B-f16.gguf"),

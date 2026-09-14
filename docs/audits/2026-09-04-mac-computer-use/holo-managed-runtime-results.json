@@ -1,0 +1,282 @@
+{
+  "date": "2026-09-13",
+  "parentCommit": "6916f16686c1ef4b19342078fa7aab31c83b6cd3",
+  "sourceFiles": [
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseHoloModel.swift",
+      "sha256": "be222c1cbcea97a58b19ac0f1fe6c3cae96ea9d98ba348ea675a881823c53458"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift",
+      "sha256": "ef515ce6a5b078a75027839548f136dba1d0ae4d1abd2ca65783d620aa887aa3"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift",
+      "sha256": "2beb7fe62c80106749c5094b6c4f2fdd8c7dada2b834f3c82b2c3bbadcc18a99"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift",
+      "sha256": "b27be73f4ebf9775861fdfb19dfd576d9994d1fe48402dc6fd12e7aeb367c09a"
+    }
+  ],
+  "managedDocument": {
+    "path": ".build/repair-verification/native-desktop-managed-holo-scroll-01-attachments/5F5F788C-D297-4592-A857-57B80C572552.json",
+    "sha256": "bfa150ccb70adc36d1fddfa739cd3f7b1148f470608b016bd114f603690025f3",
+    "report": {
+      "credentialsRemoved": true,
+      "diagnosticWorkerLimitGiB": 5,
+      "dispatchJournalCount": 2,
+      "elapsedSeconds": 59.917781949043274,
+      "failure": "",
+      "fixtureFrontmostAtReturn": true,
+      "fixtureState": {
+        "events": [
+          {
+            "dx": 0,
+            "dy": -500,
+            "precise": true,
+            "type": "scroll"
+          },
+          {
+            "dx": 0,
+            "dy": -800,
+            "precise": true,
+            "type": "scroll"
+          }
+        ],
+        "lowerCodeVisible": true,
+        "maxX": 825,
+        "maxY": 857,
+        "mode": "scroll",
+        "pid": 99506,
+        "x": 0,
+        "y": 857
+      },
+      "goal": "Find and report the lower section code in this document by scrolling vertically. Keep the horizontal position at the left edge and leave the window open.",
+      "managedLaunchCount": 1,
+      "managedRuntime": true,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memorySamples": 483,
+      "ownedWorkerExited": true,
+      "peakWorkerMemoryBytes": 4604428288,
+      "responses": [
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"direction\\\":\\\"down\\\",\\\"distance\\\":500,\\\"x\\\":300,\\\"y\\\":600}\",\"name\":\"scroll\"},\"id\":\"OTsVC1MLiWQs8w5pyP1Vq89RZXhcj0DD\",\"type\":\"function\"}]}",
+          "nativeControlCount": 6
+        },
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"time\\\":0.5}\",\"name\":\"wait\"},\"id\":\"n4LqhMo20HFpdhTXefgIhKQaXPBR5zak\",\"type\":\"function\"}]}",
+          "nativeControlCount": 7
+        },
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"direction\\\":\\\"down\\\",\\\"distance\\\":800,\\\"x\\\":300,\\\"y\\\":650}\",\"name\":\"scroll\"},\"id\":\"fqGoy2oFNbFpgW5O3S8Lq5q3kk8pWXBH\",\"type\":\"function\"}]}",
+          "nativeControlCount": 7
+        },
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"content\\\":\\\"The lower section code in the document is: **FJ-482**\\\\n\\\\nThis code was found in a modal window titled \\\\\\\"Remote Desktop native scroll fixture\\\\\\\" that appeared after scrolling through the document. The modal displays the text \\\\\\\"Lower section code: FJ-482\\\\\\\" in its content area.\\\"}\",\"name\":\"answer\"},\"id\":\"Y6NZbViMgWbQJkjvJZy497skJEHaxNvN\",\"type\":\"function\"}]}",
+          "nativeControlCount": 6
+        }
+      ],
+      "result": "completed(\"The lower section code in the document is: **FJ-482**\\n\\nThis code was found in a modal window titled \\\"Remote Desktop native scroll fixture\\\" that appeared after scrolling through the document. The modal displays the text \\\"Lower section code: FJ-482\\\" in its content area.\")",
+      "revalidation": {},
+      "scope": "managed-Holo-native-scroll",
+      "wholeApp12GBQualified": false,
+      "workerStop": {
+        "cleanupSucceeded": true,
+        "generation": 1,
+        "reason": {
+          "requested": {}
+        }
+      }
+    }
+  },
+  "loginRegression": {
+    "path": ".build/repair-verification/holo-managed-runtime-regressions-01-attachments/490E76D5-401E-47D2-BD72-0169E9DA3BA0.json",
+    "sha256": "9ba2841b5ccde03923f80d4169f13e5a5802bbc2ff2ca9b6faf1264573d5ac44",
+    "report": {
+      "completedWithoutReplay": true,
+      "independentFieldVerification": true,
+      "inference": false,
+      "nativeInput": true,
+      "proposals": 7,
+      "simulatedLogin": true,
+      "trace": [
+        "proposal=0 error=none signed=true editable=true",
+        "proposal=1 error=none signed=true editable=true",
+        "clickPoint=534.0,732.0 targetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+        "afterDelayTargetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+        "proposal=2 error=none signed=true editable=true",
+        "proposal=3 error=none signed=true editable=true",
+        "proposal=4 error=none signed=true editable=true",
+        "proposal=5 error=none signed=true editable=true",
+        "proposal=6 error=none signed=true editable=true"
+      ],
+      "verifiedDispatches": 5
+    }
+  },
+  "finalObservation": {
+    "path": ".build/repair-verification/native-desktop-managed-holo-scroll-01-attachments/8AD4B374-4C64-4870-A6AF-FACE9B50864D.png",
+    "sha256": "303bc9b1e3ad3659d1cfd155291928bab063b715880a44d6f0f33c1a8bfe8e5e"
+  },
+  "modelAssets": {
+    "repository": "mradermacher/Holo-3.1-4B-GGUF",
+    "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+    "upstream": "Hcompany/Holo-3.1-4B",
+    "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+    "files": [
+      {
+        "name": "Holo-3.1-4B.Q4_K_M.gguf",
+        "bytes": 3066386464,
+        "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+      },
+      {
+        "name": "Holo-3.1-4B.mmproj-f16.gguf",
+        "bytes": 672424256,
+        "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+      }
+    ]
+  },
+  "scope": "Holo support in the app's managed llama.cpp runtime, with retained-worker native document verification",
+  "repair": [
+    "Typed Holo inputs select Holo's model/projector names and request alias. The signed bundled executable and installer/test asset verification remain separate from runtime path-shape admission.",
+    "Fara and Holo use one launch argument path for their shared 8K context, image/batch limits, private API-key file, loopback-only transport and one-worker process policy. Each retains its own request builder, decoder and active-endpoint family checks.",
+    "Holo activation uses the existing serialized model owner, generation-scoped cancellation, join-before-replacement lifecycle, resource reporting and cleanup. Cached activation reuses the same endpoint.",
+    "Wrong model/projector/executable paths and physical memory below 12 GiB reject before launch. Holo and Fara default to the unchanged 4 GiB worker ceiling.",
+    "The standard runtime constructor now accepts a launcher while keeping its real loopback port, token, HTTP and resource implementations. The Foundation launcher is internal so an opt-in XCTest wrapper can change only the worker ceiling to 5 GiB and delegate actual launch, identity, monitoring and join behavior.",
+    "The native document test hashes both pinned Holo data files, verifies the signed verification-host runtime path, and reuses the managed runtime across proposals. No Python diagnostic worker executes this trial."
+  ],
+  "attempts": [
+    {
+      "bundle": ".build/repair-verification/holo-managed-runtime-red-01.xcresult",
+      "log": ".build/repair-verification/holo-managed-runtime-red-01.log",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 3,
+        "skippedTests": 0,
+        "startTime": 1789367234.455,
+        "finishTime": 1789367360.055,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"invalidLocalInstallation\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "OSAtlasLlamaRuntimeTests/testHoloCancellationJoinsWorkerAndCannotCancelItsFaraReplacement()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testHoloCancellationJoinsWorkerAndCannotCancelItsFaraReplacement",
+            "testName": "testHoloCancellationJoinsWorkerAndCannotCancelItsFaraReplacement()"
+          },
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.OSAtlasLlamaRuntimeError.invalidLocalInstallation)\") is not equal to (\"Optional(RemoteDesktopHost.OSAtlasLlamaRuntimeError.insufficientPhysicalMemory)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "OSAtlasLlamaRuntimeTests/testHoloRejectsWrongDataAndUnder12GBBeforeLaunching()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testHoloRejectsWrongDataAndUnder12GBBeforeLaunching",
+            "testName": "testHoloRejectsWrongDataAndUnder12GBBeforeLaunching()"
+          },
+          {
+            "failureText": "failed: caught error: \"invalidLocalInstallation\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 3,
+            "testIdentifierString": "OSAtlasLlamaRuntimeTests/testHoloSharesManagedLifecycleButKeepsItsOwnToolProtocol()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testHoloSharesManagedLifecycleButKeepsItsOwnToolProtocol",
+            "testName": "testHoloSharesManagedLifecycleButKeepsItsOwnToolProtocol()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/holo-managed-runtime-green-01.xcresult",
+      "log": ".build/repair-verification/holo-managed-runtime-green-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 6,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789367442.911,
+        "finishTime": 1789367530.963,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/holo-managed-runtime-final-01.xcresult",
+      "log": ".build/repair-verification/holo-managed-runtime-final-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 3,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789367629.909,
+        "finishTime": 1789367705.455,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-managed-holo-scroll-01.xcresult",
+      "log": ".build/repair-verification/native-desktop-managed-holo-scroll-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789367724.961,
+        "finishTime": 1789367788.707,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/holo-managed-runtime-regressions-01.xcresult",
+      "log": ".build/repair-verification/holo-managed-runtime-regressions-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 5,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789367891.697,
+        "finishTime": 1789367927.176,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    }
+  ],
+  "verification": {
+    "red": "Three executed tests reproduce missing Holo activation/lifecycle/resource-floor support.",
+    "green": "Three Holo methods and three existing Fara methods pass managed activation, cache reuse, tool protocol isolation, private credentials, one-worker/4 GiB limits, cancellation, join-before-replacement and stale cancellation/request rejection.",
+    "finalBuild": "The managed diagnostic launcher and native fixture workflow compile; three Holo lifecycle methods pass.",
+    "errorAndRegressionChecks": "Three invalid request/response scenarios stop and join Holo before Fara replacement and remove credentials. Three Fara lifecycle/resource methods and native exact Unicode/simulated login/Resume pass after the final source build.",
+    "managedTaskOracle": "Four proposals, including one wait, produce exactly two native wheel events and reveal the correct code. Horizontal position stays zero; the fixture remains open/frontmost, terminal replay emits no input, one managed worker serves the task and exits on requested shutdown.",
+    "managedTaskSeconds": 59.917781949043274,
+    "managedWorkerPeakBytes": 4604428288,
+    "managedWorkerSamples": 483,
+    "newDistinctPassingMacMethods": 5,
+    "conservativeHistoricalMacMinimum": 347,
+    "historicalIOSMinimum": 10,
+    "fullSuite": false,
+    "sourceTiming": "The real managed trial used the final executable production behavior. Later changes add an error-path test and correct a comment; the final regression attempt recompiles the current source."
+  },
+  "acceptance": {
+    "managedRuntimeComponent": "Implemented, compiled and tested",
+    "taskOraclePassed": true,
+    "fullAnswerAccuracyAccepted": false,
+    "productionNativeRoutingAccepted": false,
+    "productionSelectionChanged": false,
+    "productionWorkerLimitGiB": 4,
+    "diagnosticWorkerLimitGiB": 5,
+    "targetMacRAMGB": 12,
+    "wholeApp12GBQualified": false,
+    "limits": [
+      "The correct code is reported, but the extra answer narrative falsely says a modal appeared after scrolling. The actual fixture window existed throughout. The literal escape sequences in the answer are also retained. Full answer accuracy is not accepted.",
+      "This managed worker peak exceeds the unchanged 4 GiB production ceiling. The explicit 5 GiB diagnostic test is not production resource qualification.",
+      "Holo still lacks production package selection and native task routing through the full host/client composition. The default Fara browser loader is unchanged.",
+      "General desktop actions, cross-app tasks, broad browser workflows, real provider login, physical phone controls, whole-app memory/swap and thermal behavior remain open.",
+      "The earlier intermittent native pointer-pixel rejection remains unresolved. No window mask, coordinate correction, fixture answer or domain-specific production branch was introduced."
+    ]
+  }
+}

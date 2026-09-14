@@ -609,7 +609,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let resourceProfile: OSAtlasLlamaResourceProfile
     let routerPresetFile: OSAtlasLlamaRouterPresetFile?
     let authenticationFile: OSAtlasLlamaPrivateFile?
-    let isFara: Bool
+    private let trainedVisionAlias: String?
 
     init(
         executableURL: URL,
@@ -629,7 +629,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.resourceProfile = resourceProfile
         routerPresetFile = nil
         authenticationFile = nil
-        isFara = false
+        trainedVisionAlias = nil
     }
 
     init(
@@ -651,7 +651,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.resourceProfile = resourceProfile
         self.routerPresetFile = routerPresetFile
         authenticationFile = nil
-        isFara = false
+        trainedVisionAlias = nil
     }
 
     init(nativeTextInputs: ComputerUseNativeTextRuntimeInputs,
@@ -666,7 +666,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         resourceProfile = .compact
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
-        isFara = false
+        trainedVisionAlias = nil
     }
 
     init(faraInputs: ComputerUseFaraRuntimeInputs, port: UInt16, bearerToken: String,
@@ -679,14 +679,27 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         resourceProfile = .fara
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
-        isFara = true
+        trainedVisionAlias = ComputerUseFaraRuntimeInputs.modelAlias
+    }
+
+    init(holoInputs: ComputerUseHoloRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile, resourceProfile: OSAtlasLlamaResourceProfile = .fara) {
+        executableURL = holoInputs.llamaServerURL
+        workingDirectoryURL = holoInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = holoInputs.modelURL
+        multimodalProjectorURL = holoInputs.projectorURL
+        self.port = port; self.bearerToken = bearerToken
+        self.resourceProfile = resourceProfile
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = ComputerUseHoloModel.modelAlias
     }
 
     var arguments: [String] {
-        if isFara, let authenticationFile, let multimodalProjectorURL {
+        if let trainedVisionAlias, let authenticationFile, let multimodalProjectorURL {
             return [
                 "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
-                "--alias", ComputerUseFaraRuntimeInputs.modelAlias,
+                "--alias", trainedVisionAlias,
                 "--host", Self.host, "--port", String(port), "--api-key-file", authenticationFile.fileURL.path,
                 "--offline", "--no-ui", "--log-disable", "--parallel", "1", "--no-cont-batching",
                 "--ctx-size", String(resourceProfile.contextSize), "--no-context-shift",
@@ -1170,6 +1183,7 @@ actor OSAtlasLlamaRuntime {
         case visual(OSAtlasLlamaRuntimeInputs)
         case nativeText(ComputerUseNativeTextRuntimeInputs)
         case fara(ComputerUseFaraRuntimeInputs)
+        case holo(ComputerUseHoloRuntimeInputs)
         case router(
             visual: OSAtlasLlamaRuntimeInputs,
             semanticModelURL: URL)
@@ -1178,7 +1192,7 @@ actor OSAtlasLlamaRuntime {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
-            case .nativeText, .fara:
+            case .nativeText, .fara, .holo:
                 return nil
             }
         }
@@ -1192,6 +1206,13 @@ actor OSAtlasLlamaRuntime {
             if case .fara(let inputs) = self { return inputs }
             return nil
         }
+
+        var holo: ComputerUseHoloRuntimeInputs? {
+            if case .holo(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var isTrainedVision: Bool { fara != nil || holo != nil }
 
         var isRouter: Bool {
             if case .router = self { return true }
@@ -1268,8 +1289,8 @@ actor OSAtlasLlamaRuntime {
     /// keeps another request from unloading the worker currently completing.
     private let modelAccessGate = OSAtlasModelAccessGate()
 
-    init() {
-        launcher = FoundationOSAtlasLlamaServerLauncher()
+    init(launcher: any OSAtlasLlamaServerLaunching = FoundationOSAtlasLlamaServerLauncher()) {
+        self.launcher = launcher
         transportMaker = URLSessionOSAtlasTransportMaker()
         portProvider = LoopbackPortProvider()
         tokenProvider = RandomBearerTokenProvider()
@@ -1312,6 +1333,33 @@ actor OSAtlasLlamaRuntime {
         try await activateResolved(.fara(inputs))
     }
 
+    func activateHolo(_ inputs: ComputerUseHoloRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.holo(inputs))
+    }
+
+    func proposeHolo(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.holo != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return try ComputerUseHoloModel.decode(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
     /// Starts one b9992 router process with exactly two generated presets.
     /// Autoload is disabled: standard hosts explicitly load both fixed workers,
     /// while compact hosts load visual first and switch one worker on demand.
@@ -1336,6 +1384,10 @@ actor OSAtlasLlamaRuntime {
             try Self.validateNativeTextInputs(textInputs)
         } else if let faraInputs = inputs.fara {
             try Self.validateFaraInputs(faraInputs)
+        } else if let holoInputs = inputs.holo {
+            try Self.validateTrainedVisionInputs(modelURL: holoInputs.modelURL, projectorURL: holoInputs.projectorURL,
+                llamaServerURL: holoInputs.llamaServerURL, modelFileName: ComputerUseHoloRuntimeInputs.modelFileName,
+                projectorFileName: ComputerUseHoloRuntimeInputs.projectorFileName)
         }
         if let semanticModelURL = inputs.semanticModelURL {
             try Self.validateSemanticModelURL(semanticModelURL)
@@ -2114,7 +2166,7 @@ actor OSAtlasLlamaRuntime {
             do {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
-                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil, fara: inputs.fara != nil)
+                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil, trainedVision: inputs.isTrainedVision)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -2128,6 +2180,10 @@ actor OSAtlasLlamaRuntime {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
                     configuration = .init(faraInputs: faraInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let holoInputs = inputs.holo {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(holoInputs: holoInputs, port: port, bearerToken: token, authenticationFile: authentication)
                 } else if let textInputs = inputs.nativeText {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
@@ -2184,7 +2240,7 @@ actor OSAtlasLlamaRuntime {
                     transport: transport,
                     routerPresetFile: pendingPresetFile,
                     authenticationFile: pendingAuthenticationFile,
-                    residentModels: inputs.isRouter || inputs.nativeText != nil || inputs.fara != nil
+                    residentModels: inputs.isRouter || inputs.nativeText != nil || inputs.isTrainedVision
                         ? []
                         : [.visualGrounder],
                     residencyGeneration: inputs.isRouter ? 0 : 1)
@@ -2351,9 +2407,9 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch(nativeText: Bool = false, fara: Bool = false) throws -> OSAtlasLlamaResourceProfile {
+    private func resourceProfileForLaunch(nativeText: Bool = false, trainedVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
-        guard !fara || snapshot.physicalMemoryBytes >= 12 * 1_024 * 1_024 * 1_024 else {
+        guard !trainedVision || snapshot.physicalMemoryBytes >= 12 * 1_024 * 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(
@@ -2363,7 +2419,7 @@ actor OSAtlasLlamaRuntime {
         }
         // Text always uses the measured 4K context and a single 4 GiB process
         // ceiling. This budget is not a claim of physical 8 GiB qualification.
-        let profile: OSAtlasLlamaResourceProfile = fara ? .fara : nativeText ? .compact : hardwareProfile
+        let profile: OSAtlasLlamaResourceProfile = trainedVision ? .fara : nativeText ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
@@ -2465,13 +2521,19 @@ actor OSAtlasLlamaRuntime {
     }
 
     private static func validateFaraInputs(_ inputs: ComputerUseFaraRuntimeInputs) throws {
-        try validateSemanticModelURL(inputs.modelURL)
-        try validateSemanticModelURL(inputs.projectorURL)
-        guard inputs.modelURL.lastPathComponent == ComputerUseFaraRuntimeInputs.modelFileName,
-              inputs.projectorURL.lastPathComponent == ComputerUseFaraRuntimeInputs.projectorFileName,
-              inputs.modelURL != inputs.projectorURL,
-              inputs.llamaServerURL.isFileURL, inputs.llamaServerURL.lastPathComponent == "llama-server",
-              !inputs.llamaServerURL.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+        try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL, llamaServerURL: inputs.llamaServerURL,
+            modelFileName: ComputerUseFaraRuntimeInputs.modelFileName, projectorFileName: ComputerUseFaraRuntimeInputs.projectorFileName)
+    }
+
+    private static func validateTrainedVisionInputs(modelURL: URL, projectorURL: URL, llamaServerURL: URL,
+        modelFileName: String, projectorFileName: String) throws {
+        try validateSemanticModelURL(modelURL)
+        try validateSemanticModelURL(projectorURL)
+        guard modelURL.lastPathComponent == modelFileName,
+              projectorURL.lastPathComponent == projectorFileName,
+              modelURL != projectorURL,
+              llamaServerURL.isFileURL, llamaServerURL.lastPathComponent == "llama-server",
+              !llamaServerURL.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
         }
     }
@@ -3334,7 +3396,7 @@ final class OSAtlasLlamaServerLifetimeLease: @unchecked Sendable {
     }
 }
 
-private struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching {
+struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching {
     private let processInspector = DarwinOSAtlasProcessInspector()
     private let processReaper = OSAtlasExclusiveProcessReaper()
 

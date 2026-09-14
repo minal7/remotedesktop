@@ -74,10 +74,57 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runNativeScrollFixture(useHolo: true)
     }
 
-    private func runNativeScrollFixture(useHolo: Bool) async throws {
+    func testOptInManagedHoloScrollsANativeDocumentAndJoinsItsWorker() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_HOLO_DESKTOP_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in managed Holo with explicit diagnostic 5 GiB worker cap") }
+        try await runNativeScrollFixture(useHolo: true, managedHolo: true)
+    }
+
+    private static func managedHoloInputs(_ environment: [String: String]) async throws -> ComputerUseHoloRuntimeInputs {
+        let directory = URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_ASSETS"]))
+        for (name, expected) in [(ComputerUseHoloRuntimeInputs.modelFileName, "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"),
+            (ComputerUseHoloRuntimeInputs.projectorFileName, "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f")] {
+            let handle = try FileHandle(forReadingFrom: directory.appendingPathComponent(name)); defer { try? handle.close() }
+            var hash = SHA256()
+            while let chunk = try handle.read(upToCount: 4 * 1_024 * 1_024), !chunk.isEmpty { hash.update(data: chunk) }
+            guard hash.finalize().map({ String(format: "%02x", $0) }).joined() == expected else { throw OSAtlasLlamaRuntimeError.invalidLocalInstallation }
+        }
+        let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let executable = runtimeDirectory.appendingPathComponent("llama-server")
+        guard executable.standardizedFileURL == URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_BINARY"])).standardizedFileURL,
+              try DarwinOSAtlasProcessInspector().matchingProcesses(for: executable).isEmpty else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+        return .init(modelURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.modelFileName),
+            projectorURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.projectorFileName), llamaServerURL: executable)
+    }
+
+    /// Only this opt-in XCTest launcher changes the process ceiling. The
+    /// standard launcher still owns credentials, identity, signals and joins.
+    private final class ManagedHoloTestLauncher: OSAtlasLlamaServerLaunching, @unchecked Sendable {
+        private let lock = NSLock()
+        private var directories: [URL] = []
+        var credentialDirectories: [URL] { lock.lock(); defer { lock.unlock() }; return directories }
+        private func record(_ directory: URL) { lock.lock(); defer { lock.unlock() }; directories.append(directory) }
+        func launch(configuration: OSAtlasLlamaLaunchConfiguration) async throws -> any OSAtlasLlamaServerProcess {
+            guard configuration.arguments.contains(ComputerUseHoloModel.modelAlias), let projector = configuration.multimodalProjectorURL,
+                  let credential = configuration.authenticationFile else { throw OSAtlasLlamaRuntimeError.invalidLocalInstallation }
+            let base = configuration.resourceProfile
+            let diagnostic = OSAtlasLlamaResourceProfile(tier: base.tier, contextSize: base.contextSize,
+                logicalBatchSize: base.logicalBatchSize, physicalBatchSize: base.physicalBatchSize,
+                maximumResidentMemoryBytes: 5 * 1_024 * 1_024 * 1_024,
+                minimumLaunchMemoryBytes: base.minimumLaunchMemoryBytes, minimumInferenceMemoryBytes: base.minimumInferenceMemoryBytes)
+            let inputs = ComputerUseHoloRuntimeInputs(modelURL: configuration.modelFirstSplitURL, projectorURL: projector, llamaServerURL: configuration.executableURL)
+            record(credential.directoryURL)
+            return try await FoundationOSAtlasLlamaServerLauncher().launch(configuration: .init(holoInputs: inputs,
+                port: configuration.port, bearerToken: configuration.bearerToken, authenticationFile: credential, resourceProfile: diagnostic))
+        }
+    }
+
+    private func runNativeScrollFixture(useHolo: Bool, managedHolo: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_COMPUTER_USE_NATIVE_SCROLL_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in disposable AppKit scroll fixture") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
+        let managedInputs = managedHolo ? try await Self.managedHoloInputs(environment) : nil
+        let managedLauncher = ManagedHoloTestLauncher()
+        let managedRuntime = managedHolo ? OSAtlasLlamaRuntime(launcher: managedLauncher) : nil
         let executable = try XCTUnwrap(environment["COMPUTER_USE_TEXT_FIXTURE_EXECUTABLE"])
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -140,8 +187,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     width: window.width / screen.displayBounds.width * CGFloat(image.width), height: window.height / screen.displayBounds.height * CGFloat(image.height)).integral
                 let attachment = XCTAttachment(image: NSImage(cgImage: try XCTUnwrap(image.cropping(to: crop)), size: .zero))
                 attachment.name = "Native scroll observation \(responses.count)"; attachment.lifetime = .keepAlways; self.add(attachment)
-                proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
-                    index: responses.count, environment: environment, memoryLimitGiB: 5, registerProbe: { diagnosticProbe = $0 }))
+                if let managedRuntime, let managedInputs {
+                    let endpoint = try await managedRuntime.activateHolo(managedInputs)
+                    proposal = try await .init(managedRuntime.proposeHolo(endpoint: endpoint, input: input))
+                    try Data(proposal.response.utf8).write(to: proposalDirectory.appendingPathComponent("response-\(responses.count).json"), options: .withoutOverwriting)
+                } else {
+                    proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
+                        index: responses.count, environment: environment, memoryLimitGiB: 5, registerProbe: { diagnosticProbe = $0 }))
+                }
             } else if responses.count == steps.count {
                 proposal = .init(response: "done", action: .reportCompletion("Verified native scrolling."))
             } else {
@@ -154,24 +207,50 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }
             responses.append(["response": proposal.response, "actionError": input.actionError ?? "", "nativeControls": input.nativeControls?.jsonObject ?? [:]])
             return proposal
-        }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil })
+        }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil; await managedRuntime?.shutdown() })
+        let memory = managedInputs.map { inputs in Task.detached { () -> (UInt64, Int) in
+            var peak: UInt64 = 0, samples = 0
+            while !Task.isCancelled {
+                for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL)) ?? [] {
+                    if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) { peak = max(peak, bytes); samples += 1 }
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            return (peak, samples)
+        } }
+        defer { memory?.cancel() }
         let run = Task { try await executor.execute(taskID: "native-scroll", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
         let deadline = Task { try await Task.sleep(for: .seconds(useHolo ? 90 : 40)); run.cancel() }
         var result: ComputerUseExecutionResult?, failure: Error?
         do { result = try await run.value } catch { failure = error }
         deadline.cancel()
+        memory?.cancel()
+        let memoryResult = await memory?.value
         let final = try read(), journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("journals"), includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
         let dispatches = journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count
         let workersGone = useHolo ? try DarwinOSAtlasProcessInspector().matchingProcesses(for: URL(fileURLWithPath: XCTUnwrap(environment["HOLO_BINARY"]))).isEmpty : true
-        let report: [String: Any] = ["scope": useHolo ? "actual-Holo-native-scroll" : "scripted-native-scroll", "goal": goal,
+        let workerStop = await managedRuntime?.lastWorkerStop
+        var report: [String: Any] = ["scope": managedHolo ? "managed-Holo-native-scroll" : useHolo ? "actual-Holo-native-scroll" : "scripted-native-scroll", "goal": goal,
             "responses": responses, "fixtureState": final, "dispatchJournalCount": dispatches, "elapsedSeconds": Date().timeIntervalSince(started),
             "result": result.map { String(describing: $0) } ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
             "revalidation": executor.lastRevalidationDiagnostic, "ownedWorkerExited": workersGone, "diagnosticWorkerLimitGiB": useHolo ? 5 : 0,
             "wholeApp12GBQualified": false, "fixtureFrontmostAtReturn": NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier]
+        if managedHolo {
+            report["managedRuntime"] = true; report["managedLaunchCount"] = managedLauncher.credentialDirectories.count
+            report["peakWorkerMemoryBytes"] = memoryResult?.0 ?? 0; report["memorySamples"] = memoryResult?.1 ?? 0
+            report["memoryMetric"] = "sampled max of resident size and physical footprint"
+            report["credentialsRemoved"] = managedLauncher.credentialDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }
+            if let workerStop { report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(workerStop)) }
+        }
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
         attachment.name = "Native scroll workflow"; attachment.lifetime = .keepAlways; add(attachment)
         XCTAssertTrue(workersGone)
+        if managedHolo {
+            XCTAssertEqual(managedLauncher.credentialDirectories.count, 1, "The managed worker must be reused across proposals")
+            XCTAssertTrue(managedLauncher.credentialDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+            XCTAssertEqual(workerStop?.cleanupSucceeded, true)
+        }
         if let failure { return XCTFail("Native scroll failed: \(failure); \(executor.lastRevalidationDiagnostic)") }
         guard case .completed(let answer) = result else { return XCTFail("Native scroll did not complete: \(String(describing: result))") }
         XCTAssertTrue(process.isRunning); XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
