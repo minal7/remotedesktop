@@ -71,6 +71,7 @@
 		043599D304B31F36D0D065F0 /* ComputerUseOwnedBrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3661C3A4B17523D266035837 /* ComputerUseOwnedBrowserTests.swift */; };
 		082B668E5F22EF574A022B14 /* ComputerUseTextGoalPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33764DC44EC22E8367A25F4D /* ComputerUseTextGoalPlanner.swift */; };
 		A7D0C8E678144786A1D44450 /* ComputerUseMCPDocumentTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D0C8E678144786A1D44451 /* ComputerUseMCPDocumentTask.swift */; };
+		A7D0C8E678144786A1D44550 /* ComputerUseMCPBrowserStepPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D0C8E678144786A1D44551 /* ComputerUseMCPBrowserStepPlanner.swift */; };
 		0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7893923A36DECAC9886D28EF /* HostSession.swift */; };
 		0B188FC0D9277C223393FC7F /* ComputerUseHTTPDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 78822BFE81EBBCDA015B9FE4 /* ComputerUseHTTPDownloader.swift */; };
 		0BDF187861C7C7A6E4EF3AF6 /* ComputerUseTaskLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */; };
@@ -396,6 +397,7 @@
 		3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		33764DC44EC22E8367A25F4D /* ComputerUseTextGoalPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextGoalPlanner.swift; sourceTree = "<group>"; };
 		A7D0C8E678144786A1D44451 /* ComputerUseMCPDocumentTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseMCPDocumentTask.swift; sourceTree = "<group>"; };
+		A7D0C8E678144786A1D44551 /* ComputerUseMCPBrowserStepPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseMCPBrowserStepPlanner.swift; sourceTree = "<group>"; };
 		3661C3A4B17523D266035837 /* ComputerUseOwnedBrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseOwnedBrowserTests.swift; sourceTree = "<group>"; };
 		37BA471798CCE46AB3ED62F5 /* ComputerUseLicenseComplianceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLicenseComplianceTests.swift; sourceTree = "<group>"; };
 		39FE1E3654B6C097036EB8BC /* ComputerUseObservationWorkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseObservationWorkerTests.swift; sourceTree = "<group>"; };
@@ -858,6 +860,7 @@
 				D7DF1C2610174B22069E10D7 /* ComputerUseTextEditor.swift */,
 				33764DC44EC22E8367A25F4D /* ComputerUseTextGoalPlanner.swift */,
 				A7D0C8E678144786A1D44451 /* ComputerUseMCPDocumentTask.swift */,
+				A7D0C8E678144786A1D44551 /* ComputerUseMCPBrowserStepPlanner.swift */,
 				552B1D1A5E75FF516E92A88E /* ComputerUseTextStepStore.swift */,
 				3027DBC19074EFB6AB175D55 /* ComputerUseTextTask.swift */,
 				87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */,
@@ -1315,6 +1318,7 @@
 				C925C66799364F1247DD0434 /* ComputerUseTextEditor.swift in Sources */,
 				082B668E5F22EF574A022B14 /* ComputerUseTextGoalPlanner.swift in Sources */,
 				A7D0C8E678144786A1D44450 /* ComputerUseMCPDocumentTask.swift in Sources */,
+				A7D0C8E678144786A1D44550 /* ComputerUseMCPBrowserStepPlanner.swift in Sources */,
 				746750FC5D04FDA4281C12A7 /* ComputerUseTextStepStore.swift in Sources */,
 				2F34B7B243FAEA2CFCA96DCA /* ComputerUseTextTask.swift in Sources */,
 				54C1AC89B9CC946B1165A237 /* DesktopVideoQuality.swift in Sources */,

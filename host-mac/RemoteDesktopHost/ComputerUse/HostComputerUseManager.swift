@@ -1045,6 +1045,7 @@ final class ComputerUseHostTools {
     private let textTarget: any ComputerUseNativeTextTarget
     private let textEditorOverride: ComputerUseTextEditor?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
+    private var browserToolProposals: (id: UUID, taskID: String, propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools)?
     private var browserResearchAdmissionObserver: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)?
     private var browserTaskControls: ComputerUseBrowserTaskControls?
     private var browserTaskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
@@ -1261,6 +1262,35 @@ final class ComputerUseHostTools {
     func closeOwnedBrowser() {
         browserNavigationTask?.close()
         browserNavigationTask = nil
+    }
+
+    var hasOwnedBrowserToolProposals: Bool { browserToolProposals != nil }
+
+    func withOwnedBrowserToolProposals(taskID: String, propose: @escaping ComputerUseFaraBrowserExecutor.ProposeUsingTools,
+        operation: () async throws -> ComputerUseExecutionResult) async throws -> ComputerUseExecutionResult {
+        guard browserToolProposals == nil else { throw ComputerUseTaskExecutionError.alreadyExecuting }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        let id = UUID()
+        browserToolProposals = (id, taskID, propose)
+        defer { if browserToolProposals?.id == id { browserToolProposals = nil } }
+        return try await operation()
+    }
+
+    func proposeUsingOwnedBrowserTools(_ input: ComputerUseFaraModel.Input,
+        observation: ComputerUseFaraBrowserExecutor.ToolObservation) async throws -> ComputerUseFaraModel.Proposal? {
+        guard let scope = browserToolProposals else { return nil }
+        func check() throws {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ToolError.paused }
+            guard browserToolProposals?.id == scope.id, observation.taskID == scope.taskID else {
+                throw ComputerUseBrowserError.ownershipLost
+            }
+        }
+        try check()
+        let result = try await scope.propose(input, observation)
+        try check()
+        return result
     }
 
     /// Read-only admission gate before text-only research planning.
@@ -6184,11 +6214,13 @@ final class HostComputerUseManager: ObservableObject {
         guard let receipt else { return ComputerUseDeferredVisualExecutor() }
         return ComputerUseDeferredVisualExecutor(loader: { [visualExecutorLoader, installer] progress in
             do {
-                let visual = try await visualExecutorLoader.load(receipt: receipt, progress: progress)
+                let prepared = try await visualExecutorLoader.prepare(receipt: receipt, progress: progress)
                 try Task.checkCancellation()
-                try await installer.recordRuntimeActivationSuccess(for: receipt)
+                if prepared.runtimeWasActivated {
+                    try await installer.recordRuntimeActivationSuccess(for: receipt)
+                }
                 try Task.checkCancellation()
-                return visual
+                return prepared.executor
             } catch {
                 await visualExecutorLoader.deactivate()
                 throw error

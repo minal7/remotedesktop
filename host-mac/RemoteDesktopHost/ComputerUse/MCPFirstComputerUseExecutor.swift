@@ -322,6 +322,8 @@ final class MCPFirstComputerUseExecutor:
         }
     }
     private var documentRun: DocumentRun?
+    private weak var browserTools: ComputerUseHostTools?
+    private let browserStepPlanner: ComputerUseMCPBrowserStepPlanner
 
     private init(
         planner: any MCPProposalPlanning,
@@ -330,7 +332,8 @@ final class MCPFirstComputerUseExecutor:
         visualFallback: any ComputerUseExecuting,
         planningWorker: ComputerUsePlanningWorker,
         planningTimeout: TimeInterval,
-        documentPlanner: ComputerUseMCPDocumentPlanner
+        documentPlanner: ComputerUseMCPDocumentPlanner,
+        browserStepPlanner: ComputerUseMCPBrowserStepPlanner
     ) {
         self.planner = planner
         self.clientPool = clientPool
@@ -339,6 +342,7 @@ final class MCPFirstComputerUseExecutor:
         self.planningWorker = planningWorker
         self.planningTimeout = planningTimeout
         self.documentPlanner = documentPlanner
+        self.browserStepPlanner = browserStepPlanner
     }
 
     static func load(
@@ -348,7 +352,8 @@ final class MCPFirstComputerUseExecutor:
         clientPool: any MCPClientPooling,
         planningWorker: ComputerUsePlanningWorker = .shared,
         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
-        documentPlanner: ComputerUseMCPDocumentPlanner = .init()
+        documentPlanner: ComputerUseMCPDocumentPlanner = .init(),
+        browserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init()
     ) async throws -> MCPFirstComputerUseExecutor {
         let executor = MCPFirstComputerUseExecutor(
             planner: planner,
@@ -357,7 +362,8 @@ final class MCPFirstComputerUseExecutor:
             visualFallback: visualFallback,
             planningWorker: planningWorker,
             planningTimeout: planningTimeout,
-            documentPlanner: documentPlanner)
+            documentPlanner: documentPlanner,
+            browserStepPlanner: browserStepPlanner)
         try Task.checkCancellation()
         let identity = try await clientPool.start(binaryURL: binaryURL)
         do {
@@ -481,21 +487,23 @@ final class MCPFirstComputerUseExecutor:
             // Commit before fallback can produce an effect or suspend. Resume
             // cannot replay the original goal through newly available MCP.
             retainedFallback = (taskID, promptDigest)
-            if let conversation {
+            return try await withBrowserToolProposals(taskID: taskID, tools: tools) {
+                if let conversation {
+                    return try await visualFallback.execute(
+                        taskID: taskID,
+                        modelPrompt: prompt,
+                        currentUserPrompt: trustedUserPrompt,
+                        conversation: conversation,
+                        tools: tools,
+                        progress: progress)
+                }
                 return try await visualFallback.execute(
                     taskID: taskID,
-                    modelPrompt: prompt,
-                    currentUserPrompt: trustedUserPrompt,
-                    conversation: conversation,
+                    prompt: prompt,
+                    trustedUserPrompt: trustedUserPrompt,
                     tools: tools,
                     progress: progress)
             }
-            return try await visualFallback.execute(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                tools: tools,
-                progress: progress)
         }
         try await waitForStartedCancellation()
         if let retainedFallback, retainedFallback.taskID == taskID {
@@ -620,7 +628,7 @@ final class MCPFirstComputerUseExecutor:
                 return mailResult
             }
             guard Self.canFallBackAfterPlannerError(error) else { throw error }
-            progress("This app needs visual control — switching locally…")
+            progress("Continuing with local app and browser controls…")
             return try await executeVisualFallback()
         } catch let error as ExecutorError {
             guard error == .tooManySteps else { throw error }
@@ -723,6 +731,11 @@ final class MCPFirstComputerUseExecutor:
             // new request ID before that continuation can perform any work.
             retainedFallback = (taskID, digest)
         }
+        if let tools = browserTools {
+            return try await withBrowserToolProposals(taskID: originatingTaskID, tools: tools) {
+                try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+            }
+        }
         return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
     }
 
@@ -756,12 +769,10 @@ final class MCPFirstComputerUseExecutor:
             as? any ComputerUseVisualApprovalContinuing else {
             throw ExecutorError.visualApprovalContinuationUnavailable
         }
-        return try await visualContinuation
-            .continueAfterApprovedVisualAction(
-                continuation,
-                action: action,
-                tools: tools,
-                progress: progress)
+        return try await withBrowserToolProposals(taskID: continuation.taskID, tools: tools) {
+            try await visualContinuation.continueAfterApprovedVisualAction(continuation,
+                action: action, tools: tools, progress: progress)
+        }
     }
 
     func cancelVisualApprovalContinuation(
@@ -769,6 +780,133 @@ final class MCPFirstComputerUseExecutor:
     ) {
         (visualFallback as? any ComputerUseVisualApprovalContinuing)?
             .cancelVisualApprovalContinuation(continuation)
+    }
+
+    private func withBrowserToolProposals(taskID: String, tools: ComputerUseHostTools,
+        operation: () async throws -> ComputerUseExecutionResult) async throws -> ComputerUseExecutionResult {
+        browserTools = tools
+        let rootID = tools.ownedBrowserTaskID(forExecution: taskID)
+        return try await tools.withOwnedBrowserToolProposals(taskID: rootID, propose: { [self] input, observation in
+            try await proposeBrowserToolStep(input, observation: observation, tools: tools)
+        }, operation: operation)
+    }
+
+    private func proposeBrowserToolStep(_ input: ComputerUseFaraModel.Input,
+        observation: ComputerUseFaraBrowserExecutor.ToolObservation,
+        tools: ComputerUseHostTools) async throws -> ComputerUseFaraModel.Proposal? {
+        try checkExecutionCancellation()
+        let available = try await clientPool.allowedTools()
+        try checkExecutionCancellation()
+        guard ["find_elements", "get_element_attributes"].allSatisfy({ name in
+            available.contains { $0.toolName == name && $0.risk == .readOnly && $0.serverID == MCPServerRegistry.macControl.serverID }
+        }) else { return nil }
+        let browserPlanner = browserStepPlanner
+        // A host context/schema limit is an integration failure, not evidence
+        // that Mac tools cannot handle this task. It must not activate vision.
+        let context = try browserPlanner.context(input, observation: observation)
+        guard let plan = try await browserPlanner.propose(context) else { return nil }
+        try checkExecutionCancellation()
+        let arguments: [String: Any]
+        switch plan.kind {
+        case .visualFallback: return nil
+        case .search:
+            guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
+            arguments = ["action": "web_search", "query": plan.text]
+        case .openLink:
+            let destination: URL
+            if let userURL = context.userURLs[plan.reference] { destination = userURL }
+            else {
+                guard case .page(let page) = observation, let link = context.links[plan.reference],
+                      let verified = try await readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return nil }
+                destination = verified
+            }
+            arguments = ["action": "visit_url", "url": destination.absoluteString]
+        case .remember:
+            guard case .page = observation, !plan.text.isEmpty else { throw AppleFoundationMCPPlannerError.unknownProposal }
+            arguments = ["action": "pause_and_memorize_fact", "fact": plan.text]
+        case .answer:
+            guard case .page = observation, !plan.text.isEmpty, !Self.requestsConsequentialMutation(input.goal) else { return nil }
+            arguments = ["action": "terminate", "answer": plan.text]
+        case .askUser:
+            guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
+            arguments = ["action": "ask_user_question", "question": plan.text]
+        case .wait:
+            guard plan.text.isEmpty else { throw AppleFoundationMCPPlannerError.unknownProposal }
+            arguments = ["action": "wait", "time": 1]
+        }
+        let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
+        let encoded = String(decoding: try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+            .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
+        let response = "<tool_call>" + encoded + "</tool_call>"
+        return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+    }
+
+    private func readBrowserLinkWithMCP(_ link: ComputerUseBrowserPageSnapshot.Link,
+        observation: ComputerUseOwnedBrowser.AgentObservation, tools: ComputerUseHostTools) async throws -> URL? {
+        let page = observation.approvalPageEvidence
+        guard !link.label.isEmpty, page.page.links.filter({ $0.id == link.id }) == [link],
+              let destination = URL(string: link.destination), ComputerUseOwnedBrowser.validatedURL(destination) != nil else { return nil }
+        browserStepPlanner.inspectProposal?("Native link: \(link.label), \(destination.absoluteString)")
+        return try await withNewHelperGeneration { generation in
+            @MainActor func check() async throws {
+                try checkGenerationCancellation(generation)
+                try tools.validateOwnedBrowserAgentMemoryObservation(observation)
+                try await tools.validateOwnedBrowserPageEvidence(page)
+                try checkGenerationCancellation(generation)
+            }
+            try await check()
+            let available = try await clientPool.allowedTools()
+            try await check()
+            func tool(_ name: String) -> MCPAllowedTool? {
+                available.first { $0.toolName == name && $0.risk == .readOnly && $0.processGeneration == generation
+                    && $0.serverID == MCPServerRegistry.macControl.serverID }
+            }
+            guard let find = tool("find_elements"), let read = tool("get_element_attributes") else { return nil }
+            var rows: [MCPJSONValue] = []
+            for attempt in 0 ..< 2 {
+                let found = try await clientPool.execute(find.makeCall(taskID: page.document.taskID, arguments: [
+                    "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXLink"),
+                    "title": .string(link.label), "limit": .integer(8), "max_depth": .integer(30)]))
+                if let inspect = browserStepPlanner.inspectProposal {
+                    inspect("MCP find_elements: " + String(decoding: try JSONEncoder().encode(found), as: UTF8.self))
+                }
+                try await check()
+                guard !found.isError, !found.wasTruncated, case .object(let root)? = found.structuredContent,
+                      root["ok"] == .bool(true), root["pid"]?.exactInteger == Int(ProcessInfo.processInfo.processIdentifier),
+                      case .array(let matches)? = root["elements"], matches.count <= 8, root["count"]?.exactInteger == matches.count else { return nil }
+                rows = matches
+                if !rows.isEmpty { break }
+                guard root["limit_reached"] == .bool(false) else { return nil }
+                if attempt == 0 {
+                    // A first AX read can expose an empty WebKit tree while
+                    // accessibility is being activated. Retry the same read
+                    // once; no failure, partial result or mutation is retried.
+                    try await Task.sleep(for: .milliseconds(150))
+                    try await check()
+                }
+            }
+            var ids = Set<String>()
+            for row in rows {
+                guard case .object(let item) = row, item["role"] == .string("AXLink"),
+                      case .string(let id)? = item["id"], !id.isEmpty, ids.insert(id).inserted else { return nil }
+                let result = try await clientPool.execute(read.makeCall(taskID: page.document.taskID, arguments: [
+                    "element_id": .string(id), "names": .array(["AXRole", "AXTitle", "AXURL"].map(MCPJSONValue.string))]))
+                if let inspect = browserStepPlanner.inspectProposal {
+                    inspect("MCP get_element_attributes: " + String(decoding: try JSONEncoder().encode(result), as: UTF8.self))
+                }
+                try await check()
+                guard !result.isError, !result.wasTruncated, case .object(let object)? = result.structuredContent,
+                      object["ok"] == .bool(true), object["element_id"] == .string(id),
+                      case .array(let unavailable)? = object["unavailable"], unavailable.isEmpty,
+                      case .object(let values)? = object["values"] else { continue }
+                if values["AXRole"] == .string("AXLink"), values["AXTitle"] == .string(link.label),
+                   values["AXURL"] == .string(destination.absoluteString) {
+                    browserStepPlanner.inspectProposal?("MCP verified selected native link")
+                    return destination
+                }
+            }
+            return nil
+        }
     }
 
     func cancelMCPWork() {
@@ -1941,6 +2079,7 @@ final class MCPFirstComputerUseExecutor:
         CLARIFICATION_REQUIRED: <one short question when required information is missing>
         TASK_COMPLETE: <short result, only after a local read-only result proves it>
         VISUAL_FALLBACK_REQUIRED
+        Browser navigation is already available through the host's retained browser workflow. VISUAL_FALLBACK_REQUIRED transfers the complete task to that workflow, which uses Mac tools before considering a computer-use model. Never ask the user to supply a browser or manually open a URL.
         Never use TASK_COMPLETE to claim an email/message was sent, an event/reminder was created, a Shortcut ran, an order/purchase/payment happened, a form was submitted, or another consequential mutation occurred. Only the host can confirm an approved action. Its confirmation does not prove that every part of the user's request is complete.
         """
         if let requirements = state.contactReadRequirements,

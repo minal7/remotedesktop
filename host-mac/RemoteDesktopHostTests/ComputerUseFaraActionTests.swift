@@ -7,6 +7,127 @@ import XCTest
 
 final class ComputerUseFaraActionTests: XCTestCase {
     @MainActor
+    func testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: tool proposal retirement") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        var allowed = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["error", "capacity", "cancellation", "control", "owner", "invalid-action", "foreign-scope", "nested-scope"] {
+            allowed = true
+            let taskID = "retired-tools-" + mode
+            // First admission creates the native view. Later cases retain
+            // that window while replacing only the task's ownership.
+            if retainedWindow != nil { try browser.claim(taskID: taskID) }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BrowserToolRetirement-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("navigation")))
+            var toolCalls = 0, modelCalls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("task"),
+                propose: { _ in
+                    modelCalls += 1
+                    throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+                })
+            let proposer: ComputerUseFaraBrowserExecutor.ProposeUsingTools = { _, observation in
+                    toolCalls += 1
+                    guard case .initial = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    if let retainedWindow { XCTAssertTrue(NSApp.keyWindow === retainedWindow) }
+                    else { retainedWindow = NSApp.keyWindow }
+                    switch mode {
+                    case "error": throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+                    case "capacity": throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
+                    case "cancellation": withUnsafeCurrentTask { $0?.cancel() }
+                    case "control": allowed = false
+                    case "owner": try browser.claim(taskID: "replacement-owner")
+                    case "nested-scope":
+                        _ = try await tools.withOwnedBrowserToolProposals(taskID: taskID, propose: { _, _ in nil }, operation: {
+                            XCTFail("An overlapping scope cannot execute")
+                            return .completed("unexpected")
+                        })
+                    default:
+                        let response = self.call(#"{"action":"left_click","coordinate":[200,200]}"#)
+                        return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                    }
+                    return nil
+                }
+            do {
+                _ = try await tools.withOwnedBrowserToolProposals(taskID: mode == "foreign-scope" ? "foreign" : taskID,
+                    propose: proposer, operation: {
+                        try await executor.execute(taskID: taskID, prompt: "Find the train timetable.", trustedUserPrompt: "Find the train timetable.", tools: tools, progress: { _ in })
+                    })
+                XCTFail("A failed or retired proposal cannot continue: \(mode)")
+            } catch {
+                switch mode {
+                case "error", "invalid-action": XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .unsupportedAction)
+                case "capacity": XCTAssertNotNil(error as? ComputerUseMCPBrowserStepPlanner.Failure)
+                case "cancellation": XCTAssertTrue(error is CancellationError)
+                case "control": XCTAssertEqual(error as? ComputerUseHostTools.ToolError, .paused)
+                case "nested-scope": XCTAssertEqual(error as? ComputerUseTaskExecutionError, .alreadyExecuting)
+                default: XCTAssertNotNil(error as? ComputerUseBrowserError)
+                }
+            }
+            XCTAssertEqual(toolCalls, mode == "foreign-scope" ? 0 : 1, mode); XCTAssertEqual(modelCalls, 0, mode)
+            XCTAssertFalse(tools.hasOwnedBrowserToolProposals, mode)
+            XCTAssertNil(browser.currentDocument(taskID: taskID))
+        }
+    }
+
+    @MainActor
+    func testOptInBrowserToolProposalsKeepOneWorkflowBeforeModelFallback() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native tool-first browser workflow") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/search?q=night%20train": .init(body: "<!doctype html><h1>Night train departs at 21:45</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        for needsModel in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("BrowserToolsFirst-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("navigation")))
+            let goal = "Find the night train's departure time and report it."
+            let taskID = "tool-workflow-\(needsModel)", before = server.count("/search?q=night%20train")
+            var toolCalls = 0, modelCalls = 0, firstWindow: NSWindow?
+            let search = self.call(#"{"action":"web_search","query":"night train"}"#)
+            let answer = self.call(#"{"action":"terminate","answer":"The night train departs at 21:45."}"#)
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("task"),
+                searchProvider: .init(endpoint: base.appendingPathComponent("search"), queryParameter: "q"),
+                propose: { input in
+                    modelCalls += 1
+                    XCTAssertTrue(needsModel, "A supported tool step must not call the computer-use model")
+                    XCTAssertEqual(toolCalls, 2); XCTAssertEqual(input.goal, goal)
+                    XCTAssertEqual(input.history.count, 1); XCTAssertEqual(input.history.first?.response, search)
+                    XCTAssertEqual(input.currentURL, base.appendingPathComponent("search").appending(queryItems: [.init(name: "q", value: "night train")]))
+                    XCTAssertTrue(input.observedPage?.text.contains("21:45") == true)
+                    return try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer))
+                }, proposeUsingTools: { input, observation in
+                    toolCalls += 1; XCTAssertEqual(input.goal, goal)
+                    if toolCalls == 1 {
+                        guard case .initial = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                        firstWindow = NSApp.keyWindow
+                        XCTAssertNil(input.currentURL); XCTAssertTrue(input.history.isEmpty)
+                        return try .init(response: search, action: ComputerUseFaraAction.decodeNativeMessage(search))
+                    }
+                    guard toolCalls == 2, case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                    XCTAssertTrue(NSApp.keyWindow === firstWindow)
+                    XCTAssertEqual(page.currentURL, input.currentURL)
+                    XCTAssertEqual(input.history.first?.response, search)
+                    XCTAssertTrue(page.approvalPageEvidence.page.texts.contains { $0.text.contains("21:45") })
+                    return needsModel ? nil : try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer))
+                })
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("The night train departs at 21:45."))
+            XCTAssertEqual(toolCalls, 2); XCTAssertEqual(modelCalls, needsModel ? 1 : 0)
+            XCTAssertEqual(server.count("/search?q=night%20train"), before + 1)
+            let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result); XCTAssertEqual(toolCalls, 2)
+            XCTAssertEqual(modelCalls, needsModel ? 1 : 0); XCTAssertEqual(server.count("/search?q=night%20train"), before + 1)
+        }
+    }
+
+    @MainActor
     func testOptInScrollStillStopsWhenTargetChangesAfterAttemptBegins() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: scroll dispatch race") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

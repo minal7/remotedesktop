@@ -2,7 +2,44 @@ import Foundation
 import XCTest
 @testable import RemoteDesktopHost
 
+private actor PreparationRejectingLauncher: OSAtlasLlamaServerLaunching {
+    private(set) var calls = 0
+    func launch(configuration: OSAtlasLlamaLaunchConfiguration) async throws -> any OSAtlasLlamaServerProcess {
+        calls += 1
+        throw OSAtlasLlamaRuntimeError.serverFailedToStart
+    }
+}
+
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
+    @MainActor
+    func testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes() async throws {
+        let fixture = try makeFaraFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let info: [String: Any] = ["CFBundleIdentifier": "test.fara.prepare", "CFBundlePackageType": "APPL"]
+        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+            .write(to: fixture.bundleDirectory.appendingPathComponent("Contents/Info.plist"))
+        let launcher = PreparationRejectingLauncher()
+        let runtime = OSAtlasLlamaRuntime(launcher: launcher)
+        let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: fixture.manifest),
+            bundle: try XCTUnwrap(Bundle(url: fixture.bundleDirectory)), runtime: runtime,
+            faraJournalDirectory: fixture.root.appendingPathComponent("journal"))
+        var prepared: ComputerUsePreparedVisualExecutor?, failure: Error?
+        do { prepared = try await loader.prepare(receipt: fixture.receipt, progress: { _ in }) }
+        catch { failure = error }
+        let preparationLaunches = await launcher.calls
+        XCTAssertNil(failure, "Preparing a tool-capable browser must not warm the computer-use model")
+        XCTAssertTrue(prepared?.executor is ComputerUseFaraBrowserExecutor)
+        XCTAssertEqual(prepared?.runtimeWasActivated, false)
+        XCTAssertEqual(preparationLaunches, 0)
+        do {
+            _ = try await loader.load(receipt: fixture.receipt, progress: { _ in })
+            XCTFail("Setup must actually attempt model activation")
+        } catch { }
+        let setupLaunches = await launcher.calls
+        XCTAssertEqual(setupLaunches, preparationLaunches + 1)
+        await loader.deactivate()
+    }
+
     func testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage() throws {
         let fixture = try makeTrainedFixture(.holo31)
         defer { try? FileManager.default.removeItem(at: fixture.root) }

@@ -6,6 +6,17 @@ import Foundation
 final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
     typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal
     typealias ReadPage = @MainActor @Sendable (ComputerUseFaraModel.PageReading) async throws -> String
+    enum ToolObservation: Sendable {
+        case initial(ComputerUseOwnedBrowser.InitialAgentObservation)
+        case page(ComputerUseOwnedBrowser.AgentObservation)
+        var taskID: String {
+            switch self {
+            case .initial(let initial): return initial.taskID
+            case .page(let page): return page.approvalPageEvidence.document.taskID
+            }
+        }
+    }
+    typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ComputerUseFaraModel.Proposal?
     enum Failure: Error, LocalizedError, Equatable {
         case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion
         var errorDescription: String? {
@@ -63,6 +74,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private let store: ComputerUseTaskJournalStore
     private let propose: Propose
     private let readPage: ReadPage
+    private let proposeUsingTools: ProposeUsingTools?
     private let searchProvider: ComputerUseBrowserSearchProvider
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
@@ -71,10 +83,12 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private let now: @MainActor () -> Date
     private var isExecuting = false
     init(journalDirectory: URL, searchProvider: ComputerUseBrowserSearchProvider? = nil, propose: @escaping Propose,
+         proposeUsingTools: ProposeUsingTools? = nil,
          readPage: @escaping ReadPage = { _ in throw Failure.unsupportedAction },
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}, now: @escaping @MainActor () -> Date = Date.init) throws {
         store = try .init(directory: journalDirectory)
         self.propose = propose
+        self.proposeUsingTools = proposeUsingTools
         self.readPage = readPage
         self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q", queryFormat: .faraBing)
         self.finishRun = finishRun
@@ -211,6 +225,42 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         }
     }
 
+    /// Tool planning shares the original observation and execution history.
+    /// Only an explicit no-proposal result can reach the computer-use model;
+    /// cancellation, a changed owner/document, or a failed tool read cannot.
+    private func nextProposal(_ input: ComputerUseFaraModel.Input, observation: ToolObservation,
+                              tools: ComputerUseHostTools) async throws -> ComputerUseFaraModel.Proposal {
+        let toolPlanner = proposeUsingTools, visualPlanner = propose
+        let hasToolPlanner = toolPlanner != nil || tools.hasOwnedBrowserToolProposals
+        return try await planning.perform(timeout: 45) {
+            @MainActor func checkObservation() throws {
+                try Task.checkCancellation()
+                switch observation {
+                case .initial(let initial): try tools.validateOwnedBrowserInitialAgentObservation(initial)
+                case .page(let page): try tools.validateOwnedBrowserAgentMemoryObservation(page)
+                }
+            }
+            if hasToolPlanner {
+                try await checkObservation()
+                let proposed: ComputerUseFaraModel.Proposal?
+                if let toolPlanner { proposed = try await toolPlanner(input, observation) }
+                else { proposed = try await tools.proposeUsingOwnedBrowserTools(input, observation: observation) }
+                try await checkObservation()
+                if let proposed {
+                    // This proposal boundary is read/navigation-only. Real
+                    // MCP mutations need their own approved effect receipts.
+                    switch proposed.action {
+                    case .visitURL, .webSearch, .readPageQuestion, .remember, .askUser, .reportCompletion, .wait:
+                        return proposed
+                    default: throw Failure.unsupportedAction
+                    }
+                }
+            }
+            try Task.checkCancellation()
+            return try await visualPlanner(input)
+        }
+    }
+
     private func start(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation, session: Session,
         tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws {
         guard session.turns < 64 else { throw Failure.stepLimit }
@@ -220,8 +270,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         try lease.assertOwnership()
         progress("Reading the browser…")
         let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history, userResponse: session.userResponse, actionError: session.actionError)
-        let propose = self.propose
-        let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
+        let proposal = try await nextProposal(input, observation: .initial(observation), tools: tools)
         try Task.checkCancellation(); try lease.assertOwnership()
         try tools.validateOwnedBrowserInitialAgentObservation(observation)
         let destination: URL
@@ -407,8 +456,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading,
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL))
-            let propose = self.propose
-            let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
+            let proposal = try await nextProposal(input, observation: .page(observation), tools: tools)
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.
             // Native dispatch receipts below do not themselves prove the goal.

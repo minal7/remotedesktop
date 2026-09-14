@@ -659,6 +659,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         fileprivate let windowFrame: NSRect
         var sessionIdentity: String { ComputerUseTaskContract.digest([session.contextID ?? "", session.taskID, session.ownershipEpoch?.uuidString ?? ""]) }
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
+        var taskID: String { session.taskID }
     }
 
     func captureInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> InitialAgentObservation? {

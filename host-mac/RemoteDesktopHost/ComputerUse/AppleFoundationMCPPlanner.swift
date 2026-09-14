@@ -5465,8 +5465,8 @@ private extension AppleFoundationMCPPlanner {
         Never claim a proposed tool ran or succeeded. The host validates policy and asks for approval separately.
         Use the provided Mac tools first, including accessible website content or controls when a provided tool supports the needed step.
         Choose the next step within the complete user goal. Preserve specified destinations, source requirements, dates and stop conditions. A tool that can advance this step need not complete the entire task at once.
-        The host provides a built-in browser. If the next step requires a browser capability that none of the provided tools supports, respond exactly: VISUAL_FALLBACK_REQUIRED
-        Do not ask which browser or application to use for website work.
+        The host already has access to its own browser: it can open URLs, search the web, read page records and follow links. These browser operations are supplied by a separate retained workflow, not by the tools listed in this response. To use that workflow, respond exactly: VISUAL_FALLBACK_REQUIRED. That routing signal tries Mac tools in the browser first; it does not itself request a computer-use model.
+        Browser access is an available host capability, never missing user information. Do not ask whether the user can browse, enter a URL, grant browser access, or choose a browser. Transfer a request needing browser navigation to the host workflow when the tools listed here cannot perform that next step.
         If required information is missing or ambiguous, respond exactly as CLARIFICATION_REQUIRED: followed by one short question, without calling a tool.
         Only after a local read-only tool result proves the informational request is complete, respond exactly as TASK_COMPLETE: followed by the short result.
         Never use TASK_COMPLETE to claim a consequential action occurred; sends, creates, Shortcut runs, orders, purchases, payments, submissions, and similar changes complete only from the approved tool result.

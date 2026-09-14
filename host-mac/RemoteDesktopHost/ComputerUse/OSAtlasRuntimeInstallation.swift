@@ -377,13 +377,31 @@ struct OSAtlasRuntimeInputResolver {
 }
 
 @MainActor
+struct ComputerUsePreparedVisualExecutor {
+    let executor: any ComputerUseExecuting
+    let runtimeWasActivated: Bool
+}
+
+@MainActor
 protocol ComputerUseVisualExecutorLoading: AnyObject {
     func load(
         receipt: ComputerUseInstallationReceipt,
         progress: @escaping @MainActor (String) -> Void
     ) async throws -> any ComputerUseExecuting
 
+    func prepare(
+        receipt: ComputerUseInstallationReceipt,
+        progress: @escaping @MainActor (String) -> Void
+    ) async throws -> ComputerUsePreparedVisualExecutor
+
     func deactivate() async
+}
+
+extension ComputerUseVisualExecutorLoading {
+    func prepare(receipt: ComputerUseInstallationReceipt,
+                 progress: @escaping @MainActor (String) -> Void) async throws -> ComputerUsePreparedVisualExecutor {
+        .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
+    }
 }
 
 /// Production bridge used by HostComputerUseManager. It searches only inside
@@ -417,6 +435,30 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.nativeJournalDirectory = nativeJournalDirectory
         self.browserActionAttestationLedger =
             browserActionAttestationLedger
+    }
+
+    func prepare(receipt: ComputerUseInstallationReceipt,
+                 progress: @escaping @MainActor (String) -> Void) async throws -> ComputerUsePreparedVisualExecutor {
+        try Task.checkCancellation()
+        let package = try resolver.resolveAvailablePackage(receipt: receipt,
+            runtimeDirectoryURL: Self.bundledRuntimeDirectoryURL(in: bundle), enclosingBundleURL: bundle.bundleURL)
+        if case .fara(let inputs) = package {
+            try Task.checkCancellation()
+            return .init(executor: try makeFaraExecutor(inputs), runtimeWasActivated: false)
+        }
+        return .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
+    }
+
+    private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
+        let runtime = self.runtime
+        return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
+            propose: { input in
+                let endpoint = try await runtime.activateFara(inputs)
+                return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
+            }, readPage: { reading in
+                let endpoint = try await runtime.activateFara(inputs)
+                return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+            }, finishRun: { await runtime.shutdown() })
     }
 
     func load(
@@ -455,15 +497,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                 try Task.checkCancellation()
                 await runtime.shutdown()
                 try Task.checkCancellation()
-                let runtime = self.runtime
-                return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
-                    propose: { input in
-                        let endpoint = try await runtime.activateFara(inputs)
-                        return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
-                    }, readPage: { reading in
-                        let endpoint = try await runtime.activateFara(inputs)
-                        return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
-                    }, finishRun: { await runtime.shutdown() })
+                return try makeFaraExecutor(inputs)
             } catch {
                 await runtime.shutdown()
                 throw error
