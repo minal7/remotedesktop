@@ -4474,12 +4474,24 @@ final class HostComputerUseManager: ObservableObject {
         self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
         let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
         self.visualExecutorLoader = modelLoader
+        var configuredBrowserPlanner = mcpBrowserStepPlanner
+        if configuredBrowserPlanner.nativeTextPlanner == nil, let nativeTextInstaller {
+            configuredBrowserPlanner.nativeTextPlanner = {
+                guard let receipt = await nativeTextInstaller.currentInstallation() else { return nil }
+                try Task.checkCancellation()
+                let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
+                    runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+                return .init(inputs: inputs)
+            }
+        }
+        let browserPlanner = configuredBrowserPlanner
         self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
             try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
                 visualFallback: visualFallback,
                 planner: mcpPlanner,
-                clientPool: MCPClientPool(), browserStepPlanner: mcpBrowserStepPlanner, browserExecutorFactory: {
+                clientPool: MCPClientPool(), browserStepPlanner: browserPlanner, browserExecutorFactory: {
                     let receipt = await modelInstaller.currentInstallation()
                     try Task.checkCancellation()
                     return try modelLoader.prepareBrowser(receipt: receipt)

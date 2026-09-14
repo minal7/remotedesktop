@@ -829,8 +829,7 @@ final class MCPFirstComputerUseExecutor:
         let browserPlanner = browserStepPlanner
         // A host context/schema limit is an integration failure, not evidence
         // that Mac tools cannot handle this task. It must not activate vision.
-        let context = try browserPlanner.context(input, observation: observation)
-        guard let plan = try await browserPlanner.propose(context) else { return nil }
+        let (plan, context) = try await browserPlanner.next(input, observation: observation)
         try checkExecutionCancellation()
         let arguments: [String: Any]
         switch plan.kind {
