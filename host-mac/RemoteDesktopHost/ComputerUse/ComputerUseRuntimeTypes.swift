@@ -154,6 +154,84 @@ struct ComputerUseDesktopImage: Sendable {
         return (Int(displayBounds.minX) + min(Int(displayBounds.width) - 1, Int(floor(x / 1000 * displayBounds.width))),
                 Int(displayBounds.minY) + min(Int(displayBounds.height) - 1, Int(floor(y / 1000 * displayBounds.height))))
     }
+
+    /// Compare the complete visible target plus surrounding label context.
+    func matchesPixels(of other: Self, in displayRect: CGRect) throws -> Bool {
+        guard displayBounds == other.displayBounds, pixelWidth == other.pixelWidth, pixelHeight == other.pixelHeight,
+              let rect = imageRect(for: displayRect) else { return false }
+        return try Self.pixels(png, in: rect) == Self.pixels(other.png, in: rect)
+    }
+
+    /// This is only valid with separately verified, unchanged editable text,
+    /// collapsed selection, application/window identity and native field bounds.
+    /// Allow a narrow vertical insertion-point change inside that field, while
+    /// requiring every other pixel in the focused window to remain unchanged.
+    func matchesInsertionPointPixels(of other: Self, window: CGRect, field: CGRect,
+        onDifference: ((CGRect, CGRect, CGRect) -> Void)? = nil) throws -> Bool {
+        guard displayBounds == other.displayBounds, pixelWidth == other.pixelWidth, pixelHeight == other.pixelHeight,
+              window.contains(field), !field.isEmpty, let rect = imageRect(for: window),
+              let fieldPixels = imageRect(for: field) else { return false }
+        let a = try Self.pixels(png, in: rect), b = try Self.pixels(other.png, in: rect)
+        let width = Int(rect.width), height = Int(rect.height)
+        var left = width, top = height, right = -1, bottom = -1
+        a.withUnsafeBytes { (first: UnsafeRawBufferPointer) in
+            b.withUnsafeBytes { (second: UnsafeRawBufferPointer) in
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let i = (y * width + x) * 4
+                        if (0..<4).contains(where: { first[i + $0] != second[i + $0] }) {
+                            left = min(left, x); top = min(top, y); right = max(right, x); bottom = max(bottom, y)
+                        }
+                    }
+                }
+            }
+        }
+        if right < 0 { return true }
+        let changed = CGRect(x: displayBounds.minX + (rect.minX + CGFloat(left)) * displayBounds.width / CGFloat(pixelWidth),
+            y: displayBounds.minY + (rect.minY + CGFloat(top)) * displayBounds.height / CGFloat(pixelHeight),
+            width: CGFloat(right - left + 1) * displayBounds.width / CGFloat(pixelWidth),
+            height: CGFloat(bottom - top + 1) * displayBounds.height / CGFloat(pixelHeight))
+        // AX uses logical points; a resized image contains whole pixel cells.
+        // Compare containment in the same outward-rounded pixel space so an
+        // edge cell is not rejected for extending a fraction of a point.
+        let changedPixels = CGRect(x: rect.minX + CGFloat(left), y: rect.minY + CGFloat(top),
+            width: CGFloat(right - left + 1), height: CGFloat(bottom - top + 1))
+        onDifference?(changed, changedPixels, fieldPixels)
+        // Downsampling can paint one antialiased image pixel beyond the AX
+        // field footprint. Keep that allowance in image pixels, not points.
+        let paintFootprint = fieldPixels.insetBy(dx: -1, dy: -1).intersection(rect)
+        return paintFootprint.contains(changedPixels) && changed.width <= 4 && changed.height >= changed.width * 2
+    }
+
+    private func imageRect(for displayRect: CGRect) -> CGRect? {
+        guard displayRect.origin.x.isFinite, displayRect.origin.y.isFinite,
+              displayRect.width.isFinite, displayRect.height.isFinite, !displayRect.isEmpty else { return nil }
+        let clipped = displayRect.intersection(displayBounds)
+        guard !clipped.isEmpty, !clipped.isNull else { return nil }
+        return CGRect(x: (clipped.minX - displayBounds.minX) * CGFloat(pixelWidth) / displayBounds.width,
+            y: (clipped.minY - displayBounds.minY) * CGFloat(pixelHeight) / displayBounds.height,
+            width: clipped.width * CGFloat(pixelWidth) / displayBounds.width,
+            height: clipped.height * CGFloat(pixelHeight) / displayBounds.height).integral
+            .intersection(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+    }
+
+    private static func pixels(_ png: Data, in rect: CGRect) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil)?.cropping(to: rect) else {
+            throw OSAtlasLlamaRuntimeError.invalidVisionInput
+        }
+        let width = Int(rect.width), height = Int(rect.height)
+        var data = Data(count: width * height * 4)
+        let rendered = data.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(data: bytes.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height)); return true
+        }
+        guard rendered else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
+        return data
+    }
+
 }
 
 /// Runtime-neutral action vocabulary shared by the OS-Atlas visual fallback,

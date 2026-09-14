@@ -17,6 +17,16 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     init(stateURL: URL) { self.stateURL = stateURL }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Standard responder-chain editing commands, as in a normal AppKit
+        // document app. This keeps native shortcut tests honest: the injector
+        // posts Command+A; the fixture's own menu performs Select All.
+        let menu = NSMenu()
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        let editMenu = NSMenu(title: "Edit")
+        let selectAll = NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        selectAll.keyEquivalentModifierMask = [.command]
+        editMenu.addItem(selectAll); editItem.submenu = editMenu; menu.addItem(editItem)
+        NSApp.mainMenu = menu
         window.title = "Remote Desktop text verification fixture"
         let view = window.contentView!
         if CommandLine.arguments.contains("--browser") {

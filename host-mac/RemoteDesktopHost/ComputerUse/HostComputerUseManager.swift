@@ -740,6 +740,7 @@ struct ComputerUseApprovalTargetSnapshot: Equatable {
     let context: String
     let applicationID: String
     let accessibilityIdentity: String
+    var frame: CGRect? = nil
 }
 
 struct ComputerUseCalculatorSnapshot: Equatable {
@@ -2097,30 +2098,11 @@ final class ComputerUseHostTools {
             return Self.providedContextDescribesEditableTypingTarget(
                 accessibilityContextProvider(providerAction))
         }
-        guard let focused = focusedElement() else { return false }
-        let role = Self.stringAttribute(
-            kAXRoleAttribute as CFString,
-            from: focused) ?? ""
-        let subrole = Self.stringAttribute(
-            kAXSubroleAttribute as CFString,
-            from: focused) ?? ""
-        let editableRoles: Set<String> = [
-            kAXTextFieldRole as String,
-            kAXTextAreaRole as String,
-            kAXComboBoxRole as String,
-        ]
-        guard editableRoles.contains(role),
-              !subrole.localizedCaseInsensitiveContains("secure"),
-              boolAttribute(
-                  kAXEnabledAttribute as CFString,
-                  from: focused) == true else { return false }
-
-        var valueIsSettable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(
-            focused,
-            kAXValueAttribute as CFString,
-            &valueIsSettable) == .success else { return false }
-        return valueIsSettable.boolValue
+        // Use the same retained target and capability rules as verified
+        // editing. Native NSTextView may omit AXEnabled and expose writable
+        // selected text rather than a writable whole-field value. The shared
+        // reader rejects secure/disabled controls and stale AX references.
+        return try currentTextSnapshot() != nil
     }
 
     private static func providedContextDescribesEditableTypingTarget(
@@ -2376,7 +2358,7 @@ final class ComputerUseHostTools {
         _ action: ComputerUsePredictedAction,
         fingerprint: ComputerUseApprovalFingerprint,
         browserPageEvidence: ComputerUseBrowserPageEvidence?,
-        willBeginEffect: () -> Void
+        willBeginEffect: () throws -> Void
     ) async throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
@@ -2401,12 +2383,40 @@ final class ComputerUseHostTools {
         guard current == fingerprint else {
             throw ToolError.approvalTargetChanged
         }
-        willBeginEffect()
+        try willBeginEffect()
         if case .typeText = action {
             try await performVerified(action)
         } else {
             try perform(action, reportsPartialApprovedEffect: true)
         }
+    }
+
+    /// Native model adapters use the same target binding and verified text
+    /// path as approved host input. The adapter still owns the policy decision
+    /// and must persist its attempt in willBeginEffect before posting input.
+    func prepareNativeActionFingerprint(for action: ComputerUsePredictedAction) throws -> ComputerUseApprovalFingerprint {
+        try prepareApproval(for: action).fingerprint
+    }
+
+    func nativePointerTargetFrame(for action: ComputerUsePredictedAction) throws -> CGRect? {
+        guard mayAct() else { throw ToolError.paused }
+        guard case .click(let x, let y, _, _) = action else { return nil }
+        if let approvalTargetProvider { return try approvalTargetProvider(action).frame }
+        guard screenProvider == nil else { return nil }
+        return actionableElementSnapshot(at: CGPoint(x: x, y: y))?.frame
+    }
+
+    func nativeFocusedTextFrame() throws -> CGRect? {
+        guard mayAct() else { throw ToolError.paused }
+        guard screenProvider == nil, let snapshot = try currentTextSnapshot(), snapshot.selection.length == 0,
+              let frame = focusedElementSnapshot()?.frame, !frame.isEmpty,
+              try currentTextSnapshot() == snapshot else { return nil }
+        return frame
+    }
+
+    func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+                            willBeginEffect: () throws -> Void) async throws {
+        try await performApproved(action, fingerprint: fingerprint, browserPageEvidence: nil, willBeginEffect: willBeginEffect)
     }
 
     private struct ApprovalTarget {

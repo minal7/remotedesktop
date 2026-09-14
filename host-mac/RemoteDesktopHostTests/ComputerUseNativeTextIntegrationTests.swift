@@ -69,6 +69,130 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, modelRequestOnly: true)
     }
 
+    func testOptInNativeModelLoopEditsPausesAndResumesWithoutReplay() async throws {
+        try await runFixture(browser: false, nativeModelLoop: true)
+    }
+
+    func testNativeKeyChordsRemainLiteralAndRejectAmbiguousSequences() throws {
+        for (keys, usage, modifiers) in [(["Alt", "Left"], 0x50, UInt16(4)), (["Left", "Option"], 0x50, 4),
+            (["Control", "a"], 0x04, 2), (["Command", "a"], 0x04, 8), (["Shift", "ArrowRight"], 0x4F, 1),
+            (["Backspace"], 0x2A, 0), (["Delete"], 0x4C, 0)] {
+            XCTAssertEqual(try ComputerUseNativeKeyChord.action(keys), .key(usage: usage, modifiers: modifiers))
+        }
+        for keys in [[], ["Command"], ["a", "b"], ["Cmd", "Command", "a"], ["Alt", "Option", "Left"], [""], ["😀"]] {
+            XCTAssertThrowsError(try ComputerUseNativeKeyChord.action(keys))
+        }
+    }
+
+    private func desktopTestTools(focus: @escaping () -> String = { "field" },
+        perform: @escaping (ComputerUsePredictedAction) throws -> Void) -> ComputerUseHostTools {
+        ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
+            actionPerformer: perform,
+            screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+                displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 400)) },
+            transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })
+    }
+
+    func testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection() async throws {
+        for changed in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var focus = "field", effects = 0, calls = 0
+            let tools = desktopTestTools(focus: { focus }, perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                calls += 1
+                return calls == 1 ? .init(response: "return", action: .key(["Return"])) : .init(response: "done", action: .reportCompletion("Done"))
+            })
+            let pending = try await executor.execute(taskID: "approval", prompt: "Press Return", trustedUserPrompt: "Press Return", tools: tools, progress: { _ in })
+            guard case .approvalRequired(_, let action, let token) = pending else { return XCTFail("Expected native approval") }
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+            if changed {
+                focus = "changed field"
+                do { try await executor.performApprovedVisualAction(token, action: action, fingerprint: fingerprint, tools: tools, willBeginEffect: {}); XCTFail("Changed target executed") } catch { }
+                focus = "field"
+                do { try await executor.performApprovedVisualAction(token, action: action, fingerprint: fingerprint, tools: tools, willBeginEffect: {}); XCTFail("Rejected approval revived") } catch { }
+                XCTAssertEqual(effects, 0)
+            } else {
+                try await executor.performApprovedVisualAction(token, action: action, fingerprint: fingerprint, tools: tools, willBeginEffect: {})
+                do { try await executor.performApprovedVisualAction(token, action: action, fingerprint: fingerprint, tools: tools, willBeginEffect: {}); XCTFail("Approval replay executed") } catch { }
+                do { _ = try await executor.execute(taskID: "approval", prompt: "Press Return", trustedUserPrompt: "Press Return", tools: tools, progress: { _ in }); XCTFail("Performed approval was offered again") } catch { }
+                let result = try await executor.continueAfterApprovedVisualAction(token, action: action, tools: tools, progress: { _ in })
+                XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(effects, 1); XCTAssertEqual(calls, 2)
+            }
+        }
+    }
+
+    func testNativeDesktopUncertainEffectCannotReplayOnResumeOrRestart() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var effects = 0, proposals = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1; throw ComputerUseTextEditError.deliveryUncertain })
+        let propose: ComputerUseDesktopExecutor.Propose = { _ in proposals += 1; return .init(response: "type", action: .typeText("Tokyo")) }
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: propose)
+        do { _ = try await executor.execute(taskID: "uncertain", prompt: "Type Tokyo", trustedUserPrompt: "Type Tokyo", tools: tools, progress: { _ in }); XCTFail("Expected uncertain effect") } catch { }
+        let resumed = try await executor.execute(taskID: "uncertain", prompt: "Type Tokyo", trustedUserPrompt: "Type Tokyo", tools: tools, progress: { _ in })
+        guard case .unableToComplete = resumed else { return XCTFail("Uncertain action became complete") }
+        let restarted = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: propose)
+        do { _ = try await restarted.execute(taskID: "uncertain", prompt: "Type Tokyo", trustedUserPrompt: "Type Tokyo", tools: tools, progress: { _ in }); XCTFail("Recovered uncertain action executed") } catch { }
+        XCTAssertEqual(effects, 1); XCTAssertEqual(proposals, 1)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.filter { $0.statuses == [.uncertain] }.count, 1)
+    }
+
+    func testNativeDesktopCancellationRejectsLateProposalAndConcurrentExecution() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let started = expectation(description: "Native proposal entered")
+        let returned = expectation(description: "Late proposal returned")
+        var release: CheckedContinuation<ComputerUseFaraModel.Proposal, Never>?
+        var effects = 0, finishes = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            let result = await withCheckedContinuation { release = $0; started.fulfill() }
+            returned.fulfill()
+            return result
+        }, finishRun: { finishes += 1 })
+        let run = Task { try await executor.execute(taskID: "cancel", prompt: "Type text", trustedUserPrompt: "Type text", tools: tools, progress: { _ in }) }
+        await fulfillment(of: [started], timeout: 2)
+        do { _ = try await executor.execute(taskID: "other", prompt: "Other", trustedUserPrompt: "Other", tools: tools, progress: { _ in }); XCTFail("Concurrent task entered") }
+        catch { XCTAssertEqual(error as? ComputerUseTaskExecutionError, .alreadyExecuting) }
+        run.cancel()
+        do { _ = try await run.value; XCTFail("Cancelled task returned success") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        release?.resume(returning: .init(response: "late", action: .typeText("Must not appear")))
+        await fulfillment(of: [returned], timeout: 2)
+        XCTAssertEqual(effects, 0); XCTAssertEqual(finishes, 1)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] })
+    }
+
+    func testNativeDesktopCancellationAfterDispatchRetainsHistoryOnResume() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var run: Task<ComputerUseExecutionResult, Error>?
+        var effects = 0, proposals = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1; run?.cancel() })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 { return .init(response: "type", action: .typeText("One edit")) }
+            XCTAssertEqual(input.history.count, 1)
+            XCTAssertEqual(input.history.first?.action, .typeText("One edit"))
+            return .init(response: "done", action: .reportCompletion("Done"))
+        })
+        run = Task { try await executor.execute(taskID: "after", prompt: "One edit", trustedUserPrompt: "One edit", tools: tools, progress: { _ in }) }
+        do { _ = try await run?.value; XCTFail("Post-dispatch cancellation returned success") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let resumed = try await executor.execute(taskID: "after", prompt: "One edit", trustedUserPrompt: "One edit", tools: tools, progress: { _ in })
+        XCTAssertEqual(resumed, .completed("Done")); XCTAssertEqual(effects, 1); XCTAssertEqual(proposals, 2)
+        do { _ = try await executor.execute(taskID: "after", prompt: "New goal", trustedUserPrompt: "New goal", tools: tools, progress: { _ in }); XCTFail("Task identity accepted a changed goal") }
+        catch { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, .changedTask) }
+    }
+
     func testDesktopImagePreservesOrientationAndFullOffsetDisplayCoordinates() throws {
         let extent = CGRect(x: 0, y: 0, width: 640, height: 320)
         let redTop = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 160, width: 640, height: 160))
@@ -135,6 +259,32 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try ComputerUseFaraModel.validatePNG(frame.png)
     }
 
+    func testNativeInsertionPointComparisonRejectsChangedContentAndOtherControls() throws {
+        let bounds = CGRect(x: -200, y: 100, width: 640, height: 400)
+        let window = CGRect(x: -150, y: 140, width: 400, height: 220)
+        let field = CGRect(x: -120, y: 220, width: 250, height: 25)
+        func image(changing rect: CGRect? = nil) throws -> ComputerUseDesktopImage {
+            var image = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400))
+            if let rect {
+                let local = CGRect(x: rect.minX - bounds.minX, y: bounds.maxY - rect.maxY, width: rect.width, height: rect.height)
+                image = CIImage(color: .blue).cropped(to: local).composited(over: image)
+            }
+            return try .init(observation: .init(image: image, displayBounds: bounds))
+        }
+        let before = try image()
+        XCTAssertTrue(try before.matchesInsertionPointPixels(of: image(), window: window, field: field))
+        XCTAssertTrue(try before.matchesInsertionPointPixels(of: image(changing: CGRect(x: -50, y: 222, width: 1, height: 20)), window: window, field: field))
+        let fractionalField = CGRect(x: -120, y: 220.3, width: 250, height: 24.7)
+        XCTAssertTrue(try before.matchesInsertionPointPixels(of: image(changing: CGRect(x: -50, y: 220.3, width: 1, height: 20)), window: window, field: fractionalField),
+            "A rendered pixel cell can cross the fractional logical edge of its text field")
+        XCTAssertTrue(try before.matchesInsertionPointPixels(of: image(changing: CGRect(x: -50, y: 226, width: 1, height: 20)), window: window, field: field),
+            "Resampling can extend the insertion point by one image pixel beyond the field's rounded footprint")
+        for change in [CGRect(x: -50, y: 222, width: 8, height: 20), CGRect(x: -50, y: 150, width: 1, height: 20),
+                       CGRect(x: -50, y: 242, width: 10, height: 1), CGRect(x: -123, y: 220, width: 2, height: 20)] {
+            XCTAssertFalse(try before.matchesInsertionPointPixels(of: image(changing: change), window: window, field: field), "\(change)")
+        }
+    }
+
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
         try await runFixture(browser: false)
     }
@@ -190,7 +340,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -232,9 +382,72 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         let injector = InputInjector()
+        var simulatedLogin = false
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
-        })
+        }, authenticationContextProvider: nativeModelLoop ? {
+            simulatedLogin ? .init(focusedElement: "AXTextField AXSecureTextField Password", boundedWindowContext: "Sign in\nPassword\nContinue") : nil
+        } : nil)
+        if nativeModelLoop {
+            let exact = "  東京 e\u{301} 👩🏽‍💻  "
+            let goal = "Set Origin to Seattle and replace Destination with \(exact). Leave the form open."
+            var proposals = 0
+            var trace: [String] = []
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("native-loop"), propose: { input in
+                trace.append("proposal=\(proposals) error=\(input.actionError ?? "none") signed=\(tools.frontmostApplicationSnapshot().identity?.codeIdentity != nil) editable=\(try tools.focusedTypingTargetIsEditable(providerAction: .typeText("probe")))")
+                XCTAssertEqual(input.goal, goal); XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
+                guard proposals < 7 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                let index = proposals; proposals += 1
+                XCTAssertEqual(input.history.count, min(index, 5))
+                let arguments: [String: Any]
+                switch index {
+                case 0: arguments = ["action": "type", "text": "Seattle"]
+                case 1:
+                    try await self.verify(state, field: "origin", equals: "Seattle")
+                    let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+                    let x = window.minX + 314, y = window.maxY - 125
+                    arguments = ["action": "left_click", "coordinate": [
+                        (x - screen.displayBounds.minX) / screen.displayBounds.width * 1000,
+                        (y - screen.displayBounds.minY) / screen.displayBounds.height * 1000]]
+                case 2: arguments = ["action": "type", "text": "Replace this"]
+                case 3:
+                    try await self.verify(state, field: "destination", equals: "Replace this")
+                    arguments = ["action": "key", "keys": ["Command", "a"]]
+                case 4: arguments = ["action": "type", "text": exact]
+                case 5:
+                    try await self.verify(state, field: "destination", equals: exact)
+                    simulatedLogin = true
+                    arguments = ["action": "wait", "time": 0]
+                default: arguments = ["action": "terminate", "answer": "The two fields are filled."]
+                }
+                let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": arguments])
+                let response = "<tool_call>" + String(decoding: data, as: UTF8.self) + "</tool_call>"
+                return try .init(response: response, action: .decodeNativeMessage(response))
+            })
+            do {
+                let paused = try await executor.execute(taskID: "native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                guard case .userInterventionRequired = paused else { return XCTFail("Expected login handoff, got \(paused)") }
+                XCTAssertEqual(proposals, 6)
+                simulatedLogin = false
+                let result = try await executor.execute(taskID: "native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(result, .completed("The two fields are filled.")); XCTAssertEqual(proposals, 7)
+                try await verify(state, field: "origin", equals: "Seattle")
+                try await verify(state, field: "destination", equals: exact)
+                let replay = try await executor.execute(taskID: "native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(replay, result); XCTAssertEqual(proposals, 7)
+                let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("native-loop"), includingPropertiesForKeys: nil)
+                    .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+                let dispatches = journals.filter { $0.stepIDs == ["native-dispatch-returned"] }
+                XCTAssertEqual(dispatches.count, 5)
+                XCTAssertTrue(dispatches.allSatisfy { $0.statuses == [.verified] })
+                let report: [String: Any] = ["inference": false, "nativeInput": true, "proposals": proposals,
+                    "verifiedDispatches": dispatches.count, "simulatedLogin": true,
+                    "completedWithoutReplay": replay == result, "independentFieldVerification": true]
+                let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+                attachment.name = "Native desktop workflow metadata"; attachment.lifetime = .keepAlways; add(attachment)
+            } catch { XCTFail("Native model loop failed after \(proposals) proposals: \(String(reflecting: error)); \(trace); \(executor.lastRevalidationDiagnostic)") }
+            return
+        }
         if captureOnly || modelRequestOnly {
             // One real display capture, no model or input. OCR is confined to
             // this disposable native window and checks independent fixture text.

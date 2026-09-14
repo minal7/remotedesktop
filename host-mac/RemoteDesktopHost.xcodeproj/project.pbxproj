@@ -11,6 +11,7 @@
 		E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */; };
 		F7191DAA5A805A98C4E9BA8A /* GUI-OWL-DESKTOP-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */; };
 		FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */; };
+		BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */; };
 		B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */; };
 		E4FF598034094C418706CA54 /* ComputerUseSignInNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */; };
 		1ED3C4F4D709486CB8A3185F /* ComputerUseBrowserPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */; };
@@ -307,6 +308,7 @@
 		E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "GUI-OWL-DESKTOP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraBrowserExecutor.swift; sourceTree = "<group>"; };
+		D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDesktopExecutor.swift; sourceTree = "<group>"; };
 		B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
 		B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSignInNavigation.swift; sourceTree = "<group>"; };
 		E2AB668E8C0F4FA3BA061A41 /* ComputerUseBrowserPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseBrowserPresentation.swift; sourceTree = "<group>"; };
@@ -784,6 +786,7 @@
 				599F0814729D3FB33406E113 /* ComputerUseHoloModel.swift */,
 				2E6BEDCF0F6EE2C343DAE2C3 /* ComputerUseGUIOwlModel.swift */,
 				8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */,
+				D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */,
 				99ED4432B2B249D56CD6DEAC /* ComputerUseBrowserSearchPlanner.swift */,
 				470BA959CA234D685362D54F /* ComputerUseBrowserLinkPlanner.swift */,
 				59B31CE5CC833CA69827A976 /* ComputerUseBrowserSourcePolicy.swift */,
@@ -1237,6 +1240,7 @@
 				090C570A456F35A34DC7A76B /* ComputerUseHoloModel.swift in Sources */,
 				50E760FE6946EEC28FF48631 /* ComputerUseGUIOwlModel.swift in Sources */,
 				FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */,
+				BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */,
 				118C3A0AD32CF1720A773392 /* ComputerUseBrowserSearchPlanner.swift in Sources */,
 				0DFDF6E26E89800D0C96BE6B /* ComputerUseBrowserLinkPlanner.swift in Sources */,
 				33B485980755F4EB346CF8C8 /* ComputerUseBrowserSourcePolicy.swift in Sources */,
