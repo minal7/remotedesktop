@@ -4,6 +4,173 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInPackagedNativePreparationAndRealMCPReachApprovalWithoutModelWorker() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_NATIVE_DEMAND_PREPARATION"] == "1" else {
+            throw XCTSkip("Opt-in: installed native package and real signed Mac helper, no approved effect")
+        }
+        let started = Date()
+        let fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let realNative = ComputerUseInstaller.nativeText()
+        let installedNative = await realNative.currentInstallation()
+        let nativeReceipt = try XCTUnwrap(installedNative)
+        let suppliedHelper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
+        let manifest = MacControlMCPArtifactManifest.current
+        let helperRoot = fixture.parent.appendingPathComponent("helper-installation")
+        let helperVersion = helperRoot.appendingPathComponent("Versions").appendingPathComponent(manifest.version)
+        try FileManager.default.createDirectory(at: helperVersion, withIntermediateDirectories: true)
+        let helperApp = helperVersion.appendingPathComponent("MacControlMCP.app")
+        try FileManager.default.copyItem(at: suppliedHelper.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent(), to: helperApp)
+        let stagedReceipt = MacControlMCPInstallationReceipt(packageVersion: manifest.version, archiveSHA256: manifest.archiveSHA256,
+            appBundlePath: helperApp.path, binaryPath: helperApp.appendingPathComponent("Contents/MacOS/" + manifest.executableName).path,
+            executableSHA256: manifest.executableSHA256, bundleIdentifier: manifest.bundleIdentifier,
+            teamIdentifier: manifest.teamIdentifier, signingIdentity: manifest.signingIdentity, installedAt: Date())
+        try JSONEncoder().encode(stagedReceipt).write(to: helperRoot.appendingPathComponent("active-installation.json"), options: .atomic)
+        let realHelper = MacControlMCPInstaller(rootDirectory: helperRoot)
+        let installedHelper = await realHelper.currentInstallation()
+        let helperReceipt = try XCTUnwrap(installedHelper)
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        let mutations = fixture.parent.appendingPathComponent("mcp-mutations.json")
+        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: mutations), sessionFactory: { binary, generation in
+            MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                stateDirectory: fixture.parent.appendingPathComponent("helper-state"))
+        })
+        let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+        let visual = MobileInitiationVisualLoader(), channel = MobileInitiationTestChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+            nativeTextInstaller: native,
+            macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
+            visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                    visualFallback: fallback, clientPool: pool)
+            }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+        var failure: Error?
+        do {
+            manager.start(pairingCode: "123456")
+            await waitUntil(timeoutIterations: 1_000) { manager.capability.state == .ready }
+            guard manager.capability.state == .ready else { throw CocoaError(.fileReadUnknown) }
+            XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+            let toolNames = try await pool.allowedTools().map(\.toolName).sorted()
+            XCTAssertTrue(toolNames.contains(RemoteDesktopMailMCP.toolName)); XCTAssertGreaterThan(toolNames.count, 1)
+            manager.authorizePeer(senderID: "IOS-PEER")
+            let prompt = ComputerUseEnvelope(id: "real-helper-no-model-" + UUID().uuidString, senderID: "IOS-PEER", targetID: "HOST-ID",
+                pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
+                body: "Draft an email to codex-acceptance@example.invalid with subject \"Status\" and body \"Everything is on schedule.\"")
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil(timeoutIterations: 1_000) { if case .awaitingApproval = manager.activity { return true }; return false }
+            let approvals = await channel.approvalRequests()
+            let approval = try XCTUnwrap(approvals.first { $0.taskID == prompt.id })
+            for value in ["codex-acceptance@example.invalid", "Status", "Everything is on schedule."] {
+                XCTAssertTrue(approval.details?.contains { $0.value == value } == true)
+            }
+            let activations = await native.recordedSuccessfulActivations()
+            XCTAssertTrue(activations.isEmpty); XCTAssertEqual(visual.loadCount, 0)
+            XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: mutations.path), "Approval preparation cannot claim a Mail mutation")
+            let report: [String: Any] = ["scope": "packaged-native-preparer-real-MCP-host-approval-no-effect",
+                "helperVersion": helperReceipt.packageVersion, "allowedTools": toolNames,
+                "nativeActivationRecords": activations.count, "visualLoads": visual.loadCount,
+                "workerCountAtApproval": try inspector.matchingProcesses(for: binary).count,
+                "approvalTaskMatches": approval.taskID == prompt.id, "mutationLedgerCreated": FileManager.default.fileExists(atPath: mutations.path),
+                "elapsedSeconds": Date().timeIntervalSince(started)]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+            attachment.name = "Native preparation with real MCP"; attachment.lifetime = .keepAlways; add(attachment)
+        } catch { failure = error }
+        await manager.shutdown(); await pool.cancelAll(); await OSAtlasLlamaRuntime.shared.shutdown()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        if let failure { throw failure }
+    }
+
+    func testPassiveNativePreparationDoesNotLoadRuntimeOrCommitActivationButExplicitSetupDoes() async throws {
+        for helperInstalled in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+            let visual = MobileInitiationVisualLoader()
+            let pool = MobileInitiationStructuredPool(), channel = MobileInitiationTestChannel()
+            var preparations = 0, runtimeLoads = 0, nativeExecutions = 0
+            let makeNative = {
+                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeExecutions += 1; return nil })
+            }
+            let manager = HostComputerUseManager(injector: InputInjector(),
+                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in runtimeLoads += 1; return makeNative() },
+                nativeTextPreparer: { _, _, _ in preparations += 1; return makeNative() },
+                macControlInstaller: MobileInitiationMacControlInstaller(status: helperInstalled ? .ready(mobileInitiationMacControlReceipt) : .notInstalled),
+                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            manager.start(pairingCode: "123456")
+            await waitUntil { manager.capability.state == .ready }
+            XCTAssertEqual(preparations, 1)
+            XCTAssertEqual(runtimeLoads, 0, "Passive startup only prepares a capability")
+            let passiveActivations = await native.recordedSuccessfulActivations()
+            XCTAssertTrue(passiveActivations.isEmpty, "Preparation cannot certify that a model loaded")
+            XCTAssertEqual(visual.loadCount, 0)
+            XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "verify-model-runtime"), channel: channel))
+            let progress = await waitForSetupProgress(channel: channel, terminalPhase: .ready)
+            XCTAssertTrue(progress.contains { $0.phase == .ready })
+            XCTAssertEqual(runtimeLoads, 1, "Explicit setup must still validate the installed native runtime")
+            let setupActivations = await native.recordedSuccessfulActivations()
+            XCTAssertEqual(setupActivations, [nativeReceipt])
+            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            XCTAssertEqual(nativeExecutions, 0)
+            await manager.shutdown()
+        }
+    }
+
+    func testNativePreparationFailurePreservesInstalledMCPWithoutModelActivation() async throws {
+        for requestDuringPreparation in [false, true] {
+            let fixture = try makeFixture(markerPresent: false)
+            defer { try? FileManager.default.removeItem(at: fixture.parent) }
+            let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
+            let visual = MobileInitiationVisualLoader()
+            let pool = MobileInitiationStructuredPool(), channel = MobileInitiationTestChannel()
+            var preparations = 0, runtimeLoads = 0
+            var releasePreparation = false
+            let manager = HostComputerUseManager(injector: InputInjector(),
+                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
+                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
+                    runtimeLoads += 1
+                    return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in XCTFail("Invalid native capability executed"); return nil })
+                }, nativeTextPreparer: { _, _, _ in
+                    preparations += 1
+                    while !releasePreparation { try await Task.sleep(for: .milliseconds(10)) }
+                    throw CocoaError(.fileReadCorruptFile)
+                },
+                macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
+                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            defer { releasePreparation = true; manager.stop() }
+            manager.start(pairingCode: "123456")
+            await waitUntil { preparations == 1 }
+            if requestDuringPreparation {
+                XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-preparation-failed"), channel: channel))
+            }
+            releasePreparation = true
+            await waitUntil { manager.capability.state == .ready }
+            if requestDuringPreparation {
+                let progress = await waitForSetupProgress(channel: channel)
+                XCTAssertTrue(progress.contains { $0.phase == .failed })
+                XCTAssertFalse(progress.contains { $0.phase == .ready })
+            }
+            let installCount = await native.installCallCount()
+            XCTAssertEqual(installCount, 0, "A failed passive preparation cannot start a download loop")
+            XCTAssertEqual(preparations, 1); XCTAssertEqual(runtimeLoads, 0)
+            XCTAssertTrue(manager.needsAdditionalSetup)
+            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            let activations = await native.recordedSuccessfulActivations()
+            XCTAssertTrue(activations.isEmpty); XCTAssertEqual(visual.loadCount, 0)
+            await manager.shutdown()
+        }
+    }
+
     func testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad() async throws {
         for visualInstalled in [false, true] {
             let fixture = try makeFixture(markerPresent: false)
@@ -1359,6 +1526,10 @@ private actor MobileInitiationTestChannel: HostComputerUseChannel {
             guard envelope.kind == .assistant else { return nil }
             return try? ComputerUseTaskUpdate.decodeBody(envelope.body)
         }
+    }
+
+    func approvalRequests() -> [ComputerUseApprovalRequest] {
+        sent.compactMap { $0.kind == .approvalRequest ? try? ComputerUseApprovalRequest.decodeBody($0.body) : nil }
     }
 
     func setupProgressEnvelopes(

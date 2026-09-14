@@ -4219,6 +4219,7 @@ final class HostComputerUseManager: ObservableObject {
     private let installer: any ComputerUseModelProvisioning
     private let nativeTextInstaller: (any ComputerUseModelProvisioning)?
     private let nativeTextLoader: ComputerUseNativeTextLoader
+    private let nativeTextPreparer: ComputerUseNativeTextLoader
     private let macControlInstaller: any MacControlMCPProvisioning
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
     private let executorComposer: ComputerUseExecutorComposer
@@ -4303,6 +4304,7 @@ final class HostComputerUseManager: ObservableObject {
         installer: (any ComputerUseModelProvisioning)? = nil,
         nativeTextInstaller: (any ComputerUseModelProvisioning)? = nil,
         nativeTextLoader: ComputerUseNativeTextLoader? = nil,
+        nativeTextPreparer: ComputerUseNativeTextLoader? = nil,
         macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
         executorComposer: ComputerUseExecutorComposer? = nil,
@@ -4345,6 +4347,9 @@ final class HostComputerUseManager: ObservableObject {
         self.nativeTextLoader = nativeTextLoader ?? { receipt, tools, progress in
             try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, progress: progress)
         }
+        self.nativeTextPreparer = nativeTextPreparer ?? nativeTextLoader ?? { receipt, tools, progress in
+            try await ComputerUseNativeTextExecutorLoader.prepare(receipt: receipt, tools: tools, progress: progress)
+        }
         self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
         self.visualExecutorLoader = visualExecutorLoader
             ?? OSAtlasVisualExecutorLoader()
@@ -4383,7 +4388,7 @@ final class HostComputerUseManager: ObservableObject {
                 let receipt = await nativeTextInstaller.currentInstallation()
                 guard !Task.isCancelled, !isShuttingDown else { return }
                 if let receipt {
-                    beginNativeTextActivation(of: receipt)
+                    beginNativeTextPreparation(of: receipt)
                     return
                 }
                 let interrupted = await nativeTextInstaller.interruptedInstallationExists()
@@ -6141,9 +6146,9 @@ final class HostComputerUseManager: ObservableObject {
             errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
     }
 
-    private func beginNativeTextActivation(of receipt: ComputerUseInstallationReceipt) {
+    private func beginNativeTextPreparation(of receipt: ComputerUseInstallationReceipt) {
         guard allowsExternalServices, !isShuttingDown, setupTask == nil else { return }
-        modelState = .installing(detail: "Loading local form editing…", fraction: nil)
+        modelState = .installing(detail: "Preparing local form editing…", fraction: nil)
         setupTask = Task { [weak self] in
             guard let self else { return }
             var finishRequestedSetup = false
@@ -6155,15 +6160,35 @@ final class HostComputerUseManager: ObservableObject {
                 }
             }
             do {
-                let native = try await nativeTextLoader(receipt, tools) { [weak self] detail in
-                    self?.consumeRuntimeActivationUpdate(detail)
+                let helperStatus = await macControlInstaller.durableStatus()
+                try Task.checkCancellation()
+                let native: ComputerUseCapabilityExecutor
+                do {
+                    native = try await nativeTextPreparer(receipt, tools) { [weak self] detail in
+                        self?.consumeRuntimeActivationUpdate(detail)
+                    }
+                } catch {
+                    try Task.checkCancellation()
+                    guard !(error is CancellationError), case .ready(let helper) = helperStatus else { throw error }
+                    // A missing/changed fallback package cannot disable an
+                    // independently verified helper. Do not certify activation
+                    // or silently start downloads to repair that package.
+                    macControlReceipt = helper
+                    let visualReceipt = await installer.currentInstallation()
+                    try Task.checkCancellation()
+                    let structured = try await executorComposer(helper, deferredVisualExecutor(receipt: visualReceipt))
+                    structuredCandidate = structured
+                    try Task.checkCancellation()
+                    executor = structured
+                    modelState = .ready(runtimeName: structured.runtimeName)
+                    publishRequestedActivationFailure(error)
+                    return
                 }
                 try Task.checkCancellation()
                 var activated: any ComputerUseExecuting = native
                 // Fresh missing packages remain optional. Preserve the
                 // previous startup recovery policy for an installation that
                 // was already explicitly started before this process exited.
-                let helperStatus = await macControlInstaller.durableStatus()
                 if case .ready(let helper) = helperStatus {
                     macControlReceipt = helper
                     let visualReceipt = await installer.currentInstallation()
@@ -6172,8 +6197,6 @@ final class HostComputerUseManager: ObservableObject {
                     structuredCandidate = structured
                     activated = structured
                 }
-                try Task.checkCancellation()
-                try await nativeTextInstaller?.recordRuntimeActivationSuccess(for: receipt)
                 try Task.checkCancellation()
                 if native.hasAdditionalSetup {
                     // Capability readiness is not completion of an explicit

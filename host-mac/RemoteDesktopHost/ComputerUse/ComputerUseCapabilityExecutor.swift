@@ -495,17 +495,34 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
 
 @MainActor
 enum ComputerUseNativeTextExecutorLoader {
+    /// Preparation alone never certifies runtime activation. Passive startup
+    /// prepares the planner without occupying a worker; the runtime text
+    /// planner activates it only when it needs a proposal.
+    static func prepare(receipt: ComputerUseInstallationReceipt, tools: ComputerUseHostTools,
+                        bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
+                        journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
+                        progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
+        try await load(receipt: receipt, tools: tools, bundle: bundle, runtime: runtime,
+            journalDirectory: journalDirectory, activateRuntime: false, progress: progress)
+    }
+
     static func load(receipt: ComputerUseInstallationReceipt, tools: ComputerUseHostTools,
                      bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
                      journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
+                     activateRuntime: Bool = true,
                      progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
-        progress("Loading local computer use…")
+        try Task.checkCancellation()
+        progress(activateRuntime ? "Loading local computer use…" : "Preparing local form editing…")
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
         let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
             receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
-        let endpoint = try await runtime.activateNativeText(inputs)
-        do { try Task.checkCancellation() }
-        catch { await runtime.cancel(endpoint: endpoint); throw error }
+        if activateRuntime {
+            let endpoint = try await runtime.activateNativeText(inputs)
+            do { try Task.checkCancellation() }
+            catch { await runtime.cancel(endpoint: endpoint); throw error }
+        } else {
+            try Task.checkCancellation()
+        }
         let native = tools.makeNativeTextExecutor(
             planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
             journalDirectory: journalDirectory)

@@ -114,7 +114,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         var visualLoads = 0, result: ComputerUseExecutionResult?, failure: Error?
         var progressMessages: [String] = [], discoveredTools: [String] = []
         do {
-            let native = try await ComputerUseNativeTextExecutorLoader.load(receipt: .init(
+            let native = try await ComputerUseNativeTextExecutorLoader.prepare(receipt: .init(
                 installationVersion: ComputerUseArtifactManifest.nativeTextV2.installationVersion, modelVariant: .nativeText4B,
                 modelDirectory: nativeModel.deletingLastPathComponent().path, installedAt: Date()), tools: tools, runtime: runtime,
                 journalDirectory: directory.appendingPathComponent("text"), progress: { _ in })

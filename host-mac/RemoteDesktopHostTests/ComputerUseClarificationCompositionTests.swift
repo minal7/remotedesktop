@@ -344,6 +344,9 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, tools, progress in
                 try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
                     journalDirectory: directory.appendingPathComponent("text"), progress: progress)
+            }, nativeTextPreparer: { receipt, tools, progress in
+                try await ComputerUseNativeTextExecutorLoader.prepare(receipt: receipt, tools: tools, runtime: runtime,
+                    journalDirectory: directory.appendingPathComponent("text"), progress: progress)
             }, macControlInstaller: helperInstaller, visualExecutorLoader: loader,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 let browser = ComputerUseOwnedBrowser(mayAct: mayAct); ownedBrowser = browser
@@ -530,6 +533,9 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let manager = HostComputerUseManager(injector: InputInjector(), executor: faraExecutor, nativeTextInstaller: nativeInstaller,
             nativeTextLoader: { receipt, tools, progress in
                 try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
+                    journalDirectory: directory.appendingPathComponent("text"), progress: progress)
+            }, nativeTextPreparer: { receipt, tools, progress in
+                try await ComputerUseNativeTextExecutorLoader.prepare(receipt: receipt, tools: tools, runtime: runtime,
                     journalDirectory: directory.appendingPathComponent("text"), progress: progress)
             }, macControlInstaller: NoCompositionHelperInstaller(),
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
