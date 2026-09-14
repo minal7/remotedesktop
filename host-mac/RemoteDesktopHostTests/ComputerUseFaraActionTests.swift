@@ -14,7 +14,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var allowed = true
         let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
         var retainedWindow: NSWindow?
-        for mode in ["error", "capacity", "completion", "negated-completion", "cancellation", "control", "owner", "invalid-action", "foreign-scope", "nested-scope"] {
+        for mode in ["error", "capacity", "completion", "negated-completion", "incomplete", "cancellation", "control", "owner", "invalid-action", "foreign-scope", "nested-scope"] {
             allowed = true
             let taskID = "retired-tools-" + mode
             // First admission creates the native view. Later cases retain
@@ -39,9 +39,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     case "error": throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
                     case "capacity": throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
                     case "completion", "negated-completion":
-                        try MCPFirstComputerUseExecutor.validateBrowserCompletion(answer: "The store closes at 6 PM.",
+                        try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: .init(kind: .answer, reference: "", text: "The store closes at 6 PM."),
                             goal: mode == "completion" ? "Read the store hours and purchase a gift."
                                 : "Read the store hours. Do not purchase a gift.", hasPageObservation: true)
+                    case "incomplete":
+                        try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                            plan: .init(kind: .incomplete, reference: "", text: "The requested action has not been performed."),
+                            goal: "Complete the requested action.", hasPageObservation: false)
                     case "cancellation": withUnsafeCurrentTask { $0?.cancel() }
                     case "control": allowed = false
                     case "owner": try browser.claim(taskID: "replacement-owner")
@@ -66,6 +70,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 switch mode {
                 case "error", "invalid-action": XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .unsupportedAction)
                 case "capacity", "completion", "negated-completion": XCTAssertNotNil(error as? ComputerUseMCPBrowserStepPlanner.Failure)
+                case "incomplete": XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError,
+                    .structuredToolFailed("The requested action has not been performed."))
                 case "cancellation": XCTAssertTrue(error is CancellationError)
                 case "control": XCTAssertEqual(error as? ComputerUseHostTools.ToolError, .paused)
                 case "nested-scope": XCTAssertEqual(error as? ComputerUseTaskExecutionError, .alreadyExecuting)

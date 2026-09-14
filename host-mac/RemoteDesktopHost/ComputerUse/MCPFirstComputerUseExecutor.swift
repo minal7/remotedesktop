@@ -848,10 +848,10 @@ final class MCPFirstComputerUseExecutor:
                 destination = verified
             }
             arguments = ["action": "visit_url", "url": destination.absoluteString]
-        case .answer:
+        case .answer, .incomplete:
             let hasPage: Bool
             if case .page = observation { hasPage = true } else { hasPage = false }
-            try Self.validateBrowserCompletion(answer: plan.text, goal: input.goal, hasPageObservation: hasPage)
+            try Self.validateBrowserCompletion(plan: plan, goal: input.goal, hasPageObservation: hasPage)
             arguments = ["action": "terminate", "answer": plan.text]
         case .askUser:
             guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
@@ -870,8 +870,12 @@ final class MCPFirstComputerUseExecutor:
 
     // Completion admission is separate from deciding whether native tools
     // have a capability gap. A rejected answer cannot authorize vision.
-    static func validateBrowserCompletion(answer: String, goal: String, hasPageObservation: Bool) throws {
-        guard hasPageObservation, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+    static func validateBrowserCompletion(plan: ComputerUseMCPBrowserStepPlanner.Plan, goal: String, hasPageObservation: Bool) throws {
+        guard !plan.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AppleFoundationMCPPlannerError.unknownProposal
+        }
+        if plan.kind == .incomplete { throw ExecutorError.structuredToolFailed(plan.text) }
+        guard plan.kind == .answer, hasPageObservation else {
             throw AppleFoundationMCPPlannerError.unknownProposal
         }
         guard !requestsConsequentialMutation(goal) else {

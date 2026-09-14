@@ -2,10 +2,96 @@ import Foundation
 import AppKit
 import WebKit
 import XCTest
+#if canImport(FoundationModels) && compiler(>=6.3)
+import FoundationModels
+#endif
 @testable import RemoteDesktopHost
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInWholeNativePageTokenCapacity() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MCP_NATIVE_CAPACITY"] == "1" else {
+            throw XCTSkip("Opt-in: actual Apple token counts for complete frozen native records; no inference")
+        }
+#if canImport(FoundationModels) && compiler(>=6.3)
+        if #available(macOS 26.4, *), SystemLanguageModel.default.availability == .available {
+            let manifestURL = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_NATIVE_CAPACITY_MANIFEST"]))
+            let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+            let cases = try XCTUnwrap(manifest["cases"] as? [[String: String]])
+            let directory = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_LOOP_DIRECTORY"]))
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            var reports: [[String: Any]] = []
+            for item in cases {
+                let page = try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self,
+                    from: Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(item["catalogue"]))))
+                let url = try XCTUnwrap(item["url"]), goal = try XCTUnwrap(item["goal"])
+                let full = ComputerUseMCPBrowserStepPlanner.RecordWindow(texts: page.texts, links: page.links, containers: page.containers)
+                let columns: [String: [String]] = ["containers": ["id", "parent", "kind"], "texts": ["id", "container", "text"], "links": ["id", "container", "label"]]
+                let compact: [String: Any] = ["columns": columns,
+                    "containers": page.containers.map { [$0.id, $0.parentID as Any? ?? NSNull(), $0.kind] as [Any] },
+                    "texts": page.texts.map { [$0.id, $0.containerID, $0.pageReadingText] },
+                    "links": page.links.map { [$0.id, $0.containerID as Any? ?? NSNull(), $0.label] as [Any] }]
+                let references = [""] + page.links.map(\.id).sorted()
+                guard references.count <= 64 else {
+                    reports.append(["case": item["id"] ?? url, "fitsReferences": false,
+                        "references": references.count, "notMeasured": "Production schema permits at most 64 references"])
+                    try JSONSerialization.data(withJSONObject: ["cases": reports, "inferenceCalls": 0], options: [.prettyPrinted, .sortedKeys])
+                        .write(to: directory.appendingPathComponent("result.json"), options: .atomic)
+                    continue
+                }
+                let sourceSchema: MCPJSONValue = .object(["type": .string("object"), "additionalProperties": .bool(false),
+                    "properties": .object([
+                        "kind": .object(["type": .string("string"), "enum": .array(["search", "openLink", "answer", "askUser", "wait", "visualFallback", "inspectRecords", "incomplete"].map(MCPJSONValue.string))]),
+                        "reference": .object(["type": .string("string"), "enum": .array(references.map(MCPJSONValue.string))]),
+                        "text": .object(["type": .string("string"), "maxLength": .integer(4096)])]),
+                    "required": .array(["kind", "reference", "text"].map(MCPJSONValue.string))])
+                let schema = try FoundationMCPJSONSchemaBridge(rootSchema: sourceSchema, rootName: "browser_step").makeGenerationSchema()
+                let prior = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": ["action": "visit_url", "url": url]], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self) + "</tool_call>"
+                for (format, content) in [("named", full.object), ("columns", compact)] {
+                    var records = content
+                    records["url"] = url; records["truncated"] = page.truncated
+                    records["omittedEmbeddedContent"] = page.omittedEmbeddedContent; records["omittedStructure"] = page.omittedStructure
+                    records["recordWindow"] = ["number": 1, "total": 1, "otherCapturedTexts": 0, "otherCapturedLinks": 0]
+                    let input: [String: Any] = ["goal": goal, "page": records, "userURLs": [String: String](), "availableRecordViews": [String](),
+                        "history": [["proposal": prior, "sourceURL": NSNull(), "userResponse": NSNull(), "actionError": NSNull()]],
+                        "userResponse": NSNull(), "actionError": NSNull()]
+                    let data = try JSONSerialization.data(withJSONObject: input, options: [.sortedKeys, .withoutEscapingSlashes])
+                    let model = SystemLanguageModel.default
+                    let count = try await model.tokenCount(for: Prompt(String(decoding: data, as: UTF8.self)))
+                        + model.tokenCount(for: Instructions(ComputerUseMCPBrowserStepPlanner.instructions)) + model.tokenCount(for: schema)
+                    reports.append(["case": item["id"] ?? url, "format": format, "inputBytes": data.count, "contextTokens": count,
+                        "responseReserve": 512, "margin": 192, "availableTokens": model.contextSize,
+                        "fitsTokens": count + 512 + 192 <= model.contextSize, "fitsReferences": references.count <= 64,
+                        "texts": page.texts.count, "links": page.links.count, "containers": page.containers.count,
+                        "truncated": page.truncated, "omittedStructure": page.omittedStructure, "omittedEmbeddedContent": page.omittedEmbeddedContent])
+                    try data.write(to: directory.appendingPathComponent((item["id"] ?? "page") + "-" + format + ".json"), options: .withoutOverwriting)
+                    try JSONSerialization.data(withJSONObject: ["cases": reports, "inferenceCalls": 0], options: [.prettyPrinted, .sortedKeys])
+                        .write(to: directory.appendingPathComponent("result.json"), options: .atomic)
+                }
+            }
+            try JSONSerialization.data(withJSONObject: ["cases": reports, "inferenceCalls": 0], options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent("result.json"), options: .atomic)
+            return
+        }
+#endif
+        throw XCTSkip("Actual Apple token counting is unavailable")
+    }
+
+    func testMCPBrowserIncompleteOutcomePreservesFailureInsteadOfSuccess() throws {
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
+            userURLs: [:], links: [:], answerTexts: ["Known policy"], answerSources: ["https://example.org/policy"])
+        let message = "The policy is available, but the requested account change has not been performed."
+        let result = try planner.decode(.object(["kind": .string("incomplete"), "reference": .string(""), "text": .string(message)]), context: context)
+        XCTAssertEqual(result.kind.rawValue, "incomplete")
+        XCTAssertEqual(result.text, message)
+        let initial = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]), userURLs: [:], links: [:])
+        XCTAssertEqual(try planner.decode(.object(["kind": .string("incomplete"), "reference": .string(""),
+            "text": .string("The requested task could not be performed.")]), context: initial).kind.rawValue, "incomplete")
+        XCTAssertThrowsError(try planner.decode(.object(["kind": .string("incomplete"), "reference": .string(""), "text": .string("  ")]), context: context))
+        XCTAssertThrowsError(try planner.decode(.object(["kind": .string("incomplete"), "reference": .string(""), "text": .string("No result https://unvisited.invalid/")]), context: context))
+    }
+
     func testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability() throws {
         let planner = ComputerUseMCPBrowserStepPlanner()
         let source = URL(string: "https://example.org/source")!

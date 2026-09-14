@@ -13,10 +13,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             ("Read the page.", "Some information.", false),
         ] {
             XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
-                answer: answer, goal: goal, hasPageObservation: hasPage), goal)
+                plan: .init(kind: .answer, reference: "", text: answer), goal: goal, hasPageObservation: hasPage), goal)
         }
         XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
-            answer: "The store closes at 6 PM.", goal: "Read the store hours.", hasPageObservation: true))
+            plan: .init(kind: .answer, reference: "", text: "The store closes at 6 PM."), goal: "Read the store hours.", hasPageObservation: true))
+    }
+
+    func testIncompleteBrowserPlanCannotBecomeSuccessfulCompletion() throws {
+        let reason = "The requested action has not been performed."
+        for hasPage in [false, true] {
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                plan: .init(kind: .incomplete, reference: "", text: reason), goal: "Complete the requested action.", hasPageObservation: hasPage)) {
+                XCTAssertEqual($0 as? MCPFirstComputerUseExecutor.ExecutorError, .structuredToolFailed(reason))
+            }
+        }
     }
 
     func testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback() async throws {
