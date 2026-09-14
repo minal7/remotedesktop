@@ -36,31 +36,39 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     func testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad() async throws {
-        for visualInstalled in [false, true] {
-            let fixture = try makeFixture(markerPresent: false)
-            defer { try? FileManager.default.removeItem(at: fixture.parent) }
-            let visual = MobileInitiationVisualLoader()
-            let pool = MobileInitiationStructuredPool()
-            let channel = MobileInitiationTestChannel()
-            var nativeCalls = 0
-            let manager = HostComputerUseManager(injector: InputInjector(),
-                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: visualInstalled),
-                nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true),
-                nativeTextLoader: { _, _, _ in
-                    ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil })
-                }, macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
-                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
-                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
-                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-            manager.start(pairingCode: "123456")
-            await waitUntil { manager.capability.state == .ready }
-            XCTAssertEqual(manager.needsAdditionalSetup, !visualInstalled)
-            XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
-            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
-            XCTAssertEqual(nativeCalls, 1, "Native decline must route the whole current goal to Mac tools")
-            XCTAssertEqual(visual.loadCount, 0, "Structured routing cannot load vision even when its package exists")
-            await manager.shutdown()
+        for explicitSetup in [false, true] {
+            for visualInstalled in [false, true] {
+                let fixture = try makeFixture(markerPresent: false)
+                defer { try? FileManager.default.removeItem(at: fixture.parent) }
+                let visual = MobileInitiationVisualLoader()
+                let pool = MobileInitiationStructuredPool()
+                let channel = MobileInitiationTestChannel()
+                var nativeCalls = 0
+                let manager = HostComputerUseManager(injector: InputInjector(),
+                    installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: visualInstalled),
+                    nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: !explicitSetup),
+                    nativeTextLoader: { _, _, _ in
+                        ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil })
+                    }, macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
+                    visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                        try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                            visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                    }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+                manager.start(pairingCode: "123456")
+                await waitUntil { manager.capability.state == .ready }
+                if explicitSetup {
+                    XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "mcp-first-setup"), channel: channel))
+                    let progress = await waitForSetupProgress(channel: channel, terminalPhase: .ready)
+                    XCTAssertTrue(progress.contains { $0.phase == .ready })
+                }
+                XCTAssertEqual(manager.needsAdditionalSetup, !(visualInstalled || explicitSetup))
+                XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
+                let visualLoadsBeforeTask = visual.loadCount
+                await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+                XCTAssertEqual(nativeCalls, 0, "Available Mac tools must handle the goal before invoking the separate native text model")
+                XCTAssertEqual(visual.loadCount, visualLoadsBeforeTask, "Structured routing cannot load vision even when its package exists")
+                await manager.shutdown()
+            }
         }
     }
 
@@ -200,7 +208,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     nativeLoads += 1
                     return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
                 }, macControlInstaller: MobileInitiationMacControlInstaller(status: helperStatus),
-                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: MobileInitiationStructuredPool())
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
                 channelFactory: { _ in MobileInitiationTestChannel() })
             if shouldResume { await waitUntil { visual.loadCount == 1 } }
             await waitUntil { manager.capability.state == .ready }
@@ -229,7 +240,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     while !releaseInitialLoad { try await Task.sleep(for: .milliseconds(10)) }
                     return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
                 }, macControlInstaller: MobileInitiationMacControlInstaller(status: .notInstalled),
-                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+                visualExecutorLoader: visual, executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: MobileInitiationStructuredPool())
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
                 channelFactory: { _ in channel })
             defer { releaseInitialLoad = true; manager.stop() }
             manager.start(pairingCode: "123456")
@@ -404,17 +418,22 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
         let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
         let channel = MobileInitiationTestChannel()
+        let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
         let manager = HostComputerUseManager(injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
                 ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
-            }, macControlInstaller: helper, visualExecutorLoader: MobileInitiationVisualLoader(throwsLoadFailure: true),
-            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
+            }, macControlInstaller: helper, visualExecutorLoader: visual,
+            executorComposer: { receipt, fallback in
+                    try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
+                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: MobileInitiationStructuredPool())
+                }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
         manager.start(pairingCode: "123456")
         await waitForStatusCheck(helper)
         XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-partial"), channel: channel))
         let progress = await waitForSetupProgress(channel: channel, terminalPhase: .failed)
         XCTAssertTrue(progress.contains { $0.phase == .failed })
+        XCTAssertEqual(visual.loadCount, 1, "This fixture must reach the intended visual activation failure")
         XCTAssertEqual(manager.capability.state, .ready)
         XCTAssertTrue(manager.needsAdditionalSetup)
         let nativeInstalls = await nativeInstaller.installCallCount()

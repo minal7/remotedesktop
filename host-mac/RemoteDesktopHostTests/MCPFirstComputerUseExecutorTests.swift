@@ -27,18 +27,36 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
         let planner = StubMCPPlanner(mode: .repeatFocusedApp)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: deferred, planner: planner, clientPool: pool)
-        let capability = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in admissions += 1; return nil }, desktopFactory: { _ in mcp })
-        let first = try await capability.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { _ in })
+        let capability = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in admissions += 1; return nil }, desktopFactory: { _ in deferred })
+        let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: capability, planner: planner, clientPool: pool)
+        let first = try await mcp.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { _ in })
         XCTAssertEqual(first, .clarificationRequired("Which city?"))
-        let pending = try XCTUnwrap(capability.clarification(taskID: "root"))
+        let pending = try XCTUnwrap(mcp.clarification(taskID: "root"))
         let goal = try pending.goal.answering(pending.question, with: "Kyoto")
-        let second = try await capability.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
+        let unrelated = try ComputerUseUnresolvedTextGoal(userRequest: "Edit my document.")
+        do {
+            _ = try await mcp.continueClarification(taskID: "forged", originatingTaskID: "root", goal: unrelated, progress: { _ in })
+            XCTFail("An unrelated answer must not replace the retained route")
+        } catch {}
+        XCTAssertEqual(try mcp.clarification(taskID: "root")?.goal, pending.goal)
+        let second = try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
         XCTAssertEqual(second, .clarificationRequired("Which date?"))
-        XCTAssertEqual(try capability.clarification(taskID: "answer")?.goal, goal)
+        XCTAssertEqual(try mcp.clarification(taskID: "answer")?.goal, goal)
+        do {
+            _ = try await mcp.execute(taskID: "answer", prompt: unrelated.taskIdentityText,
+                trustedUserPrompt: unrelated.taskIdentityText, tools: tools, progress: { _ in })
+            XCTFail("A changed answered task must be rejected before MCP replans it")
+        } catch let error as MCPFirstComputerUseExecutor.ExecutorError {
+            XCTAssertEqual(error, .taskChanged)
+        } catch {
+            XCTFail("The outer MCP route must reject the changed task: \(error)")
+        }
+        let resumed = try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
+        XCTAssertEqual(resumed, second)
+        XCTAssertEqual(try mcp.clarification(taskID: "answer")?.goal, goal)
         XCTAssertEqual(planner.proposedToolNames.count, 1); XCTAssertEqual(admissions, 1); XCTAssertEqual(loads, 1); XCTAssertEqual(calls, 2)
-        capability.invalidateClarification(taskID: "answer")
-        XCTAssertNil(try capability.clarification(taskID: "answer"))
+        mcp.invalidateClarification(taskID: "answer")
+        XCTAssertNil(try mcp.clarification(taskID: "answer"))
         await pool.cancelAll()
     }
 
@@ -106,20 +124,18 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 return try await loader.load(receipt: .init(installationVersion: ComputerUseArtifactManifest.current.installationVersion,
                     modelVariant: .fara15_4B, modelDirectory: faraInputs.modelURL.deletingLastPathComponent().path, installedAt: Date()), progress: progress)
             }, abandon: { _ in await loader.deactivate() })
-            native.setDesktopFactory { _ in
-                let loaded: MCPFirstComputerUseExecutor
-                if usesActualMacTools {
-                    let helper = URL(fileURLWithPath: try XCTUnwrap(environment["MAC_CONTROL_HELPER_PATH"]))
-                    loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: helper,
-                        visualFallback: deferred, clientPool: realPool)
-                    discoveredTools = try await realPool.allowedTools().map(\.toolName).sorted()
-                } else {
-                    loaded = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fixture/helper"),
-                        visualFallback: deferred, planner: planner, clientPool: pool)
-                }
-                hybrid = loaded
-                return loaded
+            native.setDesktopFactory { _ in deferred }
+            let executor: MCPFirstComputerUseExecutor
+            if usesActualMacTools {
+                let helper = URL(fileURLWithPath: try XCTUnwrap(environment["MAC_CONTROL_HELPER_PATH"]))
+                executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper,
+                    visualFallback: native, clientPool: realPool)
+                discoveredTools = try await realPool.allowedTools().map(\.toolName).sorted()
+            } else {
+                executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/fixture/helper"),
+                    visualFallback: native, planner: planner, clientPool: pool)
             }
+            hybrid = executor
             let goal = (usesActualMacTools ? "Visit \(base.appendingPathComponent("results").absoluteString). " : "")
                 + "Find the Tokyo Music Hall concert in these results. Open its details and report its ticket price, start time and source URL."
             // Reserve the legacy driver's slot to reject that route before it
@@ -128,7 +144,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             result = try await tools.withOwnedBrowserResearchAdmission(didPrepare: { _ in
                 XCTFail("Default browsing must not use the legacy Qwen research driver")
             }, operation: {
-                try await native.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progressMessages.append($0) })
+                try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progressMessages.append($0) })
             })
         } catch { failure = error }
         hybrid?.cancelMCPWork()
@@ -699,6 +715,36 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(loads, 1)
         XCTAssertEqual(actual.callCount, 1)
+    }
+
+    func testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal() async throws {
+        let planner = StubMCPPlanner(mode: .clarification)
+        planner.availabilityOverride = .unavailable(.modelNotReady)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        var nativeCalls = 0
+        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            nativeCalls += 1; return .userInterventionRequired("Complete this step and Resume")
+        })
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: native, planner: planner, clientPool: pool)
+        let goal = "Edit the current document"
+        let first = try await executor.execute(taskID: "retained-fallback", prompt: goal, trustedUserPrompt: goal,
+            tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(nativeCalls, 1); XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        planner.availabilityOverride = .available
+        let resumed = try await executor.execute(taskID: "retained-fallback", prompt: goal, trustedUserPrompt: goal,
+            tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(resumed, first); XCTAssertEqual(nativeCalls, 2)
+        XCTAssertTrue(planner.proposedToolNames.isEmpty, "Resume must retain the executor that already owns the task")
+        do {
+            _ = try await executor.execute(taskID: "retained-fallback", prompt: "A changed task", trustedUserPrompt: "A changed task",
+                tools: makeHostTools(), progress: { _ in }); XCTFail("A retained task ID cannot acquire a new goal")
+        } catch { }
+        XCTAssertEqual(nativeCalls, 2); XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        _ = try await executor.execute(taskID: "new-task", prompt: goal, trustedUserPrompt: goal,
+            tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(planner.proposedToolNames.count, 1, "A genuinely new task considers MCP first again")
+        XCTAssertEqual(nativeCalls, 2)
     }
 
     func testMissingVisualWithUnavailableAppleReturnsSpecificUnableOutcome() async throws {
@@ -4333,6 +4379,7 @@ private final class StubMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
     }
 
     let mode: Mode
+    var availabilityOverride: AppleFoundationMCPPlannerAvailability?
     private(set) var proposedToolNames: [[String]] = []
 
     init(mode: Mode) {
@@ -4340,7 +4387,7 @@ private final class StubMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
     }
 
     func availability() -> AppleFoundationMCPPlannerAvailability {
-        mode == .unavailable ? .unavailable(.modelNotReady) : .available
+        availabilityOverride ?? (mode == .unavailable ? .unavailable(.modelNotReady) : .available)
     }
 
     func propose(
@@ -4419,7 +4466,7 @@ private actor StubMCPClientPool: MCPClientPooling {
     enum LoadFault { case none, suspendedStart, suspendedTools, toolsFailure }
     let tools: [MCPAllowedTool]
     let resultText: String
-    let structuredContent: MCPJSONValue
+    let structuredContent: MCPJSONValue?
     private var directCount = 0
     private var startCount = 0
     private var cancellingCount = 0
@@ -4445,7 +4492,7 @@ private actor StubMCPClientPool: MCPClientPooling {
     init(
         tools: [MCPAllowedTool],
         resultText: String = "email sent to codex-acceptance@example.invalid",
-        structuredContent: MCPJSONValue = .object(["ok": .bool(true)]),
+        structuredContent: MCPJSONValue? = nil,
         loadFault: LoadFault = .none,
         cancellationGate: ComputerUsePlanningTestGate<Void>? = nil,
         approvedOperationGate: ComputerUsePlanningTestGate<Void>? = nil,
@@ -4577,7 +4624,7 @@ private actor StubMCPClientPool: MCPClientPooling {
     private func result() throws -> MCPToolResult {
         try MCPToolResult(
             text: resultText,
-            structuredContent: structuredContent,
+            structuredContent: structuredContent ?? .object(["ok": .bool(true)]),
             isError: false,
             wasTruncated: false)
     }

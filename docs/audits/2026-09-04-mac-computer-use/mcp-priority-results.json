@@ -1,0 +1,729 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-14",
+  "scope": "MCP-first task dispatch and retained fallback ownership",
+  "sourceBaseCommit": "8526edb",
+  "stages": {
+    "implemented": true,
+    "compiled": true,
+    "tested": true,
+    "accepted": "Scoped routing and continuation behavior only; general production readiness is unproved."
+  },
+  "policy": "Use verified available macOS MCP capabilities before a computer-use model. Extend and qualify MCP integration before interpreting a missing planner route as a model requirement. Preserve task and effect ownership across fallback, login, scoped answers, Resume and Stop.",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "d7e4d5e784a45e3d6d580bff536bf2a96e9eb293bbaad864668b2ebebb8036c0",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "c62f8b8ad5c8f243b16f4a056039a6be8e4e8c78f5ec00c950050e96ab9a08e2",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "7a15217c73491af68dee102ba49bdf6cebd44a49ead4d0efb3274f04a4b0ae1d",
+    "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "5765577ddde774a69f1010351815b13627f8f666fd6abdb34a997143185cfc3d",
+    "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "d47226168c76ab91a8e0fc8c4933ac4dde1b4d5b4a99c7bc11101091df8757f7"
+  },
+  "reproduction": {
+    "workingDirectory": "/Users/michael/Documents/ChatGPT/remote-desktop-repair",
+    "buildCommandPrefix": "env TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 20",
+    "buildCommandSuffix": "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE=",
+    "resultFlag": "-resultBundlePath <unique .xcresult>",
+    "selectionFlag": "-only-testing:RemoteDesktopHostTests/<method>",
+    "inferenceEnabled": false,
+    "publicWebsites": false
+  },
+  "attempts": [
+    {
+      "name": "mcp-priority-red-01",
+      "note": "Executed priority regression: both passive native+helper combinations invoked the native capability before available MCP.",
+      "bundle": ".build/repair-verification/mcp-priority-red-01.xcresult",
+      "logSHA256": "82557629e355c3a5ae0ad80599fa019d6112e6e73892a9295c2490bd26069cc9",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789376634.784,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376615.289,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - Available Mac tools must handle the goal before invoking the separate native text model",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad",
+            "testName": "testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - Available Mac tools must handle the goal before invoking the separate native text model"
+          }
+        ],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "name": "mcp-priority-red-02",
+      "note": "Four passive/explicit-setup combinations reproduce native-first routing; same-task Resume also re-enters newly available MCP. Two setup assertions additionally used a failed-phase fixture wait instead of ready; corrected separately.",
+      "bundle": ".build/repair-verification/mcp-priority-red-02.xcresult",
+      "logSHA256": "6c0dfe07ace86c173a6b279a33ed18432f6dd250cb01b6065082c1b70a7b2a2d",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 2,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 2,
+        "finishTime": 1789376837.769,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376809.767,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"clarificationRequired(\"Which document should I use?\")\") is not equal to (\"userInterventionRequired(\"Complete this step and Resume\")\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal",
+            "testName": "testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()"
+          },
+          {
+            "failureText": "XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - Available Mac tools must handle the goal before invoking the separate native text model",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad",
+            "testName": "testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "50% of failures",
+            "text": "4 runs of 1 test failed with XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - Available Mac tools must handle the goal before invoking the separate native text model"
+          },
+          {
+            "category": "Common Failures",
+            "impact": "50% of failures",
+            "text": "3 runs of 1 test failed with XCTAssertEqual failed: (\"1\") is not equal to (\"2\")"
+          },
+          {
+            "category": "Common Failures",
+            "impact": "50% of failures",
+            "text": "2 runs of 1 test failed with failed - Timed out waiting for setup progress delivery"
+          }
+        ],
+        "totalTestCount": 2
+      }
+    },
+    {
+      "name": "mcp-priority-green-01",
+      "note": "Production routing repair compiles: nine pass. One older approval fixture emits generic ok:true instead of the required typed Mail status; production verification remains unchanged.",
+      "bundle": ".build/repair-verification/mcp-priority-green-01.xcresult",
+      "logSHA256": "f7cc22f904ddc35f830de71b3e6e15bd0baa8a818a9e22ad00910e9527269820",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 9,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789377121.978,
+        "passedTests": 9,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376995.356,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"toolFailed(\"The approved action returned no matching, complete confirmation. It will not be repeated.\")\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 7,
+            "testIdentifierString": "MCPFirstComputerUseExecutorTests/testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval",
+            "testName": "testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 10
+      }
+    },
+    {
+      "name": "mcp-priority-clarification-red-01",
+      "note": "Typed approval fixture now passes. New scoped-answer check fails because the outer MCP route has not transferred to the answer request ID before a changed request is considered.",
+      "bundle": ".build/repair-verification/mcp-priority-clarification-red-01.xcresult",
+      "logSHA256": "fc3a788594c042057a53ac11dd3316a1b35273268a6fe72058ae09247cb20b4f",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789377528.086,
+        "passedTests": 1,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789377506.328,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - The outer MCP route must reject the changed task: taskChanged",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers",
+            "testName": "testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 2
+      }
+    },
+    {
+      "name": "mcp-priority-green-02",
+      "note": "All 14 pass after exact clarified-goal route transfer. One real owned WebKit session uses scripted Fara questions; other cases use controlled planners/pools. No model inference or public websites.",
+      "bundle": ".build/repair-verification/mcp-priority-green-02.xcresult",
+      "logSHA256": "afa82a52d3bf7bce57275ea90c0d0d761f600822425ccfccad463acda0b7d265",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 14,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789377595.364,
+        "passedTests": 14,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789377580.739,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 14
+      },
+      "tests": [
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedNativeSetupPreservesPreviouslyAvailableMacTools()",
+          "result": "Passed",
+          "seconds": 0.0451580286026001
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedPassiveActivationTerminatesPendingFullSetupRequest()",
+          "result": "Passed",
+          "seconds": 0.07008695602416992
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad()",
+          "result": "Passed",
+          "seconds": 0.12843406200408936
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+          "result": "Passed",
+          "seconds": 0.27972304821014404
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable()",
+          "result": "Passed",
+          "seconds": 0.16232895851135254
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testApprovedMailConfirmationRequiresMatchingTypedStatusAndUsesHostWording()",
+          "result": "Passed",
+          "seconds": 0.0058029890060424805
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testCompoundApprovedRequestReturnsAnActionFactWithoutWholeTaskCompletion()",
+          "result": "Passed",
+          "seconds": 0.12063002586364746
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()",
+          "result": "Passed",
+          "seconds": 0.013701915740966797
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval()",
+          "result": "Passed",
+          "seconds": 0.010504961013793945
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+          "result": "Passed",
+          "seconds": 0.2808879613876343
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testPlanningDeadlineNeverFallsBackOrPreparesLateCalls()",
+          "result": "Passed",
+          "seconds": 0.2271900177001953
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testStructuredApprovalWorksWithoutInstalledVisualModel()",
+          "result": "Passed",
+          "seconds": 0.018455982208251953
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes()",
+          "result": "Passed",
+          "seconds": 0.007722973823547363
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()",
+          "result": "Passed",
+          "seconds": 0.0019240379333496094
+        }
+      ]
+    },
+    {
+      "name": "mcp-priority-lifecycle-01",
+      "note": "Twenty-nine pass; two setup fixture methods fail because newly eager MCP composition tries their fake helper path before the intended visual-load failure. Also identifies a related passing fixture whose visual failure was not reached.",
+      "bundle": ".build/repair-verification/mcp-priority-lifecycle-01.xcresult",
+      "logSHA256": "93b0827d85e9f98c2095616b5a2f95070453bc47d90dce9c8bd202782a0c9ad0",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 2,
+            "passedTests": 29,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 2,
+        "finishTime": 1789377714.205,
+        "passedTests": 29,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789377678.942,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Timed out waiting for Computer Use state",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 14,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup",
+            "testName": "testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup()"
+          },
+          {
+            "failureText": "XCTAssertEqual failed: (\"0\") is not equal to (\"1\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 20,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testPartialNativeActivationNeverCompletesExplicitFullSetup()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testPartialNativeActivationNeverCompletesExplicitFullSetup",
+            "testName": "testPartialNativeActivationNeverCompletesExplicitFullSetup()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "5 runs of 2 tests failed with XCTAssertEqual failed: (\"0\") is not equal to (\"1\")"
+          },
+          {
+            "category": "Common Failures",
+            "impact": "50% of failures",
+            "text": "4 runs of 1 test failed with failed - Timed out waiting for Computer Use state"
+          },
+          {
+            "category": "Longest Test Runs",
+            "impact": "85% of duration",
+            "text": "1 longest test run with outlier durations exceeding 6.66s (three standard deviations)"
+          }
+        ],
+        "totalTestCount": 31
+      },
+      "tests": [
+        {
+          "id": "ComputerUseMobileInitiationTests/testApplicationShutdownDeactivatesVisualRuntimeBeforeReturning()",
+          "result": "Passed",
+          "seconds": 0.005921006202697754
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testCancelledOSAtlasActivationFailsClosedAndDeactivatesRuntime()",
+          "result": "Passed",
+          "seconds": 0.015159010887145996
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testDesktopSetupFailurePreservesVerifiedNativeCapability()",
+          "result": "Passed",
+          "seconds": 0.027949929237365723
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testDurablePartialHelperDownloadResumesWithoutAnotherTap()",
+          "result": "Passed",
+          "seconds": 0.11829006671905518
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testExternalServiceGuardSuppressesAllAutomaticTestHostWork()",
+          "result": "Passed",
+          "seconds": 0.0027920007705688477
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedExecutorCompositionRequestsVerifiedInstallationRollback()",
+          "result": "Passed",
+          "seconds": 0.01830899715423584
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedFirstModelLoadRequestsVerifiedInstallationRollback()",
+          "result": "Passed",
+          "seconds": 0.01576101779937744
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedNativeSetupPreservesPreviouslyAvailableMacTools()",
+          "result": "Passed",
+          "seconds": 0.1629190444946289
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFailedPassiveActivationTerminatesPendingFullSetupRequest()",
+          "result": "Passed",
+          "seconds": 0.08244097232818604
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testFreshHostWaitsForMobileSetupRequestBeforeStartingInstaller()",
+          "result": "Passed",
+          "seconds": 0.0352550745010376
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad()",
+          "result": "Passed",
+          "seconds": 0.18347299098968506
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad()",
+          "result": "Passed",
+          "seconds": 0.12900304794311523
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+          "result": "Passed",
+          "seconds": 0.18404889106750488
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup()",
+          "result": "Failed",
+          "seconds": 11.781293988227844
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads()",
+          "result": "Passed",
+          "seconds": 0.13308000564575195
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInterruptedMobileAuthorizedInstallResumesOnHostRelaunch()",
+          "result": "Passed",
+          "seconds": 0.1345210075378418
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testLoadedModelIsNotAdvertisedReadyWithoutHelperReceipt()",
+          "result": "Passed",
+          "seconds": 0.019552946090698242
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress()",
+          "result": "Passed",
+          "seconds": 0.13413596153259277
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testNewPromptDuringAdditionalSetupIsTerminalWithoutExecutionOrLaterReplay()",
+          "result": "Passed",
+          "seconds": 0.08243095874786377
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testPartialNativeActivationNeverCompletesExplicitFullSetup()",
+          "result": "Failed",
+          "seconds": 0.10402894020080566
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testRelaunchedMobileMonitorPrunesOnlyItsSupersededCloudKitSession()",
+          "result": "Passed",
+          "seconds": 0.019402027130126953
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testSetupCannotReplaceRunningOrPausedNativeTask()",
+          "result": "Passed",
+          "seconds": 0.07806599140167236
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable()",
+          "result": "Passed",
+          "seconds": 0.057026028633117676
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testApprovedMCPActionKeepsReturnedResultWhileJoiningCancellation()",
+          "result": "Passed",
+          "seconds": 0.12068808078765869
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testCancelledPlanningJoinsHelperCleanupAndRejectsOverlappingExecutions()",
+          "result": "Passed",
+          "seconds": 0.01055300235748291
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testDeterministicMailStartupCancellationRetiresReturnedHelperBeforeNewWork()",
+          "result": "Passed",
+          "seconds": 0.13354706764221191
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testEveryPlannerVisibleReadOnlyOperationTraversesProductionExecutor()",
+          "result": "Passed",
+          "seconds": 0.04425609111785889
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testStructuredStartupCancellationAlsoRetiresReturnedHelperWithoutPlanning()",
+          "result": "Passed",
+          "seconds": 0.0108720064163208
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testSynchronousMCPCancellationIsJoinedBeforeAnotherHelperStart()",
+          "result": "Passed",
+          "seconds": 0.003001093864440918
+        },
+        {
+          "id": "MCPFirstComputerUseExecutorTests/testSynchronousMCPStopRejectsLateProposalAndJoinsCleanupWithoutTaskCancellation()",
+          "result": "Passed",
+          "seconds": 0.0033559799194335938
+        },
+        {
+          "id": "MCPFoundationTests/testRealStdioAcceptanceGateDefinesTheExactExposedAndPlannerSurfaces()",
+          "result": "Passed",
+          "seconds": 0.0007439851760864258
+        }
+      ]
+    },
+    {
+      "name": "mcp-priority-lifecycle-green-01",
+      "note": "Three affected setup fixtures now use the controlled MCP pool; all pass. The related partial-setup test also requires one actual attempt at its deliberately failing visual loader. Current final source compiles.",
+      "bundle": ".build/repair-verification/mcp-priority-lifecycle-green-01.xcresult",
+      "logSHA256": "53d046b34f3c23a31dc9d88164616650e6d07e5a3a4ffd9b8a923389d9ee92e4",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789377795.838,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789377782.845,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      },
+      "tests": [
+        {
+          "id": "ComputerUseMobileInitiationTests/testDesktopSetupFailurePreservesVerifiedNativeCapability()",
+          "result": "Passed",
+          "seconds": 0.029713988304138184
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup()",
+          "result": "Passed",
+          "seconds": 0.07217395305633545
+        },
+        {
+          "id": "ComputerUseMobileInitiationTests/testPartialNativeActivationNeverCompletesExplicitFullSetup()",
+          "result": "Passed",
+          "seconds": 0.06990909576416016
+        }
+      ]
+    }
+  ],
+  "distinctPassingMethods": [
+    "ComputerUseMobileInitiationTests/testApplicationShutdownDeactivatesVisualRuntimeBeforeReturning()",
+    "ComputerUseMobileInitiationTests/testCancelledOSAtlasActivationFailsClosedAndDeactivatesRuntime()",
+    "ComputerUseMobileInitiationTests/testDesktopSetupFailurePreservesVerifiedNativeCapability()",
+    "ComputerUseMobileInitiationTests/testDurablePartialHelperDownloadResumesWithoutAnotherTap()",
+    "ComputerUseMobileInitiationTests/testExternalServiceGuardSuppressesAllAutomaticTestHostWork()",
+    "ComputerUseMobileInitiationTests/testFailedExecutorCompositionRequestsVerifiedInstallationRollback()",
+    "ComputerUseMobileInitiationTests/testFailedFirstModelLoadRequestsVerifiedInstallationRollback()",
+    "ComputerUseMobileInitiationTests/testFailedNativeSetupPreservesPreviouslyAvailableMacTools()",
+    "ComputerUseMobileInitiationTests/testFailedPassiveActivationTerminatesPendingFullSetupRequest()",
+    "ComputerUseMobileInitiationTests/testFreshHostWaitsForMobileSetupRequestBeforeStartingInstaller()",
+    "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads()",
+    "ComputerUseMobileInitiationTests/testInterruptedMobileAuthorizedInstallResumesOnHostRelaunch()",
+    "ComputerUseMobileInitiationTests/testLoadedModelIsNotAdvertisedReadyWithoutHelperReceipt()",
+    "ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress()",
+    "ComputerUseMobileInitiationTests/testNewPromptDuringAdditionalSetupIsTerminalWithoutExecutionOrLaterReplay()",
+    "ComputerUseMobileInitiationTests/testPartialNativeActivationNeverCompletesExplicitFullSetup()",
+    "ComputerUseMobileInitiationTests/testRelaunchedMobileMonitorPrunesOnlyItsSupersededCloudKitSession()",
+    "ComputerUseMobileInitiationTests/testSetupCannotReplaceRunningOrPausedNativeTask()",
+    "ComputerUseMobileInitiationTests/testVisualSetupFailureKeepsNewlyInstalledNativeAndMacToolsAvailable()",
+    "MCPFirstComputerUseExecutorTests/testApprovedMCPActionKeepsReturnedResultWhileJoiningCancellation()",
+    "MCPFirstComputerUseExecutorTests/testApprovedMailConfirmationRequiresMatchingTypedStatusAndUsesHostWording()",
+    "MCPFirstComputerUseExecutorTests/testCancelledPlanningJoinsHelperCleanupAndRejectsOverlappingExecutions()",
+    "MCPFirstComputerUseExecutorTests/testCompoundApprovedRequestReturnsAnActionFactWithoutWholeTaskCompletion()",
+    "MCPFirstComputerUseExecutorTests/testDeterministicMailStartupCancellationRetiresReturnedHelperBeforeNewWork()",
+    "MCPFirstComputerUseExecutorTests/testEveryPlannerVisibleReadOnlyOperationTraversesProductionExecutor()",
+    "MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()",
+    "MCPFirstComputerUseExecutorTests/testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval()",
+    "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+    "MCPFirstComputerUseExecutorTests/testPlanningDeadlineNeverFallsBackOrPreparesLateCalls()",
+    "MCPFirstComputerUseExecutorTests/testStructuredApprovalWorksWithoutInstalledVisualModel()",
+    "MCPFirstComputerUseExecutorTests/testStructuredStartupCancellationAlsoRetiresReturnedHelperWithoutPlanning()",
+    "MCPFirstComputerUseExecutorTests/testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes()",
+    "MCPFirstComputerUseExecutorTests/testSynchronousMCPCancellationIsJoinedBeforeAnotherHelperStart()",
+    "MCPFirstComputerUseExecutorTests/testSynchronousMCPStopRejectsLateProposalAndJoinsCleanupWithoutTaskCancellation()",
+    "MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()",
+    "MCPFoundationTests/testRealStdioAcceptanceGateDefinesTheExactExposedAndPlannerSurfaces()"
+  ],
+  "distinctPassingMethodCount": 40,
+  "verificationLimit": "Forty distinct methods pass across the 14-method batch, the 29 successful lifecycle methods and the final three corrected fixtures. Production source is identical across these three checkpoints. This is not a full current suite. Updated opt-in actual-model composition helpers compile but were not run.",
+  "remaining": [
+    "Installed native packages still activate a worker eagerly during passive startup. Defer activation and prove MCP remains available when fallback activation fails.",
+    "The host policy admits 30 tool names, while the structured planner currently exposes eight. Qualify generic AX observation/actions and task-scoped postconditions before expanding that surface.",
+    "MCPApprovedActionResult.verified currently confirms the embedded Mail action only. Compound and generic mutation workflows still need continuation and independent whole-task verification.",
+    "Model fallback must not repeat a possibly performed MCP action. Preserve uncertainty, scoped approval and login handoff while extending routing.",
+    "Re-run actual default-helper/native/Fara composition after the MCP execution path and demand loading are qualified; the updated test helpers are compilation-only this checkpoint.",
+    "Native window capture repeatability, generic cross-app tasks, real provider login, physical phone and whole-app 12 GB RAM/heat acceptance remain open."
+  ]
+}

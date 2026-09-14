@@ -1,0 +1,234 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-14",
+  "scope": "One disposable real TextEdit document; no input or inference",
+  "sourceBaseCommit": "8526edb",
+  "sourceSHA256": "3839539f02018a1fc9a82b914b170db0ca0df9dea1e72584cf217050e2d15327",
+  "stages": {
+    "implemented": "Diagnostic harness only",
+    "compiled": true,
+    "tested": true,
+    "accepted": false
+  },
+  "attempts": [
+    {
+      "name": "native-window-background-probe-01",
+      "bundle": ".build/repair-verification/native-window-background-probe-01.xcresult",
+      "logSHA256": "60eab0151a0bebe8774e48e285cafe0172b38a3ddd81a266ff2cc655c6e33fb7",
+      "note": "Strict AX window bounds equality did not find an SCWindow. Owned document cleanup ran; no effect or inference.",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789376175.864,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376149.112,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - The isolated screenshot must identify exactly our owned TextEdit window",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels",
+            "testName": "testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "name": "native-window-background-probe-02",
+      "bundle": ".build/repair-verification/native-window-background-probe-02.xcresult",
+      "logSHA256": "db6e28904e2786c6450ee9079a85c1b158cf79b9b3b212a8c771970732c41623",
+      "note": "Recorded candidate metadata reproduces the geometry mismatch: AX (185,83,656,422), SC (187,84,652,420). Strict equality still rejects before capture.",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789376262.976,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376237.146,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - The isolated screenshot must identify exactly our owned TextEdit window",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels",
+            "testName": "testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "name": "native-window-background-probe-03",
+      "bundle": ".build/repair-verification/native-window-background-probe-03.xcresult",
+      "logSHA256": "c72d66d5f4264e95eafe6f8df3fd5bbacff8487c593fccd8ebb4ff63c3c65cf1",
+      "note": "Diagnostic-only binding requires exactly one owned app window contained by its AX window. White and black test-owned backdrops reproduce broad display-capture changes with unchanged text, selection, geometry and saved bytes. All owned windows exit.",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789376340.19,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789376318.443,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "secondWindowMetadata": {
+    "axWindowBounds": "(185.0, 83.0, 656.0, 422.0)",
+    "ownedPID": 18352,
+    "windows": [
+      {
+        "frame": "(187.0, 84.0, 652.0, 420.0)",
+        "onScreen": true,
+        "windowID": 7092
+      }
+    ]
+  },
+  "comparison": {
+    "displayCaptureMatches": false,
+    "displayDifference": {
+      "display": "(185.625, 83.58503401360544, 654.75, 421.30234315948604)",
+      "field": "(219.0, 136.0, 778.0, 456.0)",
+      "pixels": "(220.0, 99.0, 776.0, 499.0)"
+    },
+    "editorFrame": "(185.0, 115.0, 656.0, 384.0)",
+    "elapsedSeconds": 2.058754086494446,
+    "filterContentRect": "(186.0, 84.0, 654.0, 420.0)",
+    "filterPointPixelScale": 2,
+    "independentDifference": {
+      "display": "(193.5, 115.5, 5.0, 15.0)",
+      "field": "(0.0, 62.0, 1308.0, 768.0)",
+      "pixels": "(15.0, 63.0, 10.0, 30.0)"
+    },
+    "independentWindowCaptureMatches": false,
+    "ownedTextEditExited": true,
+    "savedBytesMatchOriginal": true,
+    "scope": "one-real-TextEdit-window-with-test-owned-backdrop-no-input-no-inference",
+    "textAndSelectionMatch": true,
+    "windowBounds": "(185.0, 83.0, 656.0, 422.0)",
+    "windowImageHeight": 840,
+    "windowImageWidth": 1308
+  },
+  "windowMetadata": {
+    "axWindowBounds": "(185.0, 83.0, 656.0, 422.0)",
+    "ownedPID": 20485,
+    "windows": [
+      {
+        "frame": "(186.0, 84.0, 654.0, 420.0)",
+        "onScreen": true,
+        "windowID": 7102
+      }
+    ]
+  },
+  "captureSHA256": {
+    "window-black.png": "ee9c040713a873f2beeea0c88f1a49b607fe660651dabc202cd8a104514469c0",
+    "display-black.png": "d96ec99ae665de303bce391d5d1354f8a3608c398f10af9b41c8eb92469f6156",
+    "window-white.png": "ef914972999e87f9d6d89cba6b6e61b195f6c2e7f227585bea8694b053495340",
+    "display-white.png": "2ddab0ded44a11b0b5f24b53fe4ec1e41a8030e3dddd26560726094aabe363d1"
+  },
+  "interpretation": "Independent-window capture removes the broad backdrop difference but still differs over a 5x15 logical-point region inside the editor, exceeding the existing 4-point insertion-caret width. The unchanged-display comparison also fails. The experiment answers the background-isolation question; it does not repair native approval or establish real TextEdit task success.",
+  "unchanged": [
+    "No production capture implementation changed.",
+    "No caret threshold, rounded-corner mask or coordinate tolerance was added.",
+    "Fara selection and production 4 GiB worker cap remain unchanged."
+  ],
+  "remaining": [
+    "Qualify stable SC/AX window geometry and the remaining caret-area difference before considering independent capture for production.",
+    "Prioritize MCP desktop capability coverage before additional visual-model TextEdit runs."
+  ],
+  "reproduction": {
+    "method": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels",
+    "environment": [
+      "TEST_RUNNER_RUN_REAL_TEXTEDIT_ACCEPTANCE=1",
+      "TEST_RUNNER_NATIVE_TEXTEDIT_TRIAL_DIRECTORY=<unique trial directory>"
+    ],
+    "testExecutionAllowanceSeconds": 60,
+    "oneBuildJob": true
+  }
+}

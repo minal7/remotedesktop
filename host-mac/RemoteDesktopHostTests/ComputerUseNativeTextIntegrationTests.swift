@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CryptoKit
 import CoreImage
+import ScreenCaptureKit
 import XCTest
 import Vision
 @testable import RemoteDesktopHost
@@ -88,12 +89,16 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false)
     }
 
+    func testOptInRealTextEditMeasuresBackgroundAndIndependentWindowPixels() async throws {
+        try await runRealTextEditTask(actualModel: false, captureOnly: true)
+    }
+
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
     }
 
-    private func runRealTextEditTask(actualModel: Bool) async throws {
+    private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -152,6 +157,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let editorPoint = ComputerUsePredictedAction.click(x: Int(initialFrame.midX), y: Int(initialFrame.midY), button: 1, count: 1)
             XCTAssertEqual(try tools.nativePointerTargetFrame(for: editorPoint), initialFrame,
                 "An editor's unlabeled AX geometry must remain available for native pointer validation")
+            if captureOnly {
+                try await measureTextEditBackground(tools: tools, app: app, editorFrame: initialFrame,
+                    original: original, document: document, output: output)
+                return
+            }
             if let inputs {
                 let manifest = ComputerUseArtifactManifest.holo31
                 let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: manifest), runtime: runtime,
@@ -289,6 +299,70 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
+    /// Diagnostic only: no inference or input. A single test-owned backdrop
+    /// changes behind one real TextEdit window; both capture paths are retained.
+    private func measureTextEditBackground(tools: ComputerUseHostTools, app: NSRunningApplication, editorFrame: CGRect,
+        original: String, document: URL, output: URL) async throws {
+        let started = Date(), screen = try tools.currentScreen()
+        let bounds = try XCTUnwrap(screen.frontmostWindowBounds)
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let appWindows = content.windows.filter { $0.owningApplication?.processID == app.processIdentifier }
+        let windowMetadata: [String: Any] = ["ownedPID": app.processIdentifier, "axWindowBounds": String(describing: bounds),
+            "windows": appWindows.map { ["windowID": $0.windowID, "frame": String(describing: $0.frame), "onScreen": $0.isOnScreen] as [String: Any] }]
+        try JSONSerialization.data(withJSONObject: windowMetadata, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("window-metadata.json"), options: .withoutOverwriting)
+        // The measured AX bounds include a border outside the WindowServer
+        // frame. This diagnostic owns exactly one app window, so it can bind
+        // that unique window without guessing a production matching tolerance.
+        XCTAssertEqual(appWindows.count, 1, "The diagnostic owns exactly one TextEdit window")
+        let window = try XCTUnwrap(appWindows.first)
+        XCTAssertTrue(bounds.contains(window.frame))
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+        let config = SCStreamConfiguration()
+        config.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+        config.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
+        config.showsCursor = false; config.ignoreShadowsSingleWindow = true; config.shouldBeOpaque = false
+        let backdrop = NSWindow(contentRect: try XCTUnwrap(NSScreen.main?.frame), styleMask: [.borderless], backing: .buffered, defer: false)
+        backdrop.isReleasedWhenClosed = false; backdrop.ignoresMouseEvents = true; backdrop.isOpaque = true
+        defer { backdrop.close() }
+        backdrop.backgroundColor = .white; backdrop.order(.below, relativeTo: Int(window.windowID))
+        try await Task.sleep(for: .milliseconds(300))
+        let beforeEditor = try tools.nativeFocusedEditorObservation()?.textState
+        let beforeScreen = try tools.currentScreen(), before = try ComputerUseDesktopImage(observation: beforeScreen)
+        let isolatedBeforeCG = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        let isolatedBefore = try ComputerUseDesktopImage(observation: .init(image: CIImage(cgImage: isolatedBeforeCG), displayBounds: window.frame, frontmostWindowBounds: window.frame))
+        backdrop.backgroundColor = .black; backdrop.displayIfNeeded()
+        try await Task.sleep(for: .milliseconds(300))
+        let afterScreen = try tools.currentScreen(), after = try ComputerUseDesktopImage(observation: afterScreen)
+        let isolatedAfterCG = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        let isolatedAfter = try ComputerUseDesktopImage(observation: .init(image: CIImage(cgImage: isolatedAfterCG), displayBounds: window.frame, frontmostWindowBounds: window.frame))
+        let afterEditor = try tools.nativeFocusedEditorObservation()?.textState
+        XCTAssertEqual(beforeEditor, afterEditor); XCTAssertEqual(afterEditor?.valuePrefix, original)
+        XCTAssertEqual(beforeScreen.frontmostWindowBounds, afterScreen.frontmostWindowBounds)
+        XCTAssertEqual(try tools.nativeFocusedTextFrame(), editorFrame)
+        XCTAssertEqual(try Data(contentsOf: document), Data(original.utf8))
+        var displayDifference: [String: String] = [:], independentDifference: [String: String] = [:]
+        let displayMatches = try before.matchesInsertionPointPixels(of: after, window: bounds, field: editorFrame,
+            onDifference: { changed, pixels, field in displayDifference = ["display": String(describing: changed), "pixels": String(describing: pixels), "field": String(describing: field)] })
+        let independentMatches = try isolatedBefore.matchesInsertionPointPixels(of: isolatedAfter, window: window.frame, field: editorFrame.intersection(window.frame),
+            onDifference: { changed, pixels, field in independentDifference = ["display": String(describing: changed), "pixels": String(describing: pixels), "field": String(describing: field)] })
+        for (name, image) in [("display-white.png", before), ("display-black.png", after), ("window-white.png", isolatedBefore), ("window-black.png", isolatedAfter)] {
+            try image.png.write(to: output.appendingPathComponent(name), options: .withoutOverwriting)
+        }
+        backdrop.close(); app.forceTerminate()
+        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
+        let report: [String: Any] = ["scope": "one-real-TextEdit-window-with-test-owned-backdrop-no-input-no-inference",
+            "elapsedSeconds": Date().timeIntervalSince(started), "windowBounds": String(describing: bounds),
+            "editorFrame": String(describing: editorFrame), "filterContentRect": String(describing: filter.contentRect),
+            "filterPointPixelScale": filter.pointPixelScale, "windowImageWidth": isolatedBeforeCG.width, "windowImageHeight": isolatedBeforeCG.height,
+            "displayCaptureMatches": displayMatches, "independentWindowCaptureMatches": independentMatches,
+            "displayDifference": displayDifference, "independentDifference": independentDifference,
+            "textAndSelectionMatch": beforeEditor == afterEditor, "savedBytesMatchOriginal": try Data(contentsOf: document) == Data(original.utf8),
+            "ownedTextEditExited": app.isTerminated]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("capture-comparison.json"), options: .withoutOverwriting)
+        XCTAssertTrue(app.isTerminated)
+        XCTAssertFalse(displayMatches, "The controlled backdrop should reproduce the observed composited-window rejection")
     }
 
     private static func managedHoloInputs(_ environment: [String: String]) async throws -> ComputerUseHoloRuntimeInputs {

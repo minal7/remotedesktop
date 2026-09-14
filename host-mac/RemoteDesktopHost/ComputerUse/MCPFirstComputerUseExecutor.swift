@@ -68,8 +68,8 @@ private final class MCPGenerationCancellationJoin: @unchecked Sendable {
 }
 
 /// Routes structured work through a pinned local MCP sidecar and Apple's
-/// on-device planner. OS-Atlas Pro 4B remains the visual fallback for
-/// applications that do not expose an appropriate structured operation.
+/// on-device planner before the fallback text and visual capabilities.
+/// Fallback execution is retained once it takes ownership of a task.
 /// No remote inference or API credential is used by this executor.
 @MainActor
 final class MCPFirstComputerUseExecutor:
@@ -85,6 +85,7 @@ final class MCPFirstComputerUseExecutor:
         case structuredToolFailed(String)
         case visualApprovalContinuationUnavailable
         case calculatorClearNotVerified
+        case taskChanged
         case calculatorResultNotVerified(String)
 
         var errorDescription: String? {
@@ -103,6 +104,8 @@ final class MCPFirstComputerUseExecutor:
                 return "The local visual executor cannot resume this approved action."
             case .calculatorClearNotVerified:
                 return "Calculator could not be verified as cleared, so the task was stopped."
+            case .taskChanged:
+                return "The resumed task no longer matches its original request."
             case .calculatorResultNotVerified(let expected):
                 return "Calculator did not show the expected result (\(expected)), so the task was not marked complete."
             }
@@ -284,6 +287,7 @@ final class MCPFirstComputerUseExecutor:
     private var activeExecutionEpoch: UInt64?
     private var pendingApprovalState: PlanningState?
     private var pendingApprovalDigest: String?
+    private var retainedFallback: (taskID: String, promptDigest: String)?
 
     private init(
         planner: any MCPProposalPlanning,
@@ -343,13 +347,15 @@ final class MCPFirstComputerUseExecutor:
         helperReady
     }
 
-    var hasAdditionalSetup: Bool { !visualFallback.isReady }
+    var supportsNativeTextTasks: Bool { visualFallback.supportsNativeTextTasks }
+    var hasAdditionalSetup: Bool { !visualFallback.isReady || visualFallback.hasAdditionalSetup }
     var readyDetail: String {
-        visualFallback.isReady ? "Mac tools and visual control are ready" : "Mac tools are ready; visual control needs setup"
+        if supportsNativeTextTasks { return visualFallback.readyDetail }
+        return visualFallback.isReady ? "Mac tools and visual control are ready" : "Mac tools are ready; visual control needs setup"
     }
 
     var runtimeName: String {
-        let visual = visualFallback.isReady ? ", with visual control available on demand" : "; visual control needs setup"
+        let visual = hasAdditionalSetup ? "; additional computer-use setup is needed" : ", with fallback computer use available on demand"
         switch planner.availability() {
         case .available:
             return "Apple on-device planner + local Mac tools" + visual
@@ -431,8 +437,12 @@ final class MCPFirstComputerUseExecutor:
     ) async throws -> ComputerUseExecutionResult {
         try beginExecution()
         defer { activeExecutionEpoch = nil }
+        let promptDigest = ComputerUseTextTaskContract.digest(trustedUserPrompt)
         func executeVisualFallback() async throws
             -> ComputerUseExecutionResult {
+            // Commit before fallback can produce an effect or suspend. Resume
+            // cannot replay the original goal through newly available MCP.
+            retainedFallback = (taskID, promptDigest)
             if let conversation {
                 return try await visualFallback.execute(
                     taskID: taskID,
@@ -450,6 +460,11 @@ final class MCPFirstComputerUseExecutor:
                 progress: progress)
         }
         try await waitForStartedCancellation()
+        if let retainedFallback, retainedFallback.taskID == taskID {
+            guard retainedFallback.promptDigest == promptDigest else { throw ExecutorError.taskChanged }
+            return try await executeVisualFallback()
+        }
+        retainedFallback = nil
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -624,6 +639,21 @@ final class MCPFirstComputerUseExecutor:
         defer { activeExecutionEpoch = nil }
         try await waitForStartedCancellation()
         guard let continuing = visualFallback as? any ComputerUseTextClarificationContinuing else { throw ExecutorError.visualApprovalContinuationUnavailable }
+        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        guard taskID != originatingTaskID else { throw ExecutorError.visualApprovalContinuationUnavailable }
+        if retainedFallback?.taskID == taskID {
+            guard retainedFallback?.promptDigest == digest else { throw ExecutorError.taskChanged }
+        } else {
+            guard retainedFallback?.taskID == originatingTaskID,
+                  let pending = try continuing.clarification(taskID: originatingTaskID),
+                  let answer = goal.userTurns.last,
+                  try pending.goal.answering(pending.question, with: answer) == goal else {
+                throw ExecutorError.visualApprovalContinuationUnavailable
+            }
+            // A validated answer transfers the same fallback session to its
+            // new request ID before that continuation can perform any work.
+            retainedFallback = (taskID, digest)
+        }
         return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
     }
 

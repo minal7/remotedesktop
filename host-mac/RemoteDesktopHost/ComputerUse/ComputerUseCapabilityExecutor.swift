@@ -55,6 +55,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     let isReady = true
+    let supportsNativeTextTasks = true
     let requiresMacControlHelper = false
     var hasAdditionalSetup: Bool { desktopFactory == nil || !desktopIncludesVisualControl }
     var readyDetail: String {
