@@ -405,6 +405,14 @@ final class ComputerUseTests: XCTestCase {
     }
 
     func test_managerRejectsEarlyPopupHandbackThenContinuesTheExactNativeGoal() async throws {
+        try await runPopupHandbackToExactNativeGoal(useHostControls: false)
+    }
+
+    func test_hostControlsRejectEarlyPopupHandbackThenContinueTheExactNativeGoal() async throws {
+        try await runPopupHandbackToExactNativeGoal(useHostControls: true)
+    }
+
+    private func runPopupHandbackToExactNativeGoal(useHostControls: Bool) async throws {
         let secret = "private-popup-verification"
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/login": .init(body: """
@@ -467,16 +475,24 @@ final class ComputerUseTests: XCTestCase {
         server.releaseHeldResponses()
         await waitUntil(timeoutIterations: 1_000) { fixture.browser.hasOpenSignInWindow && server.count("/finish-signal") == 1 }
         XCTAssertNil(fixture.manager.recordUserInputForIntervention())
-        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
-            revision: 1, hostEpoch: 1), channel: fixture.channel))
-        XCTAssertEqual(fixture.manager.activity, .paused)
-        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: taskID), 2)
-        XCTAssertTrue(fixture.browser.hasOpenSignInWindow)
-        XCTAssertEqual(taskIDs, [taskID])
-        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
-            revision: 2, hostEpoch: 2), channel: fixture.channel))
+        if !useHostControls {
+            XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+                revision: 1, hostEpoch: 1), channel: fixture.channel))
+            XCTAssertEqual(fixture.manager.activity, .paused)
+            XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: taskID), 2)
+            XCTAssertTrue(fixture.browser.hasOpenSignInWindow)
+            XCTAssertEqual(taskIDs, [taskID])
+        }
+        let beforeEarlyResumeEpoch = fixture.ledger.hostControlEpoch(taskID: taskID)
+        if useHostControls {
+            fixture.manager.requestLocalTaskControl(.resume, displayed: try XCTUnwrap(fixture.manager.localTaskControls))
+        } else {
+            XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+                revision: 2, hostEpoch: 2), channel: fixture.channel))
+        }
         await waitUntil(timeoutIterations: 1_000) {
-            guard fixture.manager.activity == .paused, fixture.ledger.hostControlEpoch(taskID: taskID) == 3 else { return false }
+            guard fixture.manager.activity == .paused,
+                  fixture.ledger.hostControlEpoch(taskID: taskID) > beforeEarlyResumeEpoch else { return false }
             return await fixture.channel.sentMessages().contains {
                 $0.body.contains(ComputerUseBrowserError.signInWindowOpen.localizedDescription)
             }
@@ -496,8 +512,13 @@ final class ComputerUseTests: XCTestCase {
         let pausedMessages = await fixture.channel.sentMessages()
         XCTAssertFalse(pausedMessages.contains { $0.kind == .assistant })
         XCTAssertFalse(fixture.browser.validate(try XCTUnwrap(original)))
-        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
-            revision: 3, hostEpoch: 3), channel: fixture.channel))
+        if useHostControls {
+            fixture.manager.requestLocalTaskControl(.resume, displayed: try XCTUnwrap(fixture.manager.localTaskControls))
+        } else {
+            XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: taskID), 3)
+            XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+                revision: 3, hostEpoch: 3), channel: fixture.channel))
+        }
         await waitUntil(timeoutIterations: 1_000) {
             guard fixture.manager.activity == .idle, server.count("/edited?value=Paris") == 1 else { return false }
             return await fixture.channel.sentMessages().contains { $0.kind == .assistant }

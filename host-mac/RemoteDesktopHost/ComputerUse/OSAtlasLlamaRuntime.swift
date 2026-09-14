@@ -1264,6 +1264,9 @@ actor OSAtlasLlamaRuntime {
     private let resourceInspector: any OSAtlasLlamaResourceInspecting
     private let readinessAttempts: Int
     private let readinessDelay: Duration
+    /// Explicit diagnostic observer. Normal app composition retains no model
+    /// exchanges; callers receive bodies only, never authentication headers.
+    private let inspectFaraExchange: (@Sendable (Data, Data) -> Void)?
     private let cachedHealthAttempts = 3
     private let cachedHealthDelay: Duration = .milliseconds(100)
     private var active: ActiveServer?
@@ -1289,8 +1292,10 @@ actor OSAtlasLlamaRuntime {
     /// keeps another request from unloading the worker currently completing.
     private let modelAccessGate = OSAtlasModelAccessGate()
 
-    init(launcher: any OSAtlasLlamaServerLaunching = FoundationOSAtlasLlamaServerLauncher()) {
+    init(launcher: any OSAtlasLlamaServerLaunching = FoundationOSAtlasLlamaServerLauncher(),
+         inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil) {
         self.launcher = launcher
+        self.inspectFaraExchange = inspectFaraExchange
         transportMaker = URLSessionOSAtlasTransportMaker()
         portProvider = LoopbackPortProvider()
         tokenProvider = RandomBearerTokenProvider()
@@ -1309,6 +1314,7 @@ actor OSAtlasLlamaRuntime {
         resourceInspector: any OSAtlasLlamaResourceInspecting = DarwinOSAtlasLlamaResourceInspector()
     ) {
         self.launcher = launcher
+        self.inspectFaraExchange = nil
         self.transportMaker = transportMaker
         self.portProvider = portProvider
         self.tokenProvider = tokenProvider
@@ -1562,6 +1568,7 @@ actor OSAtlasLlamaRuntime {
             }
             try Task.checkCancellation()
             guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            if let body = request.httpBody { inspectFaraExchange?(body, data) }
             return try ComputerUseFaraModel.decode(data)
         } catch {
             if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
@@ -1584,6 +1591,7 @@ actor OSAtlasLlamaRuntime {
             } onCancel: { Task { await self.cancel(endpoint: endpoint) } }
             try Task.checkCancellation()
             guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            if let body = request.httpBody { inspectFaraExchange?(body, data) }
             return try ComputerUseFaraModel.decodePageAnswer(data)
         } catch {
             if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }

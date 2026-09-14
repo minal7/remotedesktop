@@ -1,9 +1,166 @@
 import Foundation
+import AppKit
+import WebKit
 import XCTest
 @testable import RemoteDesktopHost
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MANAGED_PUBLIC_BROWSER"] == "1" else {
+            throw XCTSkip("Opt-in: bounded read-only task on the real GitHub site")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["MANAGED_PUBLIC_BROWSER_TRIAL_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        let browserFactory: (@escaping () -> Bool) -> ComputerUseBrowserNavigationTask = { mayAct in
+                ComputerUseBrowserNavigationTask(browser: ComputerUseOwnedBrowser(mayAct: mayAct),
+                    journalDirectory: output.appendingPathComponent("browser"))
+            }
+        let diagnostic = environment["MANAGED_PUBLIC_BROWSER_TRACE"] == "1"
+        let trace: (@Sendable (Data, Data) -> Void)?
+        if diagnostic { trace = { request, response in
+            // Explicit public-page acceptance only. No headers or credentials
+            // are recorded, and large screenshot payloads are omitted.
+            do {
+                var body = try JSONSerialization.jsonObject(with: request) as! [String: Any]
+                if var messages = body["messages"] as? [[String: Any]] {
+                    for index in messages.indices {
+                        if let content = messages[index]["content"] as? [[String: Any]] {
+                            messages[index]["content"] = content.map { $0["type"] as? String == "image_url"
+                                ? ["type": "image_omitted"] : $0 }
+                        }
+                    }
+                    body["messages"] = messages
+                }
+                let record: [String: Any] = ["time": Date().timeIntervalSince1970,
+                    "request": body, "response": String(decoding: response, as: UTF8.self)]
+                try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+                    .write(to: output.appendingPathComponent("exchange-" + UUID().uuidString + ".json"), options: .withoutOverwriting)
+            } catch { FileHandle.standardError.write(Data("Public browser trace failed: \(error)\n".utf8)) }
+        } } else { trace = nil }
+        let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: trace)
+        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("tasks.json"))
+        let diagnosticManager: HostComputerUseManager? = diagnostic ? HostComputerUseManager(injector: InputInjector(),
+            nativeTextInstaller: ComputerUseInstaller.nativeText(),
+            visualExecutorLoader: OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: output.appendingPathComponent("fara")),
+            taskLedger: ledger, browserNavigationFactory: browserFactory, allowsExternalServices: true) : nil
+        let session = HostSession(computerUseManager: diagnosticManager, computerUseTaskLedger: ledger,
+            computerUseBrowserNavigationFactory: browserFactory,
+            allowsExternalComputerUseServices: true)
+        let manager = session.computerUse, channel = MobileInitiationTestChannel(), started = Date()
+        let taskID = "managed-github-release-" + UUID().uuidString
+        let goal = "Open https://github.com/apple/swift-nio/releases. Find the latest stable release and report its version, publication date in YYYY-MM-DD format, and the official link for that release."
+        var observedURLs: [String] = [], maximumWorkers = 0, samples = 0
+        func browserURLs(in view: NSView) -> [String] {
+            if let browser = view as? WKWebView { return browser.url.map { [$0.absoluteString] } ?? [] }
+            return view.subviews.flatMap { browserURLs(in: $0) }
+        }
+        let monitor = Task { @MainActor in
+            while !Task.isCancelled {
+                let count = try inspector.matchingProcesses(for: binary).count
+                maximumWorkers = max(maximumWorkers, count); samples += 1
+                if count > 1 { manager.stop() }
+                for url in NSApp.windows.compactMap(\.contentView).flatMap({ browserURLs(in: $0) }) {
+                    if observedURLs.last != url { observedURLs.append(url) }
+                }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+            }
+        }
+        var failure: Error?, terminal: ComputerUseTaskUpdate?
+        do {
+            manager.start(pairingCode: "123456", additionalChannels: [channel], includeDefaultChannel: false)
+            await waitUntil(timeoutIterations: 1_500) { manager.capability.state == .ready }
+            guard manager.capability.state == .ready else { throw CocoaError(.executableNotLoadable) }
+            manager.authorizePeer(senderID: "IOS-PEER")
+            let request = ComputerUseEnvelope(id: taskID, senderID: "IOS-PEER", targetID: "HOST-ID",
+                pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: goal, supportsApprovedActionEvidence: true).encodedBody())
+            XCTAssertTrue(manager.handle(request, channel: channel))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(100))
+            while ContinuousClock.now < deadline {
+                terminal = await channel.taskUpdates().last { $0.taskID == taskID }
+                if terminal != nil { break }
+                if case .awaitingApproval = manager.activity {
+                    throw NSError(domain: "ManagedPublicBrowser", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "The read-only task requested an approval; no action was approved"])
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        } catch { failure = error }
+        let activityAtEnd = String(describing: manager.activity)
+        await session.shutdown()
+        monitor.cancel(); try await monitor.value
+        let report: [String: Any] = ["scope": "real-GitHub-read-only-task-through-managed-HostSession", "diagnosticTraceEnabled": diagnostic,
+            "goal": goal, "taskID": taskID, "failure": String(reflecting: failure), "activityAtEnd": activityAtEnd,
+            "elapsedSeconds": Date().timeIntervalSince(started), "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(),
+            "terminalText": terminal?.text as Any? ?? NSNull(), "observedBrowserURLs": observedURLs,
+            "maximumObservedWorkerCount": maximumWorkers, "workerSamples": samples,
+            "workersAfterShutdown": try inspector.matchingProcesses(for: binary).count,
+            "messages": try JSONSerialization.jsonObject(with: JSONEncoder().encode(await channel.messages()))]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        if let failure { throw failure }
+        XCTAssertEqual(terminal?.outcome, .taskCompleted)
+        let answer = terminal?.text ?? ""
+        // Frozen against the official release API before running this task;
+        // these oracle values are never supplied to the app or its planners.
+        XCTAssertTrue(answer.contains("2.102.0")); XCTAssertTrue(answer.contains("2026-09-01"))
+        XCTAssertTrue(answer.contains("https://github.com/apple/swift-nio/releases/tag/2.102.0"))
+        XCTAssertTrue(observedURLs.contains { $0.hasPrefix("https://github.com/apple/swift-nio/releases") })
+        XCTAssertLessThanOrEqual(maximumWorkers, 1)
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+    }
+
+    func testOptInManagedFaraInstallationValidatesRuntimeAndJoinsWorker() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_FARA_INSTALLATION"] == "1" else {
+            throw XCTSkip("Opt-in: normal pinned Fara installation and one real runtime validation")
+        }
+        let started = Date(), installer = ComputerUseInstaller(), native = ComputerUseInstaller.nativeText()
+        let nativeBefore = await native.currentInstallation()
+        let before = await installer.currentInstallation()
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        var phases: [String] = []
+        let receipt = try await installer.install { update in
+            phases.append(update.phase.rawValue)
+            FileHandle.standardError.write(Data("Managed Fara installation: \(update.detail)\n".utf8))
+        }
+        XCTAssertEqual(receipt.modelVariant, .fara15_4B)
+        let loader = OSAtlasVisualExecutorLoader()
+        var failure: Error?, runtimeName = ""
+        do {
+            let executor = try await loader.load(receipt: receipt) { detail in
+                FileHandle.standardError.write(Data("Managed Fara validation: \(detail)\n".utf8))
+            }
+            XCTAssertTrue(executor is ComputerUseFaraBrowserExecutor)
+            XCTAssertTrue(executor.isReady)
+            runtimeName = executor.runtimeName
+            XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty, "The loader must join its validation worker")
+            try await installer.recordRuntimeActivationSuccess(for: receipt)
+        } catch { failure = error }
+        await loader.deactivate()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        let after = await installer.currentInstallation(), nativeAfter = await native.currentInstallation()
+        XCTAssertEqual(after, receipt); XCTAssertEqual(nativeAfter, nativeBefore)
+        let report: [String: Any] = ["scope": "normal-managed-Fara-installation-and-real-runtime-validation",
+            "previouslyInstalled": before != nil, "modelDirectory": receipt.modelDirectory,
+            "runtimeName": runtimeName, "phases": phases, "receiptValidated": after == receipt,
+            "nativeReceiptUnchanged": nativeBefore == nativeAfter,
+            "workersAfterTeardown": try inspector.matchingProcesses(for: binary).count,
+            "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure)]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]),
+            uniformTypeIdentifier: "public.json")
+        attachment.name = "Managed Fara installation"; attachment.lifetime = .keepAlways; add(attachment)
+        if let failure { throw failure }
+    }
+
     func testOptInManagedInstallationAndHostSessionReachMCPApprovalWithoutModelWorker() async throws {
         guard ProcessInfo.processInfo.environment["RUN_MANAGED_MCP_HOST_SESSION"] == "1" else {
             throw XCTSkip("Opt-in: installs the pinned helper in normal Application Support and exercises HostSession startup")
@@ -1607,6 +1764,8 @@ private actor MobileInitiationTestChannel: HostComputerUseChannel {
     func approvalRequests() -> [ComputerUseApprovalRequest] {
         sent.compactMap { $0.kind == .approvalRequest ? try? ComputerUseApprovalRequest.decodeBody($0.body) : nil }
     }
+
+    func messages() -> [ComputerUseEnvelope] { sent }
 
     func setupProgressEnvelopes(
         phase: ComputerUseSetupProgress.Phase
