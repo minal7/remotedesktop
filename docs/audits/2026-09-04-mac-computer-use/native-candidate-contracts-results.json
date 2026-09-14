@@ -1,0 +1,1165 @@
+{
+  "scope": "Shared native provider outcomes and Mac capability contracts; bounded native model comparison",
+  "date": "2026-09-13",
+  "baseCommit": "cce5f919285c3a9e36f5b1e5263cbcef810a37b3",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "a3acbf6096bd56c461b7c01f471a439582cfbe4f54e41a44aa7fda38a761e4a3",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "f689a6af8e9083bd417e1daa091b243ceb3378a34154032e08fcdcae9776a9f1",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseGUIOwlModel.swift": "a890e8d5a1f177fba685b4bf00f816bdc2325fc40c00fd0d5b74c0b40166cb41",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseHoloModel.swift": "2b434b50e0ab03a333b709ed511e0d0edbf1338b1eb0866d9b04ba58d7fb5d35",
+    "host-mac/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests.swift": "1d97b9db07ad15167fddf2aca84376c48ab15b39e48a732f2d57149983f789a2",
+    "host-mac/RemoteDesktopHostTests/ComputerUseHoloModelTests.swift": "0a36a1d3b2f1f32d39fe5aa3ae9c298e399d19fc94b38778ccc669b5f85c4b3a",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "a5b921bcd0bc25b962dcefbc6ca9f4c6eb4e9782ce4f91bff71abdab12da49cf"
+  },
+  "generalization": "Production changes are shared outcome, input-surface and capability declarations. No website, fixture label/value, expected answer or coordinate offset is encoded in production.",
+  "repair": "Native proposal retains raw provider wire while separating native action, completion status, manual handoff and unsupported action. Holo keeps OpenAI tool calls; GUI-Owl keeps its Action/XML recipe. Desktop profiles declare only implemented Mac capabilities and reject browser metadata. Default browser profiles remain unchanged.",
+  "attempts": [
+    {
+      "bundle": ".build/repair-verification/native-candidate-contracts-red-01.xcresult",
+      "log": ".build/repair-verification/native-candidate-contracts-red-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 2,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 2,
+        "finishTime": 1789355104.277,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789355080.833,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native GUI-Owl success could not continue: unsupportedAction",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testGUIOwlNativeStatusAndManualHandoffRemainDistinct()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testGUIOwlNativeStatusAndManualHandoffRemainDistinct",
+            "testName": "testGUIOwlNativeStatusAndManualHandoffRemainDistinct()"
+          },
+          {
+            "failureText": "XCTUnwrap failed: threw error \"invalidResponse\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeCandidateProfilesDeclareMacEffectsAndKeepSeparateProtocols()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeCandidateProfilesDeclareMacEffectsAndKeepSeparateProtocols",
+            "testName": "testNativeCandidateProfilesDeclareMacEffectsAndKeepSeparateProtocols()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "50% of failures",
+            "text": "2 runs of 1 test failed with XCTUnwrap failed: threw error \"invalidResponse\""
+          }
+        ],
+        "totalTestCount": 2
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-candidate-contracts-green-01.xcresult",
+      "log": ".build/repair-verification/native-candidate-contracts-green-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789355460.627,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789355376.071,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-candidate-regressions-01.xcresult",
+      "log": ".build/repair-verification/native-candidate-regressions-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 5,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789355708.109,
+        "passedTests": 5,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789355697.045,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 5
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-candidate-harness-build-01.xcresult",
+      "log": ".build/repair-verification/native-candidate-harness-build-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789355861.771,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789355830.724,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-gui-owl-model-01.xcresult",
+      "log": ".build/repair-verification/native-desktop-gui-owl-model-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789355955.207,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789355878.099,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native guiOwl task failed: stepLimit",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInGUIOwlModelEditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInGUIOwlModelEditsANativeDesktopForm",
+            "testName": "testOptInGUIOwlModelEditsANativeDesktopForm()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-delayed-row-click-red-01.xcresult",
+      "log": ".build/repair-verification/native-delayed-row-click-red-01.log",
+      "compilerOnly": true,
+      "summary": {
+        "devicesAndConfigurations": [],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789356100.616,
+        "passedTests": 0,
+        "result": "unknown",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789356090.743,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 0
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-delayed-row-click-red-02.xcresult",
+      "log": ".build/repair-verification/native-delayed-row-click-red-02.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789356153.642,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789356126.313,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-delayed-empty-click-01.xcresult",
+      "log": ".build/repair-verification/native-delayed-empty-click-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789356257.6,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789356227.637,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-holo-model-01.xcresult",
+      "log": ".build/repair-verification/native-desktop-holo-model-01.log",
+      "compilerOnly": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789356307.412,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789356282.737,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native holo task failed: invalidResponse",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInHoloModelEditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInHoloModelEditsANativeDesktopForm",
+            "testName": "testOptInHoloModelEditsANativeDesktopForm()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "modelTrials": [
+    {
+      "model": "gui-owl",
+      "workflow": {
+        "dispatchJournalCount": 3,
+        "elapsedSeconds": 63.356502056121826,
+        "failure": "RemoteDesktopHost.ComputerUseDesktopExecutor.Failure.stepLimit",
+        "fixtureState": {
+          "destination": "",
+          "generation": 0,
+          "origin": "TokyoTokyoTokyo",
+          "pid": 46891
+        },
+        "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+        "memorySamples": 175,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 3392421888,
+        "responses": [
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Click on the \"Destination\" field in the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [169, 656]}}\n</tool_call>",
+            "seconds": 5.702268958091736,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>",
+            "seconds": 7.652466893196106,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Click the close button on the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [136, 491]}}\n</tool_call>",
+            "seconds": 10.428218007087708,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>",
+            "seconds": 10.358609914779663,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Click on the \"Destination\" field in the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [169, 626]}}\n</tool_call>",
+            "seconds": 10.550233006477356,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>",
+            "seconds": 10.583823084831238,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          }
+        ],
+        "result": "",
+        "revalidation": {
+          "editableAuthorityMatches": "true",
+          "focusMatches": "true",
+          "screenMatches": "false",
+          "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+        },
+        "scope": "actual-guiOwl-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 4294967296,
+        "workerResidency": "fresh worker per proposal"
+      },
+      "proposals": [
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-0",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "9d0b1b6fa7f4a80ede7858ca09ee118b69f1efccf2dec3aa6ac115b361e5379e",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3281371136,
+            "memorySamples": 16,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 46899,
+            "startupSeconds": 1.2969583329977468,
+            "generationSeconds": 3.022360375034623,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 55,
+              "prompt_tokens": 2175,
+              "total_tokens": 2230,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 4.391108875046484
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Click on the \"Destination\" field in the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [169, 656]}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355885,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 55,
+              "prompt_tokens": 2175,
+              "total_tokens": 2230,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-u6pwzOjKhuaBgF8UMSyfV5II1CKHRVJO",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 2175,
+              "prompt_ms": 2578.12,
+              "prompt_per_token_ms": 1.185342528735632,
+              "prompt_per_second": 843.6379997827875,
+              "predicted_n": 55,
+              "predicted_ms": 354.591,
+              "predicted_per_token_ms": 6.447109090909091,
+              "predicted_per_second": 155.1082796799693
+            }
+          }
+        },
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-1",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "a729a989cc58be3008db0be888fd35cf73f1335b186701734e0e40b9ab2e33a3",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3334946816,
+            "memorySamples": 25,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 46905,
+            "startupSeconds": 1.0395926249912009,
+            "generationSeconds": 5.414002042030916,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 3796,
+              "total_tokens": 3835,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 6.523827750002965
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355893,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 3796,
+              "total_tokens": 3835,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-DIhMKUuT6DM5hQKZyP7Dkj89ZZeBmAIg",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 3796,
+              "prompt_ms": 4989.995,
+              "prompt_per_token_ms": 1.3145403055848262,
+              "prompt_per_second": 760.7222051324701,
+              "predicted_n": 39,
+              "predicted_ms": 273.168,
+              "predicted_per_token_ms": 7.004307692307693,
+              "predicted_per_second": 142.7692848357055
+            }
+          }
+        },
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-2",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "8ccba8e0b75eec8322475f2391232a9c0e15f91744edb10747d5ecc56fd3a051",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3387850752,
+            "memorySamples": 36,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 47219,
+            "startupSeconds": 1.0376549588982016,
+            "generationSeconds": 8.166320291929878,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 52,
+              "prompt_tokens": 5343,
+              "total_tokens": 5395,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 9.276077958988026
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Click the close button on the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [136, 491]}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355905,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 52,
+              "prompt_tokens": 5343,
+              "total_tokens": 5395,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-CzBzqZNLFgKUO9Temvas5cNAeD6FIhSl",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 5343,
+              "prompt_ms": 7552.899,
+              "prompt_per_token_ms": 1.4136064008983718,
+              "prompt_per_second": 707.4104923155996,
+              "predicted_n": 52,
+              "predicted_ms": 400.372,
+              "predicted_per_token_ms": 7.699461538461539,
+              "predicted_per_second": 129.87921233253076
+            }
+          }
+        },
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-3",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "92cdb9e146e0d639e1463303d0453b4829186ffd14f8fc4118be659c705af8ad",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3386933248,
+            "memorySamples": 35,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 47224,
+            "startupSeconds": 1.0346548329107463,
+            "generationSeconds": 8.063302792026661,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 5463,
+              "total_tokens": 5502,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 9.172964875004254
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355917,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 5463,
+              "total_tokens": 5502,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-YnnRzF684d0uq8XsOJO2ld9RLZugmZbL",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 5463,
+              "prompt_ms": 7562.687,
+              "prompt_per_token_ms": 1.3843468790042102,
+              "prompt_per_second": 722.3623032395761,
+              "predicted_n": 39,
+              "predicted_ms": 296.549,
+              "predicted_per_token_ms": 7.603820512820512,
+              "predicted_per_second": 131.51283599000502
+            }
+          }
+        },
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-4",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "05c68ba038cc12280e789048b54e40253972e4bae09c2a1a9ccc68d9e2cd1d9b",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3392421888,
+            "memorySamples": 36,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 47539,
+            "startupSeconds": 1.0357164170127362,
+            "generationSeconds": 8.229535875027068,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 55,
+              "prompt_tokens": 5516,
+              "total_tokens": 5571,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 9.340154542005621
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Click on the \"Destination\" field in the \"Remote Desktop text verification fixture\" window.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [169, 626]}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355929,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 55,
+              "prompt_tokens": 5516,
+              "total_tokens": 5571,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-O2qQMnyOWS7x2r6YPnHC6RRzKQFIKngP",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 5516,
+              "prompt_ms": 7591.805,
+              "prompt_per_token_ms": 1.3763243292240754,
+              "prompt_per_second": 726.5729296260903,
+              "predicted_n": 55,
+              "predicted_ms": 423.627,
+              "predicted_per_token_ms": 7.702309090909091,
+              "predicted_per_second": 129.83119583973638
+            }
+          }
+        },
+        {
+          "directory": ".build/repair-verification/native-desktop-gui-owl-model-01-proposals/proposal-5",
+          "workerReport": {
+            "scope": "one-native-GUI-Owl-desktop-protocol-proposal-no-tool-execution",
+            "requestSHA256": "847009f88f6f04d4837575a51680245c356a3d06d316fd13e9e301eb42f84c91",
+            "modelAssets": {
+              "repo": "mradermacher/GUI-Owl-1.5-2B-Instruct-GGUF",
+              "revision": "1db6394f7337877ed46ad1fa0aa991889ea694ef",
+              "upstreamRepo": "mPLUG/GUI-Owl-1.5-2B-Instruct",
+              "upstreamRevision": "528ceaec795bbfbe6103bd79e03db849feadfb24",
+              "files": [
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf",
+                  "bytes": 1107410432,
+                  "sha256": "5fd2c77781a14a91128928b5bd313252aab076b44682396af4bb2c99667f5ef5"
+                },
+                {
+                  "name": "GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf",
+                  "bytes": 819394848,
+                  "sha256": "e3e3816edb92e62a51f8754b21f1369d8c0224f5488a878a4ef8284903bcf64a"
+                }
+              ]
+            },
+            "binarySHA256": "91b860f0dc5dc3bca12ff44ae57f333c8051b4d37f085a0fe91c67ce52eeef8d",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 3390914560,
+            "memorySamples": 36,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 47856,
+            "startupSeconds": 1.0418613330693915,
+            "generationSeconds": 8.22459566697944,
+            "responseReceived": true,
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 5643,
+              "total_tokens": 5682,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "finishReason": "stop",
+            "exitCode": 0,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 9.33970779099036
+          },
+          "response": {
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "Action: Type \"Tokyo\" in the Destination field.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Tokyo\"}}\n</tool_call>"
+                }
+              }
+            ],
+            "created": 1789355940,
+            "model": "gui-owl-desktop-v1",
+            "system_fingerprint": "b9992-6eddde06a",
+            "object": "chat.completion",
+            "usage": {
+              "completion_tokens": 39,
+              "prompt_tokens": 5643,
+              "total_tokens": 5682,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "id": "chatcmpl-jHmnOoVr3Ov6oB6FN3qfSSAUWMbFM3N3",
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 5643,
+              "prompt_ms": 7706.852,
+              "prompt_per_token_ms": 1.3657366648945597,
+              "prompt_per_second": 732.2055749870376,
+              "predicted_n": 39,
+              "predicted_ms": 301.715,
+              "predicted_per_token_ms": 7.736282051282051,
+              "predicted_per_second": 129.26105762060223
+            }
+          }
+        }
+      ]
+    },
+    {
+      "model": "holo",
+      "workflow": {
+        "dispatchJournalCount": 0,
+        "elapsedSeconds": 10.00891900062561,
+        "failure": "RemoteDesktopHost.ComputerUseFaraAction.Failure.invalidResponse",
+        "fixtureState": {
+          "destination": "",
+          "generation": 0,
+          "origin": "",
+          "pid": 54891
+        },
+        "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+        "memorySamples": 24,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 4312367104,
+        "responses": [],
+        "result": "",
+        "revalidation": {},
+        "scope": "actual-holo-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 4294967296,
+        "workerResidency": "fresh worker per proposal"
+      },
+      "proposals": [
+        {
+          "directory": ".build/repair-verification/native-desktop-holo-model-01-proposals/proposal-0",
+          "workerReport": {
+            "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+            "requestSHA256": "2bcd811e7962c636ac99d020faec5990679bb69f3c5f52713fe3146d79b12de0",
+            "modelAssets": {
+              "repository": "mradermacher/Holo-3.1-4B-GGUF",
+              "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+              "upstream": "Hcompany/Holo-3.1-4B",
+              "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+              "files": [
+                {
+                  "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                  "bytes": 3066386464,
+                  "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+                },
+                {
+                  "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                  "bytes": 672424256,
+                  "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+                }
+              ]
+            },
+            "binarySHA256": "721d83f5e31bf3c620c94364fb67154fed6f4f8d401a488dfc8851b96fbe6a6e",
+            "targetMacRAMGB": 12,
+            "wholeApp12GBQualified": false,
+            "selectedProductionModelChanged": false,
+            "memoryMetric": "sampled max of resident size and physical footprint",
+            "memoryStopLimitBytes": 4294967296,
+            "diagnosticMemoryLimitOnly": false,
+            "productionMemoryLimitChanged": false,
+            "peakSampledProcessMemoryBytes": 4312137728,
+            "memorySamples": 7,
+            "startupDeadlineSeconds": 45,
+            "generationDeadlineSeconds": 45,
+            "totalDeadlineSeconds": 100,
+            "runnerExecutesNoActions": true,
+            "minimumImageTokensEnvironment": null,
+            "pid": 54899,
+            "startupSeconds": 1.5488196670776233,
+            "watchdogReason": "memory-limit",
+            "error": "RemoteDisconnected: Remote end closed connection without response",
+            "exitCode": -9,
+            "ownedProcessExited": true,
+            "credentialRemoved": true,
+            "totalSeconds": 6.883438916993327
+          }
+        }
+      ]
+    }
+  ],
+  "interpretation": [
+    "Contract red executes two failures; green executes three passes. Five focused regressions pass, including the real native Unicode/login/Resume workflow. Harness rebuild passes the status/handoff method again.",
+    "Delayed editable-row and empty-sibling scripted workflows pass after one compiler-only test diagnostic error was fixed. They do not reproduce or resolve the first actual GUI-Owl click rejection. The empty-sibling variant includes an initial no-effect observation and is not an identical first-frame replay.",
+    "Ten distinct methods have successful checkpoints here; four newly passing methods raise the conservative historical minimum to 315 Mac and 10 iOS. This is not a current full-suite pass.",
+    "GUI-Owl sends six proposals and executes three exact typing actions in Origin after rejected clicks. Destination stays empty and Origin becomes TokyoTokyoTokyo. A proposed close also violates the instruction to leave the form open; the close is not dispatched. The task fails at its six-proposal bound.",
+    "GUI-Owl peak 3392421888 bytes remains below the unchanged 4294967296-byte cap. All six workers exit and remove their temporary credentials.",
+    "Holo returns no proposal and sends zero input. The supervisor records memory-limit at 4312137728 bytes; the independently sampled peak is 4312367104. Its worker exits and removes its credential. The Swift diagnostic runner surfaces invalidResponse; the worker report is the cause evidence.",
+    "Both alternatives use the same fixed form, goal, full-display image policy and 4 GiB cap as the preceding Fara Q4 native trial. Their probes launch a fresh worker per proposal, whereas Fara retains its worker across proposals. This limits residency/performance comparison.",
+    "No source admission changes were made from the GUI-Owl click failure, and no model is promoted. Fara remains eligible and selected; the native executor remains a candidate outside production routing."
+  ],
+  "remaining": [
+    "Capture the exact first-click target identity and changed pixel bounds without another full model retry.",
+    "General recovery must not treat a rejected focus action as a successful prerequisite for typing; model and app behavior must be distinguished.",
+    "Verify goal constraints, including preserving unrelated fields and leaving documents/windows open, across the fixed cross-domain set.",
+    "Remaining generic native actions, clarification, production routing, provider login, phone integration and whole-app 12 GB/thermal acceptance remain open."
+  ]
+}

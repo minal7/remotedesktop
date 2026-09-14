@@ -6,7 +6,8 @@ enum ComputerUseHoloModel {
 
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
-        guard input.surface == .browser, endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
+        try input.validateSurfaceContext()
+        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
               !input.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               input.goal.utf8.count <= 8_192, input.history.count <= 20,
               input.pageReading == nil, input.history.allSatisfy({ $0.pageReading == nil }) else { throw invalid }
@@ -77,7 +78,7 @@ enum ComputerUseHoloModel {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["model": modelAlias, "messages": messages,
-            "tools": tools, "tool_choice": "required", "parallel_tool_calls": false,
+            "tools": tools(surface: input.surface), "tool_choice": "required", "parallel_tool_calls": false,
             "temperature": 0.8, "max_tokens": 1024, "stream": false,
             "chat_template_kwargs": ["enable_thinking": true], "reasoning_format": "deepseek"], options: [.sortedKeys, .withoutEscapingSlashes])
         guard request.httpBody!.count <= 9 * 1_024 * 1_024 else { throw invalid }
@@ -86,20 +87,20 @@ enum ComputerUseHoloModel {
 
     /// Click/answer use Holo's published schemas. The other tools describe this
     /// app's existing actions, including exact insertion without implicit keys.
-    private static var tools: [[String: Any]] {
+    private static func tools(surface: ComputerUseFaraModel.Input.Surface) -> [[String: Any]] {
         func tool(_ name: String, _ description: String, _ properties: [String: Any]) -> [String: Any] {
             ["type": "function", "function": ["name": name, "description": description,
                 "parameters": ["type": "object", "properties": properties, "required": properties.keys.sorted(), "additionalProperties": false]]]
         }
         let string = ["type": "string"]
-        return [
+        let declared = [
             tool("click", "Click at (x, y) coordinates", [
                 "element": ["type": "string", "description": "Detailed description of the target UI element"],
                 "x": ["type": "integer", "description": "X coordinate as integer in [0, 1000]"],
                 "y": ["type": "integer", "description": "Y coordinate as integer in [0, 1000]"]]),
             tool("answer", "Provide a final answer", ["content": ["type": "string", "description": "The answer content"]]),
-            tool("type", "Insert the supplied text into the currently focused editor using its existing selection. In the Find bar, typing updates the page search. This does not add Enter or select-all.", ["text": string]),
-            tool("key", "Perform the explicitly supplied key or key chord through the browser adapter. Control+f opens the native Find bar. Do not add other keys.", ["keys": ["type": "array", "items": string, "minItems": 1]]),
+            tool("type", surface == .desktop ? "Insert exact text into the focused native editable field using its current selection. Preserve whitespace and Unicode. This does not add Enter or select-all." : "Insert the supplied text into the currently focused editor using its existing selection. In the Find bar, typing updates the page search. This does not add Enter or select-all.", ["text": string]),
+            tool("key", surface == .desktop ? ComputerUseFaraModel.desktopKeyDescription : "Perform the explicitly supplied key or key chord through the browser adapter. Control+f opens the native Find bar. Do not add other keys.", ["keys": ["type": "array", "items": string, "minItems": 1]]),
             tool("scroll", "Scroll in the explicit direction by an unsigned distance. A distance of 1000 is one viewport height for up/down or one viewport width for left/right.", [
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
                 "distance": ["type": "number", "minimum": 0, "maximum": 10_000]]),
@@ -108,6 +109,11 @@ enum ComputerUseHoloModel {
             tool("visit_url", "Navigate the owned browser to an HTTP or HTTPS URL.", ["url": string]),
             tool("history_back", "Go back one page in this browser's history.", [:]),
             tool("ask_user", "Pause the task and ask the user for missing information. The bound reply will be returned as this tool's result.", ["question": string])]
+        guard surface == .desktop else { return declared }
+        return declared.filter { tool in
+            guard let function = tool["function"] as? [String: Any], let name = function["name"] as? String else { return false }
+            return ["click", "type", "key", "wait", "answer"].contains(name)
+        }
     }
 
     static func decode(_ data: Data) throws -> ComputerUseFaraModel.Proposal {

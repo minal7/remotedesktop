@@ -56,6 +56,16 @@ enum ComputerUseFaraModel {
         var pageReading: PageReading? = nil
         var userResponse: String? = nil
         var actionError: String? = nil
+
+        func validateSurfaceContext() throws {
+            if surface == .desktop {
+                guard currentURL == nil, pageReading == nil, userResponse == nil,
+                      history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
+                        && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+            }
+        }
     }
     struct Proposal: Equatable, Sendable {
         let response: String
@@ -81,13 +91,7 @@ enum ComputerUseFaraModel {
                 { $0 + $1.response.utf8.count + ($1.currentURL?.absoluteString.utf8.count ?? 0) }) <= 65_536 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        if input.surface == .desktop {
-            guard input.currentURL == nil, input.pageReading == nil, input.userResponse == nil,
-                  input.history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
-                    && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
-                throw OSAtlasLlamaRuntimeError.invalidResponse
-            }
-        }
+        try input.validateSurfaceContext()
         var messages: [[String: Any]] = [["role": "system", "content":
             try input.surface == .desktop ? desktopSystemPrompt() : officialSystemPrompt]]
         let earliestImage = max(0, input.history.count - 2)
@@ -171,6 +175,12 @@ enum ComputerUseFaraModel {
     /// declaring only the capabilities implemented by the native Mac adapter.
     /// Browser requests retain the pinned upstream prompt byte for byte.
     private static func desktopSystemPrompt() throws -> String {
+        try replacingDesktopToolSchema(in: officialSystemPrompt, with: desktopToolSchema())
+    }
+
+    static let desktopKeyDescription = "Required for key: one base key and optional Shift, Control, Option/Alt, Command/Meta modifiers. This is macOS: Command+a selects all in an editor. Control and Command are distinct; Option+Left is a literal Mac chord. Base keys include letters, digits, arrows, Return, Tab, Escape, Space, Backspace, Delete, Home, End, PageUp and PageDown."
+
+    static func desktopToolSchema() -> [String: Any] {
         let actions = ["key", "type", "left_click", "right_click", "double_click", "triple_click",
             "wait", "pause_and_memorize_fact", "terminate"]
         let properties: [String: Any] = [
@@ -179,20 +189,23 @@ enum ComputerUseFaraModel {
             "coordinate": ["type": "array", "items": ["type": "number", "minimum": 0, "maximum": 1000], "minItems": 2, "maxItems": 2,
                 "description": "Required for clicks: [x, y] normalized over the entire screenshot, with the origin at its top left."],
             "keys": ["type": "array", "items": ["type": "string"], "minItems": 1, "maxItems": 5,
-                "description": "Required for key: one base key and optional Shift, Control, Option/Alt, Command/Meta modifiers. This is macOS: Command+a selects all in an editor. Control and Command are distinct; Option+Left is a literal Mac chord. Base keys include letters, digits, arrows, Return, Tab, Escape, Space, Backspace, Delete, Home, End, PageUp and PageDown."],
+                "description": desktopKeyDescription],
             "text": ["type": "string", "description": "Exact text required by type, including its whitespace and Unicode."],
             "time": ["type": "number", "minimum": 0, "maximum": 30, "description": "Seconds required by wait."],
             "fact": ["type": "string", "description": "Fact required by pause_and_memorize_fact."],
             "answer": ["type": "string", "description": "Final answer required by terminate."]]
-        let tool: [String: Any] = ["type": "function", "function": ["name": "computer_use",
+        return ["type": "function", "function": ["name": "computer_use",
             "description": "Interact with the visible macOS desktop using one action per screenshot. Coordinates cover the full display from 0 to 1000 on each axis. Locate targets in the latest screenshot. The host handles sign-in and permission handoff to the user; never type credentials. Only the listed native actions are available.",
             "parameters": ["type": "object", "properties": properties, "required": ["action"], "additionalProperties": false]]]
+    }
+
+    static func replacingDesktopToolSchema(in original: String, with tool: [String: Any]) throws -> String {
         let schema = try JSONSerialization.data(withJSONObject: tool, options: [.sortedKeys, .withoutEscapingSlashes])
-        guard let start = officialSystemPrompt.range(of: "<tools>\n"),
-              let end = officialSystemPrompt.range(of: "</tools>", range: start.upperBound..<officialSystemPrompt.endIndex) else {
+        guard let start = original.range(of: "<tools>\n"),
+              let end = original.range(of: "</tools>", range: start.upperBound..<original.endIndex) else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        return officialSystemPrompt.replacingCharacters(in: start.upperBound..<end.lowerBound,
+        return original.replacingCharacters(in: start.upperBound..<end.lowerBound,
             with: String(decoding: schema, as: UTF8.self) + "\n")
     }
     static func validatePageReading(_ reading: PageReading) throws {

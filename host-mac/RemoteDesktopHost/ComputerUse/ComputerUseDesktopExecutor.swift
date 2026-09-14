@@ -1,12 +1,29 @@
 import Foundation
 import CoreGraphics
 
+/// Shared native outcomes retain the provider's original response. A status
+/// carries no invented answer, and manual handoff carries no invented input.
+struct ComputerUseDesktopProposal: Equatable, Sendable {
+    enum Decision: Equatable, Sendable {
+        case action(ComputerUseFaraAction)
+        case completionStatus(success: Bool)
+        case handoff(String)
+        case unsupported
+    }
+    let response: String
+    let decision: Decision
+    init(response: String, decision: Decision) { self.response = response; self.decision = decision }
+    init(response: String, action: ComputerUseFaraAction) { self.init(response: response, decision: .action(action)) }
+    init(_ proposal: ComputerUseFaraModel.Proposal) { self.init(response: proposal.response, action: proposal.action) }
+    var action: ComputerUseFaraAction? { if case .action(let action) = decision { return action }; return nil }
+}
+
 /// Native image/action execution for trained computer-use providers. Provider
 /// request profiles remain separate; this adapter admits shared native effects.
 /// Not selected by the production loader until native model acceptance passes.
 @MainActor
 final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
-    typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal
+    typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseDesktopProposal
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -15,13 +32,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     }
     private final class Approval {
         let continuation: ComputerUseVisualApprovalContinuation
-        let proposal: ComputerUseFaraModel.Proposal
+        let proposal: ComputerUseDesktopProposal
         let action: ComputerUsePredictedAction
         let observation: Observation
         let fingerprint: ComputerUseApprovalFingerprint
         let message: String
         var performed = false
-        init(taskID: String, proposal: ComputerUseFaraModel.Proposal, action: ComputerUsePredictedAction,
+        init(taskID: String, proposal: ComputerUseDesktopProposal, action: ComputerUsePredictedAction,
              observation: Observation, fingerprint: ComputerUseApprovalFingerprint, message: String) {
             continuation = .init(taskID: taskID, nonce: UUID())
             self.proposal = proposal; self.action = action; self.observation = observation
@@ -162,11 +179,18 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
     }
 
-    private func record(_ proposal: ComputerUseFaraModel.Proposal, observation: Observation, session: Session) {
+    private func record(_ proposal: ComputerUseDesktopProposal, observation: Observation, session: Session) {
         session.turns += 1
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
             actionError: session.actionError, action: proposal.action))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
+    }
+
+    private func complete(_ answer: String, session: Session) throws -> ComputerUseExecutionResult {
+        var completed = session.journal; completed.statuses = [.verified]
+        try store.save(completed, replacing: session.journal); session.journal = completed
+        session.terminal = .completed(answer)
+        return .completed(answer)
     }
 
     private func run(taskID: String, goal: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
@@ -199,7 +223,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
             do {
-                let action = try Self.nativeAction(proposal.action, image: observation.image)
+                let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
                 try revalidate(observation, action: action, tools: tools)
                 if let action {
                     if case .typeText = action, try !tools.focusedTypingTargetIsEditable(providerAction: action) { throw Failure.changedScreen }
@@ -215,14 +239,20 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     try await dispatch(proposal, action: action, observation: observation, fingerprint: fingerprint,
                         session: session, tools: tools, assertOwnership: { try lease.assertOwnership() })
                 } else {
-                    switch proposal.action {
-                    case .reportCompletion(let answer):
-                        var completed = session.journal; completed.statuses = [.verified]
-                        try store.save(completed, replacing: session.journal); session.journal = completed
-                        session.terminal = .completed(answer)
-                        return .completed(answer)
-                    case .wait(let seconds): try await Task.sleep(for: .seconds(seconds))
-                    case .remember: break
+                    switch proposal.decision {
+                    case .completionStatus(let success):
+                        if success { return try complete("The model reported completion.", session: session) }
+                        let result = ComputerUseExecutionResult.unableToComplete("The model reported that it could not complete the task.")
+                        session.terminal = result; return result
+                    case .handoff(let message):
+                        guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              message.utf8.count <= 8192 else { throw Failure.unsupportedAction }
+                        record(proposal, observation: observation, session: session)
+                        session.actionError = nil; session.rejected = 0
+                        return .userInterventionRequired(message)
+                    case .action(.reportCompletion(let answer)): return try complete(answer, session: session)
+                    case .action(.wait(let seconds)): try await Task.sleep(for: .seconds(seconds))
+                    case .action(.remember): break
                     default: throw Failure.unsupportedAction
                     }
                 }
@@ -246,7 +276,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         throw Failure.stepLimit
     }
 
-    private func dispatch(_ proposal: ComputerUseFaraModel.Proposal, action: ComputerUsePredictedAction,
+    private func dispatch(_ proposal: ComputerUseDesktopProposal, action: ComputerUsePredictedAction,
                           observation: Observation, fingerprint: ComputerUseApprovalFingerprint, session: Session,
                           tools: ComputerUseHostTools, approved: Bool = false, willBeginEffect: () -> Void = {},
                           assertOwnership: () throws -> Void) async throws {

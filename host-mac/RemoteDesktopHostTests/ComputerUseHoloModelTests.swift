@@ -332,7 +332,8 @@ final class ComputerUseHoloModelTests: XCTestCase {
 @MainActor
 enum HoloTestProposalRunner {
     static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int,
-                        environment: [String: String]) async throws -> ComputerUseFaraModel.Proposal {
+                        environment: [String: String], memoryLimitGiB: Int = 5) async throws -> ComputerUseFaraModel.Proposal {
+        guard [4, 5].contains(memoryLimitGiB) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
         let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
         let requestFile = directory.appendingPathComponent("request-\(index).json")
@@ -341,7 +342,7 @@ enum HoloTestProposalRunner {
         let output = directory.appendingPathComponent("proposal-\(index)")
         let probe = HoloProbeProcess()
         try probe.start(python: try XCTUnwrap(environment["HOLO_PYTHON"]), script: try XCTUnwrap(environment["HOLO_PROBE_SCRIPT"]),
-            arguments: [requestFile.path, output.path, try XCTUnwrap(environment["HOLO_ASSETS"]), try XCTUnwrap(environment["HOLO_BINARY"]), "5"])
+            arguments: [requestFile.path, output.path, try XCTUnwrap(environment["HOLO_ASSETS"]), try XCTUnwrap(environment["HOLO_BINARY"]), String(memoryLimitGiB)])
         let status = try await probe.finish()
         let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String: Any])
         XCTAssertEqual(report["ownedProcessExited"] as? Bool, true)

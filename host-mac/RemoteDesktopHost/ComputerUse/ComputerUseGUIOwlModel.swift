@@ -17,6 +17,14 @@ enum ComputerUseGUIOwlModel {
             guard case .browser(let action) = decision else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
             return ComputerUseFaraModel.Proposal(response: response, action: action).compatibleBrowserProposal()
         }
+        func compatibleDesktopProposal() -> ComputerUseDesktopProposal {
+            switch decision {
+            case .browser(let action): return .init(response: response, action: action)
+            case .terminalStatus(let success): return .init(response: response, decision: .completionStatus(success: success))
+            case .handoff(let message): return .init(response: response, decision: .handoff(message))
+            case .wheel, .middleClick: return .init(response: response, decision: .unsupported)
+            }
+        }
     }
     static func decode(_ data: Data) throws -> Proposal {
         do {
@@ -84,7 +92,8 @@ enum ComputerUseGUIOwlModel {
     /// remain visible; older actions retain their original outcomes as summaries.
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
-        guard input.surface == .browser, endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
+        try input.validateSurfaceContext()
+        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
               !input.goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,
               input.goal.utf8.count <= 8192, input.history.count <= 20,
               input.pageReading == nil, input.history.allSatisfy({$0.pageReading == nil}) else { throw invalid }
@@ -126,7 +135,7 @@ enum ComputerUseGUIOwlModel {
             "Step\(i+1): " + input.history[i].response + "\nObserved before action: " + observations[i] + "\nObserved outcome: " + outcomes[i]
         }
         var messages:[[String:Any]]=[
-            ["role":"system","content":[["type":"text","text":officialSystemPrompt]]]]
+            ["role":"system","content":[["type":"text","text":try input.surface == .desktop ? desktopSystemPrompt() : officialSystemPrompt]]]]
         for i in firstImage...input.history.count {
             var text = ""
             if i == firstImage {
@@ -150,6 +159,21 @@ enum ComputerUseGUIOwlModel {
         request.httpBody=try JSONSerialization.data(withJSONObject:["model":modelAlias,"messages":messages,"temperature":0,"seed":20260913,"max_tokens":1024,"stream":false],options:[.sortedKeys,.withoutEscapingSlashes])
         guard request.httpBody!.count<=9*1024*1024 else { throw invalid }
         return request
+    }
+
+    private static func desktopSystemPrompt() throws -> String {
+        var tool = ComputerUseFaraModel.desktopToolSchema()
+        guard var function = tool["function"] as? [String: Any],
+              var parameters = function["parameters"] as? [String: Any],
+              var properties = parameters["properties"] as? [String: Any] else { throw invalid }
+        properties["action"] = ["type": "string",
+            "enum": ["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "answer", "terminate", "interact"],
+            "description": "Choose one native Mac action. Clicking uses coordinate; type inserts exact text at the current selection without implicit keys; key sends the literal chord. wait takes seconds. answer uses text for the final answer. terminate uses status success or failure and supplies no answer text. interact uses text to request manual user control, then resumes with a fresh screenshot after the user chooses Resume."]
+        properties.removeValue(forKey: "answer"); properties.removeValue(forKey: "fact")
+        properties["status"] = ["type": "string", "enum": ["success", "failure"], "description": "Required by terminate: whether the task succeeded or could not be completed."]
+        properties["text"] = ["type": "string", "description": "Exact text to insert for type, final answer for answer, or manual handoff message for interact."]
+        parameters["properties"] = properties; function["parameters"] = parameters; tool["function"] = function
+        return try ComputerUseFaraModel.replacingDesktopToolSchema(in: officialSystemPrompt, with: tool)
     }
 
     // Verbatim SYSTEM_PROMPT, X-PLUG/MobileAgent commit 11cea575561fb7800b5fb6b6cafa56f7a91de11f,

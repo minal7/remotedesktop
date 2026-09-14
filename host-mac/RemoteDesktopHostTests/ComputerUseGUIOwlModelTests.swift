@@ -523,7 +523,7 @@ final class ComputerUseGUIOwlModelTests: XCTestCase {
 }
 
 @MainActor
-private enum GUIOwlTestProposalRunner {
+enum GUIOwlTestProposalRunner {
     static func propose(input:ComputerUseFaraModel.Input,directory:URL,index:Int,environment:[String:String]) async throws -> ComputerUseGUIOwlModel.Proposal {
         let endpoint=OSAtlasLlamaEndpoint(generation:1,variant:nil,baseURL:URL(string:"http://127.0.0.1:43123")!,bearerToken:"unused-diagnostic-request")
         let request=try ComputerUseGUIOwlModel.makeRequest(endpoint:endpoint,input:input)

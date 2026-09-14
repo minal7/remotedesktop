@@ -73,11 +73,34 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, nativeModelLoop: true)
     }
 
+    func testOptInDelayedNativeFieldClickUsesTheWholeEditableRow() async throws {
+        try await runFixture(browser: false, nativeModelLoop: true, nativeClickFraction: 0.083, nativeClickDelay: .seconds(3))
+    }
+
+    func testOptInDelayedNativeFieldClickPreservesAnEmptySibling() async throws {
+        try await runFixture(browser: false, nativeModelLoop: true, nativeClickFraction: 0.083,
+            nativeClickDelay: .seconds(6), nativeOriginText: "")
+    }
+
     func testOptInFaraModelEditsANativeDesktopForm() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_DESKTOP_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: bounded local Fara Q4 inference and disposable native input")
         }
-        try await runFixture(browser: false, actualDesktopModel: true)
+        try await runFixture(browser: false, actualDesktopModel: .fara)
+    }
+
+    func testOptInGUIOwlModelEditsANativeDesktopForm() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_GUI_OWL_DESKTOP_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: bounded GUI-Owl Q4 inference and disposable native input")
+        }
+        try await runFixture(browser: false, actualDesktopModel: .guiOwl)
+    }
+
+    func testOptInHoloModelEditsANativeDesktopForm() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_DESKTOP_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: bounded Holo Q4 inference and disposable native input")
+        }
+        try await runFixture(browser: false, actualDesktopModel: .holo)
     }
 
     func testNativeKeyChordsRemainLiteralAndRejectAmbiguousSequences() throws {
@@ -123,10 +146,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
         mixed = native; mixed.userResponse = "An answer from another surface"
         XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
-        // These adapters do not yet expose native Mac capability profiles.
-        // A shared Input must not silently select their browser declarations.
-        XCTAssertThrowsError(try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: native))
-        XCTAssertThrowsError(try ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: native))
+        XCTAssertThrowsError(try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: mixed))
+        XCTAssertThrowsError(try ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: mixed))
     }
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
@@ -139,6 +160,80 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
             authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
             planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })
+    }
+
+    func testGUIOwlNativeStatusAndManualHandoffRemainDistinct() async throws {
+        for mode in ["success", "failure", "handoff"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var calls = 0, effects = 0, firstResponse: String?
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                calls += 1
+                guard calls <= 2 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
+                let arguments: [String: String]
+                if calls == 2 {
+                    XCTAssertEqual(mode, "handoff"); XCTAssertEqual(input.history.count, 1)
+                    XCTAssertEqual(input.history.first?.response, firstResponse)
+                    XCTAssertNil(input.history.first?.action); XCTAssertNil(input.userResponse)
+                    arguments = ["action": "answer", "text": "The requested step is finished."]
+                } else if mode == "handoff" {
+                    arguments = ["action": "interact", "text": "Complete the local step – 東京, then Resume."]
+                } else { arguments = ["action": "terminate", "status": mode] }
+                let body = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": arguments])
+                let response = "Action: Follow the current task.\n<tool_call>" + String(decoding: body, as: UTF8.self) + "</tool_call>"
+                if calls == 1 { firstResponse = response }
+                let packet = try JSONSerialization.data(withJSONObject: ["model": ComputerUseGUIOwlModel.modelAlias,
+                    "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": response]]]])
+                return try ComputerUseGUIOwlModel.decode(packet).compatibleDesktopProposal()
+            })
+            do {
+                let result = try await executor.execute(taskID: mode, prompt: "Complete the current local step", trustedUserPrompt: "Complete the current local step", tools: tools, progress: { _ in })
+                switch (mode, result) {
+                case ("success", .completed): break
+                case ("failure", .unableToComplete): break
+                case ("handoff", .userInterventionRequired(let message)):
+                    XCTAssertEqual(message, "Complete the local step – 東京, then Resume."); XCTAssertEqual(calls, 1)
+                    let resumed = try await executor.execute(taskID: mode, prompt: "Complete the current local step", trustedUserPrompt: "Complete the current local step", tools: tools, progress: { _ in })
+                    XCTAssertEqual(resumed, .completed("The requested step is finished.")); XCTAssertEqual(calls, 2)
+                default: XCTFail("Incorrect native outcome for \(mode): \(result)")
+                }
+                let count = calls
+                _ = try await executor.execute(taskID: mode, prompt: "Complete the current local step", trustedUserPrompt: "Complete the current local step", tools: tools, progress: { _ in })
+                XCTAssertEqual(calls, count); XCTAssertEqual(effects, 0)
+            } catch { XCTFail("Native GUI-Owl \(mode) could not continue: \(error)") }
+        }
+    }
+
+    func testNativeCandidateProfilesDeclareMacEffectsAndKeepSeparateProtocols() throws {
+        let image = try ComputerUseDesktopImage(observation: .init(
+            image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+            displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        let input = ComputerUseFaraModel.Input(goal: "Edit the current form.", screenshotPNG: image.png, surface: .desktop)
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let holo = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input).httpBody)) as? [String: Any])
+        let holoTools = try XCTUnwrap(holo["tools"] as? [[String: Any]]).compactMap { $0["function"] as? [String: Any] }
+        XCTAssertEqual(Set(holoTools.compactMap { $0["name"] as? String }), Set(["click", "type", "key", "wait", "answer"]))
+        let key = try XCTUnwrap(holoTools.first { $0["name"] as? String == "key" }?["description"] as? String)
+        XCTAssertTrue(key.contains("Command")); XCTAssertTrue(key.contains("Control")); XCTAssertFalse(key.contains("browser"))
+        let owl = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: input).httpBody)) as? [String: Any])
+        XCTAssertNil(owl["tools"], "GUI-Owl must keep its XML protocol")
+        let messages = try XCTUnwrap(owl["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.first?["content"] as? [[String: Any]])
+        let prompt = try XCTUnwrap(content.first?["text"] as? String)
+        let start = try XCTUnwrap(prompt.range(of: "<tools>\n"))
+        let end = try XCTUnwrap(prompt.range(of: "</tools>", range: start.upperBound..<prompt.endIndex))
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        let function = try XCTUnwrap(schema["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let action = try XCTUnwrap(properties["action"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(action["enum"] as? [String])),
+            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "answer", "terminate", "interact"]))
+        XCTAssertNil(properties["answer"]); XCTAssertNil(properties["fact"])
+        let status = try XCTUnwrap(properties["status"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(status["enum"] as? [String])), Set(["success", "failure"]))
     }
 
     func testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection() async throws {
@@ -193,7 +288,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let started = expectation(description: "Native proposal entered")
         let returned = expectation(description: "Late proposal returned")
-        var release: CheckedContinuation<ComputerUseFaraModel.Proposal, Never>?
+        var release: CheckedContinuation<ComputerUseDesktopProposal, Never>?
         var effects = 0, finishes = 0
         let tools = desktopTestTools(perform: { _ in effects += 1 })
         let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
@@ -415,7 +510,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: Bool = false) async throws {
+    private enum NativeModel: String { case fara, guiOwl, holo }
+
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle") async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -463,13 +560,18 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }, authenticationContextProvider: nativeModelLoop ? {
             simulatedLogin ? .init(focusedElement: "AXTextField AXSecureTextField Password", boundedWindowContext: "Sign in\nPassword\nContinue") : nil
         } : nil)
-        if actualDesktopModel {
-            let inputs = try await FaraTestAssets.inputs(environment: ProcessInfo.processInfo.environment)
+        if let actualDesktopModel {
+            let environment = ProcessInfo.processInfo.environment
+            let inputs = actualDesktopModel == .fara ? try await FaraTestAssets.inputs(environment: environment) : nil
+            let workerURL = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment[actualDesktopModel == .guiOwl ? "GUI_OWL_BINARY" : "HOLO_BINARY"]))
+            XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: workerURL).isEmpty)
+            let proposalDirectory = actualDesktopModel == .fara ? directory : URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_MODEL_TRIAL_DIRECTORY"]))
+            if actualDesktopModel != .fara { try FileManager.default.createDirectory(at: proposalDirectory, withIntermediateDirectories: false) }
             let runtime = OSAtlasLlamaRuntime()
             let memory = Task.detached { () -> (UInt64, Int) in
                 var peak: UInt64 = 0, samples = 0
                 while !Task.isCancelled {
-                    for child in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL)) ?? [] {
+                    for child in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: workerURL)) ?? [] {
                         if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: child.processIdentifier) {
                             peak = max(peak, bytes); samples += 1
                         }
@@ -499,10 +601,20 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 let cropped = try XCTUnwrap(source.cropping(to: crop))
                 let png = try XCTUnwrap(NSBitmapImageRep(cgImage: cropped).representation(using: .png, properties: [:]))
                 let imageAttachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
-                imageAttachment.name = "Fara native fixture observation \(responses.count)"; imageAttachment.lifetime = .keepAlways; self.add(imageAttachment)
+                imageAttachment.name = "\(actualDesktopModel.rawValue) native fixture observation \(responses.count)"; imageAttachment.lifetime = .keepAlways; self.add(imageAttachment)
                 let began = Date()
-                let endpoint = try await runtime.activateFara(inputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let proposal: ComputerUseDesktopProposal
+                switch actualDesktopModel {
+                case .fara:
+                    let endpoint = try await runtime.activateFara(XCTUnwrap(inputs))
+                    proposal = try await .init(runtime.proposeFara(endpoint: endpoint, input: input))
+                case .guiOwl:
+                    proposal = try await GUIOwlTestProposalRunner.propose(input: input, directory: proposalDirectory,
+                        index: responses.count, environment: environment).compatibleDesktopProposal()
+                case .holo:
+                    proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
+                        index: responses.count, environment: environment, memoryLimitGiB: 4))
+                }
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
                     "fixtureCropInModelImage": NSStringFromRect(crop), "modelImageWidth": source.width, "modelImageHeight": source.height])
@@ -515,12 +627,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             deadline.cancel()
             await runtime.shutdown(); memory.cancel()
             let measured = await memory.value
-            let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+            let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: workerURL).isEmpty
             let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("actual-native"), includingPropertiesForKeys: nil)
                 .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
             let fieldState = try JSONSerialization.jsonObject(with: Data(contentsOf: state))
-            var report: [String: Any] = ["scope": "actual-Fara-Q4-native-desktop-form", "goal": goal,
+            var report: [String: Any] = ["scope": "actual-\(actualDesktopModel.rawValue)-Q4-native-desktop-form", "goal": goal,
                 "responses": responses, "result": result.map { String(describing: $0) } ?? "",
+                "workerLimitBytes": UInt64(4) * 1024 * 1024 * 1024,
+                "workerResidency": actualDesktopModel == .fara ? "retained within task" : "fresh worker per proposal",
                 "failure": failure.map { String(reflecting: $0) } ?? "", "elapsedSeconds": Date().timeIntervalSince(started),
                 "peakSampledWorkerBytes": measured.0, "memorySamples": measured.1, "ownedWorkerExited": gone,
                 "fixtureState": fieldState, "dispatchJournalCount": journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count,
@@ -529,10 +643,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(stop))
             }
             let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
-            attachment.name = "Actual Fara native desktop workflow"; attachment.lifetime = .keepAlways; add(attachment)
+            attachment.name = "Actual \(actualDesktopModel.rawValue) native desktop workflow"; attachment.lifetime = .keepAlways; add(attachment)
             XCTAssertTrue(gone)
-            if let failure { return XCTFail("Native Fara task failed: \(failure)") }
-            guard case .completed = result else { return XCTFail("Native Fara task did not complete: \(String(describing: result))") }
+            if let failure { return XCTFail("Native \(actualDesktopModel.rawValue) task failed: \(failure)") }
+            guard case .completed = result else { return XCTFail("Native \(actualDesktopModel.rawValue) task did not complete: \(String(describing: result))") }
             try await verify(state, field: "origin", equals: "")
             try await verify(state, field: "destination", equals: "Tokyo")
             let count = responses.count
@@ -542,7 +656,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
         if nativeModelLoop {
             let exact = "  東京 e\u{301} 👩🏽‍💻  "
-            let goal = "Set Origin to Seattle and replace Destination with \(exact). Leave the form open."
+            let goal = "Set Origin to \(nativeOriginText.isEmpty ? "an empty value" : nativeOriginText) and replace Destination with \(exact). Leave the form open."
             var proposals = 0
             var trace: [String] = []
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("native-loop"), propose: { input in
@@ -554,11 +668,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 XCTAssertEqual(input.history.count, min(index, 5))
                 let arguments: [String: Any]
                 switch index {
-                case 0: arguments = ["action": "type", "text": "Seattle"]
+                case 0: arguments = nativeOriginText.isEmpty ? ["action": "wait", "time": 0] : ["action": "type", "text": nativeOriginText]
                 case 1:
-                    try await self.verify(state, field: "origin", equals: "Seattle")
+                    try await self.verify(state, field: "origin", equals: nativeOriginText)
                     let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
-                    let x = window.minX + 314, y = window.maxY - 125
+                    let x = window.minX + 24 + 580 * nativeClickFraction, y = window.maxY - 125
+                    let target = try tools.nativePointerTargetFrame(for: .click(x: Int(x), y: Int(y), button: 1, count: 1))
+                    trace.append("clickPoint=\(x),\(y) targetFrame=\(String(describing: target))")
+                    try await Task.sleep(for: nativeClickDelay)
                     arguments = ["action": "left_click", "coordinate": [
                         (x - screen.displayBounds.minX) / screen.displayBounds.width * 1000,
                         (y - screen.displayBounds.minY) / screen.displayBounds.height * 1000]]
@@ -584,17 +701,17 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 simulatedLogin = false
                 let result = try await executor.execute(taskID: "native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
                 XCTAssertEqual(result, .completed("The two fields are filled.")); XCTAssertEqual(proposals, 7)
-                try await verify(state, field: "origin", equals: "Seattle")
+                try await verify(state, field: "origin", equals: nativeOriginText)
                 try await verify(state, field: "destination", equals: exact)
                 let replay = try await executor.execute(taskID: "native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
                 XCTAssertEqual(replay, result); XCTAssertEqual(proposals, 7)
                 let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("native-loop"), includingPropertiesForKeys: nil)
                     .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
                 let dispatches = journals.filter { $0.stepIDs == ["native-dispatch-returned"] }
-                XCTAssertEqual(dispatches.count, 5)
+                XCTAssertEqual(dispatches.count, nativeOriginText.isEmpty ? 4 : 5)
                 XCTAssertTrue(dispatches.allSatisfy { $0.statuses == [.verified] })
                 let report: [String: Any] = ["inference": false, "nativeInput": true, "proposals": proposals,
-                    "verifiedDispatches": dispatches.count, "simulatedLogin": true,
+                    "verifiedDispatches": dispatches.count, "simulatedLogin": true, "trace": trace,
                     "completedWithoutReplay": replay == result, "independentFieldVerification": true]
                 let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
                 attachment.name = "Native desktop workflow metadata"; attachment.lifetime = .keepAlways; add(attachment)
