@@ -1,5 +1,4 @@
 import Foundation
-import ImageIO
 
 /// Verified model data and the signed bundled executable, resolved by setup.
 /// The runtime never downloads models or executes code from a model package.
@@ -228,16 +227,7 @@ enum ComputerUseFaraModel {
     }
 
     static func validatePNG(_ data: Data) throws {
-        guard data.count <= 2 * 1_024 * 1_024,
-              data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
-              let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
-              CGImageSourceGetCount(source) == 1,
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) as? [CFString: Any],
-              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
-              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-              (1...4096).contains(width), (1...4096).contains(height), width * height <= 4_194_304 else {
-            throw OSAtlasLlamaRuntimeError.invalidVisionInput
-        }
+        try ComputerUseModelImagePolicy.validatePNG(data)
     }
 }
 

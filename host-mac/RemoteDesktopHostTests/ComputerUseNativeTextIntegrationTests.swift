@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CryptoKit
+import CoreImage
 import XCTest
 import Vision
 @testable import RemoteDesktopHost
@@ -64,6 +65,76 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, captureOnly: true)
     }
 
+    func testOptInNativeDesktopImageBuildsAllModelRequests() async throws {
+        try await runFixture(browser: false, modelRequestOnly: true)
+    }
+
+    func testDesktopImagePreservesOrientationAndFullOffsetDisplayCoordinates() throws {
+        let extent = CGRect(x: 0, y: 0, width: 640, height: 320)
+        let redTop = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 160, width: 640, height: 160))
+        let blueBottom = CIImage(color: .blue).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 160))
+        let source = redTop.composited(over: blueBottom).cropped(to: extent)
+            .transformed(by: CGAffineTransform(translationX: 90, y: -30))
+        let frame = try ComputerUseDesktopImage(observation: .init(image: source,
+            displayBounds: CGRect(x: -1920, y: 120, width: 1920, height: 960),
+            frontmostWindowBounds: CGRect(x: -1500, y: 300, width: 300, height: 200)))
+        XCTAssertEqual(frame.pixelWidth, 640); XCTAssertEqual(frame.pixelHeight, 320)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: frame.png))
+        let top = try XCTUnwrap(bitmap.colorAt(x: 40, y: 40)?.usingColorSpace(.deviceRGB))
+        let bottom = try XCTUnwrap(bitmap.colorAt(x: 40, y: 280)?.usingColorSpace(.deviceRGB))
+        XCTAssertGreaterThan(top.redComponent, 0.9); XCTAssertLessThan(top.blueComponent, 0.1)
+        XCTAssertGreaterThan(bottom.blueComponent, 0.9); XCTAssertLessThan(bottom.redComponent, 0.1)
+        for (x, y, expectedX, expectedY) in [(0.0, 0.0, -1920, 120), (250, 250, -1440, 360),
+                (500, 500, -960, 600), (1000, 1000, -1, 1079), (12.5, 87.5, -1896, 204)] {
+            let point = try frame.displayPoint(normalizedX: x, normalizedY: y)
+            XCTAssertEqual(point.x, expectedX); XCTAssertEqual(point.y, expectedY)
+        }
+        for value in [-0.01, 1000.01, Double.nan, .infinity, -.infinity] {
+            XCTAssertThrowsError(try frame.displayPoint(normalizedX: value, normalizedY: 500))
+            XCTAssertThrowsError(try frame.displayPoint(normalizedX: 500, normalizedY: value))
+        }
+    }
+
+    func testDesktopImageBoundsRetinaSizeAndRejectsInvalidGeometry() throws {
+        let source = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: 5000, height: 3000))
+        let bounds = CGRect(x: 200, y: -1500, width: 2500, height: 1500)
+        let frame = try ComputerUseDesktopImage(observation: .init(image: source, displayBounds: bounds))
+        XCTAssertEqual(frame.pixelWidth, 2048); XCTAssertEqual(frame.pixelHeight, 1228)
+        XCTAssertLessThanOrEqual(frame.png.count, ComputerUseModelImagePolicy.maximumPNGBytes)
+        try ComputerUseFaraModel.validatePNG(frame.png)
+        let point = try frame.displayPoint(normalizedX: 1000, normalizedY: 1000)
+        XCTAssertEqual(point.x, 2699); XCTAssertEqual(point.y, -1)
+        for invalid in [CGRect.zero, .infinite, CGRect(x: 0, y: 0, width: 100, height: 100),
+                        CGRect(x: 0.5, y: 0, width: 2500, height: 1500)] {
+            XCTAssertThrowsError(try ComputerUseDesktopImage(observation: .init(image: source, displayBounds: invalid)))
+        }
+        XCTAssertThrowsError(try ComputerUseDesktopImage(observation: .init(image: .empty(), displayBounds: bounds)))
+        XCTAssertThrowsError(try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .white), displayBounds: bounds)))
+    }
+
+    func testDesktopImageShrinksBusyPixelsToTheEncodedByteBudget() throws {
+        let side = 1024
+        var bytes = Data(count: side * side * 4)
+        bytes.withUnsafeMutableBytes { (buffer: UnsafeMutableRawBufferPointer) in
+            var random: UInt32 = 0x517CC1B7
+            for i in 0..<buffer.count {
+                random = random &* 1664525 &+ 1013904223
+                buffer[i] = i % 4 == 3 ? 255 : UInt8(truncatingIfNeeded: random >> 24)
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: bytes as CFData))
+        let image = try XCTUnwrap(CGImage(width: side, height: side, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: side * 4, space: XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider,
+            decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let frame = try ComputerUseDesktopImage(observation: .init(image: CIImage(cgImage: image),
+            displayBounds: CGRect(x: 0, y: 0, width: side, height: side)))
+        XCTAssertLessThan(frame.pixelWidth, side, "The initial random PNG exceeds the byte cap")
+        XCTAssertEqual(frame.pixelWidth, frame.pixelHeight)
+        XCTAssertLessThanOrEqual(frame.png.count, ComputerUseModelImagePolicy.maximumPNGBytes)
+        try ComputerUseFaraModel.validatePNG(frame.png)
+    }
+
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
         try await runFixture(browser: false)
     }
@@ -119,7 +190,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -164,26 +235,47 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
         })
-        if captureOnly {
+        if captureOnly || modelRequestOnly {
             // One real display capture, no model or input. OCR is confined to
             // this disposable native window and checks independent fixture text.
             let started = Date()
             do {
                 let observation = try tools.currentScreen()
                 let captureSeconds = Date().timeIntervalSince(started)
+                var modelMetadata: [String: Any] = [:]
+                var inspectedImage = observation.image
+                if modelRequestOnly {
+                    let preparationStart = Date()
+                    let image = try ComputerUseDesktopImage(observation: observation)
+                    inspectedImage = try XCTUnwrap(CIImage(data: image.png))
+                    let input = ComputerUseFaraModel.Input(goal: "Read the labels in the frontmost native window.", screenshotPNG: image.png)
+                    let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+                        baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                    _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                    _ = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
+                    _ = try ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: input)
+                    XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
+                    let corner = try image.displayPoint(normalizedX: 1000, normalizedY: 1000)
+                    XCTAssertEqual(corner.x, Int(observation.displayBounds.maxX) - 1)
+                    XCTAssertEqual(corner.y, Int(observation.displayBounds.maxY) - 1)
+                    modelMetadata = ["modelImageWidth": image.pixelWidth, "modelImageHeight": image.pixelHeight,
+                        "pngBytes": image.png.count, "imageAndRequestSeconds": Date().timeIntervalSince(preparationStart),
+                        "requestProtocols": ["Fara", "Holo", "GUI-Owl"]]
+                }
                 let bounds = try XCTUnwrap(observation.normalizedFrontmostWindowBounds)
                 let request = VNRecognizeTextRequest()
                 request.recognitionLevel = .accurate
                 request.regionOfInterest = bounds
-                try VNImageRequestHandler(ciImage: observation.image).perform([request])
+                try VNImageRequestHandler(ciImage: inspectedImage).perform([request])
                 let lines = request.results?.compactMap { $0.topCandidates(1).first?.string } ?? []
                 XCTAssertTrue(lines.contains("Origin"), "Native capture did not show Origin")
                 XCTAssertTrue(lines.contains("Destination"), "Native capture did not show Destination")
-                let report: [String: Any] = ["captureSeconds":captureSeconds,
+                var report: [String: Any] = ["captureSeconds":captureSeconds,
                     "imageWidth":observation.image.extent.width,"imageHeight":observation.image.extent.height,
                     "displayBounds":NSStringFromRect(observation.displayBounds),
                     "windowBounds":observation.frontmostWindowBounds.map(NSStringFromRect) ?? "missing",
                     "fixtureVisible":lines.contains("Origin") && lines.contains("Destination"),"inference":false,"input":false]
+                report.merge(modelMetadata) { _, value in value }
                 let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]), uniformTypeIdentifier: "public.json")
                 attachment.name = "Native desktop capture metadata"; attachment.lifetime = .keepAlways; add(attachment)
             } catch { XCTFail("Native desktop fixture capture failed: \(String(reflecting: error))") }
