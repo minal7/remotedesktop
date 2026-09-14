@@ -1369,6 +1369,120 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertThrowsError(try messages(oversized), "All retained failure text must count toward the aggregate context budget")
     }
 
+    func testUnsupportedNavigationIsNonExecutableButRetainedInModelHistory() throws {
+        let urls = ["view-source:https://example.com/releases", "javascript:alert(1)", "file:///tmp/private.txt",
+                    "data:text/html,hello", "mailto:person@example.com", "ftp://example.com/file", "custom-app:open"]
+        for url in urls {
+            let arguments = try JSONSerialization.data(withJSONObject: ["action": "visit_url", "url": url])
+            let response = call(String(decoding: arguments, as: UTF8.self))
+            let action = try ComputerUseFaraAction.decodeNativeMessage(response)
+            XCTAssertEqual(action, .unsupportedNavigation, "Unsupported URL must never become executable: \(url)")
+            let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+            let png = try smallPNG()
+            let input = ComputerUseFaraModel.Input(goal: "Read the current page.", screenshotPNG: png,
+                history: [.init(screenshotPNG: png, response: response, action: action)],
+                actionError: "visit_url failed: only HTTP and HTTPS are supported. No URL was opened.")
+            _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        }
+    }
+
+    @MainActor
+    func testOptInUnsupportedNavigationFeedsBackAndContinuesWithoutEffects() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: unsupported navigation recovery") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for initiallyBlank in [true, false] {
+            let server = try OwnedBrowserHTTPFixture(), base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraUnsupportedURL-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let taskID = "unsupported-url", goal = "Find the requested details on the current source."
+            _ = try browser.prepareWorkflowSession(taskID: taskID)
+            let start = base.appendingPathComponent("start"), details = base.appendingPathComponent("details")
+            if !initiallyBlank { _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: start) }
+            let rejected = ["view-source:\(details.absoluteString)", "javascript:document.body.textContent='unexpected'", "file:///tmp/private.txt"]
+            var calls = 0, readings = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                guard calls < 6 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
+                if (1...3).contains(calls) {
+                    let feedback = try XCTUnwrap(input.actionError)
+                    XCTAssertTrue(feedback.contains("HTTP and HTTPS")); XCTAssertTrue(feedback.contains("No URL was opened"))
+                    XCTAssertTrue(feedback.contains("read_page_answer_question")); XCTAssertLessThan(feedback.utf8.count, 512)
+                    XCTAssertEqual(input.currentURL, initiallyBlank ? nil : start)
+                    XCTAssertEqual(server.count("/details"), 0)
+                    XCTAssertTrue(input.history.last?.response.contains(rejected[calls - 1]) == true)
+                    let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                    _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                }
+                if calls == 4 {
+                    XCTAssertNil(input.actionError)
+                    XCTAssertNotNil(input.history.last?.actionError)
+                    XCTAssertEqual(input.currentURL, details)
+                }
+                if calls == 5 { XCTAssertEqual(input.pageReading?.answer, "Read the source.") }
+                let arguments: [String: String]
+                if calls < 3 { arguments = ["action": "visit_url", "url": rejected[calls]] }
+                else if calls == 3 { arguments = ["action": "visit_url", "url": details.absoluteString] }
+                else if calls == 4 { arguments = ["action": "read_page_answer_question", "question": "What does this page say?"] }
+                else { arguments = ["action": "terminate", "answer": "Read the source."] }
+                calls += 1
+                // Keep literal slashes so retained raw model history is independently inspectable.
+                let data = try JSONSerialization.data(withJSONObject: arguments, options: [.withoutEscapingSlashes])
+                let response = self.call(String(decoding: data, as: UTF8.self))
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }, readPage: { source in
+                readings += 1; XCTAssertEqual(source.sourceURL, details); XCTAssertFalse(source.text.contains("unexpected"))
+                return "Read the source."
+            })
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Read the source.")); XCTAssertEqual(calls, 6); XCTAssertEqual(readings, 1)
+            let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result); XCTAssertEqual(calls, 6); XCTAssertEqual(server.count("/details"), 1)
+            let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            let dispatches = records.filter { $0.stepIDs == ["native-dispatch-returned"] }
+            XCTAssertEqual(dispatches.count, 1); XCTAssertEqual(dispatches.first?.statuses, [.verified])
+        }
+    }
+
+    @MainActor
+    func testOptInRepeatedUnsupportedNavigationStopsWithoutDispatchOrReplay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded unsupported navigation") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for initiallyBlank in [true, false] {
+            let server = try OwnedBrowserHTTPFixture(), base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraUnsupportedLimit-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let goal = "Read the source.", taskID = "unsupported-limit"
+            _ = try browser.prepareWorkflowSession(taskID: taskID)
+            if !initiallyBlank { _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base) }
+            var calls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                calls += 1
+                guard calls <= 5 else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
+                if calls > 1 { XCTAssertNotNil(input.actionError) }
+                let response = self.call(#"{"action":"visit_url","url":"view-source:https://example.com/"}"#)
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            do {
+                _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTFail("Repeated unsupported proposals must stop after three recovery opportunities")
+            } catch { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .stepLimit) }
+            XCTAssertEqual(calls, 4)
+            let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            guard case .unableToComplete = replay else { return XCTFail("A replay must retain the exhausted recovery budget") }
+            XCTAssertEqual(calls, 4)
+            let records = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertFalse(records.contains { $0.stepIDs == ["native-dispatch-returned"] })
+        }
+    }
+
     @MainActor
     func testOptInFaraReportsUndispatchedURLRejectionAndContinuesOriginalTask() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: rejected native navigation feedback") }
@@ -1478,7 +1592,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: rejected URL cannot regain withdrawn authority") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        for mode in ["paused", "changed-owner", "revoked-source"] {
+        for (mode, unsupportedScheme) in ["paused", "changed-owner", "revoked-source"].flatMap({ mode in [false, true].map { (mode, $0) } }) {
             let server = try OwnedBrowserHTTPFixture(), base = try await server.start(); defer { server.stop() }
             let blockedServer = try OwnedBrowserHTTPFixture(), blockedBase = try await blockedServer.start(); defer { blockedServer.stop() }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraRejectedAuthority-" + UUID().uuidString)
@@ -1499,7 +1613,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 if mode == "paused" { allowsActions = false }
                 if mode == "changed-owner" { try browser.claim(taskID: "successor") }
                 if mode == "revoked-source" { try browser.installSourcePolicy(.init(goal: researchGoal, allowedOrigins: []), replacing: policy.digest, session: session) }
-                let response = self.call("{\"action\":\"visit_url\",\"url\":\"\(blockedBase.appendingPathComponent("blocked").absoluteString)\"}")
+                let prefix = unsupportedScheme ? "view-source:" : ""
+                let response = self.call("{\"action\":\"visit_url\",\"url\":\"\(prefix)\(blockedBase.appendingPathComponent("blocked").absoluteString)\"}")
                 return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
             })
             do {
@@ -5862,7 +5977,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
             call(#"{"action":"left_click","coordinate":[1,2,3]}"#),
             call(#"{"action":"left_click","coordinate":[1,2],"text":"unrelated"}"#),
             call(#"{"action":"type"}"#), call(#"{"action":"key","keys":[]}"#),
-            call(#"{"action":"visit_url","url":"javascript:alert(1)"}"#),
+            call(#"{"action":"visit_url","url":"/relative/path"}"#),
+            call(#"{"action":"visit_url","url":"https:"}"#),
+            call(#"{"action":"visit_url","url":" https://example.com/"}"#),
+            call(#"{"action":"visit_url","url":"https://example.com/\npath"}"#),
+            call(#"{"action":"visit_url","url":12}"#),
+            call(#"{"action":"visit_url","url":"file:///tmp/private","extra":true}"#),
+            call(#"{"action":"visit_url","url":"https://[invalid/"}"#),
             call(#"{"action":"visit_url","url":"https://user:password@example.com/"}"#),
             call(#"{"action":"wait","time":-1}"#),
             valid.replacingOccurrences(of: "computer_use", with: "another_tool")]

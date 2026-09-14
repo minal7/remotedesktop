@@ -24,6 +24,9 @@ enum ComputerUseFaraAction: Equatable, Sendable {
     /// The unlocated variant above retains the browser's viewport semantics.
     case scrollAt(horizontal: Bool, pixels: Double, point: Point)
     case visitURL(URL)
+    /// A well-formed proposal for a scheme this browser cannot open. It carries
+    /// no executable URL; the browser may return bounded tool failure feedback.
+    case unsupportedNavigation
     case historyBack
     case webSearch(String)
     case readPageQuestion(String)
@@ -110,10 +113,13 @@ enum ComputerUseFaraAction: Equatable, Sendable {
             case "visit_url":
                 try keys("url")
                 let source = try string("url")
-                guard source.utf8.count <= 8_192, let parts = URLComponents(string: source),
-                      ["http", "https"].contains(parts.scheme?.lowercased() ?? ""),
-                      parts.host?.isEmpty == false, parts.user == nil, parts.password == nil,
-                      let url = parts.url else { throw Failure.invalidResponse }
+                guard source.utf8.count <= 8_192,
+                      source == source.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !source.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                      let parts = URLComponents(string: source), let scheme = parts.scheme,
+                      parts.user == nil, parts.password == nil, let url = parts.url else { throw Failure.invalidResponse }
+                guard ["http", "https"].contains(scheme.lowercased()) else { return .unsupportedNavigation }
+                guard parts.host?.isEmpty == false else { throw Failure.invalidResponse }
                 return .visitURL(url)
             case "history_back": try keys(); return .historyBack
             case "web_search": try keys("query"); return try .webSearch(string("query"))

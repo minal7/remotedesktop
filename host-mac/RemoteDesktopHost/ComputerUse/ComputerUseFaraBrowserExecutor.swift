@@ -51,6 +51,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var pageReading: ComputerUseFaraModel.PageReading?
         var turns = 0
         var staleProposals = 0
+        var unsupportedNavigations = 0
         var terminal: ComputerUseExecutionResult?
         var approval: PendingApproval?
         var isStarting = false
@@ -228,6 +229,10 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         case .askUser(let question):
             try retainQuestion(question, proposal: proposal, png: observation.png, currentURL: nil, session: session, tools: tools)
             return
+        case .unsupportedNavigation:
+            record(proposal, png: observation.png, currentURL: nil, session: session)
+            try reportUnsupportedNavigation(session: session)
+            return
         case .visitURL(let url): destination = url
         case .webSearch(let query): destination = try searchProvider.destination(query: query)
         case .wait(let seconds):
@@ -270,6 +275,18 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             throw error
         }
+    }
+
+    private func reportUnsupportedNavigation(session: Session) throws {
+        // Keep this budget cumulative across Resume and otherwise successful
+        // actions. A model repeatedly choosing unavailable navigation must not
+        // spend the full action budget retrying or silently change the URL.
+        session.unsupportedNavigations += 1
+        guard session.unsupportedNavigations <= 3 else {
+            session.terminal = .unableToComplete(Failure.stepLimit.localizedDescription)
+            throw Failure.stepLimit
+        }
+        session.actionError = "visit_url failed: this browser supports only HTTP and HTTPS URLs. No URL was opened. To read information on the current page, use read_page_answer_question."
     }
 
     private func undispatchedURLRejection(_ error: Error, proposal: ComputerUseFaraModel.Proposal) -> String? {
@@ -466,7 +483,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     assertRootOwnership: { try lease.assertOwnership() })
             case .wait(let seconds):
                 try await Task.sleep(for: .seconds(seconds))
-            case .remember: break
+            case .remember, .unsupportedNavigation: break
             case .askUser(let question):
                 try retainQuestion(question, proposal: proposal, png: observation.png, currentURL: observation.currentURL, session: session, tools: tools)
                 return .clarificationRequired(question)
@@ -499,7 +516,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             record(proposal, observation: observation, session: session)
             session.pageReading = nextReading
-            session.actionError = rejection?.message
+            if case .unsupportedNavigation = proposal.action { try reportUnsupportedNavigation(session: session) }
+            else { session.actionError = rejection?.message }
             if let rejection { observation = rejection.observation; continue }
             do {
                 let retainedSession: ComputerUseOwnedBrowser.AgentObservation?
