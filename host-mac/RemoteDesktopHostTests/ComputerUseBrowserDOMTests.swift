@@ -3,6 +3,59 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText() async throws {
+        let fixture = try await DOMFixture(body: """
+            <style>img{width:32px;height:32px}</style>
+            <a href='/search'><img alt='Search' src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'></a>
+            <button type='button'><img alt='Calendar'></button>
+            <a href='/mixed'>Visible caption<img alt='Alternative caption'></a>
+            <a href='/explicit' aria-label='Explicit caption'><img alt='Fallback caption'></a>
+            <a href='/private'><span hidden><img alt='Hidden caption'></span><img aria-hidden='true' alt='Decorative caption'></a>
+            <a href='/empty'><img alt=''></a>
+            """)
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document).page
+        XCTAssertTrue(page.isWellFormed)
+        XCTAssertEqual(page.links.map(\.label), ["Search", "Visible caption", "Explicit caption"])
+        XCTAssertEqual(page.controls.first { $0.kind == "button" }?.label, "Calendar")
+        XCTAssertFalse(page.texts.map(\.text).joined().contains("Search"), "Alternative labels must not become rendered text")
+        XCTAssertEqual(page.links.first { $0.label == "Search" }?.textIDs, [])
+    }
+
+    func testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent() async throws {
+        let fixture = try await DOMFixture(body: """
+            <style>img{width:32px;height:32px}</style>
+            <a href='/unicode'><img alt='  東京   events  '><img alt='Calendar'></a>
+            <a href='/hidden'><img style='display:none' alt='Display hidden'><img style='visibility:hidden' alt='Visibility hidden'><img style='opacity:0' alt='Transparent'><img style='width:0;height:0' alt='Zero size'><img role='presentation' alt='Presentation'><img role='none' alt='None'><span inert><img alt='Inert'></span><span contenteditable><img alt='Editor'></span></a>
+            <a href='/oversized'><img alt='\(String(repeating: "界", count: 683))'></a>
+            <button type='button'><img alt='\(String(repeating: "界", count: 86))'></button>
+            <a href='/too-many'>\((0..<33).map { "<img alt='Part \($0)'>" }.joined())</a>
+            <a href='/many-nodes'>\(String(repeating: "<span></span>", count: 513))<img alt='Beyond bound'></a>
+            """)
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document).page
+        XCTAssertTrue(page.isWellFormed); XCTAssertTrue(page.truncated)
+        XCTAssertEqual(page.links.map(\.label), ["東京 events Calendar"])
+        XCTAssertTrue(page.controls.isEmpty, "An oversized image name must not create a partially labelled button")
+        XCTAssertTrue(page.texts.isEmpty)
+    }
+
+    func testChangingImageAlternativeTextInvalidatesRetainedPageEvidence() async throws {
+        let fixture = try await DOMFixture(body: """
+            <a href='/details'><img id='icon' alt='Original destination' width='32' height='32'></a>
+            <script>fetch('/signal').then(()=>{icon.alt='Changed destination';fetch('/changed')})</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let original = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertEqual(original.page.links.first?.label, "Original destination")
+        fixture.server.releaseHeldResponses()
+        try await fixture.wait { fixture.server.count("/changed") == 1 }
+        do { try await fixture.browser.validatePageEvidence(original); XCTFail("Changed image labels must retire page evidence") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertEqual(fresh.page.links.first?.label, "Changed destination")
+    }
+
     func testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata() throws {
         func page(_ tooltips: [String?]) -> ComputerUseBrowserPageSnapshot {
             .init(id: String(repeating: "a", count: 32), texts: tooltips.enumerated().map {

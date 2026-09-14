@@ -3755,6 +3755,124 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInNativeImageLinkActivationRejectsChangedLabelOrImage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native image-only link admission") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let modes = ["stable-image", "stable-padding", "label", "label-restored", "replaced", "source-restored", "hidden"]
+        var routes: [String: OwnedBrowserHTTPFixture.Response] = [:]
+        for mode in modes {
+            let mutation: String
+            switch mode {
+            case "label": mutation = "icon.alt='Delete'"
+            case "label-restored": mutation = "icon.alt='Delete';icon.alt='Search'"
+            case "replaced": mutation = "icon.replaceWith(icon.cloneNode(true))"
+            case "source-restored": mutation = "const original=icon.src;icon.src=original+'#changed';icon.src=original"
+            case "hidden": mutation = "icon.style.display='none'"
+            default: mutation = "icon.setAttribute('alt','Search')"
+            }
+            routes["/page-" + mode] = .init(body: """
+                <!doctype html><style>a{position:fixed;left:10vw;top:10vh;width:20vw;height:10vh}img{width:40px;height:10vh}</style>
+                <a href='#' onclick="event.preventDefault();fetch('/clicked-\(mode)?trusted='+event.isTrusted)"><img id='icon' alt='Search' src='data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'></a>
+                <script>fetch('/release-\(mode)').then(()=>{\(mutation);fetch('/changed-\(mode)')})</script>
+                """)
+            routes["/release-" + mode] = .init(held: true)
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: routes)
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "native-image-link"
+        try browser.claim(taskID: taskID)
+        for mode in modes {
+            let document = try await browser.navigate(taskID: taskID, operationID: mode, to: base.appendingPathComponent("page-" + mode))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: mode == "stable-image" ? 120 : 250, y: 150))
+            let initial = try await browser.inspectAgentTarget(action, observation: observation)
+            XCTAssertTrue(try XCTUnwrap(initial).context.contains("Search"), mode)
+            server.releaseHeldResponses()
+            var deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/changed-" + mode) == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/changed-" + mode), 1)
+            let allowed = mode.hasPrefix("stable-"), expectedClicks = allowed ? 1 : 0
+            var began = 0
+            do {
+                let target = try await browser.inspectAgentTarget(action, observation: observation)
+                try await browser.performAgentInput(action, observation: observation, target: target, willBeginEffect: { began += 1 })
+                if !allowed { XCTFail("Changed image link admitted: \(mode)") }
+            } catch {
+                if allowed { XCTFail("Stable image link rejected: \(mode), \(error), \(browser.lastAgentTargetStatus ?? "none")") }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mode) }
+            }
+            deadline = ContinuousClock.now + .seconds(2)
+            if allowed { while server.count("/clicked-" + mode + "?trusted=true") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) } }
+            XCTAssertEqual(began, expectedClicks, mode)
+            XCTAssertEqual(server.count("/clicked-" + mode + "?trusted=true"), expectedClicks, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInLiveRoxieImageSearchHasRetainedNativeTarget() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: read-only public image-link target probe, no inference or click") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "roxie-image-link-probe"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ImageLinkProbe-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory)
+        var stage = "claim"
+        defer {
+            let status = XCTAttachment(string: "Stage: \(stage); capture: \(browser.lastAgentCaptureStage ?? "none"); target: \(browser.lastAgentTargetStatus ?? "none")")
+            status.name = "Roxie image search probe final stage"; status.lifetime = .keepAlways; add(status)
+        }
+        try browser.claim(taskID: taskID)
+        stage = "navigate"
+        _ = try await browser.navigate(taskID: taskID, operationID: "open", to: URL(string: "https://roxie.com/")!)
+        stage = "initial capture"
+        let observation = try await navigation.captureAgentObservation(taskID: taskID)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let view = try XCTUnwrap(NSApp.windows.filter { $0.isVisible && $0.title == "AI Browser — Remote Desktop" }.compactMap(\.contentView).flatMap(webViews).first)
+        // This point is the last actual model proposal in the frozen failed
+        // movie task. Retain it only as public-site diagnostic evidence.
+        let point = ComputerUseFaraAction.Point(x: 968, y: 43)
+        let pixel = try point.pixel(width: observation.pixelWidth, height: observation.pixelHeight)
+        let x = CGFloat(pixel.x) / CGFloat(observation.pixelWidth) * view.bounds.width
+        let y = CGFloat(pixel.y) / CGFloat(observation.pixelHeight) * view.bounds.height
+        func details() async throws -> String {
+            try await view.evaluateJavaScript("""
+                JSON.stringify({point:[\(x),\(y)],viewport:[innerWidth,innerHeight],hit:(()=>{const e=document.elementFromPoint(\(x),\(y)),r=e?.getBoundingClientRect(),s=e&&getComputedStyle(e);return {html:e?.outerHTML.slice(0,2048),rect:r&&[r.x,r.y,r.width,r.height],opacity:s?.opacity,pointer:s?.pointerEvents,z:s?.zIndex}})(),links:[...document.querySelectorAll('a')].filter(a=>a.querySelector('img[alt="Search"]')).map(a=>{const r=a.getBoundingClientRect();return {html:a.outerHTML.slice(0,2048),rect:[r.x,r.y,r.width,r.height]}})})
+                """) as? String ?? "unavailable"
+        }
+        stage = "public geometry before delay"
+        let before = try await details()
+        let image = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+        image.name = "Roxie image search retained observation"; image.lifetime = .keepAlways; add(image)
+        try await Task.sleep(for: .seconds(8))
+        stage = "public geometry after delay"
+        let metadata = XCTAttachment(string: "Before: \(before)\nAfter: \(try await details())\nAdmitted links: \(observation.approvalPageEvidence.page.links.map(\.label))")
+        metadata.name = "Roxie image search point and catalogue"; metadata.lifetime = .keepAlways; add(metadata)
+        XCTAssertTrue(observation.approvalPageEvidence.page.links.contains { $0.label == "Search" })
+        // The initial image can still be fading in. Record that retained
+        // preflight separately, then qualify a fresh, settled observation.
+        do { _ = try await browser.inspectAgentTarget(.pointer(.leftClick, point), observation: observation) }
+        catch { }
+        let early = XCTAttachment(string: browser.lastAgentTargetStatus ?? "none")
+        early.name = "Initial image target after delay"; early.lifetime = .keepAlways; add(early)
+        stage = "settled capture"
+        let settled = try await navigation.captureAgentObservation(taskID: taskID, preserving: observation)
+        stage = "settled immediate preflight"
+        let immediate = try await browser.inspectAgentTarget(.pointer(.leftClick, point), observation: settled)
+        XCTAssertTrue(try XCTUnwrap(immediate).context.contains("Search"))
+        try await Task.sleep(for: .seconds(8))
+        stage = "settled delayed preflight"
+        do {
+            let target = try await browser.inspectAgentTarget(.pointer(.leftClick, point), observation: settled)
+            XCTAssertTrue(try XCTUnwrap(target).context.contains("Search"))
+        } catch { XCTFail("Image search preflight: \(error); status: \(browser.lastAgentTargetStatus ?? "none")") }
+        stage = "complete"
+    }
+
+    @MainActor
     func testOptInNativeRoxieTicketLinkMetadata() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: inspect public movie link metadata without clicking") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

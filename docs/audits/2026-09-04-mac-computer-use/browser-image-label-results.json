@@ -1,0 +1,1182 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-14",
+  "scope": "Bounded image alternative labels for native browser link/button targets, retaining MCP-first routing",
+  "sourceBaseCommit": "713e29b",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "caa23013428563b1b7294d48ae40bc4f27b99d5ddcb07ed9bc337950af8ea8bb",
+    "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "e5dc3bf9f9c49caf9b2ebc7859a3348fa9166732750340a22ca3065802c4dcd7",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "2aaf66a13af2e25b937559e9adb8c53b32c206516730406411fa2ed419032eb5",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "c52c79e76918161b5c807064038ff715563ba7ec076a7e8368554debea6498d5",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "215f8b2d8b9224ae3b1c11a1af05cf8399ebce07cd954511d1da7dbb954d0ce5",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "6a3080fa753ba67a6065bf5fe6a75535bccc5e104b11a8c9f7169f6ca1f05cf9"
+  },
+  "stages": {
+    "implemented": true,
+    "compiled": true,
+    "tested": true,
+    "accepted": "Scoped metadata, local native activation and retained public Search target only. Full movie task and general production browsing remain unaccepted."
+  },
+  "policy": "Use available verified macOS MCP capabilities first. A missing MCP integration route must be investigated before it becomes a model requirement. This repair does not change routing, model selection, loading, or the 4 GiB production worker cap.",
+  "findings": [
+    "The original model point [968,43] is over the rendered Search img in an anchor. Native metadata before and after eight seconds shows the same image and rectangle, but the baseline catalogue omitted the image-only link.",
+    "Two red methods prove the missing alternative-label path in a local page and the real native public page. The local button label is missing as well.",
+    "Links and native buttons now fall back to rendered img alternative text only when their existing caption/label is empty. Alternative labels stay separate from rendered text and answer evidence.",
+    "Image-label traversal is bounded to 512 descendants, 32 contributing images and 2048 UTF-8 bytes, with existing control (256-byte), link and aggregate page limits. Hidden, inert, editor, zero-size and decorative images do not contribute.",
+    "Bindings retain the contributing DOM image nodes. Changed and restored labels or image sources, node replacement and visibility changes reject before native effects. Repeated identical alt assignment still permits two trusted activation cases, on the image and on link padding.",
+    "Point rejection diagnostics name only fixed check/field categories; no check was removed or relaxed. The live early retained point rejected changed-hit-layout-opacity. A fresh observation passes immediately and again after eight seconds while the carousel runs.",
+    "Three early live diagnostic attempts report XCTest InvalidTransition idle -> failed(deinit); the instrumented attempt locates initial capture / validate-page-stale-agent-content. The tiny probe had bypassed the existing bounded read-only observation retry. Its final form uses the production navigation wrapper, without new retry behavior in production.",
+    "All 14 exact current focused methods pass with zero skips. The nine-method regression bundle retains a main-thread responsiveness warning and a QoS priority-inversion warning.",
+    "The unchanged real movie task still fails, this time in 96.23 seconds with seven decoded proposals and eight captured observations. The model clicks the sponsored All Concert result and proposes the wrong theroxie.com domain (blocked by the source policy). The eighth proposal attempt fails with invalidResponse before reaching the venue. The current harness retains only successful proposals, so the exact failing request, transport or decode stage is unproved.",
+    "This failed full task does not exercise the repaired venue Search target. The independent live preflight proves that narrower capability; it does not establish model accuracy or an end-to-end improvement.",
+    "One worker maximum was sampled 214 times and none remained after shutdown. This is not a whole-Mac memory or heat qualification. No ticket selection or purchase was dispatched."
+  ],
+  "currentPassingTests": [
+    "ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence()",
+    "ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent()",
+    "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+    "ComputerUseFaraActionTests/testOptInAgentDistinguishesBackgroundMotionFromChangedHitTargets()",
+    "ComputerUseFaraActionTests/testOptInFaraApprovalCancellationAfterDispatchDoesNotReplayTheEffect()",
+    "ComputerUseFaraActionTests/testOptInFaraApprovalCancellationBeforeDispatchRetiresAuthority()",
+    "ComputerUseFaraActionTests/testOptInFaraLinkNavigationRejectsChangedTargetsCancellationAndReusedInput()",
+    "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+    "ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage()",
+    "ComputerUseFaraActionTests/testOptInOwnedBrowserNativeClickAndUnicodeInputStopAtLogin()",
+    "ComputerUseFaraActionTests/testOptInSearchSubmitUsesBoundFormContextAndRetainsCommitGates()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+    "MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()",
+    "MCPFirstComputerUseExecutorTests/testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes()"
+  ],
+  "independentMovieOracle": {
+    "checkedAt": "2026-09-14",
+    "sourcePage": "https://roxie.com/film/the-cycle-of-love/",
+    "screeningURL": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c",
+    "expected": {
+      "date": "2026-09-17",
+      "time": "6:20 PM",
+      "runtimeMinutes": 95,
+      "screen": "Little Roxie",
+      "generalAdmissionIncludingFee": "$15.62",
+      "bookingFee": "$1.62"
+    },
+    "verification": "Read-only official film page and the actual corresponding screening link; neighboring Monday screening also checked to distinguish dates. No quantity selected."
+  },
+  "movieTrials": {
+    "baseline": {
+      "goal": "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing.",
+      "model": "Fara1.5-4B",
+      "seconds": 72.90044796466827,
+      "failure": "",
+      "result": "Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+      "lastAgentTargetStatus": "stale-agent-point",
+      "lastAgentCaptureStage": "complete",
+      "ownedProcessExited": true,
+      "nativeDispatchJournalStatuses": [
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ]
+      ],
+      "nativeAttemptOutcomes": [
+        "documentCommitted",
+        "documentCommitted"
+      ],
+      "proposalLimit": 24,
+      "timeoutSeconds": 300,
+      "reportPath": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/7D615F05-C232-481C-8B25-F722773E58CC.json",
+      "reportSHA256": "c6c95be4d54a38c391f56bdf755f4ae8841ed325d151c118bb0d1c9670211571",
+      "retainedProposals": [
+        {
+          "source": "",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "The Cycle of Love Roxie San Francisco September 17 2026 official tickets"
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "019e392ef96ec5a11a3918912de8dd483dcdbb91d2957bc2e47511d209d526b8"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 3
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "314de5dff1b3e8545164a291bf82b2cfbb34c9cb4266af090698684896370f77"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "double_click",
+              "coordinate": [
+                140,
+                754
+              ]
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "49e548918d8c404c4174dfbbc2293e7827341857efe15a499085c141b58c666c"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "visit_url",
+              "url": "https://www.roxie.com"
+            }
+          },
+          "actionError": "double_click at [140.0, 754.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "responseSHA256": "470c258ad64e0eee5708c91890c17fc4604922522ec301d72b8aa8ab87e2dbf8"
+        },
+        {
+          "source": "https://roxie.com/",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                238,
+                89
+              ]
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "d1d122beff3a05279bc84ebcda3cf79d1b6e0de4b4de8e2d59b186e60feddbb9"
+        },
+        {
+          "source": "https://roxie.com/",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                344,
+                893
+              ]
+            }
+          },
+          "actionError": "left_click at [238.0, 89.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "responseSHA256": "02f00c1c269105a62c06bed9d2616ef047d0deef08f2addcce312f193db9a2ad"
+        },
+        {
+          "source": "https://roxie.com/",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                968,
+                43
+              ]
+            }
+          },
+          "actionError": "left_click at [344.0, 893.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "responseSHA256": "33c457e1dc3c083647bd837880e7bc23509d05442e24b9945cddcbd3ae241fca"
+        }
+      ]
+    },
+    "current": {
+      "goal": "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing.",
+      "model": "Fara1.5-4B",
+      "seconds": 96.23487198352814,
+      "failure": "RemoteDesktopHost.OSAtlasLlamaRuntimeError.invalidResponse",
+      "result": "nil",
+      "lastAgentTargetStatus": "agent-chrome-current",
+      "lastAgentCaptureStage": "complete",
+      "ownedProcessExited": true,
+      "nativeDispatchJournalStatuses": [
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ]
+      ],
+      "nativeAttemptOutcomes": [
+        "documentCommitted",
+        "documentCommitted",
+        "documentCommitted"
+      ],
+      "proposalLimit": 24,
+      "timeoutSeconds": 300,
+      "reportPath": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/E03B10B8-F7AC-4693-A293-BEBDF9F8E8B7.json",
+      "reportSHA256": "ae5a6950c7bd77fce415388e5d2befd1957f9f05ac19508b532703623ca2a7c1",
+      "retainedProposals": [
+        {
+          "source": "",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "The Cycle of Love Roxie San Francisco September 17 2026 official tickets"
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "019e392ef96ec5a11a3918912de8dd483dcdbb91d2957bc2e47511d209d526b8"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 3
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "599fce832a9c8d52b24e9c56a714a2fb46464a55dfe1f0c29b33478183ea1a14"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "left_click",
+              "coordinate": [
+                236,
+                731
+              ]
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "5bacd22cf6df8ca12fb973ab89b51cf8b5ba15450ee52120114734fa15b309d3"
+        },
+        {
+          "source": "https://www.bing.com/aclk",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "history_back"
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "02230f6d99f37a16aceb44ea763c48d3a0ba12e0b4ac3dedaa70d1e2049bd62f"
+        },
+        {
+          "source": "https://www.bing.com/aclk",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "visit_url",
+              "url": "https://www.theroxie.com"
+            }
+          },
+          "actionError": "The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "responseSHA256": "2e44b70e4efaab6a6741764ec6e526a4871a596d695460449719373e550f9342"
+        },
+        {
+          "source": "https://www.bing.com/aclk",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "web_search",
+              "query": "site:theroxie.com \"The Cycle of Love\" Roxie San Francisco tickets"
+            }
+          },
+          "actionError": "visit_url to https://www.theroxie.com failed: BrowserSourcePolicy: The destination is not permitted for this task.",
+          "responseSHA256": "244943e1b5cc960820c95644a310a13bbe5ab6cd1889911b1c4c1fa09ac27cef"
+        },
+        {
+          "source": "https://www.bing.com/search",
+          "action": {
+            "name": "computer_use",
+            "arguments": {
+              "action": "wait",
+              "time": 3
+            }
+          },
+          "actionError": "",
+          "responseSHA256": "f6fd1ee33dd18535ad1f5354dedf7011abec8f4023db5bf9c027b2fa79aa49bd"
+        }
+      ]
+    }
+  },
+  "workerEvidence": {
+    "samplePath": ".build/repair-verification/fara-q4-image-label-movie-01-worker-samples.json",
+    "sha256": "080463f04bfaf58aeccc59b734ba97afb82f344881b7fd6e2bf6e12b0d877e4e",
+    "exitCode": 65,
+    "sampleCount": 214,
+    "maximumWorkers": 1,
+    "workersAfterExit": []
+  },
+  "nextEvidence": [
+    "Investigate general MCP search/result-reading coverage before extending visual fallback for source selection.",
+    "Use the runtime's existing inspectFaraExchange hook for bounded opt-in exchange diagnostics, distinguish request/transport/decode failures, and keep model targeting, source-policy and adapter evidence separate.",
+    "Rerun the frozen movie task after the demonstrated cause is repaired; then qualify the normal HostSession/MCP-first composition rather than promoting component tests to app acceptance.",
+    "Continue real provider login, physical phone, broader native operations, whole-Mac 12 GB and responsiveness qualification."
+  ],
+  "attempts": [
+    {
+      "name": "fara-q4-native-observation-movie-01",
+      "note": "Unchanged Fara Q4 real movie task at 713e29b failed after four rejected actions. The final search-icon point motivated this repair.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_FARA_MODEL_DIRECTORY=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/TrainedComputerUseModels/Fara15 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test-without-building -xctestrun /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/RemoteDesktopHost_macosx27.0-arm64.xctestrun -destination 'platform=macOS,arch=arm64' -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 330 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/fara-q4-native-observation-movie-01.xcresult' > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/fara-q4-native-observation-movie-01.log' 2>&1",
+      "bundle": ".build/repair-verification/fara-q4-native-observation-movie-01.xcresult",
+      "logSHA256": "3885261531b832108cc7bea9b597ebf72895ee9d884860761073625e9796a2d8",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789399087.564,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789398998.699,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Live ticket task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink",
+            "testName": "testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()",
+          "result": "Failed",
+          "durationInSeconds": 76.10046601295471
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/041B94A6-A08F-44C6-BB0F-5FF3AE71B561.png",
+          "sha256": "812476cf6f4ff651471b0dbac939a87805526bfae8ee98608de50889b99f2a0a"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/2AE124C3-165D-4F6B-8F89-83BD29057B96.png",
+          "sha256": "c390839867abf2cbc14b9379496cd076a8cd4f6b9498566618935e88e3f4df0f"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/5DC65A5C-EC42-4AD9-BCAF-80DAB038ECBA.png",
+          "sha256": "39dad2d0b3f745a1cf6f7c37d3b7650493d34148dadf48dbdf7192f998a8cf4a"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/7D615F05-C232-481C-8B25-F722773E58CC.json",
+          "sha256": "c6c95be4d54a38c391f56bdf755f4ae8841ed325d151c118bb0d1c9670211571"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/AE800008-09DB-47DD-B077-E9493928F821.png",
+          "sha256": "92dc26bd849cf5ee45ef840d6a5a9f1a0dc57096b83c94e4749a1d980f5f1612"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/B70BA5DD-4E90-491F-985A-E980BA9CA451.png",
+          "sha256": "92dc26bd849cf5ee45ef840d6a5a9f1a0dc57096b83c94e4749a1d980f5f1612"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/CF52488D-9A6A-41F4-B3AC-6DE91F834F23.png",
+          "sha256": "aed4cee5b2e604ad3c66690dc109906f4bedbfcae56815e2f2610c3c29816ad7"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/DC390278-75C3-4A6D-B6FD-DC70701C47FD.png",
+          "sha256": "a848c24bd10dd1fac461d23a648c478ab625742f49f04958f5c04a7d656b7196"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-native-observation-movie-01-attachments/manifest.json",
+          "sha256": "328d4c6a5655a4cbb3152323b9ed90e0d2853028a1d251c3be15f75bf67ff921"
+        }
+      ]
+    },
+    {
+      "name": "image-link-label-red-01",
+      "note": "Executed missing-label red tests: image-only Search link and Calendar button absent; actual public Search point unadmitted.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 40 -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-red-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-red-01.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-label-red-01.xcresult",
+      "logSHA256": "9db874bee221919f8eae2d7abfff7bd354eb1d18eafdd9aa9ae9a80d14b2a6d7",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 2,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 2,
+        "finishTime": 1789399595.474,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789399545.341,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"[\"Visible caption\", \"Explicit caption\"]\") is not equal to (\"[\"Search\", \"Visible caption\", \"Explicit caption\"]\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText",
+            "testName": "testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()"
+          },
+          {
+            "failureText": "XCTAssertTrue failed",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 2
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+          "result": "Failed",
+          "durationInSeconds": 0.8835959434509277
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 9.573270082473755
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-label-red-01-attachments/5D718ADD-0EEA-4C8B-8841-B3233138109B.png",
+          "sha256": "aed4cee5b2e604ad3c66690dc109906f4bedbfcae56815e2f2610c3c29816ad7"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-red-01-attachments/C1DA30C7-CB0A-4395-A9AA-9FD7AEA46323.txt",
+          "sha256": "965738e36e9c0edf00aaf1b1280e12702a940abbe3d13e417d5616fb85fcd08b"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-red-01-attachments/manifest.json",
+          "sha256": "7a47149b274fd010e090eaf7cd77eb466784ddf1f29307292dc81c98a36e5223"
+        }
+      ]
+    },
+    {
+      "name": "image-link-label-green-01",
+      "note": "Three metadata methods and seven native image-link variants pass; live catalogue includes Search but retained point still rejects.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-01.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-label-green-01.xcresult",
+      "logSHA256": "21c864919c431f2510a10bff96e722feb9f0112d86a79de6356dfa0c5dbc82a8",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 4,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789399847.433,
+        "passedTests": 4,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789399784.675,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Image search preflight: pageChanged; status: stale-agent-point",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 4,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 5
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.29432499408721924
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.1532590389251709
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+          "result": "Passed",
+          "durationInSeconds": 0.08610498905181885
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 10.352743029594421
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage()",
+          "result": "Passed",
+          "durationInSeconds": 0.43451201915740967
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-label-green-01-attachments/1ABD0E6E-5B46-4BC8-BD2A-6D080E7F2AA8.txt",
+          "sha256": "e7403e449d25c11cbd3865cbae23e5160696df6f24e98158a7ea9dcf154aa129"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-01-attachments/834302B5-0BBB-437B-B506-8DE8E4D02FDC.png",
+          "sha256": "aed4cee5b2e604ad3c66690dc109906f4bedbfcae56815e2f2610c3c29816ad7"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-01-attachments/manifest.json",
+          "sha256": "560fb8c2b0ac7d1489e26d58b52f25c4143e7b6f72d0c5f38758958d580e4cac"
+        }
+      ]
+    },
+    {
+      "name": "image-link-point-diagnostic-01",
+      "note": "Read-only diagnostics identify changed hit layout in the live early observation; no admission guard was relaxed.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 40 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-point-diagnostic-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-point-diagnostic-01.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-point-diagnostic-01.xcresult",
+      "logSHA256": "f23c37c32bc17ec15b06705357dafe40081120d51390e0bcf827065a1eb0f5af",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789399960.632,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789399914.897,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Image search preflight: pageChanged; status: stale-agent-point-changed-hit-layout",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 10.474601030349731
+        }
+      ],
+      "attachments": []
+    },
+    {
+      "name": "image-link-label-green-02",
+      "note": "Four local methods pass; early public capture fails before attachments, with XCTest reporting InvalidTransition idle -> failed(deinit).",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-02.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-label-green-02.xcresult",
+      "logSHA256": "9d2f1195d4aeee9117cee5c829a5224c989188222d728e55ac0eea4f796b2bdf",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 4,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789400075.544,
+        "passedTests": 4,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789400031.532,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"InvalidTransition { \n  phase: idle\n  targetPhase: failed(deinit)\n}\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 4,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 5
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.28998899459838867
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.1308499574661255
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+          "result": "Passed",
+          "durationInSeconds": 0.11667907238006592
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 1.5209269523620605
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage()",
+          "result": "Passed",
+          "durationInSeconds": 0.4169689416885376
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-label-green-02-attachments/manifest.json",
+          "sha256": "ace810d7e2cbb4f8c40ce09dc8e191ae466adb4e1a7d49c59f2215b411d38b05"
+        }
+      ]
+    },
+    {
+      "name": "image-link-live-retained-01",
+      "note": "One unchanged binary diagnostic repeats that early capture failure. No inference or click.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test-without-building -xctestrun /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/RemoteDesktopHost_macosx27.0-arm64.xctestrun -destination 'platform=macOS,arch=arm64' -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 40 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-live-retained-01.xcresult' > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-live-retained-01.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-live-retained-01.xcresult",
+      "logSHA256": "a5180914329eeeb5e9beeefdded3815da8c54ec33c4a974d6ef3c1aeee8141f5",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789400112.96,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789400104.772,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"InvalidTransition { \n  phase: idle\n  targetPhase: failed(deinit)\n}\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 1.700091004371643
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-live-retained-01-attachments/manifest.json",
+          "sha256": "ace810d7e2cbb4f8c40ce09dc8e191ae466adb4e1a7d49c59f2215b411d38b05"
+        }
+      ]
+    },
+    {
+      "name": "image-link-point-diagnostic-02",
+      "note": "Stage marker locates failure at initial capture / validate-page-stale-agent-content. The probe bypassed the existing production observation retry.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 40 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-point-diagnostic-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-point-diagnostic-02.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-point-diagnostic-02.xcresult",
+      "logSHA256": "69fca5ccb65d482aeca426c9a6f0aab9778794bc19f6c2a3822475e9a25b911d",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789400252.315,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789400220.23,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"InvalidTransition { \n  phase: idle\n  targetPhase: failed(deinit)\n}\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget",
+            "testName": "testOptInLiveRoxieImageSearchHasRetainedNativeTarget()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Failed",
+          "durationInSeconds": 1.8039100170135498
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-point-diagnostic-02-attachments/3AA90E59-06FB-4279-9A06-97F5C3C1858E.txt",
+          "sha256": "b99b0d387a4e2f2a06425503a723e89466d4e284f7d5f28b36d35899c84a2545"
+        },
+        {
+          "path": ".build/repair-verification/image-link-point-diagnostic-02-attachments/manifest.json",
+          "sha256": "56ebd207031051ccbe28de10559794b490ba9304db8967ef3e2101c386267623"
+        }
+      ]
+    },
+    {
+      "name": "image-link-label-green-03",
+      "note": "Probe now uses the existing navigation observation retry. Five methods pass; initial opacity change is rejected, a fresh target remains valid after eight seconds.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-03.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-green-03.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-label-green-03.xcresult",
+      "logSHA256": "068f707ec0db464c7f4f6ff437f151bcec3639d1e479707f34e52a5330d17a9a",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 5,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789400362.89,
+        "passedTests": 5,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789400318.842,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 5
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingImageAlternativeTextInvalidatesRetainedPageEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.2932809591293335
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageLabelFallbackIsBoundedAndExcludesUnrenderedOrDecorativeContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.1314760446548462
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText()",
+          "result": "Passed",
+          "durationInSeconds": 0.12407505512237549
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInLiveRoxieImageSearchHasRetainedNativeTarget()",
+          "result": "Passed",
+          "durationInSeconds": 18.51991093158722
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInNativeImageLinkActivationRejectsChangedLabelOrImage()",
+          "result": "Passed",
+          "durationInSeconds": 0.4138530492782593
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/image-link-label-green-03-attachments/7AE47D70-58CE-4101-96EE-0052615429FC.png",
+          "sha256": "aed4cee5b2e604ad3c66690dc109906f4bedbfcae56815e2f2610c3c29816ad7"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-03-attachments/D89BB1F0-0243-4C24-986D-FB6745CF9A62.txt",
+          "sha256": "4f2bcec40fcd7e21178639882205dcb1d524c5e8881b81088933b1df674b1b6b"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-03-attachments/DCCBD2CD-E195-425E-ADE5-5672288EBD74.txt",
+          "sha256": "9105f8d2698be0b343825821c93418b9b45d1597061eaab003b7d808eac5bf5d"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-03-attachments/FBBB2472-DE3F-4B34-B8A3-CB2D8C733836.txt",
+          "sha256": "3bd77b1d7b903e279f469fb87c258affd3439bdabcf025e715e9ce7f678ffa9f"
+        },
+        {
+          "path": ".build/repair-verification/image-link-label-green-03-attachments/manifest.json",
+          "sha256": "28672fda216832bfd39ceeb0fb869f3fb4255410e7d452e6e90103d5056a8416"
+        }
+      ]
+    },
+    {
+      "name": "image-link-label-regression-01",
+      "note": "Nine relevant input and MCP-priority methods pass; two runtime warnings retained.",
+      "command": "env TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test-without-building -xctestrun /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/RemoteDesktopHost_macosx27.0-arm64.xctestrun -destination 'platform=macOS,arch=arm64' -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInAgentDistinguishesBackgroundMotionFromChangedHitTargets -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraLinkNavigationRejectsChangedTargetsCancellationAndReusedInput -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraApprovalCancellationBeforeDispatchRetiresAuthority -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraApprovalCancellationAfterDispatchDoesNotReplayTheEffect -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInOwnedBrowserNativeClickAndUnicodeInputStopAtLogin -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInSearchSubmitUsesBoundFormContextAndRetainsCommitGates -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-regression-01.xcresult' > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/image-link-label-regression-01.log' 2>&1",
+      "bundle": ".build/repair-verification/image-link-label-regression-01.xcresult",
+      "logSHA256": "4435eff749d9bbc2ddc408b1ef246631ece0a67d2ce0ee869eb4142e5dd8d04f",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 9,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789400413.712,
+        "passedTests": 9,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "[Internal] Thread running at User-interactive quality-of-service class waiting on a lower QoS thread running at Default quality-of-service class. Investigate ways to avoid priority inversions"
+          },
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789400402.677,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 9
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInAgentDistinguishesBackgroundMotionFromChangedHitTargets()",
+          "result": "Passed",
+          "durationInSeconds": 1.355247974395752
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraApprovalCancellationAfterDispatchDoesNotReplayTheEffect()",
+          "result": "Passed",
+          "durationInSeconds": 0.21628403663635254
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraApprovalCancellationBeforeDispatchRetiresAuthority()",
+          "result": "Passed",
+          "durationInSeconds": 0.15812897682189941
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraLinkNavigationRejectsChangedTargetsCancellationAndReusedInput()",
+          "result": "Passed",
+          "durationInSeconds": 0.38182199001312256
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInOwnedBrowserNativeClickAndUnicodeInputStopAtLogin()",
+          "result": "Passed",
+          "durationInSeconds": 0.45846498012542725
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInSearchSubmitUsesBoundFormContextAndRetainsCommitGates()",
+          "result": "Passed",
+          "durationInSeconds": 1.2043899297714233
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testInstalledNativeAndMacToolsRouteStructuredGoalsWithoutVisualLoad()",
+          "result": "Passed",
+          "durationInSeconds": 0.734158992767334
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal()",
+          "result": "Passed",
+          "durationInSeconds": 0.019269108772277832
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes()",
+          "result": "Passed",
+          "durationInSeconds": 0.009624958038330078
+        }
+      ],
+      "attachments": []
+    },
+    {
+      "name": "fara-q4-image-label-movie-01",
+      "note": "Unchanged full real movie task using the same Q4 assets, exact oracle, 24-proposal/300-second cap, and provider ticket-selection guard.",
+      "command": "env TEST_RUNNER_RUN_FARA_LIVE_SITE_ACCEPTANCE=1 TEST_RUNNER_FARA_MODEL_DIRECTORY=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/TrainedComputerUseModels/Fara15 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test-without-building -xctestrun /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/RemoteDesktopHost_macosx27.0-arm64.xctestrun -destination 'platform=macOS,arch=arm64' -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 330 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/fara-q4-image-label-movie-01.xcresult' > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/fara-q4-image-label-movie-01.log' 2>&1",
+      "bundle": ".build/repair-verification/fara-q4-image-label-movie-01.xcresult",
+      "logSHA256": "56e611a497e03e1389f974711f259a21cf677f93f94684d44b31a2fae990aad0",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789400599.99,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789400485.119,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Live ticket task failed after 7 proposals: invalidResponse",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink",
+            "testName": "testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraFindsLiveRoxieMovieTimePriceAndTicketLink()",
+          "result": "Failed",
+          "durationInSeconds": 99.38309597969055
+        }
+      ],
+      "attachments": [
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/018C700F-D3CB-4843-9691-4E7C0DBDB7C9.png",
+          "sha256": "12f2f83324c962a1ecd606f02f6d1d683586390e085abe4c984fb9ad901c9c97"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/180A6DD9-2BF0-48A8-BF96-F0CD15078ED0.png",
+          "sha256": "6964206469c60d4bb574eb61d611deb455577c0616e7048f2447bade3739d8c3"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/25C420EB-1506-41DA-A908-2BFEEEF1050A.png",
+          "sha256": "eb0101454d5b1a6585ead90238c81868ee98014c4a80eda4e2a00786de1e3520"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/3510EA7C-B086-48C4-9D61-D23C1C14AFD2.png",
+          "sha256": "899cfd67a245c4ad16437c4a6b579752058a1bc20c08880debd4c65390f3cddc"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/61A448BB-4DFF-4355-ADE2-7361AE3D289E.png",
+          "sha256": "27cd4900827566f2cdd81e07cfb28f069a0cd8e4193f8f4e19bccb617d8da046"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/925A2CD8-492C-418E-B451-50F74919B5DB.png",
+          "sha256": "eb0101454d5b1a6585ead90238c81868ee98014c4a80eda4e2a00786de1e3520"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/E03B10B8-F7AC-4693-A293-BEBDF9F8E8B7.json",
+          "sha256": "ae5a6950c7bd77fce415388e5d2befd1957f9f05ac19508b532703623ca2a7c1"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/EAC50588-7747-4D98-908A-5F7120D21695.png",
+          "sha256": "0ce357567798bd2f44310ac3446e3039df31f762deae474427aacfcbd1c265b8"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/F1357851-699B-46D4-9626-383C52F17EDF.png",
+          "sha256": "c390839867abf2cbc14b9379496cd076a8cd4f6b9498566618935e88e3f4df0f"
+        },
+        {
+          "path": ".build/repair-verification/fara-q4-image-label-movie-01-attachments/manifest.json",
+          "sha256": "1651b24246f05c22aca5267a99b4f019ac23734f6affa9fc14f51ad652424700"
+        }
+      ]
+    }
+  ]
+}

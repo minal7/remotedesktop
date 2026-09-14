@@ -586,6 +586,7 @@ enum ComputerUseBrowserDOM {
       const preparedFieldRevisions = new Map(), formStateProofs = new Map();
       let lastPageSnapshot = null;
       const linkIdentityAttributes = new Set(['href', 'target', 'download', 'ping', 'rel', 'referrerpolicy', 'hreflang', 'type', 'role', 'aria-disabled']);
+      const imageLabelAttributes = ['alt', 'src', 'srcset', 'sizes'];
       const pageControlIDs = new WeakMap(), pageFormIDs = new WeakMap(), pageOptionIDs = new WeakMap();
       let nextPageControlID = 0, nextPageFormID = 0, nextPageOptionID = 0;
       const protectedTypes = new Set(['password', 'hidden', 'file']);
@@ -625,7 +626,10 @@ enum ComputerUseBrowserDOM {
             for (const binding of [...lastPageSnapshot.links.values(), ...lastPageSnapshot.controls.values()]) {
               if ((record.type === 'childList' && Array.from(record.removedNodes).some(node => contains(node, binding.element) || (binding.fragmentTarget && contains(node, binding.fragmentTarget))))
                   || (record.type === 'attributes' && contains(record.target, binding.element))
-                  || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)) {
+                  || (record.type === 'attributes' && record.target instanceof HTMLBaseElement)
+                  || (binding.labelImages?.length && (
+                    (record.type === 'attributes' && binding.labelImages.some(image => contains(record.target, image)))
+                    || (record.type === 'childList' && contains(binding.element, record.target))))) {
                 if (lastPageSnapshot.agentState) {
                   // A repeated setAttribute with the same value does not
                   // change authority. A change followed by restoration still
@@ -662,7 +666,7 @@ enum ComputerUseBrowserDOM {
       }
       const observer = new MutationObserver(retire);
       const observationOptions = {subtree: true, childList: true, attributes: true, attributeOldValue: true,
-        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes, ...queryAttributes], characterData: true};
+        attributeFilter: [...identityAttributes, ...scalarConstraintAttributes, ...choiceAttributes, ...linkIdentityAttributes, ...imageLabelAttributes, ...queryAttributes], characterData: true};
       observer.observe(doc, observationOptions);
       function synchronize() {
         retire(observer.takeRecords());
@@ -1161,30 +1165,37 @@ enum ComputerUseBrowserDOM {
         state.focusHit = focusPoint && agentHitAtPoint(...focusPoint);
         return true;
       }
-      function agentTargetPointStateMatches(previous, current, x, y, focused) {
-        if (!agentFocusStateMatches(previous,current) || !previous.hitTargets || previous.width !== current.width || previous.height !== current.height
-            || !Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return false;
+      function agentTargetPointFailure(previous, current, x, y, focused) {
+        if (!agentFocusStateMatches(previous,current)) return 'focus';
+        if (!previous.hitTargets) return 'missing-raster';
+        if (previous.width !== current.width || previous.height !== current.height) return 'viewport';
+        if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return 'bounds';
         let oldHit;
         if (focused) {
           if (!previous.focusPoint || previous.focusPoint[0] !== x || previous.focusPoint[1] !== y
-              || !previous.focusHit || !contains(previous.focused,previous.focusHit)) return false;
+              || !previous.focusHit || !contains(previous.focused,previous.focusHit)) return 'focused-hit';
           oldHit = previous.focusHit;
         } else {
           const grid = previous.hitTargets, column = (x-grid.originX)/grid.stepX, row = (y-grid.originY)/grid.stepY;
           const ix = Math.round(column), iy = Math.round(row);
-          if (Math.abs(column-ix)>0.000001 || Math.abs(row-iy)>0.000001 || ix<0 || iy<0 || ix>=grid.columns || iy>=grid.rows) return false;
+          if (Math.abs(column-ix)>0.000001 || Math.abs(row-iy)>0.000001 || ix<0 || iy<0 || ix>=grid.columns || iy>=grid.rows) return 'raster-point';
           const id = grid.pixels[iy*grid.columns+ix];
-          if (!id || id === 65535) return false;
+          if (!id || id === 65535) return id ? 'untracked-hit' : 'unmapped-hit';
           oldHit = previous.elements[id-1];
         }
-        if (oldHit !== agentHitAtPoint(x,y) || !agentElementStateMatches(previous,current,oldHit)) return false;
+        if (oldHit !== agentHitAtPoint(x,y)) return 'changed-hit';
+        if (!agentElementStateMatches(previous,current,oldHit)) {
+          const before = previous.layout[previous.indices.get(oldHit)], after = current.layout[current.indices.get(oldHit)];
+          const fields = ['x','y','width','height','pointer-events','z-index','opacity'];
+          return 'changed-hit-layout-' + (before && after ? fields.filter((name,index)=>before[index] !== after[index]).join(',') : 'presence');
+        }
         // A pointer-transparent overlay can obscure the image while leaving
         // event hit-testing unchanged. Retain the conservative visual check.
         const transparentAtPoint = state => state.layout.map((rect,index)=>({rect,element:state.elements[index]}))
           .filter(item=>item.rect[4]==='none' && item.rect[0]<=x && x<item.rect[0]+item.rect[2] && item.rect[1]<=y && y<item.rect[1]+item.rect[3]);
         const before = transparentAtPoint(previous), after = transparentAtPoint(current);
         return before.length === after.length && before.every((item,index)=>item.element === after[index].element
-          && JSON.stringify(item.rect) === JSON.stringify(after[index].rect));
+          && JSON.stringify(item.rect) === JSON.stringify(after[index].rect)) ? null : 'visual-cover';
       }
       function agentPointStateMatches(previous, current, x, y) {
         if (!agentFocusStateMatches(previous,current) || !Number.isFinite(x) || !Number.isFinite(y)
@@ -1320,12 +1331,36 @@ enum ComputerUseBrowserDOM {
             if (buttons.has(element)) { buttons.get(element).push(entry); break; }
           }
         }
+        function imageLabelFor(element) {
+          // Icon-only links and buttons can derive a name from rendered img
+          // alternative text. Keep this separate from visible text/answer
+          // evidence, and retain the actual nodes for input freshness checks.
+          const images = [], labels = [];
+          const walker = doc.createTreeWalker(element, NodeFilter.SHOW_ELEMENT, filter);
+          let node, visited = 0, size = 0;
+          while ((node = walker.nextNode())) {
+            if (++visited > 512) { truncated = true; return null; }
+            if (!(node instanceof HTMLImageElement) || !visibleInPage(node)
+                || ['none','presentation'].includes((node.getAttribute('role') || '').toLowerCase())
+                || !Array.from(node.getClientRects()).some(rect => rect.width > 0 && rect.height > 0)) continue;
+            const raw = node.getAttribute('alt') || '';
+            if (raw.length > 8192) { truncated = true; return null; }
+            const label = raw.replace(/\s+/g, ' ').trim();
+            if (!label) continue;
+            size += encoder.encode(label).length + (labels.length ? 1 : 0);
+            if (size > 2048 || images.length >= 32) { truncated = true; return null; }
+            images.push(node); labels.push(label);
+          }
+          return {label:labels.join(' '),images};
+        }
         for (const [anchor, parts] of anchors) {
           // href is data. Resolve with the document's base URL; never navigate
           // or evaluate it. Unsupported destinations remain plain page text.
           if (links.length >= 128) { truncated = true; break; }
           if (!visibleInPage(anchor) || (!parts.length && anchor.getClientRects().length === 0)) continue;
-          const label = parts.map(entry => entry.text).join(' ').trim() || (anchor.getAttribute('aria-label') || '').trim();
+          let label = parts.map(entry => entry.text).join(' ').trim() || (anchor.getAttribute('aria-label') || '').trim();
+          const imageLabel = label ? null : imageLabelFor(anchor);
+          if (!label && imageLabel) label = imageLabel.label;
           const raw = anchor.getAttribute('href') || '';
           if (!label) continue;
           if (label.length > 8192 || raw.length > 8192) { truncated = true; continue; }
@@ -1364,7 +1399,8 @@ enum ComputerUseBrowserDOM {
           }
           const agentNavigationKind = !agentCanNavigate ? null : source.href !== destination.href
             ? (target.toLowerCase() === '_blank' ? 'document' : null) : fragmentTarget ? 'fragment' : null;
-          linkBindings.set(id, {element: anchor, base, signature, canOpen, agentNavigationKind, fragmentTarget, metadata:{label,destination:url.href}});
+          linkBindings.set(id, {element: anchor, base, signature, canOpen, agentNavigationKind, fragmentTarget,
+            labelImages:imageLabel?.images || [],metadata:{label,destination:url.href}});
         }
         // Observe supported native control metadata in a separate bounded
         // pass: the text walker deliberately excludes inputs and options.
@@ -1502,6 +1538,8 @@ enum ComputerUseBrowserDOM {
           let label = labelFor(element).label;
           if (!label && declaredRole && ['checkbox','radio','switch','button'].includes(declaredRole)) label = labelText(element).trim();
           if (!label && element instanceof HTMLButtonElement) label = (buttons.get(element) || []).map(entry => entry.text).join(' ');
+          const imageLabel = !label && element instanceof HTMLButtonElement ? imageLabelFor(element) : null;
+          if (imageLabel) label = imageLabel.label;
           if (!label && element instanceof HTMLInputElement && ['button','submit','reset','image'].includes(kind)) {
             // Browser-localized default captions are not literal page labels.
             label = kind === 'image' ? (element.getAttribute('alt') || '') : (element.getAttribute('value') || '');
@@ -1551,7 +1589,7 @@ enum ComputerUseBrowserDOM {
           const textEditingSignature = nativeCombobox ? JSON.stringify(roleAttributes.filter(key => !['aria-expanded','aria-busy'].includes(key))
             .map(key => [key, element.getAttribute(key)])) : null;
           controlBindings.set(control.id, {element, form: declaredRole ? null : element.form, metadata: control, signature,
-            textEditingSignature,references:details.references,state,composite:details.composite || null});
+            textEditingSignature,labelImages:imageLabel?.images || [],references:details.references,state,composite:details.composite || null});
         }
         for (const option of pendingOptions) {
           if (compositeMembers.has(option)) continue;
@@ -2047,7 +2085,8 @@ enum ComputerUseBrowserDOM {
               const targetRect = args.focused === true && hit?.getBoundingClientRect();
               const pointX = targetRect ? targetRect.x + targetRect.width/2 : args.x;
               const pointY = targetRect ? targetRect.y + targetRect.height/2 : args.y;
-              if (!agentTargetPointStateMatches(lastPageSnapshot.agentState,agentState,pointX,pointY,args.focused === true)) return reply('stale-agent-point');
+              const pointFailure = agentTargetPointFailure(lastPageSnapshot.agentState,agentState,pointX,pointY,args.focused === true);
+              if (pointFailure) return reply('stale-agent-point-' + pointFailure);
               // Typing requires the exact focused element to accept text. Ancestor
               // and link lookup below is only suitable for identifying other input.
               // Caret/selection keys additionally need native text selection.
