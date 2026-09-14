@@ -259,6 +259,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             "approvalRequests": approvalRequests,
             "rejectedApprovalReplays": rejectedApprovalReplays, "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
             "revalidation": executor?.lastRevalidationDiagnostic ?? [:],
+            "approvalValidation": executor?.lastApprovalDiagnostic ?? [:],
             "responses": executor?.diagnosticHistory.map { ["response": $0.response, "actionError": $0.actionError ?? "",
                 "screenshotSHA256": SHA256.hash(data: $0.screenshotPNG).map { String(format: "%02x", $0) }.joined()] } ?? [],
             "managedLaunchCount": launcher.credentialDirectories.count, "ownedWorkersExited": exited,
@@ -1095,6 +1096,50 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         permitted = false; XCTAssertThrowsError(try tools.nativeFocusedEditorDescription())
     }
 
+    func testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow() throws {
+        for scale in [1, 2] {
+            let display = CGRect(x: -100, y: 20, width: 640, height: 400)
+            let window = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 42,
+                accessibilityWindowHash: 123, bounds: CGRect(x: 0, y: 70, width: 300, height: 250))
+            func digest(_ point: CGPoint, change: CGRect?, owner: ComputerUseFrontmostWindowCaptureIdentity?) throws -> String? {
+                let context = try XCTUnwrap(CGContext(data: nil, width: 640 * scale, height: 400 * scale,
+                    bitsPerComponent: 8, bytesPerRow: 640 * scale * 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 640 * scale, height: 400 * scale))
+                if let change {
+                    context.setFillColor(CGColor(gray: 0, alpha: 1))
+                    context.fill(CGRect(x: (change.minX - display.minX) * CGFloat(scale),
+                        y: (display.maxY - change.maxY) * CGFloat(scale), width: change.width * CGFloat(scale), height: change.height * CGFloat(scale)))
+                }
+                return try ComputerUseHostTools.approvalVisualDigest(around: [point], image: XCTUnwrap(context.makeImage()),
+                    displayBounds: display, window: owner)
+            }
+            for (point, outside, inside) in [
+                (CGPoint(x: 10, y: 150), CGRect(x: -8, y: 145, width: 7, height: 10), CGRect(x: 1, y: 145, width: 7, height: 10)),
+                (CGPoint(x: 290, y: 150), CGRect(x: 301, y: 145, width: 7, height: 10), CGRect(x: 292, y: 145, width: 7, height: 10)),
+                (CGPoint(x: 150, y: 80), CGRect(x: 145, y: 62, width: 10, height: 7), CGRect(x: 145, y: 71, width: 10, height: 7)),
+                (CGPoint(x: 150, y: 310), CGRect(x: 145, y: 321, width: 10, height: 7), CGRect(x: 145, y: 312, width: 10, height: 7))
+            ] {
+                let base = try digest(point, change: nil, owner: window)
+                XCTAssertEqual(try digest(point, change: outside, owner: window), base, "Outside window at \(scale)x, \(point)")
+                XCTAssertNotEqual(try digest(point, change: inside, owner: window), base, "Changed target must invalidate approval")
+                XCTAssertNotEqual(try digest(point, change: outside, owner: nil), try digest(point, change: nil, owner: nil), "Unknown owner must retain display pixels")
+            }
+            let outsidePoint = CGPoint(x: -10, y: 150), outsideChange = CGRect(x: -12, y: 145, width: 7, height: 10)
+            XCTAssertNotEqual(try digest(outsidePoint, change: outsideChange, owner: window), try digest(outsidePoint, change: nil, owner: window),
+                "A target outside the frontmost window must retain its display pixels")
+            let point = CGPoint(x: 150, y: 150), base = try digest(point, change: nil, owner: window)
+            for changed in [
+                ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 43, accessibilityWindowHash: 123, bounds: window.bounds),
+                .init(applicationProcessIdentifier: 42, accessibilityWindowHash: 124, bounds: window.bounds),
+                .init(applicationProcessIdentifier: 42, accessibilityWindowHash: 123, bounds: window.bounds.offsetBy(dx: 1, dy: 0))
+            ] {
+                XCTAssertNotEqual(try digest(point, change: nil, owner: changed), base, "Identical pixels cannot revive a different owning window")
+            }
+            XCTAssertNotEqual(try digest(point, change: nil, owner: nil), base, "Lost window authority must invalidate approval")
+        }
+    }
+
     func testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection() async throws {
         for changed in [false, true] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -1122,6 +1167,38 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(effects, 1); XCTAssertEqual(calls, 2)
             }
         }
+    }
+
+    func testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var effects = 0, calls = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            calls += 1
+            XCTAssertEqual(input.goal, "Continue the same task")
+            switch calls {
+            case 1: return .init(response: "unsupported before approval", decision: .unsupported)
+            case 2:
+                XCTAssertNotNil(input.actionError)
+                return .init(response: "approved Return", action: .key(["Return"]))
+            case 3:
+                XCTAssertNil(input.actionError, "A verified approved effect must not be reported as the previous failure")
+                XCTAssertEqual(input.history.map(\.response), ["unsupported before approval", "approved Return"])
+                return .init(response: "first rejection after success", decision: .unsupported)
+            case 4: return .init(response: "second rejection after success", decision: .unsupported)
+            case 5: return .init(response: "done", action: .reportCompletion("Done"))
+            default: throw ComputerUseDesktopExecutor.Failure.stepLimit
+            }
+        })
+        let pending = try await executor.execute(taskID: "approval-recovery", prompt: "Continue the same task",
+            trustedUserPrompt: "Continue the same task", tools: tools, progress: { _ in })
+        guard case .approvalRequired(_, let action, let token) = pending else { return XCTFail("Expected native approval") }
+        try await executor.performApprovedVisualAction(token, action: action,
+            fingerprint: tools.prepareNativeActionFingerprint(for: action), tools: tools, willBeginEffect: {})
+        let result = try await executor.continueAfterApprovedVisualAction(token, action: action, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Done"), "Only consecutive failures may exhaust the rejection allowance")
+        XCTAssertEqual(calls, 5); XCTAssertEqual(effects, 1)
     }
 
     func testNativeDesktopUncertainEffectCannotReplayOnResumeOrRestart() async throws {

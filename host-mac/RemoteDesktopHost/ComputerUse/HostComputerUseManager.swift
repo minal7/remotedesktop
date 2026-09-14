@@ -3096,31 +3096,58 @@ final class ComputerUseHostTools {
         guard !points.isEmpty else { return nil }
         let displayID = CGMainDisplayID()
         let bounds = CGDisplayBounds(displayID)
+        let windowBefore = liveFrontmostWindowSnapshot()
         guard bounds.width > 0, bounds.height > 0,
               let image = CGDisplayCreateImage(displayID) else {
             throw ToolError.screenshotUnavailable
         }
+        let windowAfter = liveFrontmostWindowSnapshot()
+        guard windowBefore == windowAfter else { throw ToolError.approvalTargetChanged }
+        return try Self.approvalVisualDigest(around: points, image: image, displayBounds: bounds, window: windowAfter)
+    }
 
+    static func approvalVisualDigest(around points: [CGPoint], image: CGImage, displayBounds bounds: CGRect,
+                                     window: ComputerUseFrontmostWindowCaptureIdentity?) throws -> String? {
+        guard !points.isEmpty else { return nil }
+        func valid(_ rect: CGRect) -> Bool {
+            !rect.isEmpty && [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy(\.isFinite)
+        }
+        guard valid(bounds), points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && bounds.contains($0) }),
+              window.map({ valid($0.bounds) }) ?? true else { throw ToolError.approvalTargetUnavailable }
         let scaleX = CGFloat(image.width) / bounds.width
         let scaleY = CGFloat(image.height) / bounds.height
-        var digestInput = Data()
+        let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        var scope = imageBounds
+        func geometry(_ rect: CGRect) -> [String] {
+            [rect.minX, rect.minY, rect.width, rect.height].map { String(Double($0)) }
+        }
+        var identity = ["approval-pixels-v2", String(image.width), String(image.height)] + geometry(bounds)
+        if let window {
+            identity += ["window", String(window.applicationProcessIdentifier), String(window.accessibilityWindowHash)] + geometry(window.bounds)
+            // A cross-window drag or a target outside the focused window
+            // still needs display pixels at every checkpoint.
+            if points.allSatisfy({ window.bounds.contains($0) }) {
+                scope = CGRect(x: (window.bounds.minX - bounds.minX) * scaleX,
+                    y: (window.bounds.minY - bounds.minY) * scaleY,
+                    width: window.bounds.width * scaleX, height: window.bounds.height * scaleY).intersection(imageBounds)
+            }
+        } else { identity.append("unknown-window") }
+        var digestInput = Data(ComputerUseTaskContract.digest(identity).utf8)
         for point in points {
             let pixelPoint = CGPoint(
                 x: (point.x - bounds.minX) * scaleX,
                 y: (point.y - bounds.minY) * scaleY)
             let radius: CGFloat = 48
-            let imageBounds = CGRect(
-                x: 0,
-                y: 0,
-                width: image.width,
-                height: image.height)
-            let cropRect = CGRect(
+            let requested = CGRect(
                 x: pixelPoint.x - radius,
                 y: pixelPoint.y - radius,
                 width: radius * 2,
                 height: radius * 2)
-                .intersection(imageBounds)
-                .integral
+                .intersection(scope)
+            // Whole image pixels only: outward rounding at a fractional
+            // window edge can import pixels from the adjacent application.
+            let cropRect = CGRect(x: ceil(requested.minX), y: ceil(requested.minY),
+                width: floor(requested.maxX) - ceil(requested.minX), height: floor(requested.maxY) - ceil(requested.minY))
             guard cropRect.width > 0, cropRect.height > 0,
                   let crop = image.cropping(to: cropRect) else {
                 throw ToolError.approvalTargetUnavailable
@@ -3143,6 +3170,7 @@ final class ComputerUseHostTools {
                 return true
             }
             guard rendered else { throw ToolError.screenshotUnavailable }
+            digestInput.append(contentsOf: ComputerUseTaskContract.digest(geometry(cropRect)).utf8)
             digestInput.append(contentsOf: pixels)
         }
         return SHA256.hash(data: digestInput)

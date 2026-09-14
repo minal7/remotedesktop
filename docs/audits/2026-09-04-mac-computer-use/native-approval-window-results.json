@@ -1,0 +1,794 @@
+{
+  "date": "2026-09-14",
+  "parentCommit": "0a1411bc7557fdb46c9b31d4094e0c5be6541cc8",
+  "scope": "Approval checkpoint pixels and native post-approval feedback; full real-app and model acceptance remain open",
+  "sourceFiles": [
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift",
+      "sha256": "c9173cce72b81a79bb7d21ea6784c6db1c23db85e6f83ba2443a1fefb760c588"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift",
+      "sha256": "d4de9832558b4868574cbeb0e5ebf6c6781e9ccab04e5e9a1b7baa72f2b42756"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift",
+      "sha256": "246a18e2d1fab4d84e783366abf34bf5eed48b486aec9b1229515d096fb66181"
+    }
+  ],
+  "sourcePatch": {
+    "path": ".build/repair-verification/native-approval-window-final.patch",
+    "sha256": "905c795d0a0decb652c81db04d44edaa8ca1c504a26b052dc456bff7966e95a8"
+  },
+  "attempts": [
+    {
+      "name": "native-approval-diagnostic-build-01",
+      "note": "Diagnostic equality flags only; two existing approval/replay methods pass.",
+      "bundle": ".build/repair-verification/native-approval-diagnostic-build-01.xcresult",
+      "logSHA256": "6e893a6600eb93760427255be5577103dd3cb8d6e8823538713276959e307a96",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 2,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789374849.602,
+        "finishTime": 1789374877.416,
+        "runtimeWarnings": [],
+        "testFailures": []
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection()",
+          "result": "Passed",
+          "durationInSeconds": 0.7181129455566406
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopUncertainEffectCannotReplayOnResumeOrRestart()",
+          "result": "Passed",
+          "durationInSeconds": 0.2405019998550415
+        }
+      ]
+    },
+    {
+      "name": "real-textedit-holo-05",
+      "note": "Before pixel-scope repair. Actual failure proves visualDigest is the only mismatching fingerprint field. Two approved clicks; third rejected before effects.",
+      "bundle": ".build/repair-verification/real-textedit-holo-05.xcresult",
+      "logSHA256": "a34d6b0e1af34bb02581bf50b53b48872aa46b842d300d0a6f39e0629bda1c42",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789374890.746,
+        "finishTime": 1789374955.03,
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "testFailures": [
+          {
+            "failureText": "failed - Real TextEdit task failed: invalidApproval",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit",
+            "testName": "testOptInHoloEditsAndSavesUnicodeInRealTextEdit()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit()",
+          "result": "Failed",
+          "durationInSeconds": 50.29332196712494
+        }
+      ],
+      "workflow": {
+        "path": ".build/repair-verification/real-textedit-holo-05/workflow.json",
+        "sha256": "93836331be562c47f2955f9d2896ffb165db862179c0b557ae919ac8db7611a4",
+        "report": {
+          "approvalRequests": [
+            {
+              "action": "click(x: 259, y: 128, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "click(x: 233, y: 130, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "click(x: 207, y: 130, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            }
+          ],
+          "approvalValidation": {
+            "accessibilityMatches": "true",
+            "actionMatches": "true",
+            "applicationMatches": "true",
+            "continuationMatches": "true",
+            "fingerprintActionMatches": "true",
+            "performed": "false",
+            "terminal": "false",
+            "visualDigestMatches": "false"
+          },
+          "approvedEditorClicks": 2,
+          "approvedSaves": 0,
+          "credentialsRemoved": true,
+          "diagnosticWorkerLimitGiB": 5,
+          "documentOpenAndFrontmostAtReturn": true,
+          "editorClickEffects": 2,
+          "elapsedSeconds": 46.829728960990906,
+          "expected": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n",
+          "failure": "RemoteDesktopHost.ComputerUseDesktopExecutor.Failure.invalidApproval",
+          "finalNativeWindow": {
+            "modal": false,
+            "role": "AXWindow",
+            "subrole": "AXStandardWindow",
+            "title": "Travel notes.txt",
+            "truncated": false
+          },
+          "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+          "loaderActivationSeconds": 2.072517991065979,
+          "managedLaunchCount": 4,
+          "memorySamples": 337,
+          "memorySamplingStartsAfterLoaderActivation": true,
+          "original": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "ownedTextEditExited": true,
+          "ownedWorkersExited": true,
+          "peakWorkerMemoryBytes": 4510351360,
+          "rejectedApprovalReplays": 2,
+          "responses": [
+            {
+              "actionError": "",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Text showing \\\\\\\"Seattle\\\\\\\" in the Route line of the document\\\",\\\"x\\\":150,\\\"y\\\":115}\",\"name\":\"click\"},\"id\":\"aClKg4KdSmYogFYQhkD5dWZqXAbjSuRF\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "4a9e156a617a7c24da6623f0567dd13a8888704d2bce9722888d46946d9b6d39"
+            },
+            {
+              "actionError": "",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"The word \\\\\\\"Seattle\\\\\\\" in the Route line\\\",\\\"x\\\":135,\\\"y\\\":117}\",\"name\":\"click\"},\"id\":\"NGCrzOYdbJmIv4Q5HoaqS9rcAryt8J2H\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "f0c27d90d6631301bf5de806960813c390edfe052e854884d8d2e6f673c6b26c"
+            }
+          ],
+          "result": "approvalRequired(message: \"Click an unidentified item. The host could not verify its label, so your approval is required\", action: RemoteDesktopHost.ComputerUsePredictedAction.click(x: 207, y: 130, button: 1, count: 1), continuation: ComputerUseVisualApprovalContinuation(browserBound: false))",
+          "revalidation": {},
+          "savedBytesMatch": false,
+          "savedUTF8": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "saveEffects": 0,
+          "scope": "Holo-package-loader-real-TextEdit",
+          "scriptCalls": 0,
+          "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
+          "wholeApp12GBQualified": false,
+          "workerStop": {
+            "cleanupSucceeded": true,
+            "generation": 4,
+            "reason": {
+              "requested": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "native-approval-window-red-01",
+      "note": "Invalid first synthetic fixture: rectangle y coordinates were inverted. Retained as a harness failure, not repair evidence.",
+      "bundle": ".build/repair-verification/native-approval-window-red-01.xcresult",
+      "logSHA256": "f395505e32fb3f21e7242bfbca54ea30ff3f195a2c815cc44921bc44b8a41dbb",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789375028.524,
+        "finishTime": 1789375117.4,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertNotEqual failed: (\"Optional(\"f47a8ec3e9aff2318d896942282ad4fe37d6391c82914f54a5da8a37de1300c6\")\") is equal to (\"Optional(\"f47a8ec3e9aff2318d896942282ad4fe37d6391c82914f54a5da8a37de1300c6\")\") - Changed target must invalidate approval",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow",
+            "testName": "testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+          "result": "Failed",
+          "durationInSeconds": 0.6403619050979614
+        }
+      ]
+    },
+    {
+      "name": "native-approval-window-red-02",
+      "note": "Corrected synthetic fixture against unchanged digest behavior. Eight outside-window equality and eight window-identity assertions fail; changed-target and unscoped-pixel checks pass.",
+      "bundle": ".build/repair-verification/native-approval-window-red-02.xcresult",
+      "logSHA256": "a44cf347f6dc7e04307d84772ed64fe2781b4b34f0d8327deb6eb1c4533d1212",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789375138.865,
+        "finishTime": 1789375164.067,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(\"0a740ffc6704d306e12c3b763dedd87ad82fad101cc354469fd57804b0c6ab4c\")\") is not equal to (\"Optional(\"f47a8ec3e9aff2318d896942282ad4fe37d6391c82914f54a5da8a37de1300c6\")\") - Outside window at 1x, (10.0, 150.0)",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow",
+            "testName": "testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+          "result": "Failed",
+          "durationInSeconds": 0.6317169666290283
+        }
+      ]
+    },
+    {
+      "name": "native-approval-window-green-01",
+      "note": "Scoped digest and window binding implemented. Seven focused methods pass, including real TextEdit exact saved bytes, click/Save approval and no replay.",
+      "bundle": ".build/repair-verification/native-approval-window-green-01.xcresult",
+      "logSHA256": "20533d161e6cf2e50fb11611b375a145e7936977cd09538290cd0822fc64538b",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 7,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789375226.593,
+        "finishTime": 1789375262.777,
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "testFailures": []
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+          "result": "Passed",
+          "durationInSeconds": 0.02460300922393799
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection()",
+          "result": "Passed",
+          "durationInSeconds": 0.7237870693206787
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopUncertainEffectCannotReplayOnResumeOrRestart()",
+          "result": "Passed",
+          "durationInSeconds": 0.23545503616333008
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeInsertionPointComparisonRejectsChangedContentAndOtherControls()",
+          "result": "Passed",
+          "durationInSeconds": 0.7028659582138062
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds()",
+          "result": "Passed",
+          "durationInSeconds": 3.058156967163086
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay()",
+          "result": "Passed",
+          "durationInSeconds": 10.06298303604126
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_hostClickApprovalRequiresAnIdentifiedActionableControl()",
+          "result": "Passed",
+          "durationInSeconds": 0.0064220428466796875
+        }
+      ],
+      "workflow": {
+        "path": ".build/repair-verification/native-approval-window-green-01/workflow.json",
+        "sha256": "d0cb84c04d8e32d9eb3be86591141888eace6ac2f63dc358124fee7e14dc3a2f",
+        "report": {
+          "approvalRequests": [
+            {
+              "action": "click(x: 513, y: 307, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "key(usage: 22, modifiers: 8)",
+              "message": "Use a Command shortcut that may save, close, quit, cut, paste, or reload current work"
+            }
+          ],
+          "approvalValidation": {
+            "accessibilityMatches": "true",
+            "actionMatches": "true",
+            "applicationMatches": "true",
+            "continuationMatches": "true",
+            "fingerprintActionMatches": "true",
+            "performed": "true",
+            "terminal": "false",
+            "visualDigestMatches": "true"
+          },
+          "approvedEditorClicks": 1,
+          "approvedSaves": 1,
+          "credentialsRemoved": true,
+          "diagnosticWorkerLimitGiB": 0,
+          "documentOpenAndFrontmostAtReturn": true,
+          "editorClickEffects": 1,
+          "elapsedSeconds": 9.775324940681458,
+          "expected": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n",
+          "failure": "",
+          "finalNativeWindow": {
+            "modal": false,
+            "role": "AXWindow",
+            "subrole": "AXStandardWindow",
+            "title": "Travel notes.txt",
+            "truncated": false
+          },
+          "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+          "loaderActivationSeconds": 0,
+          "managedLaunchCount": 0,
+          "memorySamples": 0,
+          "memorySamplingStartsAfterLoaderActivation": true,
+          "original": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "ownedTextEditExited": true,
+          "ownedWorkersExited": true,
+          "peakWorkerMemoryBytes": 0,
+          "rejectedApprovalReplays": 2,
+          "responses": [
+            {
+              "actionError": "",
+              "response": "scripted native operation 0",
+              "screenshotSHA256": "95a9f2a65b2f04fcba4371b09a141ecf5877ac461392f49cf1c73356226e1049"
+            },
+            {
+              "actionError": "",
+              "response": "scripted native operation 1",
+              "screenshotSHA256": "5199bfa0de9553c67fd17fb5c1d918f0f54cd3657eb7360b7584409781f62bb3"
+            },
+            {
+              "actionError": "",
+              "response": "scripted native operation 2",
+              "screenshotSHA256": "d7a3d9c40b2d3cf72397cd40ea35a335087c9dd113a2252290b93a808f2e6de3"
+            },
+            {
+              "actionError": "",
+              "response": "scripted native operation 3",
+              "screenshotSHA256": "9591f81c476a9d33bc5802b415636c41c51b42f15ceff1eee646ee100e032eed"
+            },
+            {
+              "actionError": "",
+              "response": "scripted native operation 4",
+              "screenshotSHA256": "0e98482cbaca8ea7f517d18f12bf1722cdd51961dc8d6baf0af83d109f565e63"
+            }
+          ],
+          "result": "completed(\"Updated the route and saved the document.\")",
+          "revalidation": {
+            "changedDisplayBounds": "(194.0625, 153.66137566137567, 2.53125, 13.508692365835223)",
+            "changedPixelBounds": "(230.0, 182.0, 3.0, 16.0)",
+            "fieldPixelBounds": "(219.0, 136.0, 778.0, 456.0)"
+          },
+          "savedBytesMatch": true,
+          "savedUTF8": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n",
+          "saveEffects": 1,
+          "scope": "scripted-real-TextEdit",
+          "scriptCalls": 6,
+          "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
+          "wholeApp12GBQualified": false
+        }
+      }
+    },
+    {
+      "name": "real-textedit-holo-06",
+      "note": "After digest repair, before continuation-state repair. Three click approvals succeed. Two proposals are rejected by window pixel checks; a fourth approval exceeds the fixed three-click test allowance. No edits or Save. Failed task.",
+      "bundle": ".build/repair-verification/real-textedit-holo-06.xcresult",
+      "logSHA256": "03aa9dd78b643962ae7edf5f7bb8b54f26d6e2c854a2fb2d325b4f8faf4ac485",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789375278.163,
+        "finishTime": 1789375403.033,
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "testFailures": [
+          {
+            "failureText": "failed - Real TextEdit task failed: unexpectedOutcome(\"The test authorizes only Save or bounded single clicks inside its own current editor\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit",
+            "testName": "testOptInHoloEditsAndSavesUnicodeInRealTextEdit()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInHoloEditsAndSavesUnicodeInRealTextEdit()",
+          "result": "Failed",
+          "durationInSeconds": 110.86535596847534
+        }
+      ],
+      "workflow": {
+        "path": ".build/repair-verification/real-textedit-holo-06/workflow.json",
+        "sha256": "6944c3b06d22921cca3212b39e95a8192008ee163ebd33a70005d1bdcd05da7c",
+        "report": {
+          "approvalRequests": [
+            {
+              "action": "click(x: 241, y: 139, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "click(x: 250, y: 145, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "click(x: 233, y: 142, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            },
+            {
+              "action": "click(x: 224, y: 139, button: 1, count: 1)",
+              "message": "Click an unidentified item. The host could not verify its label, so your approval is required"
+            }
+          ],
+          "approvalValidation": {
+            "accessibilityMatches": "true",
+            "actionMatches": "true",
+            "applicationMatches": "true",
+            "continuationMatches": "true",
+            "fingerprintActionMatches": "true",
+            "performed": "true",
+            "terminal": "false",
+            "visualDigestMatches": "true"
+          },
+          "approvedEditorClicks": 3,
+          "approvedSaves": 0,
+          "credentialsRemoved": true,
+          "diagnosticWorkerLimitGiB": 5,
+          "documentOpenAndFrontmostAtReturn": true,
+          "editorClickEffects": 3,
+          "elapsedSeconds": 107.6744099855423,
+          "expected": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n",
+          "failure": "RemoteDesktopHostTests.(unknown context at $117797c88).NativeTextFixtureFailure.unexpectedOutcome(\"The test authorizes only Save or bounded single clicks inside its own current editor\")",
+          "finalNativeWindow": {
+            "modal": false,
+            "role": "AXWindow",
+            "subrole": "AXStandardWindow",
+            "title": "Travel notes.txt",
+            "truncated": false
+          },
+          "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+          "loaderActivationSeconds": 1.7845479249954224,
+          "managedLaunchCount": 5,
+          "memorySamples": 822,
+          "memorySamplingStartsAfterLoaderActivation": true,
+          "original": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "ownedTextEditExited": true,
+          "ownedWorkersExited": true,
+          "peakWorkerMemoryBytes": 4605542400,
+          "rejectedApprovalReplays": 3,
+          "responses": [
+            {
+              "actionError": "",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Text containing 'Route: Seattle' in the Travel notes.txt document\\\",\\\"x\\\":150,\\\"y\\\":135}\",\"name\":\"click\"},\"id\":\"cJETi64NAXoL0T3bLrdanfHWwNDhmRXu\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "edd31d73d55eca2b177e8bc75a16843037a57129851b64ee1bf501b1a33b37af"
+            },
+            {
+              "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Text containing 'Seattle' in the Route line of the Travel notes.txt document\\\",\\\"x\\\":140,\\\"y\\\":125}\",\"name\":\"click\"},\"id\":\"fe5Y7SX0gWv473YwfGle4Z5tkYqLVmLX\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "386ec6280a3fdf5bea9b64838c6180ebd974088bf857786a84cfdf91b976a0cc"
+            },
+            {
+              "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"The word 'Seattle' in the Route line of the Travel notes.txt text editor\\\",\\\"x\\\":145,\\\"y\\\":130}\",\"name\":\"click\"},\"id\":\"hwsB76YQyp5h9VBQNLL8hITIWYO6vk7V\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "bb4c1663ad1f229705b8680698cf6bc3ad2e304f6cb3ab0c5d105bb71e51c9f1"
+            },
+            {
+              "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"The word 'Seattle' on the Route line in the Travel notes.txt editor\\\",\\\"x\\\":135,\\\"y\\\":128}\",\"name\":\"click\"},\"id\":\"0TxojtQt1x7SZhPX5191f04vE0p4OC5d\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "daff14853bfbceb5a28aea784c2e75e4a0b31e38a7d11e5a88099cf9c36bb049"
+            },
+            {
+              "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+              "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"The text editing area of Travel notes.txt showing Meeting notes, Route: Seattle, Status: draft\\\",\\\"x\\\":180,\\\"y\\\":130}\",\"name\":\"click\"},\"id\":\"Kx48bqXj2HYe2Tax2OW6TSOxlIL6l3r2\",\"type\":\"function\"}]}",
+              "screenshotSHA256": "7b7ddaf67c37a6bb6c62653022c43d2bef42491a9c974861d765a495d6ef484d"
+            }
+          ],
+          "result": "approvalRequired(message: \"Click an unidentified item. The host could not verify its label, so your approval is required\", action: RemoteDesktopHost.ComputerUsePredictedAction.click(x: 224, y: 139, button: 1, count: 1), continuation: ComputerUseVisualApprovalContinuation(browserBound: false))",
+          "revalidation": {
+            "editableAuthorityMatches": "true",
+            "focusMatches": "true",
+            "pointerAuthorityMatches": "true",
+            "pointerChangedDisplayBounds": "(817.59375, 83.58503401360544, 22.78125, 421.30234315948604)",
+            "pointerChangedPixelBounds": "(969.0, 99.0, 27.0, 499.0)",
+            "pointerFieldPixelBounds": "(219.0, 136.0, 778.0, 456.0)",
+            "pointerHasUnchangedEditorProof": "true",
+            "pointerPoint": "311,145",
+            "pointerTargetFrame": "(185.0, 115.0, 656.0, 384.0)",
+            "pointerTargetPixelsMatch": "false",
+            "screenMatches": "false",
+            "textFrameAfter": "Optional((185.0, 115.0, 656.0, 384.0))",
+            "textFrameBefore": "Optional((185.0, 115.0, 656.0, 384.0))",
+            "window": "Optional((185.0, 83.0, 656.0, 422.0))"
+          },
+          "savedBytesMatch": false,
+          "savedUTF8": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "saveEffects": 0,
+          "scope": "Holo-package-loader-real-TextEdit",
+          "scriptCalls": 0,
+          "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
+          "wholeApp12GBQualified": false,
+          "workerStop": {
+            "cleanupSucceeded": true,
+            "generation": 5,
+            "reason": {
+              "requested": {}
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "native-approval-browser-regressions-01",
+      "note": "Two existing live-target browser approval methods and native cancellation pass. No model inference.",
+      "bundle": ".build/repair-verification/native-approval-browser-regressions-01.xcresult",
+      "logSHA256": "5de3a5e051f4687167c2be7ecfc5932e67e44a3cfa42794350896daa60b9e9ff",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 3,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789375431.788,
+        "finishTime": 1789375434.019,
+        "runtimeWarnings": [],
+        "testFailures": []
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopCancellationRejectsLateProposalAndConcurrentExecution()",
+          "result": "Passed",
+          "durationInSeconds": 0.15689003467559814
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_optInFaraManagerRefreshesReplacedNativeControlBeforeApproval()",
+          "result": "Passed",
+          "durationInSeconds": 0.6548930406570435
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_optInFaraScriptedActionUsesLiveTargetApproval()",
+          "result": "Passed",
+          "durationInSeconds": 0.2841160297393799
+        }
+      ]
+    },
+    {
+      "name": "native-approval-recovery-red-01",
+      "note": "Regression reproduces stale actionError and failure allowance after a successful approved action.",
+      "bundle": ".build/repair-verification/native-approval-recovery-red-01.xcresult",
+      "logSHA256": "a894e7e8c43e15d77440b4a3eae0f258e11501373d60ccf9d61f1a2fdaabeaae",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789375529.113,
+        "finishTime": 1789375555.622,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertNil failed: \"That action is not supported by the native desktop adapter. No input was sent. Choose a supported native action.\" - A verified approved effect must not be reported as the previous failure",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections",
+            "testName": "testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections()",
+          "result": "Failed",
+          "durationInSeconds": 1.3212159872055054
+        }
+      ]
+    },
+    {
+      "name": "native-approval-final-green-01",
+      "note": "Final rebuilt source: ten pass, scripted TextEdit fails before its first approval at changedScreen. Its changed pixel bounds include the title-bar region. This is a failed full batch, despite its filename.",
+      "bundle": ".build/repair-verification/native-approval-final-green-01.xcresult",
+      "logSHA256": "9e3889dbbd1a433bc0265c49dc393a9276c6c3929f5b58c4c584370569229a1d",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 10,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789375588.629,
+        "finishTime": 1789375618.226,
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "testFailures": [
+          {
+            "failureText": "failed - Real TextEdit task failed: changedScreen",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 8,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay",
+            "testName": "testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay()"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow()",
+          "result": "Passed",
+          "durationInSeconds": 0.02320396900177002
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeApprovedSuccessClearsThePriorErrorAndResetsConsecutiveRejections()",
+          "result": "Passed",
+          "durationInSeconds": 0.9062219858169556
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection()",
+          "result": "Passed",
+          "durationInSeconds": 0.5854400396347046
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopCancellationRejectsLateProposalAndConcurrentExecution()",
+          "result": "Passed",
+          "durationInSeconds": 0.0711069107055664
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeDesktopUncertainEffectCannotReplayOnResumeOrRestart()",
+          "result": "Passed",
+          "durationInSeconds": 0.22032296657562256
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeInsertionPointComparisonRejectsChangedContentAndOtherControls()",
+          "result": "Passed",
+          "durationInSeconds": 0.6782780885696411
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds()",
+          "result": "Passed",
+          "durationInSeconds": 3.0148040056228638
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay()",
+          "result": "Failed",
+          "durationInSeconds": 4.04135799407959
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_hostClickApprovalRequiresAnIdentifiedActionableControl()",
+          "result": "Passed",
+          "durationInSeconds": 0.0028570890426635742
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_optInFaraManagerRefreshesReplacedNativeControlBeforeApproval()",
+          "result": "Passed",
+          "durationInSeconds": 0.5678490400314331
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_optInFaraScriptedActionUsesLiveTargetApproval()",
+          "result": "Passed",
+          "durationInSeconds": 0.29240691661834717
+        }
+      ],
+      "workflow": {
+        "path": ".build/repair-verification/native-approval-final-green-01/workflow.json",
+        "sha256": "0a04c054d5353332c31d6d791ef89d227d89febc15530709b22d613b75bdd07f",
+        "report": {
+          "approvalRequests": [],
+          "approvalValidation": {},
+          "approvedEditorClicks": 0,
+          "approvedSaves": 0,
+          "credentialsRemoved": true,
+          "diagnosticWorkerLimitGiB": 0,
+          "documentOpenAndFrontmostAtReturn": true,
+          "editorClickEffects": 0,
+          "elapsedSeconds": 3.0810409784317017,
+          "expected": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n",
+          "failure": "RemoteDesktopHost.ComputerUseDesktopExecutor.Failure.changedScreen",
+          "finalNativeWindow": {
+            "modal": false,
+            "role": "AXWindow",
+            "subrole": "AXStandardWindow",
+            "title": "Travel notes.txt",
+            "truncated": false
+          },
+          "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+          "loaderActivationSeconds": 0,
+          "managedLaunchCount": 0,
+          "memorySamples": 0,
+          "memorySamplingStartsAfterLoaderActivation": true,
+          "original": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "ownedTextEditExited": true,
+          "ownedWorkersExited": true,
+          "peakWorkerMemoryBytes": 0,
+          "rejectedApprovalReplays": 0,
+          "responses": [
+            {
+              "actionError": "",
+              "response": "scripted native operation 0",
+              "screenshotSHA256": "75f1492437b1082d266d9fd34069141f5f9b05c243d5984c27bcc606fe398ad4"
+            }
+          ],
+          "result": "",
+          "revalidation": {
+            "editableAuthorityMatches": "true",
+            "focusMatches": "true",
+            "pointerAuthorityMatches": "true",
+            "pointerChangedDisplayBounds": "(194.0625, 83.58503401360544, 646.3125, 44.747543461829174)",
+            "pointerChangedPixelBounds": "(230.0, 99.0, 766.0, 53.0)",
+            "pointerFieldPixelBounds": "(219.0, 136.0, 778.0, 456.0)",
+            "pointerHasUnchangedEditorProof": "true",
+            "pointerPoint": "513,307",
+            "pointerTargetFrame": "(185.0, 115.0, 656.0, 384.0)",
+            "pointerTargetPixelsMatch": "false",
+            "screenMatches": "false",
+            "textFrameAfter": "Optional((185.0, 115.0, 656.0, 384.0))",
+            "textFrameBefore": "Optional((185.0, 115.0, 656.0, 384.0))",
+            "window": "Optional((185.0, 83.0, 656.0, 422.0))"
+          },
+          "savedBytesMatch": false,
+          "savedUTF8": "Meeting notes\nRoute: Seattle\nStatus: draft\n",
+          "saveEffects": 0,
+          "scope": "scripted-real-TextEdit",
+          "scriptCalls": 1,
+          "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
+          "wholeApp12GBQualified": false
+        }
+      }
+    }
+  ],
+  "outcome": {
+    "implemented": true,
+    "compiled": true,
+    "tested": true,
+    "accepted": "Scoped digest/window binding and post-approval feedback only; not whole TextEdit or model readiness",
+    "finalBatchPassed": 10,
+    "finalBatchFailed": 1,
+    "finalBatchSkipped": 0,
+    "newPassingMethods": 2,
+    "historicalMinimumMac": 360,
+    "historicalMinimumIOS": 10,
+    "fullCurrentSuite": false,
+    "actualHoloWholeTaskPassed": false
+  },
+  "nextInvestigation": [
+    "Reproduce the native window pixel changes without inference and retain the two compared images; current diagnostics retain only their bounding box.",
+    "Holo06 changedDisplayBounds=(817.59375,83.58503401360544,22.78125,421.30234315948604), along the right edge. Final scripted attempt=(194.0625,83.58503401360544,646.3125,44.747543461829174), across the title-bar region. Both retain matching focus, editable authority and window geometry.",
+    "A rectangular AX window includes rounded/transparent corners and transient rendering. These are candidate explanations only; the actual differing pixels were not retained. Do not mask them or attribute the failure without a controlled comparison.",
+    "Distinguish legitimate target changes and initial app animation from unrelated background visible through the window; keep changed-target rejection, cancellation and no replay.",
+    "Repeat the unchanged real TextEdit task after the measured native observation repair, with the now-tested continuation-state fix; then compare UI-TARS and Holo on complete fixed tasks."
+  ],
+  "limits": [
+    "The final batch is not green. Earlier scripted success remains a historical result, not repeatability acceptance.",
+    "Holo05 peak worker memory 4510351360 bytes; Holo06 4605542400 bytes, under the authorized diagnostic 5 GiB ceiling. The production 4 GiB ceiling, default Fara selection and total 12 GB acceptance are unchanged.",
+    "Holo05 and Holo06 both fail. No actual-model run has tested the final continuation-state fix yet.",
+    "The approvalValidation performed=true flags in Holo06 are from the deliberate rejected replay of its third approved click, not a failure of the fourth approval; the latter was refused by the test allowance before calling the executor.",
+    "The recurring main-thread UI-unresponsiveness runtime warning remains unexplained.",
+    "All observed trial workers, credentials and owned TextEdit instances exit. The installed /Applications/RemoteDesktopHost.app stays alive."
+  ],
+  "inspectedImage": {
+    "path": ".build/repair-verification/real-textedit-holo-06-attachments/FEC94226-74AE-43E8-9BF9-673353925238.png",
+    "sha256": "285605afd1fcc937156f2c54d05262afdf99753c3953b6a66f4646124a4b6e22",
+    "observation": "Final TextEdit window contains the original three lines, unchanged, with Codex behind it. The image alone does not identify the earlier differing pixels."
+  }
+}

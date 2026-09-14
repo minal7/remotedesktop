@@ -70,6 +70,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private var session: Session?
     private var isExecuting = false
     private(set) var lastRevalidationDiagnostic: [String: String] = [:]
+    /// Equality flags only: never retain action payloads, app content or hashes.
+    private(set) var lastApprovalDiagnostic: [String: String] = [:]
     /// Read-only access to the already bounded task history for opt-in
     /// diagnostics; reading it performs no capture, model request or input.
     var diagnosticHistory: [ComputerUseFaraModel.Step] { session?.history ?? [] }
@@ -361,8 +363,20 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         fingerprint: ComputerUseApprovalFingerprint, tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
         guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
         isExecuting = true; defer { isExecuting = false }
+        lastApprovalDiagnostic = [:]
         guard let session, let pending = session.approval, pending.continuation == continuation,
-              pending.action == action, pending.fingerprint == fingerprint, !pending.performed, session.terminal == nil else { throw Failure.invalidApproval }
+              pending.action == action, pending.fingerprint == fingerprint, !pending.performed, session.terminal == nil else {
+            if let session, let pending = session.approval {
+                lastApprovalDiagnostic = ["continuationMatches": String(pending.continuation == continuation),
+                    "actionMatches": String(pending.action == action),
+                    "fingerprintActionMatches": String(pending.fingerprint.action == fingerprint.action),
+                    "applicationMatches": String(pending.fingerprint.applicationID == fingerprint.applicationID),
+                    "accessibilityMatches": String(pending.fingerprint.accessibilityIdentity == fingerprint.accessibilityIdentity),
+                    "visualDigestMatches": String(pending.fingerprint.visualDigest == fingerprint.visualDigest),
+                    "performed": String(pending.performed), "terminal": String(session.terminal != nil)]
+            } else { lastApprovalDiagnostic = ["pendingApprovalMissing": "true"] }
+            throw Failure.invalidApproval
+        }
         let lease = try store.acquireExecution(taskID: session.journal.taskID, expected: session.journal)
         defer { lease.release() }
         do {
@@ -384,6 +398,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
               pending.action == action, pending.performed, session.terminal == nil else { throw Failure.invalidApproval }
         session.approval = nil
         record(pending.proposal, observation: pending.observation, session: session)
+        // Match the ordinary verified-input path: the next proposal observes
+        // success, and only subsequent consecutive rejections count.
+        session.actionError = nil; session.rejected = 0
         return try await execute(taskID: session.taskID, prompt: session.goal, trustedUserPrompt: session.goal, tools: tools, progress: progress)
     }
 
