@@ -776,6 +776,13 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
     let focusedElement: AXUIElement
     let documentIdentity: String?
 
+    func hasSameDocumentTarget(as other: Self) -> Bool {
+        application == other.application && window == other.window
+            && CFEqual(focusedElement, other.focusedElement)
+            && documentIdentity == other.documentIdentity && frame == other.frame && role == other.role
+            && text.isEditable == other.text.isEditable && text.isSecure == other.text.isSecure
+    }
+
     static func == (lhs: Self, rhs: Self) -> Bool {
         // Text-edit bindings deliberately retire on scope notifications. A
         // read does not inherit mutation authority from that transient UUID.

@@ -1,0 +1,2489 @@
+{
+  "date": "2026-09-14",
+  "baseCommit": "c096614",
+  "scope": "Default MCP-first executor, actual Apple on-device semantic planner, signed MacControlMCP helper, real TextEdit and HostComputerUseManager with a local test channel.",
+  "currentVerification": {
+    "distinctPassedMethods": 39,
+    "focusedMethods": 36,
+    "realNativeMethods": 3,
+    "skipped": 0,
+    "visualModelFallbackCalls": 0,
+    "successfulTasksConfirmedEffectsEach": 2
+  },
+  "design": [
+    "Available MCP tools precede visual fallback. Production uses no test values, app names or coordinates to select behavior.",
+    "Apple selects typed operations and ranges of host-owned task fragments. The host requires complete ordered source coverage and resolves exact user literals.",
+    "Exact UTF-8 replacement preserves other bytes; absent, ambiguous and overlapping matches reject. Files and result text are bounded to 16 KiB.",
+    "The actual focused AX control, process, window, document and complete plain-text file must agree before planning and dispatch.",
+    "Separate ordered approvals bind each effect. Native editor and saved-file state confirm action facts; final outcomes are checked before task completion."
+  ],
+  "limitations": [
+    "Two successful natural-language TextEdit workflows and one real stale-editor rejection are qualified. Other apps, rich/unsaved/large documents and general language remain unaccepted.",
+    "Source coverage verifies structure, not the correctness of every semantic classification by a language model.",
+    "The real manager and executor use a test channel, isolated signed helper, and approvals restricted to exact effects on disposable owned documents. This is not full HostSession, normal managed setup, real provider login or physical phone acceptance.",
+    "Native Take Control/Resume before and between approvals, process restart, global keyboard dispatch races and other-app Save behavior require further real qualification. Scripted ordered-continuation regressions pass.",
+    "The existing UI-responsiveness runtime warning remains in real native runs. Whole-app 12 GB RAM, heat, swap, idle and residency remain unqualified.",
+    "Fara selection is unchanged. No trained computer-use model ran. The installed host process was preserved."
+  ],
+  "nativeSchemaProbe": {
+    "file": ".build/repair-verification/document-schema-probe.swift",
+    "result": "Xcode beta swiftc typecheck passed for an associated-value Generable enum; no inference or effects."
+  },
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "9fad64c6943e3bdb1e2790c314dcb2db1edc1809a526fe98cca6cb9b30d95722",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "a0c4ca576054aa8f9d60cb36ded1d1c4157b8846c07f1b3e570e4d86a7b9781c",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "7dd936f8e598ed05d2de07095aaaa4536a7cc437814e576924ed150ef4b2a9d8",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPDocumentTask.swift": "9ece95f8a2cfb7c70b4f33ef954c587647c6ceb7eb095f17891bea7c17e9de88",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "043431d43fb95429eb7677bef27e8b2c5f443eac96ed6b62c6216abc558b96e5"
+  },
+  "attempts": [
+    {
+      "id": "mcp-native-host-task-red-01",
+      "bundle": ".build/repair-verification/mcp-native-host-task-red-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-red-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789384236.899,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789384196.09,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager",
+            "testName": "testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Failed",
+          "durationInSeconds": 5.13988995552063
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "editorExact": false,
+        "elapsedSeconds": 4.16049599647522,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"working\"}",
+            "createdAt": 811077017.170752,
+            "id": "0A5A5E39-A770-4531-A495-D444D0A26518",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Planning with on-device Apple Intelligence…\"}",
+            "createdAt": 811077017.63211,
+            "id": "73D47A5F-ABC8-4FE9-A464-D9C024366C10",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"This app needs visual control — switching locally…\"}",
+            "createdAt": 811077021.012739,
+            "id": "CD21969A-CD84-4C59-8EFE-6ED3FADD5B53",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"outcome\":\"unableToComplete\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Native document task reached model fallback\"}",
+            "createdAt": 811077021.012774,
+            "id": "FCB5AB0B-43A6-4218-B757-211DC39F4288",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"ready\"}",
+            "createdAt": 811077021.012812,
+            "id": "F455E1A8-E62A-4C48-8A11-F34E25F10926",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-native-host-task-green-01",
+      "bundle": ".build/repair-verification/mcp-native-host-task-green-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-green-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789384598.089,
+        "passedTests": 0,
+        "result": "unknown",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789384589.478,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 0
+      },
+      "tests": [],
+      "buildFailure": "ApprovedActionRecord.callDigest does not exist; corrected to fingerprint.canonicalDigest. No test executed."
+    },
+    {
+      "id": "mcp-native-host-task-green-02",
+      "bundle": ".build/repair-verification/mcp-native-host-task-green-02.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-green-02.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789384792.416,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789384621.568,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager",
+            "testName": "testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Failed",
+          "durationInSeconds": 6.413111925125122
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "editorExact": false,
+        "elapsedSeconds": 5.353816032409668,
+        "failure": "nil",
+        "fallbackCalls": 0,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"text\":\"working\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811077571.342103,
+            "id": "F03BBF87-E013-4B29-BC82-CE6A9ED4A755",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811077571.388645,
+            "id": "7596F26B-5FCC-46B4-9A0B-D7005DFF5AC6",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"I couldn't complete that task: The local planner took too long to choose the next step. No further action was taken; earlier completed steps remain on the Mac.\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"outcome\":\"unableToComplete\"}",
+            "createdAt": 811077576.37569,
+            "id": "352C6685-3D0A-4425-9D30-8F12E278D4EB",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"ready\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811077576.375738,
+            "id": "CF50DF63-8D42-453C-BE07-37B36B8D8AB9",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "I couldn't complete that task: The local planner took too long to choose the next step. No further action was taken; earlier completed steps remain on the Mac."
+      }
+    },
+    {
+      "id": "mcp-native-host-task-green-03",
+      "bundle": ".build/repair-verification/mcp-native-host-task-green-03.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-green-03.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789384944.16,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789384897.155,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager",
+            "testName": "testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Failed",
+          "durationInSeconds": 10.493889927864075
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "editorExact": false,
+        "elapsedSeconds": 9.475233912467957,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"working\",\"hostControlEpoch\":0}",
+            "createdAt": 811077718.990585,
+            "id": "8F19EB13-4F08-474B-A996-B095DB59C237",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811077719.029627,
+            "id": "0CB00DBA-8509-450A-BA00-85D6CB61523F",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811077725.568881,
+            "id": "02AFCC3B-EA39-4B65-8BAB-BECE9DC96D85",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"This app needs visual control — switching locally…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811077728.164922,
+            "id": "E95D45B6-4C0D-46AE-BB46-8A2F073EC310",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Native document task reached model fallback\",\"outcome\":\"unableToComplete\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811077728.164992,
+            "id": "5BCB90E1-6600-43C6-AB36-867484D441AB",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"ready\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811077728.165042,
+            "id": "F18A452A-FF87-463C-AEE2-08961EFC762A",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-document-core-01",
+      "bundle": ".build/repair-verification/mcp-document-core-01.xcresult",
+      "log": ".build/repair-verification/mcp-document-core-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 6,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789384982.363,
+        "passedTests": 6,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789384981.177,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 6
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationPreservesBytesAcrossDifferentTasks()",
+          "result": "Passed",
+          "durationInSeconds": 0.0031429529190063477
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsAmbiguousOrMissingLiteral()",
+          "result": "Passed",
+          "durationInSeconds": 0.0016869306564331055
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsUnboundPayloadAndConflictingOrder()",
+          "result": "Passed",
+          "durationInSeconds": 0.0020630359649658203
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRequiresCompleteTaskAndExactTarget()",
+          "result": "Passed",
+          "durationInSeconds": 0.001716017723083496
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRetainsUnicodeDistinctnessAndDeletion()",
+          "result": "Passed",
+          "durationInSeconds": 0.0015759468078613281
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPPlainDocumentReadRejectsRichAndOversizedFiles()",
+          "result": "Passed",
+          "durationInSeconds": 0.0022569894790649414
+        }
+      ]
+    },
+    {
+      "id": "mcp-native-host-task-observed-01",
+      "bundle": ".build/repair-verification/mcp-native-host-task-observed-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-observed-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789385112.053,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789385045.953,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager",
+            "testName": "testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Failed",
+          "durationInSeconds": 10.474868059158325
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Seattle\", value: \"Zürich\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Zürich\", value: \"東京\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.preserveOtherText, find: \"all other text and line breaks\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"save the document\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"leave its window open\", value: \"\")]))"
+        ],
+        "editorExact": false,
+        "elapsedSeconds": 9.488692045211792,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"working\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811077886.962874,
+            "id": "3B5EFFD7-D8B2-4F40-B4D4-B4E3FF2200C4",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Planning the document task with on-device Apple Intelligence…\"}",
+            "createdAt": 811077887.005042,
+            "id": "5B3A1FE4-03EB-4213-B2B2-6A61BCBFDC1D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"Planning with on-device Apple Intelligence…\"}",
+            "createdAt": 811077893.527438,
+            "id": "867A9008-7226-447D-B5FA-527A56DBCBA2",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"This app needs visual control — switching locally…\"}",
+            "createdAt": 811077896.14369,
+            "id": "3BCB7A99-2C17-4BD5-893C-4CD043C271B4",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"outcome\":\"unableToComplete\",\"text\":\"Native document task reached model fallback\"}",
+            "createdAt": 811077896.143729,
+            "id": "D6A54A99-CFDD-4F45-9D7B-455ADF516D7F",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"ready\"}",
+            "createdAt": 811077896.143803,
+            "id": "EBFB15D2-E4BE-499F-9E69-02ADA58EF9CA",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-native-host-task-structured-01",
+      "bundle": ".build/repair-verification/mcp-native-host-task-structured-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-structured-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789385296.925,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789385190.685,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager",
+            "testName": "testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Failed",
+          "durationInSeconds": 8.362267017364502
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"replace Seattle with Zürich → 東京\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Seattle\", value: \"Zürich → 東京\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"keep all other text and line breaks unchanged\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.preserveOtherText, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"save the document\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"leave its window open\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": false,
+        "elapsedSeconds": 7.311748027801514,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"working\",\"hostControlEpoch\":0}",
+            "createdAt": 811078073.885216,
+            "id": "3B5BCA06-78DD-4123-BB66-C58F62B931A9",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"hostControlEpoch\":0}",
+            "createdAt": 811078073.931675,
+            "id": "2492308F-A215-4604-B48C-23D0FD4F3D35",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"Planning with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078078.284756,
+            "id": "05101BCA-ED46-4B04-9D32-90E62C949D78",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"This app needs visual control — switching locally…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078080.890105,
+            "id": "B7F19335-7079-43F5-B323-891D245819AC",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Native document task reached model fallback\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"outcome\":\"unableToComplete\"}",
+            "createdAt": 811078080.89019,
+            "id": "2EA7737C-7B40-4674-B9C9-9ED4EC3F280E",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"ready\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078080.890246,
+            "id": "0705206A-967C-4337-AF9B-BD638F75EED2",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-native-host-task-structured-02",
+      "bundle": ".build/repair-verification/mcp-native-host-task-structured-02.xcresult",
+      "log": ".build/repair-verification/mcp-native-host-task-structured-02.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789385385.897,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789385350.124,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Passed",
+          "durationInSeconds": 6.8626919984817505
+        }
+      ],
+      "realTask": {
+        "approvalCount": 2,
+        "approvedCalls": [
+          {
+            "approvalConfirmLabel": "Allow action",
+            "approvalDetails": "Perform the reviewed accessibility action set_element_attribute. Argument values are hidden here for privacy.",
+            "approvalSummary": "Control this app on your Mac?",
+            "arguments": {
+              "element_id": "el_d43062b1c0a9cf92",
+              "name": "AXValue",
+              "value": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
+            },
+            "argumentsDigest": "9a133709de721591745bc0b023b771b1f54a327e73cb94309d4571f442219716",
+            "canonicalArguments": "{\"element_id\":\"el_d43062b1c0a9cf92\",\"name\":\"AXValue\",\"value\":\"Meeting notes\\nRoute: Zürich → 東京\\nStatus: draft\\n\"}",
+            "canonicalDigest": "5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc",
+            "processGeneration": 2,
+            "risk": "approvalRequired",
+            "schemaDigest": "ef3d2e028fa7f03b9d0fa4bc0cb73e92abbfa9e680eaf53d522f23e0136b1d58",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "15d8cc8fabd9b1aa88dae2017edbcc4f2c1c3bed04cf29b840e33d0342fa7d76",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "set_element_attribute"
+          },
+          {
+            "approvalConfirmLabel": "Press key",
+            "approvalDetails": "Key: s",
+            "approvalSummary": "Press a key on this Mac?",
+            "arguments": {
+              "key": "s",
+              "modifiers": [
+                "command"
+              ]
+            },
+            "argumentsDigest": "e525b119e902e87c448e8df071db447319ca486eacd10fbdafc8976f9f7516ee",
+            "canonicalArguments": "{\"key\":\"s\",\"modifiers\":[\"command\"]}",
+            "canonicalDigest": "4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac",
+            "processGeneration": 3,
+            "risk": "approvalRequired",
+            "schemaDigest": "8984e4d26e6796fb5b1f8e3971773aa879b11835c101407ef9e9ebc5cc7753ca",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "a3926f622901156287fce280b90555e426969c7dca5ac8d4a55874fae1975fa5",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "press_key"
+          }
+        ],
+        "confirmedActionCount": 2,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Seattle\", value: \"Zürich → 東京\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"Keep all other text and line breaks unchanged,\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.preserveOtherText, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"save the document,\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"and leave its window open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": true,
+        "elapsedSeconds": 6.5479090213775635,
+        "failure": "nil",
+        "fallbackCalls": 0,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"working\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078163.968839,
+            "id": "3AD36475-E2B7-4D68-956E-A803C9D37665",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078164.013887,
+            "id": "090289E0-6ED1-4424-9B7B-9AEC136AFEA5",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"requestID\":\"2DF0D828-E6A8-4EC1-8B6D-F603AD7D870C\",\"confirmLabel\":\"Allow action\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"details\":[{\"label\":\"Exact local action\",\"value\":\"{\\\"element_id\\\":\\\"el_d43062b1c0a9cf92\\\",\\\"name\\\":\\\"AXValue\\\",\\\"value\\\":\\\"Meeting notes\\\\nRoute: Zürich → 東京\\\\nStatus: draft\\\\n\\\"}\"}],\"message\":\"Control this app on your Mac?\"}",
+            "createdAt": 811078169.263723,
+            "id": "2DF0D828-E6A8-4EC1-8B6D-F603AD7D870C",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Waiting for your approval before continuing…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078169.263735,
+            "id": "F20A818E-DD1F-4E84-AE97-383E9F3417E7",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Performing the one approved Mac action…\",\"hostControlEpoch\":0}",
+            "createdAt": 811078169.269571,
+            "id": "28D44D1F-AC06-4438-9339-8200B9F5A62D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"\",\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc\"},\"taskID\":\"real-textedit-mcp-task\",\"isApprovedActionEvidenceOnly\":true}",
+            "createdAt": 811078169.279854,
+            "id": "78B49C84-63FE-43DB-82EE-A3DC7CEC7A24",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"text\":\"Applying the approved document edit…\",\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc\"},\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078169.279897,
+            "id": "AA1ABF48-2D58-4A61-99E4-F5894958A678",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"\",\"approvedActionEvidence\":{\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"state\":\"confirmed\",\"actionID\":\"5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc\",\"summary\":\"The focused document contains the approved text.\"},\"taskID\":\"real-textedit-mcp-task\",\"isApprovedActionEvidenceOnly\":true}",
+            "createdAt": 811078169.413523,
+            "id": "FC3F90F4-536E-470A-B103-3B0464C59FED",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"details\":[{\"value\":\"{\\\"key\\\":\\\"s\\\",\\\"modifiers\\\":[\\\"command\\\"]}\",\"label\":\"Exact local action\"}],\"taskID\":\"real-textedit-mcp-task\",\"requestID\":\"1B723088-9B45-43FE-BFA6-796C459449E5\",\"confirmLabel\":\"Press key\",\"message\":\"Press a key on this Mac?\",\"hostControlEpoch\":0}",
+            "createdAt": 811078170.002546,
+            "id": "1B723088-9B45-43FE-BFA6-796C459449E5",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"state\":\"confirmed\",\"actionID\":\"5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc\",\"summary\":\"The focused document contains the approved text.\"},\"text\":\"Waiting for your approval before continuing…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.002554,
+            "id": "B9E4194F-AD28-4730-9390-A42696C7BF06",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Performing the one approved Mac action…\",\"hostControlEpoch\":0,\"approvedActionEvidence\":{\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"summary\":\"The focused document contains the approved text.\",\"actionID\":\"5e638f50569fcaf2446f9acbc3a9d43b15a2aabe4009b3126926a4c05923affc\",\"state\":\"confirmed\"}}",
+            "createdAt": 811078170.019042,
+            "id": "488B03F4-AC88-4C7F-9AC7-E7609BAFD522",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"isApprovedActionEvidenceOnly\":true,\"text\":\"\",\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\"},\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.033967,
+            "id": "84DA1068-CEE3-4F5D-83B5-164A12C5B371",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\"},\"text\":\"Saving the approved document…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.03402,
+            "id": "EE4E4857-3018-40DD-93C3-EA8C68931A4A",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"isApprovedActionEvidenceOnly\":true,\"text\":\"\",\"approvedActionEvidence\":{\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"state\":\"confirmed\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"summary\":\"The saved file contains the approved text.\"},\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.211897,
+            "id": "46C25555-42E0-44D1-AAEE-1879D6AD216B",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"state\":\"confirmed\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"summary\":\"The saved file contains the approved text.\"},\"outcome\":\"taskCompleted\",\"text\":\"The document is updated and saved, and its window is still open.\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.211975,
+            "id": "9D6B9320-5FED-41C4-A595-8CE34D2E5976",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"state\":\"confirmed\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"summary\":\"The saved file contains the approved text.\"},\"text\":\"ready\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078170.21202,
+            "id": "783170ED-038B-4A12-8CF9-D2F7B682663F",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": true,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "terminalOutcome": "taskCompleted",
+        "terminalText": "The document is updated and saved, and its window is still open."
+      }
+    },
+    {
+      "id": "mcp-document-overlap-red-01",
+      "bundle": ".build/repair-verification/mcp-document-overlap-red-01.xcresult",
+      "log": ".build/repair-verification/mcp-document-overlap-red-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789385559.455,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789385528.643,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertNil failed: \"ComputerUseMCPDocumentEdit(expected: \"ba\", save: false)\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsOverlappingLiteralMatches()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsOverlappingLiteralMatches",
+            "testName": "testMCPDocumentCompilationRejectsOverlappingLiteralMatches()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertNil failed: \"ComputerUseMCPDocumentEdit(expected: \"ba\", save: false)\""
+          }
+        ],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsOverlappingLiteralMatches()",
+          "result": "Failed",
+          "durationInSeconds": 0.6650789976119995
+        }
+      ]
+    },
+    {
+      "id": "mcp-document-core-final-01",
+      "bundle": ".build/repair-verification/mcp-document-core-final-01.xcresult",
+      "log": ".build/repair-verification/mcp-document-core-final-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 7,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789385633.999,
+        "passedTests": 7,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789385619.186,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 7
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationPreservesBytesAcrossDifferentTasks()",
+          "result": "Passed",
+          "durationInSeconds": 0.0031789541244506836
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsAmbiguousOrMissingLiteral()",
+          "result": "Passed",
+          "durationInSeconds": 0.001804947853088379
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsOverlappingLiteralMatches()",
+          "result": "Passed",
+          "durationInSeconds": 0.001125931739807129
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsUnboundPayloadAndConflictingOrder()",
+          "result": "Passed",
+          "durationInSeconds": 0.0019450187683105469
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRequiresCompleteTaskAndExactTarget()",
+          "result": "Passed",
+          "durationInSeconds": 0.001640915870666504
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRetainsUnicodeDistinctnessAndDeletion()",
+          "result": "Passed",
+          "durationInSeconds": 0.0013740062713623047
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPPlainDocumentReadRejectsRichAndOversizedFiles()",
+          "result": "Passed",
+          "durationInSeconds": 0.0021170377731323242
+        }
+      ]
+    },
+    {
+      "id": "mcp-native-document-append-01",
+      "bundle": ".build/repair-verification/mcp-native-document-append-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-append-01.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789385708.441,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789385684.252,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument",
+            "testName": "testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()",
+          "result": "Failed",
+          "durationInSeconds": 8.390361070632935
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"[exact quoted payload p1] to the current document\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.append, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"save it\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"and leave it open\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": false,
+        "elapsedSeconds": 7.353783965110779,
+        "externalEditPreserved": false,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
+        "messages": [
+          {
+            "body": "{\"text\":\"working\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078485.555927,
+            "id": "E5A390AF-DB06-48DB-986F-201820624909",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Planning the document task with on-device Apple Intelligence…\"}",
+            "createdAt": 811078486.054202,
+            "id": "83147374-0FB7-4ED2-83E3-3FB2D9077695",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811078489.954753,
+            "id": "074CADEF-A46E-40EA-8A6C-4C8AD13B7D68",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"This app needs visual control — switching locally…\",\"hostControlEpoch\":0}",
+            "createdAt": 811078492.593413,
+            "id": "C5474BD7-C3AC-4C97-974A-2062305BC3C9",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"outcome\":\"unableToComplete\",\"text\":\"Native document task reached model fallback\",\"hostControlEpoch\":0}",
+            "createdAt": 811078492.593484,
+            "id": "0576FE29-75B9-48BA-917F-CD197EAAAFC0",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"text\":\"ready\",\"hostControlEpoch\":0}",
+            "createdAt": 811078492.593535,
+            "id": "77D26292-5CA1-4406-B985-D27239EB6896",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "staleEditExperiment": false,
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-native-document-append-02",
+      "bundle": ".build/repair-verification/mcp-native-document-append-02.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-append-02.log",
+      "currentSource": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789385957.141,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789385848.302,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument",
+            "testName": "testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()",
+          "result": "Failed",
+          "durationInSeconds": 9.137186050415039
+        }
+      ],
+      "realTask": {
+        "approvalCount": 0,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"Append [exact quoted payload p1] to the current document\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.append, find: \"\", value: \"[exact quoted payload p1]\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"[exact quoted payload p1] to the current document, save it, and leave it open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"save it, and leave it open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": false,
+        "elapsedSeconds": 8.054425954818726,
+        "externalEditPreserved": false,
+        "failure": "nil",
+        "fallbackCalls": 1,
+        "goal": "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
+        "messages": [
+          {
+            "body": "{\"text\":\"working\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811078731.670632,
+            "id": "901EF94F-E895-4A2B-A7D1-52AF0CAC36F8",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"Planning the document task with on-device Apple Intelligence…\"}",
+            "createdAt": 811078732.148072,
+            "id": "43E4F084-CC4C-4E0F-ADD0-CE5B58109EE6",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning with on-device Apple Intelligence…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078736.770977,
+            "id": "DE129DE5-2237-4B3A-91A7-247A6265EBE0",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"This app needs visual control — switching locally…\"}",
+            "createdAt": 811078739.428593,
+            "id": "91D1477B-8BE1-4200-AA09-D144A6A982C0",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"outcome\":\"unableToComplete\",\"hostControlEpoch\":0,\"text\":\"Native document task reached model fallback\"}",
+            "createdAt": 811078739.428641,
+            "id": "B6287F67-BFB3-40EC-9FE6-F08F522643F8",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"ready\"}",
+            "createdAt": 811078739.42869,
+            "id": "25E681B6-A465-40CA-8130-FAE483B5781C",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "staleEditExperiment": false,
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "Native document task reached model fallback"
+      }
+    },
+    {
+      "id": "mcp-native-document-append-03",
+      "bundle": ".build/repair-verification/mcp-native-document-append-03.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-append-03.log",
+      "currentSource": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789386207.887,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789386095.888,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument()",
+          "result": "Passed",
+          "durationInSeconds": 6.642582893371582
+        }
+      ],
+      "realTask": {
+        "approvalCount": 2,
+        "approvedCalls": [
+          {
+            "approvalConfirmLabel": "Allow action",
+            "approvalDetails": "Perform the reviewed accessibility action set_element_attribute. Argument values are hidden here for privacy.",
+            "approvalSummary": "Control this app on your Mac?",
+            "arguments": {
+              "element_id": "el_da7c93d9c5b0a29d",
+              "name": "AXValue",
+              "value": "Release notes\n\nApproved by the team."
+            },
+            "argumentsDigest": "300bdf7baf16ba94db53cc81bcf63850f3f1c08ebd71a96631337867941de42c",
+            "canonicalArguments": "{\"element_id\":\"el_da7c93d9c5b0a29d\",\"name\":\"AXValue\",\"value\":\"Release notes\\n\\nApproved by the team.\"}",
+            "canonicalDigest": "40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1",
+            "processGeneration": 2,
+            "risk": "approvalRequired",
+            "schemaDigest": "ef3d2e028fa7f03b9d0fa4bc0cb73e92abbfa9e680eaf53d522f23e0136b1d58",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "7faafe8aa390b430c3f688256d41b8d07315a032cfdbc0b2ebbf06b1b362e3d2",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "set_element_attribute"
+          },
+          {
+            "approvalConfirmLabel": "Press key",
+            "approvalDetails": "Key: s",
+            "approvalSummary": "Press a key on this Mac?",
+            "arguments": {
+              "key": "s",
+              "modifiers": [
+                "command"
+              ]
+            },
+            "argumentsDigest": "e525b119e902e87c448e8df071db447319ca486eacd10fbdafc8976f9f7516ee",
+            "canonicalArguments": "{\"key\":\"s\",\"modifiers\":[\"command\"]}",
+            "canonicalDigest": "4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac",
+            "processGeneration": 3,
+            "risk": "approvalRequired",
+            "schemaDigest": "8984e4d26e6796fb5b1f8e3971773aa879b11835c101407ef9e9ebc5cc7753ca",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "a3926f622901156287fce280b90555e426969c7dca5ac8d4a55874fae1975fa5",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "press_key"
+          }
+        ],
+        "confirmedActionCount": 2,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"Append [exact quoted payload p1] to the current document,\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.append, find: \"\", value: \"[exact quoted payload p1]\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \" save it, \", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"and leave it open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": true,
+        "elapsedSeconds": 6.342892050743103,
+        "externalEditPreserved": false,
+        "failure": "nil",
+        "fallbackCalls": 0,
+        "goal": "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
+        "messages": [
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"working\"}",
+            "createdAt": 811078986.551983,
+            "id": "32C0B9AB-1081-4174-9C5D-096ABA88AB91",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"Planning the document task with on-device Apple Intelligence…\"}",
+            "createdAt": 811078987.042682,
+            "id": "644BCB7F-E1F9-45D5-AD31-0319FE3A3C17",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"message\":\"Control this app on your Mac?\",\"requestID\":\"03B94050-64B3-43EF-AA0C-C3E2ECE28605\",\"details\":[{\"label\":\"Exact local action\",\"value\":\"{\\\"element_id\\\":\\\"el_da7c93d9c5b0a29d\\\",\\\"name\\\":\\\"AXValue\\\",\\\"value\\\":\\\"Release notes\\\\n\\\\nApproved by the team.\\\"}\"}],\"taskID\":\"real-textedit-mcp-task\",\"confirmLabel\":\"Allow action\"}",
+            "createdAt": 811078991.631044,
+            "id": "03B94050-64B3-43EF-AA0C-C3E2ECE28605",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Waiting for your approval before continuing…\"}",
+            "createdAt": 811078991.631051,
+            "id": "72B5A560-53DB-482E-8ECE-50346FA01BBB",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Performing the one approved Mac action…\"}",
+            "createdAt": 811078991.651408,
+            "id": "E3EBF1FB-4F27-482E-B051-47193BA0F4D4",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"isApprovedActionEvidenceOnly\":true,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"\",\"approvedActionEvidence\":{\"actionID\":\"40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1\",\"state\":\"unconfirmed\"}}",
+            "createdAt": 811078991.663003,
+            "id": "D3F73F32-5B11-4464-8A33-0A791508BFAC",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Applying the approved document edit…\",\"approvedActionEvidence\":{\"actionID\":\"40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1\",\"state\":\"unconfirmed\"}}",
+            "createdAt": 811078991.66305,
+            "id": "24DFA3C6-200F-4B8C-82D0-BAC2A92AED3F",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"isApprovedActionEvidenceOnly\":true,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"\",\"approvedActionEvidence\":{\"actionID\":\"40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"summary\":\"The focused document contains the approved text.\",\"state\":\"confirmed\"}}",
+            "createdAt": 811078991.807067,
+            "id": "1DBB0FCC-F37E-46F3-9779-D33306A1D043",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"message\":\"Press a key on this Mac?\",\"requestID\":\"CE3EC184-FB49-405C-A560-C601ED2FA3B7\",\"details\":[{\"label\":\"Exact local action\",\"value\":\"{\\\"key\\\":\\\"s\\\",\\\"modifiers\\\":[\\\"command\\\"]}\"}],\"taskID\":\"real-textedit-mcp-task\",\"confirmLabel\":\"Press key\"}",
+            "createdAt": 811078992.383664,
+            "id": "CE3EC184-FB49-405C-A560-C601ED2FA3B7",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Waiting for your approval before continuing…\",\"approvedActionEvidence\":{\"actionID\":\"40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"summary\":\"The focused document contains the approved text.\",\"state\":\"confirmed\"}}",
+            "createdAt": 811078992.383671,
+            "id": "71E7086F-6B18-4765-A5CE-3E424F3F3E34",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Performing the one approved Mac action…\",\"approvedActionEvidence\":{\"actionID\":\"40788d3022937b7a70654bd2f5e4a375b4ebeef505206e344457d00ed466c0b1\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"summary\":\"The focused document contains the approved text.\",\"state\":\"confirmed\"}}",
+            "createdAt": 811078992.395557,
+            "id": "54BEC94E-489B-4D4C-947B-664EDA52F342",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"isApprovedActionEvidenceOnly\":true,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"\",\"approvedActionEvidence\":{\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"unconfirmed\"}}",
+            "createdAt": 811078992.410193,
+            "id": "38C1DC5C-839E-46DA-98E3-45010C3C90D9",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Saving the approved document…\",\"approvedActionEvidence\":{\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"unconfirmed\"}}",
+            "createdAt": 811078992.410218,
+            "id": "B8491FA3-FCAF-485C-BCFE-D4CAC0F0459B",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"\",\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"isApprovedActionEvidenceOnly\":true,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078992.589411,
+            "id": "150632C8-270D-45D5-9AD1-28E1F49371A1",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"The document is updated and saved, and its window is still open.\",\"hostControlEpoch\":0,\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"outcome\":\"taskCompleted\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078992.589491,
+            "id": "A38DC3B2-6C03-40FD-931C-4782AD3F58F7",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"ready\",\"hostControlEpoch\":0,\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811078992.589517,
+            "id": "6F17F321-7765-480C-9B88-2B062C98FC8D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": true,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "staleEditExperiment": false,
+        "terminalOutcome": "taskCompleted",
+        "terminalText": "The document is updated and saved, and its window is still open."
+      }
+    },
+    {
+      "id": "mcp-native-document-replacement-final-01",
+      "bundle": ".build/repair-verification/mcp-native-document-replacement-final-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-replacement-final-01.log",
+      "currentSource": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789386237.112,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789386221.076,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager()",
+          "result": "Passed",
+          "durationInSeconds": 7.21240496635437
+        }
+      ],
+      "realTask": {
+        "approvalCount": 2,
+        "approvedCalls": [
+          {
+            "approvalConfirmLabel": "Allow action",
+            "approvalDetails": "Perform the reviewed accessibility action set_element_attribute. Argument values are hidden here for privacy.",
+            "approvalSummary": "Control this app on your Mac?",
+            "arguments": {
+              "element_id": "el_c8c93c01282671c1",
+              "name": "AXValue",
+              "value": "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
+            },
+            "argumentsDigest": "b621ffe4e40df20f46cde5e8833b17a7edc9118762a135f9e313453fe0090f17",
+            "canonicalArguments": "{\"element_id\":\"el_c8c93c01282671c1\",\"name\":\"AXValue\",\"value\":\"Meeting notes\\nRoute: Zürich → 東京\\nStatus: draft\\n\"}",
+            "canonicalDigest": "d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474",
+            "processGeneration": 2,
+            "risk": "approvalRequired",
+            "schemaDigest": "ef3d2e028fa7f03b9d0fa4bc0cb73e92abbfa9e680eaf53d522f23e0136b1d58",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "080050db6414076b63c54a02d9838d3990ba254a788a8d352daed0fe59f07c29",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "set_element_attribute"
+          },
+          {
+            "approvalConfirmLabel": "Press key",
+            "approvalDetails": "Key: s",
+            "approvalSummary": "Press a key on this Mac?",
+            "arguments": {
+              "key": "s",
+              "modifiers": [
+                "command"
+              ]
+            },
+            "argumentsDigest": "e525b119e902e87c448e8df071db447319ca486eacd10fbdafc8976f9f7516ee",
+            "canonicalArguments": "{\"key\":\"s\",\"modifiers\":[\"command\"]}",
+            "canonicalDigest": "4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac",
+            "processGeneration": 3,
+            "risk": "approvalRequired",
+            "schemaDigest": "8984e4d26e6796fb5b1f8e3971773aa879b11835c101407ef9e9ebc5cc7753ca",
+            "serverID": "io.github.AdelElo13.mac-control-mcp",
+            "stepEffectID": "a3926f622901156287fce280b90555e426969c7dca5ac8d4a55874fae1975fa5",
+            "taskID": "real-textedit-mcp-task",
+            "toolName": "press_key"
+          }
+        ],
+        "confirmedActionCount": 2,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Seattle\", value: \"Zürich → 東京\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \" Keep all other text and line breaks unchanged,\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.preserveOtherText, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \" save the document, \", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"and leave its window open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": true,
+        "elapsedSeconds": 6.9015949964523315,
+        "externalEditPreserved": false,
+        "failure": "nil",
+        "fallbackCalls": 0,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"text\":\"working\"}",
+            "createdAt": 811079022.466058,
+            "id": "1DC16AF9-D8C6-431B-B15E-DEC19BABF871",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079022.959367,
+            "id": "3494F971-25BB-431F-82F6-D94772B2F8AC",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"details\":[{\"label\":\"Exact local action\",\"value\":\"{\\\"element_id\\\":\\\"el_c8c93c01282671c1\\\",\\\"name\\\":\\\"AXValue\\\",\\\"value\\\":\\\"Meeting notes\\\\nRoute: Zürich → 東京\\\\nStatus: draft\\\\n\\\"}\"}],\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"message\":\"Control this app on your Mac?\",\"confirmLabel\":\"Allow action\",\"requestID\":\"E1C6D708-21FA-4BAC-859A-0CADF508DAB5\"}",
+            "createdAt": 811079028.048583,
+            "id": "E1C6D708-21FA-4BAC-859A-0CADF508DAB5",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Waiting for your approval before continuing…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811079028.048595,
+            "id": "F74236D4-871D-46F7-87EA-7745B57FCDFE",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Performing the one approved Mac action…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079028.067839,
+            "id": "9F531508-936E-49BD-AAEF-04A1277ED2F0",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474\"},\"isApprovedActionEvidenceOnly\":true,\"text\":\"\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079028.079481,
+            "id": "6209CE39-9952-4D75-8FD6-EAF1C4E3D27F",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474\"},\"text\":\"Applying the approved document edit…\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079028.079573,
+            "id": "9349610C-46D3-4222-857C-06BADB40AB7D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"\",\"isApprovedActionEvidenceOnly\":true,\"taskID\":\"real-textedit-mcp-task\",\"approvedActionEvidence\":{\"summary\":\"The focused document contains the approved text.\",\"actionID\":\"d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"state\":\"confirmed\"}}",
+            "createdAt": 811079028.221081,
+            "id": "1E87790F-916E-4E98-9C99-3AEDC7214C2A",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"details\":[{\"label\":\"Exact local action\",\"value\":\"{\\\"key\\\":\\\"s\\\",\\\"modifiers\\\":[\\\"command\\\"]}\"}],\"confirmLabel\":\"Press key\",\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"message\":\"Press a key on this Mac?\",\"requestID\":\"80365DDD-64EF-46A3-8827-389734D73EA9\"}",
+            "createdAt": 811079028.827206,
+            "id": "80365DDD-64EF-46A3-8827-389734D73EA9",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\",\"approvedActionEvidence\":{\"state\":\"confirmed\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"actionID\":\"d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474\",\"summary\":\"The focused document contains the approved text.\"},\"text\":\"Waiting for your approval before continuing…\"}",
+            "createdAt": 811079028.827215,
+            "id": "16D98709-B74D-4C89-BCFD-549C92462AFD",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"approvedActionEvidence\":{\"state\":\"confirmed\",\"resultDigest\":\"8314194a283c1bf9b19af9d59ee5343cb243b4bea1495af9307c75d97b819d1c\",\"summary\":\"The focused document contains the approved text.\",\"actionID\":\"d2fca5c443c8fb0384b43258dcc7d5227dd6caffceef2a7c7e5740a73dfab474\"},\"taskID\":\"real-textedit-mcp-task\",\"text\":\"Performing the one approved Mac action…\"}",
+            "createdAt": 811079028.86547,
+            "id": "DDB8173C-0995-477E-9261-2C75550A32E1",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"\",\"approvedActionEvidence\":{\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"unconfirmed\"},\"taskID\":\"real-textedit-mcp-task\",\"isApprovedActionEvidenceOnly\":true}",
+            "createdAt": 811079028.875807,
+            "id": "95A4D64B-7AD2-40AC-9B57-63267E6BD12D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Saving the approved document…\",\"approvedActionEvidence\":{\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"unconfirmed\"},\"hostControlEpoch\":0,\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079028.87584,
+            "id": "C8E8CCA3-47CC-4EB7-A0C0-64D116149BF5",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"isApprovedActionEvidenceOnly\":true,\"text\":\"\"}",
+            "createdAt": 811079029.052879,
+            "id": "DEF9DA3B-1300-4B1E-8974-943E5669C09D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"outcome\":\"taskCompleted\",\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"text\":\"The document is updated and saved, and its window is still open.\"}",
+            "createdAt": 811079029.052975,
+            "id": "71CD4750-F3D0-4FE9-88A5-CBF88AEDAA45",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"approvedActionEvidence\":{\"summary\":\"The saved file contains the approved text.\",\"resultDigest\":\"cf198aad83ca3594168ac416667ed96ad70abb48da12bf91be0a2bbf250ca126\",\"actionID\":\"4deeb4c7307035519406daf1cfef50fec4fc7c2eb6a8d6ddf557550dc7ee51ac\",\"state\":\"confirmed\"},\"text\":\"ready\"}",
+            "createdAt": 811079029.052997,
+            "id": "4080D8B7-5E73-46BF-AD60-0665FBD2CF2D",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": true,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "staleEditExperiment": false,
+        "terminalOutcome": "taskCompleted",
+        "terminalText": "The document is updated and saved, and its window is still open."
+      }
+    },
+    {
+      "id": "mcp-native-document-stale-01",
+      "bundle": ".build/repair-verification/mcp-native-document-stale-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-stale-01.log",
+      "currentSource": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789386308.492,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789386293.317,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testOptInRealTextEditMCPRejectsAnEditChangedDuringApproval()",
+          "result": "Passed",
+          "durationInSeconds": 6.22889506816864
+        }
+      ],
+      "realTask": {
+        "approvalCount": 1,
+        "approvedCalls": [],
+        "confirmedActionCount": 0,
+        "documentProposals": [
+          "Optional(RemoteDesktopHost.ComputerUseMCPDocumentProposal(application: \"TextEdit\", document: \"Travel notes.txt\", requirements: [RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"In the open TextEdit document, replace Seattle with Zürich → 東京.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.replaceLiteral, find: \"Seattle\", value: \"Zürich → 東京\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \" Keep all other text and line breaks unchanged,\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.preserveOtherText, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \" save the document, \", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.save, find: \"\", value: \"\"), RemoteDesktopHost.ComputerUseMCPDocumentProposal.Requirement(source: \"and leave its window open.\", operation: RemoteDesktopHost.ComputerUseMCPDocumentProposal.Operation.keepWindowOpen, find: \"\", value: \"\")]))"
+        ],
+        "editorExact": false,
+        "elapsedSeconds": 5.910102009773254,
+        "externalEditPreserved": true,
+        "failure": "nil",
+        "fallbackCalls": 0,
+        "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+        "messages": [
+          {
+            "body": "{\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0,\"text\":\"working\"}",
+            "createdAt": 811079094.689049,
+            "id": "E716940A-4623-468B-B2BC-A09D20208872",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Planning the document task with on-device Apple Intelligence…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811079095.173396,
+            "id": "190414F4-B729-4652-81DE-7EEAB22112F1",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"hostControlEpoch\":0,\"message\":\"Control this app on your Mac?\",\"details\":[{\"value\":\"{\\\"element_id\\\":\\\"el_76e7d6b06b06d1ea\\\",\\\"name\\\":\\\"AXValue\\\",\\\"value\\\":\\\"Meeting notes\\\\nRoute: Zürich → 東京\\\\nStatus: draft\\\\n\\\"}\",\"label\":\"Exact local action\"}],\"taskID\":\"real-textedit-mcp-task\",\"requestID\":\"DBE1F817-D564-4C34-A3AD-45626D533DA9\",\"confirmLabel\":\"Allow action\"}",
+            "createdAt": 811079100.266677,
+            "id": "DBE1F817-D564-4C34-A3AD-45626D533DA9",
+            "kind": "approvalRequest",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Waiting for your approval before continuing…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811079100.266683,
+            "id": "1CF4EBB3-76AC-4667-9753-81E6AF41AF44",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"text\":\"Performing the one approved Mac action…\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811079100.290975,
+            "id": "5E0E7EB5-C276-4C00-B0DD-46B33314834A",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"607cc3672e674255009952c1dd46599c63617deb7edb2721afb125df6fbbde09\"},\"isApprovedActionEvidenceOnly\":true,\"text\":\"\",\"taskID\":\"real-textedit-mcp-task\"}",
+            "createdAt": 811079100.299307,
+            "id": "68CFE86F-BD35-4812-8125-657C27B3002A",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"607cc3672e674255009952c1dd46599c63617deb7edb2721afb125df6fbbde09\"},\"text\":\"I couldn't confirm the approved action's result. It will not be retried automatically: The document or its text changed. The pending action was stopped.\",\"taskID\":\"real-textedit-mcp-task\",\"outcome\":\"unableToComplete\",\"hostControlEpoch\":0}",
+            "createdAt": 811079100.299359,
+            "id": "AE674F3A-37CB-4A5C-84D3-2A9396A27600",
+            "kind": "assistant",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          },
+          {
+            "body": "{\"approvedActionEvidence\":{\"state\":\"unconfirmed\",\"actionID\":\"607cc3672e674255009952c1dd46599c63617deb7edb2721afb125df6fbbde09\"},\"text\":\"ready\",\"taskID\":\"real-textedit-mcp-task\",\"hostControlEpoch\":0}",
+            "createdAt": 811079100.299381,
+            "id": "1A1A9BDA-8736-40E7-BA79-E5B25A4372C3",
+            "kind": "status",
+            "pairingCode": "123456",
+            "senderID": "HOST-ID",
+            "sessionID": "TEXTEDIT-SESSION",
+            "targetID": "TEXTEDIT-TEST"
+          }
+        ],
+        "ownedTextEditExited": true,
+        "savedFileExact": false,
+        "scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+        "staleEditExperiment": true,
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "I couldn't confirm the approved action's result. It will not be retried automatically: The document or its text changed. The pending action was stopped."
+      }
+    },
+    {
+      "id": "mcp-native-document-regression-final-01",
+      "bundle": ".build/repair-verification/mcp-native-document-regression-final-01.xcresult",
+      "log": ".build/repair-verification/mcp-native-document-regression-final-01.log",
+      "currentSource": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 36,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789386347.485,
+        "passedTests": 36,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789386345.253,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Longest Test Runs",
+            "impact": "14% of duration",
+            "text": "1 longest test run with outlier durations exceeding 0.15s (three standard deviations)"
+          }
+        ],
+        "totalTestCount": 36
+      },
+      "tests": [
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationPreservesBytesAcrossDifferentTasks()",
+          "result": "Passed",
+          "durationInSeconds": 0.0028820037841796875
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsAmbiguousOrMissingLiteral()",
+          "result": "Passed",
+          "durationInSeconds": 0.0018069744110107422
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsOverlappingLiteralMatches()",
+          "result": "Passed",
+          "durationInSeconds": 0.0010949373245239258
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRejectsUnboundPayloadAndConflictingOrder()",
+          "result": "Passed",
+          "durationInSeconds": 0.0017969608306884766
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRequiresCompleteTaskAndExactTarget()",
+          "result": "Passed",
+          "durationInSeconds": 0.0015050172805786133
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentCompilationRetainsUnicodeDistinctnessAndDeletion()",
+          "result": "Passed",
+          "durationInSeconds": 0.0013689994812011719
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPDocumentSourceRangesPreserveEveryByteAndRejectOmissions()",
+          "result": "Passed",
+          "durationInSeconds": 0.0014820098876953125
+        },
+        {
+          "nodeIdentifier": "ComputerUseNativeTextIntegrationTests/testMCPPlainDocumentReadRejectsRichAndOversizedFiles()",
+          "result": "Passed",
+          "durationInSeconds": 0.002046942710876465
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedActionStorageFailureDoesNotPublishClaimOrResultAndPoisonsFurtherWork()",
+          "result": "Passed",
+          "durationInSeconds": 0.004329085350036621
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedMCPConfirmationSurvivesPauseAndResumeThroughCapabilityWrapperWithoutReplay()",
+          "result": "Passed",
+          "durationInSeconds": 0.03153097629547119
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedPlanDistinguishesRepeatedEffectsAndRequiresAConfirmedPrefix()",
+          "result": "Passed",
+          "durationInSeconds": 0.007748961448669434
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedPlanPauseStopAndLateConfirmationPreserveTheWholeHistory()",
+          "result": "Passed",
+          "durationInSeconds": 0.006610989570617676
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedPlanRejectsContractPromptStepAndLegacyScopeChanges()",
+          "result": "Passed",
+          "durationInSeconds": 0.009624958038330078
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedPlanReloadRejectsBrokenHistoryAndRetainsLateConfirmation()",
+          "result": "Passed",
+          "durationInSeconds": 0.0072939395904541016
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_approvedPlanStorageFailureCannotPublishTheNextClaimOrItsResult()",
+          "result": "Passed",
+          "durationInSeconds": 0.007840991020202637
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_freshApprovedConfirmationBindsActionAndWholeTaskScopeBeforeRecording()",
+          "result": "Passed",
+          "durationInSeconds": 0.10812592506408691
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_lateApprovedMCPConfirmationCannotReplaceStopOrChangeNewerTask()",
+          "result": "Passed",
+          "durationInSeconds": 0.033277034759521484
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_lateApprovedMCPConfirmationIsRetainedAfterTransportStopWithoutAnotherTerminal()",
+          "result": "Passed",
+          "durationInSeconds": 0.01872694492340088
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_legacyApprovedActionClientReceivesNoEvidenceOnlyStatus()",
+          "result": "Passed",
+          "durationInSeconds": 0.030763983726501465
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerContinuesOrderedMCPActionsWithoutReplanningOrReplay()",
+          "result": "Passed",
+          "durationInSeconds": 0.05297195911407471
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerOrderedMCPPlanHandsControlBackAndResumesConfirmedPrefix()",
+          "result": "Passed",
+          "durationInSeconds": 0.05967700481414795
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerOrderedMCPPlanPublishesConfirmedEvidenceBeforeSuspendingContinuation()",
+          "result": "Passed",
+          "durationInSeconds": 0.030966997146606445
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerOrderedMCPPlanRejectsPrematureCompletionAndForeignNextStep()",
+          "result": "Passed",
+          "durationInSeconds": 0.15576696395874023
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerOrderedMCPPlanStopPreventsTheNextApprovedEffect()",
+          "result": "Passed",
+          "durationInSeconds": 0.04126298427581787
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_managerOrderedMCPPlanSurvivesCapabilityWrapper()",
+          "result": "Passed",
+          "durationInSeconds": 0.06002402305603027
+        },
+        {
+          "nodeIdentifier": "ComputerUseTests/test_unconfirmedApprovedMCPActionCannotReplanOrRepeatOnResume()",
+          "result": "Passed",
+          "durationInSeconds": 0.039920926094055176
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadAcceptsWholeDocumentRequestsAcrossAppNames()",
+          "result": "Passed",
+          "durationInSeconds": 0.015534043312072754
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadBindsOneEditorInsteadOfTrustingDiscoveryValues()",
+          "result": "Passed",
+          "durationInSeconds": 0.0015799999237060547
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadDoesNotCompleteOtherOrCompoundTasks()",
+          "result": "Passed",
+          "durationInSeconds": 0.002472996711730957
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadIdentityRetainsAXControlWhenEditBindingIsRetired()",
+          "result": "Passed",
+          "durationInSeconds": 0.0006279945373535156
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadKeepsUnavailableCapabilityOnFallbackPath()",
+          "result": "Passed",
+          "durationInSeconds": 0.1062549352645874
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadRejectsProtectedOrNonDocumentTargets()",
+          "result": "Passed",
+          "durationInSeconds": 0.003374934196472168
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadRequiresCompleteByteExactAttributeValue()",
+          "result": "Passed",
+          "durationInSeconds": 0.007787942886352539
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadRunsBeforePlannerAndModelFallback()",
+          "result": "Passed",
+          "durationInSeconds": 0.007654070854187012
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadStopBeforeDispatchDoesNotReadPrivateText()",
+          "result": "Passed",
+          "durationInSeconds": 0.11041295528411865
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testFocusedMCPReadStopsWhenTargetChangesAcrossAnAwait()",
+          "result": "Passed",
+          "durationInSeconds": 0.12793195247650146
+        }
+      ]
+    }
+  ],
+  "preservationCheck": {
+    "installedHostPID": 67555,
+    "installedHostRunning": true,
+    "originalCheckoutHEAD": "603e79e9f877a4a1c9a0b462d8db4da06dc46cf2",
+    "originalStash": "f11908b0e0617388bec0a3d4a9542c9c5694f174",
+    "remainingTaskMCPModelBuildProcesses": 0
+  }
+}

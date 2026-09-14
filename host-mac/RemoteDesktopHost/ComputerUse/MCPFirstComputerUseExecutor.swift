@@ -304,6 +304,24 @@ final class MCPFirstComputerUseExecutor:
     private var pendingApprovalState: PlanningState?
     private var pendingApprovalDigest: String?
     private var retainedFallback: (taskID: String, promptDigest: String)?
+    private let documentPlanner: ComputerUseMCPDocumentPlanner
+    private final class DocumentRun {
+        let prompt: String
+        let snapshot: ComputerUseMCPFocusedTextSnapshot
+        let document: URL
+        let edit: ComputerUseMCPDocumentEdit
+        let contract: ComputerUseTaskContract
+        let calls: [MCPToolCall]
+        var prepared: MCPPreparedApproval?
+        var plan: ComputerUseTaskLedger.ApprovedActionPlan?
+        var confirmed: [MCPApprovedActionResult] = []
+        init(prompt: String, snapshot: ComputerUseMCPFocusedTextSnapshot, document: URL,
+             edit: ComputerUseMCPDocumentEdit, contract: ComputerUseTaskContract, calls: [MCPToolCall]) {
+            self.prompt = prompt; self.snapshot = snapshot; self.document = document
+            self.edit = edit; self.contract = contract; self.calls = calls
+        }
+    }
+    private var documentRun: DocumentRun?
 
     private init(
         planner: any MCPProposalPlanning,
@@ -311,7 +329,8 @@ final class MCPFirstComputerUseExecutor:
         binaryURL: URL,
         visualFallback: any ComputerUseExecuting,
         planningWorker: ComputerUsePlanningWorker,
-        planningTimeout: TimeInterval
+        planningTimeout: TimeInterval,
+        documentPlanner: ComputerUseMCPDocumentPlanner
     ) {
         self.planner = planner
         self.clientPool = clientPool
@@ -319,6 +338,7 @@ final class MCPFirstComputerUseExecutor:
         self.visualFallback = visualFallback
         self.planningWorker = planningWorker
         self.planningTimeout = planningTimeout
+        self.documentPlanner = documentPlanner
     }
 
     static func load(
@@ -327,7 +347,8 @@ final class MCPFirstComputerUseExecutor:
         planner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
         clientPool: any MCPClientPooling,
         planningWorker: ComputerUsePlanningWorker = .shared,
-        planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait
+        planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
+        documentPlanner: ComputerUseMCPDocumentPlanner = .init()
     ) async throws -> MCPFirstComputerUseExecutor {
         let executor = MCPFirstComputerUseExecutor(
             planner: planner,
@@ -335,7 +356,8 @@ final class MCPFirstComputerUseExecutor:
             binaryURL: binaryURL.standardizedFileURL,
             visualFallback: visualFallback,
             planningWorker: planningWorker,
-            planningTimeout: planningTimeout)
+            planningTimeout: planningTimeout,
+            documentPlanner: documentPlanner)
         try Task.checkCancellation()
         let identity = try await clientPool.start(binaryURL: binaryURL)
         do {
@@ -484,6 +506,11 @@ final class MCPFirstComputerUseExecutor:
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
+        if let run = documentRun, run.contract.taskID == taskID {
+            throw ExecutorError.approvalStateChanged
+        }
+        documentRun = nil
+
         if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
             taskID: taskID, prompt: trustedUserPrompt, progress: progress) {
             try Task.checkCancellation()
@@ -538,6 +565,11 @@ final class MCPFirstComputerUseExecutor:
             progress("Opening the requested app…")
             try await tools.openApplication(named: applicationName)
             return .completed("Done. I opened \(applicationName).")
+        }
+
+        if let documentResult = try await executeDocumentTask(taskID: taskID, prompt: trustedUserPrompt,
+            tools: tools, progress: progress) {
+            return documentResult
         }
 
         guard planner.availability() == .available else {
@@ -623,6 +655,9 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         try Task.checkCancellation()
+        if let run = documentRun, run.contract.taskID == prepared.call.taskID {
+            return try await performDocumentAction(prepared, run: run, tools: tools, progress: progress)
+        }
         guard let state = pendingApprovalState,
               pendingApprovalDigest == prepared.call.canonicalDigest,
               prepared.call.taskID == state.taskID else {
@@ -735,6 +770,7 @@ final class MCPFirstComputerUseExecutor:
         activeProcessGeneration = nil
         pendingApprovalState = nil
         pendingApprovalDigest = nil
+        documentRun?.prepared = nil
         guard let generation else { return }
         _ = cancellationJoin(for: generation).start()
     }
@@ -837,6 +873,209 @@ final class MCPFirstComputerUseExecutor:
         return try await withGenerationCancellation(generation: identity.processGeneration) {
             try checkGenerationCancellation(identity.processGeneration)
             return try await operation(identity.processGeneration)
+        }
+    }
+
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {
+        guard let run = documentRun, run.contract.taskID == taskID else { return nil }
+        let candidate = try ComputerUseTaskLedger.ApprovedActionPlan(contract: run.contract,
+            promptBody: promptBody, calls: run.calls)
+        if let previous = run.plan, previous != candidate { throw MCPClientError.approvalMismatch }
+        run.plan = candidate
+        return candidate
+    }
+
+    func continueApprovedActionPlan(taskID: String,
+        confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord], tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
+        guard let run = documentRun, run.contract.taskID == taskID, run.plan != nil,
+              !confirmedActions.isEmpty, confirmedActions.count == run.confirmed.count,
+              confirmedActions.count <= run.calls.count else { throw MCPClientError.approvalMismatch }
+        for (index, record) in confirmedActions.enumerated() {
+            guard record.fingerprint.canonicalDigest == run.calls[index].canonicalDigest,
+                  record.response == run.confirmed[index].response,
+                  record.completionPromptDigest == nil else { throw MCPClientError.approvalMismatch }
+        }
+        try checkDocument(run, tools: tools, expected: run.edit.expected)
+        if confirmedActions.count == run.calls.count {
+            if run.edit.save {
+                guard try ComputerUseMCPPlainDocument.read(run.document) == Data(run.edit.expected.utf8) else {
+                    throw ExecutorError.structuredToolFailed("The saved document changed after confirmation.")
+                }
+            }
+            return .completed(run.edit.save
+                ? "The document is updated and saved, and its window is still open."
+                : "The document is updated and its window is still open.")
+        }
+        // Resume can restart the helper after handoff, but never rediscover or
+        // replay a completed edit. The next call must keep its exact plan ID.
+        return try await withNewHelperGeneration { generation in
+            let available = try await clientPool.allowedTools()
+            try checkDocument(run, tools: tools, expected: run.edit.expected)
+            let original = run.calls[confirmedActions.count]
+            guard original.toolName == "press_key",
+                  let tool = available.first(where: { $0.toolName == original.toolName && $0.serverID == original.serverID
+                      && $0.schemaDigest == original.schemaDigest && $0.processGeneration == generation }) else {
+                throw MCPClientError.approvalMismatch
+            }
+            let call = try tool.makeCall(taskID: taskID, arguments: original.arguments, stepEffectID: original.stepEffectID)
+            guard call.canonicalDigest == original.canonicalDigest else { throw MCPClientError.approvalMismatch }
+            let prepared = try await clientPool.prepareApproval(call)
+            try checkDocument(run, tools: tools, expected: run.edit.expected)
+            try checkGenerationCancellation(generation)
+            run.prepared = prepared
+            return .mcpApprovalRequired(prepared)
+        }
+    }
+
+    private func executeDocumentTask(taskID: String, prompt: String, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        guard let snapshot = try tools.mcpFocusedTextSnapshot(), snapshot.isReadable,
+              let identity = snapshot.documentIdentity, let document = URL(string: identity), document.isFileURL,
+              let bytes = try? ComputerUseMCPPlainDocument.read(document), bytes == Data(snapshot.text.value.utf8) else { return nil }
+        let application = snapshot.application.localizedName ?? ""
+        let filename = document.lastPathComponent
+        return try await withNewHelperGeneration { generation in
+            let available = try await clientPool.allowedTools().filter {
+                $0.serverID == MCPServerRegistry.macControl.serverID && $0.processGeneration == generation
+            }
+            func tool(_ name: String) throws -> MCPAllowedTool {
+                guard let tool = available.first(where: { $0.toolName == name
+                    && $0.serverID == MCPServerRegistry.macControl.serverID && $0.processGeneration == generation }) else {
+                    throw ExecutorError.requiredToolsMissing
+                }
+                return tool
+            }
+            @MainActor func checkBefore() throws {
+                try checkGenerationCancellation(generation)
+                guard try tools.mcpFocusedTextSnapshot() == snapshot,
+                      try ComputerUseMCPPlainDocument.read(document) == bytes else { throw ExecutorError.approvalStateChanged }
+            }
+            try checkBefore()
+            guard available.contains(where: { $0.toolName == "set_element_attribute" || $0.toolName == "press_key" }) else { return nil }
+            progress("Planning the document task with on-device Apple Intelligence…")
+            try checkBefore()
+            let documentPlanner = self.documentPlanner
+            let proposal = try await planningWorker.perform(timeout: planningTimeout) {
+                try await documentPlanner.propose(prompt: prompt, application: application, document: filename)
+            }
+            try checkBefore()
+            guard let proposal, let edit = try ComputerUseMCPDocumentEdit.compile(proposal, prompt: prompt,
+                application: application, document: filename, original: snapshot.text.value) else { return nil }
+            let editsText = !edit.expected.utf8.elementsEqual(snapshot.text.value.utf8)
+            let needed = (editsText ? ["find_elements", "set_element_attribute"] : []) + (edit.save ? ["press_key"] : [])
+            guard needed.allSatisfy({ name in available.contains { $0.toolName == name } }) else { return nil }
+            var unscoped: [MCPToolCall] = []
+            if editsText {
+                let found = try await clientPool.execute(tool("find_elements").makeCall(taskID: taskID, arguments: [
+                    "pid": .integer(Int(snapshot.window.applicationProcessIdentifier)), "role": .string(snapshot.role)]))
+                try checkBefore()
+                guard let element = ComputerUseMCPFocusedTextRead.elementID(in: found, matching: snapshot) else {
+                    throw ExecutorError.approvalStateChanged
+                }
+                unscoped.append(try tool("set_element_attribute").makeCall(taskID: taskID, arguments: [
+                    "element_id": .string(element), "name": .string("AXValue"), "value": .string(edit.expected)]))
+            }
+            if edit.save {
+                unscoped.append(try tool("press_key").makeCall(taskID: taskID,
+                    arguments: ["key": .string("s"), "modifiers": .array([.string("command")])]))
+            }
+            guard !unscoped.isEmpty else { return .completed("The document already contains the requested text and is still open.") }
+            let target = ComputerUseTaskContract.digest(["native-plain-document-v1", document.absoluteString,
+                String(snapshot.window.applicationProcessIdentifier), String(CFHash(snapshot.focusedElement)),
+                String(describing: snapshot.window), String(describing: snapshot.frame)])
+            let entities = unscoped.enumerated().map { index, call in
+                ComputerUseTaskContract.Entity(id: "action\(index)",
+                    authorityDigest: ComputerUseTaskLedger.ApprovedActionPlan.authorityDigest(for: call))
+            }
+            var predicates: [ComputerUseTaskContract.Predicate] = [
+                .init(id: "target", entityID: "action0", kind: "same-native-document", expectedDigest: target),
+                .init(id: "original", entityID: "action0", kind: "exact-original-text",
+                    expectedDigest: ComputerUseTaskContract.digest([snapshot.text.value]))]
+            var steps: [ComputerUseTaskContract.Step] = []
+            for (index, call) in unscoped.enumerated() {
+                let post = "result\(index)"
+                predicates.append(.init(id: post, entityID: "action\(index)",
+                    kind: call.toolName == "press_key" ? "exact-saved-text" : "exact-editor-text",
+                    expectedDigest: ComputerUseTaskContract.digest([edit.expected])))
+                steps.append(.init(id: "step\(index)", dependencies: index == 0 ? [] : ["step\(index - 1)"],
+                    operation: .init(capabilityID: "mcp.approved", entityID: "action\(index)",
+                        payloadDigest: call.argumentsDigest, payloadVersion: 1),
+                    preconditions: ["target", index == 0 ? "original" : "result\(index - 1)"], postconditions: [post]))
+            }
+            let contract = try ComputerUseTaskContract(taskID: taskID, promptDigest: ComputerUseTaskContract.digest([prompt]),
+                entities: entities, predicates: predicates, steps: steps, invariants: ["target"],
+                outcomes: ["target"] + steps.flatMap(\.postconditions))
+            let calls = try zip(unscoped, steps).map { call, step in
+                try tool(call.toolName).makeCall(taskID: taskID, arguments: call.arguments,
+                    stepEffectID: contract.effectIdentity(for: step))
+            }
+            let run = DocumentRun(prompt: prompt, snapshot: snapshot, document: document, edit: edit, contract: contract, calls: calls)
+            let prepared = try await clientPool.prepareApproval(calls[0])
+            try checkBefore()
+            run.prepared = prepared
+            documentRun = run
+            return .mcpApprovalRequired(prepared)
+        }
+    }
+
+    private func checkDocument(_ run: DocumentRun, tools: ComputerUseHostTools, expected: String) throws {
+        try checkExecutionCancellation()
+        guard let current = try tools.mcpFocusedTextSnapshot(), current.isReadable,
+              current.hasSameDocumentTarget(as: run.snapshot), current.text.value.utf8.elementsEqual(expected.utf8) else {
+            throw ExecutorError.structuredToolFailed("The document or its text changed. The pending action was stopped.")
+        }
+        let bytes = try ComputerUseMCPPlainDocument.read(run.document)
+        guard bytes == Data(run.snapshot.text.value.utf8) || bytes == Data(run.edit.expected.utf8) else {
+            throw ExecutorError.structuredToolFailed("The saved document changed outside this task. The pending action was stopped.")
+        }
+    }
+
+    private func performDocumentAction(_ prepared: MCPPreparedApproval, run: DocumentRun,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
+        let index = run.confirmed.count
+        guard index < run.calls.count, run.prepared == prepared,
+              prepared.call.canonicalDigest == run.calls[index].canonicalDigest else { throw MCPClientError.approvalMismatch }
+        let isSave = prepared.call.toolName == "press_key"
+        let expectedBefore = index == 0 ? run.snapshot.text.value : run.edit.expected
+        return try await withGenerationCancellation(generation: prepared.call.processGeneration,
+            preserveCompletedResultOnCancellation: true) {
+            try checkGenerationCancellation(prepared.call.processGeneration)
+            try checkDocument(run, tools: tools, expected: expectedBefore)
+            progress(isSave ? "Saving the approved document…" : "Applying the approved document edit…")
+            try checkDocument(run, tools: tools, expected: expectedBefore)
+            run.prepared = nil
+            let result = try await clientPool.performApproved(prepared.call, fingerprint: prepared.fingerprint)
+            guard !result.isError, !result.wasTruncated,
+                  case .object(let content)? = result.structuredContent, content["ok"] == .bool(true) else {
+                throw MCPClientError.toolFailed("The document action was not confirmed. It will not be repeated.")
+            }
+            if isSave {
+                guard content["key"] == .string("s"), content["modifiers"] == .array([.string("command")]) else {
+                    throw MCPClientError.approvalMismatch
+                }
+                for _ in 0..<40 {
+                    try checkDocument(run, tools: tools, expected: run.edit.expected)
+                    if try ComputerUseMCPPlainDocument.read(run.document) == Data(run.edit.expected.utf8) { break }
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                guard try ComputerUseMCPPlainDocument.read(run.document) == Data(run.edit.expected.utf8) else {
+                    throw MCPClientError.toolFailed("The save could not be verified. It will not be repeated.")
+                }
+            } else {
+                guard content["element_id"] == prepared.call.arguments["element_id"],
+                      content["name"] == .string("AXValue"), content["ax_status"] == .integer(0) else {
+                    throw MCPClientError.approvalMismatch
+                }
+            }
+            try checkDocument(run, tools: tools, expected: run.edit.expected)
+            let fact = MCPApprovedActionResult(callDigest: prepared.call.canonicalDigest,
+                response: isSave ? "The saved file contains the approved text." : "The focused document contains the approved text.",
+                completionPromptDigest: nil)
+            run.confirmed.append(fact)
+            return fact
         }
     }
 

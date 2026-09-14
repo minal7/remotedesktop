@@ -9,6 +9,128 @@ import Vision
 
 @MainActor
 final class ComputerUseNativeTextIntegrationTests: XCTestCase {
+    private typealias DocumentRequirement = ComputerUseMCPDocumentProposal.Requirement
+    private func compileDocument(_ prompt: String, original: String, requirements: [DocumentRequirement],
+        application: String = "Editor", document: String = "Notes.txt") throws -> ComputerUseMCPDocumentEdit? {
+        try ComputerUseMCPDocumentEdit.compile(.init(application: application, document: document, requirements: requirements),
+            prompt: prompt, application: "Editor", document: "Notes.txt", original: original)
+    }
+
+    func testMCPDocumentCompilationPreservesBytesAcrossDifferentTasks() throws {
+        let prompt = "Change \"draft\" to \"ready\". Preserve everything else. Save."
+        let task = try ComputerUseTextPayloadCatalog(prompt).projectedTask
+        let sources = task.components(separatedBy: ". ")
+        let result = try compileDocument(prompt, original: "Title\r\nStatus: draft\r\n\r\n", requirements: [
+            .init(source: sources[0] + ".", operation: .replaceLiteral, find: "p1", value: "p2"),
+            .init(source: sources[1] + ".", operation: .preserveOtherText, find: "", value: ""),
+            .init(source: sources[2], operation: .save, find: "", value: "")])
+        XCTAssertEqual(result, .init(expected: "Title\r\nStatus: ready\r\n\r\n", save: true))
+        let append = "Append \"Done.\" and keep the document open."
+        let projected = try ComputerUseTextPayloadCatalog(append).projectedTask
+        let split = try XCTUnwrap(projected.range(of: " and "))
+        let appended = try compileDocument(append, original: "Notes\n", requirements: [
+            .init(source: String(projected[..<split.lowerBound]), operation: .append, find: "", value: "p1"),
+            .init(source: String(projected[split.lowerBound...]), operation: .keepWindowOpen, find: "", value: "")])
+        XCTAssertEqual(appended, .init(expected: "Notes\nDone.", save: false))
+    }
+
+    func testMCPDocumentCompilationRequiresCompleteTaskAndExactTarget() throws {
+        let prompt = "Replace red with blue, then print it."
+        let edit = DocumentRequirement(source: "Replace red with blue,", operation: .replaceLiteral, find: "red", value: "blue")
+        XCTAssertNil(try compileDocument(prompt, original: "red", requirements: [edit]))
+        XCTAssertNil(try compileDocument(prompt, original: "red", requirements: [edit,
+            .init(source: "then print it.", operation: .unsupported, find: "", value: "")]))
+        let simple = "Replace red with blue."
+        let requirement = DocumentRequirement(source: simple, operation: .replaceLiteral, find: "red", value: "blue")
+        XCTAssertNil(try compileDocument(simple, original: "red", requirements: [requirement], application: "Another App"))
+        XCTAssertNil(try compileDocument(simple, original: "red", requirements: [requirement], document: "Other.txt"))
+    }
+
+    func testMCPDocumentCompilationRejectsAmbiguousOrMissingLiteral() throws {
+        let prompt = "Replace red with blue."
+        let item = DocumentRequirement(source: prompt, operation: .replaceLiteral, find: "red", value: "blue")
+        for original in ["red red", "green", ""] {
+            XCTAssertNil(try compileDocument(prompt, original: original, requirements: [item]), original)
+        }
+        let every = "Replace every red with blue."
+        XCTAssertEqual(try compileDocument(every, original: "red/red\n", requirements: [
+            .init(source: every, operation: .replaceEveryLiteral, find: "red", value: "blue")]),
+            .init(expected: "blue/blue\n", save: false))
+    }
+
+    func testMCPDocumentCompilationRetainsUnicodeDistinctnessAndDeletion() throws {
+        let prompt = "Replace \"é\" with \"東京 👩🏽‍💻\"."
+        let projected = try ComputerUseTextPayloadCatalog(prompt).projectedTask
+        let item = DocumentRequirement(source: projected, operation: .replaceLiteral, find: "p1", value: "p2")
+        let result = try XCTUnwrap(compileDocument(prompt, original: "é/e\u{301}\n", requirements: [item]))
+        XCTAssertEqual(Data(result.expected.utf8), Data("東京 👩🏽‍💻/e\u{301}\n".utf8))
+        XCTAssertNil(try compileDocument(prompt, original: "e\u{301}", requirements: [item]))
+        let deletion = "Replace \"old\" with \"\"."
+        XCTAssertEqual(try compileDocument(deletion, original: "[old]\n", requirements: [
+            .init(source: try ComputerUseTextPayloadCatalog(deletion).projectedTask, operation: .replaceLiteral,
+                find: "p1", value: "p2")]), .init(expected: "[]\n", save: false))
+    }
+
+    func testMCPDocumentCompilationRejectsOverlappingLiteralMatches() throws {
+        let prompt = "Replace aa with b."
+        XCTAssertNil(try compileDocument(prompt, original: "aaa", requirements: [
+            .init(source: prompt, operation: .replaceLiteral, find: "aa", value: "b")]))
+        let every = "Replace every aa with b."
+        XCTAssertNil(try compileDocument(every, original: "aaa", requirements: [
+            .init(source: every, operation: .replaceEveryLiteral, find: "aa", value: "b")]))
+    }
+
+    func testMCPDocumentCompilationRejectsUnboundPayloadAndConflictingOrder() throws {
+        let prompt = "Replace red with blue."
+        XCTAssertNil(try compileDocument(prompt, original: "red", requirements: [
+            .init(source: prompt, operation: .replaceLiteral, find: "red", value: "invented")]))
+        let ordered = "Save, then replace red with blue."
+        XCTAssertNil(try compileDocument(ordered, original: "red", requirements: [
+            .init(source: "Save,", operation: .save, find: "", value: ""),
+            .init(source: "then replace red with blue.", operation: .replaceLiteral, find: "red", value: "blue")]))
+        let conflict = "Replace the entire document with blue. Keep all other text unchanged."
+        XCTAssertNil(try compileDocument(conflict, original: "red", requirements: [
+            .init(source: "Replace the entire document with blue.", operation: .replaceAll, find: "", value: "blue"),
+            .init(source: "Keep all other text unchanged.", operation: .preserveOtherText, find: "", value: "")]))
+        let append = "Append x."
+        XCTAssertNil(try compileDocument(append, original: String(repeating: "a", count: 16_384), requirements: [
+            .init(source: append, operation: .append, find: "", value: "x")]))
+    }
+
+    func testMCPPlainDocumentReadRejectsRichAndOversizedFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let plain = directory.appendingPathComponent("Notes.txt"), rich = directory.appendingPathComponent("Notes.rtf")
+        let data = Data("Exact UTF-8 → 東京\r\n".utf8)
+        try data.write(to: plain); try Data("{\\rtf1 Hello}".utf8).write(to: rich)
+        XCTAssertEqual(try ComputerUseMCPPlainDocument.read(plain), data)
+        XCTAssertThrowsError(try ComputerUseMCPPlainDocument.read(rich))
+        try Data(repeating: 65, count: 16_385).write(to: plain)
+        XCTAssertThrowsError(try ComputerUseMCPPlainDocument.read(plain))
+        XCTAssertThrowsError(try ComputerUseMCPPlainDocument.read(directory))
+    }
+
+    func testMCPDocumentSourceRangesPreserveEveryByteAndRejectOmissions() throws {
+        for task in ["Append [exact quoted payload p1] to the current document, save it, and leave it open.",
+            "In the document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+            "Replace v1.2 with v2.0; then save.\n", "Append Tom and Jerry, Inc. to the document. Save it."] {
+            let sources = try ComputerUseMCPDocumentSources(projectedTask: task)
+            XCTAssertEqual(Data(sources.segments.joined().utf8), Data(task.utf8))
+            XCTAssertEqual(try sources.resolve([(1, sources.segments.count)]), [task])
+            XCTAssertThrowsError(try sources.resolve([(2, sources.segments.count)]))
+            XCTAssertThrowsError(try sources.resolve([(1, sources.segments.count), (sources.segments.count, sources.segments.count)]))
+            XCTAssertThrowsError(try sources.resolve([(0, sources.segments.count)]))
+            XCTAssertThrowsError(try sources.resolve([(1, sources.segments.count + 1)]))
+            XCTAssertThrowsError(try sources.resolve([]))
+        }
+        let prompt = "Append \"A, B and C.\" to the document."
+        let projected = try ComputerUseTextPayloadCatalog(prompt).projectedTask
+        XCTAssertEqual(try compileDocument(prompt, original: "", requirements: [
+            .init(source: projected, operation: .append, find: "", value: "[exact quoted payload p1]")]),
+            .init(expected: "A, B and C.", save: false))
+    }
+
     func testSignedHostMacToolsStartAndPrepareApprovalWithoutModels() async throws {
         guard ProcessInfo.processInfo.environment["RUN_SIGNED_INDEPENDENT_MAC_TOOLS_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in signed helper installation and real MCP protocol; no desktop or Mail effects")
@@ -107,6 +229,20 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, mcpWriteProbe: true)
     }
 
+    func testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true)
+    }
+
+    func testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpTask: (
+            prompt: "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
+            original: "Release notes\n\n", expected: "Release notes\n\nApproved by the team."))
+    }
+
+    func testOptInRealTextEditMCPRejectsAnEditChangedDuringApproval() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, rejectStaleMCPEdit: true)
+    }
+
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
@@ -114,7 +250,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
         mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
-        mcpWriteProbe: Bool = false) async throws {
+        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false,
+        mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -125,9 +262,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativeTextEdit-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let document = directory.appendingPathComponent("Travel notes.txt")
-        let original = mcpReadText ?? "Meeting notes\nRoute: Seattle\nStatus: draft\n"
-        let expected = "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
-        let goal = "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
+        let original = mcpTask?.original ?? mcpReadText ?? "Meeting notes\nRoute: Seattle\nStatus: draft\n"
+        let expected = mcpTask?.expected ?? "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
+        let goal = mcpTask?.prompt ?? "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
         try Data(original.utf8).write(to: document, options: .withoutOverwriting)
         let previousApp = NSWorkspace.shared.frontmostApplication
         let previousInstances = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").map(\.processIdentifier))
@@ -167,6 +304,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         do {
             for _ in 0..<100 { if ownsDocument() { break }; try await Task.sleep(for: .milliseconds(50)) }
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
+            if mcpHostTask {
+                try await runTextEditMCPHostTask(tools: tools, app: app, goal: goal, expected: expected,
+                    document: document, output: output, rejectStaleEdit: rejectStaleMCPEdit)
+                return
+            }
             if mcpWriteProbe {
                 try await probeTextEditMCPWrite(tools: tools, app: app, original: original, expected: expected,
                     document: document, output: output)
@@ -332,6 +474,118 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
+    private func runTextEditMCPHostTask(tools: ComputerUseHostTools, app: NSRunningApplication,
+        goal: String, expected: String, document: URL, output: URL, rejectStaleEdit: Bool = false) async throws {
+        let started = Date(), taskID = "real-textedit-mcp-task"
+        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
+        let base = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mcp-mutations.json")),
+            sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                stateDirectory: output.appendingPathComponent("helper-state")) })
+        let pool = NativeMCPTaskObservedPool(base: base)
+        let proposals = NativeMCPDocumentProposalLog()
+        let channel = NativeMCPTaskChannel()
+        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("host-ledger.json"))
+        var fallbackCalls = 0, failure: Error?, terminal: ComputerUseTaskUpdate?
+        var approvals = Set<String>(), manager: HostComputerUseManager?
+        var savedExact = false, editorExact = false
+        let externalEdit = "Edited independently during approval.\n"
+        var externalEditPreserved = false
+        do {
+            let fallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+                fallbackCalls += 1
+                return .unableToComplete("Native document task reached model fallback")
+            })
+            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper, visualFallback: fallback,
+                clientPool: pool, planningTimeout: 15, documentPlanner: .init(inspectProposal: { proposals.append($0) }))
+            let host = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+                allowsExternalServices: false, channelFactory: { _ in channel })
+            manager = host
+            host.authorizePeer(senderID: "TEXTEDIT-TEST")
+            let request = ComputerUseEnvelope(id: taskID, senderID: "TEXTEDIT-TEST", targetID: "HOST-ID",
+                pairingCode: "123456", sessionID: "TEXTEDIT-SESSION", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: goal, supportsApprovedActionEvidence: true).encodedBody())
+            XCTAssertTrue(host.handle(request, channel: channel))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(25))
+            while ContinuousClock.now < deadline {
+                let messages = await channel.messages()
+                if let message = messages.last(where: { $0.kind == .assistant }) {
+                    terminal = try ComputerUseTaskUpdate.decodeBody(message.body)
+                    break
+                }
+                for message in messages where message.kind == .approvalRequest {
+                    let approval = try ComputerUseApprovalRequest.decodeBody(message.body)
+                    guard approvals.insert(approval.requestID).inserted else { continue }
+                    let pendingCall = await pool.latestPrepared()
+                    let call = try XCTUnwrap(pendingCall)
+                    let snapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
+                    guard snapshot.window.applicationProcessIdentifier == app.processIdentifier,
+                          snapshot.documentIdentity.flatMap(URL.init(string:))?.standardizedFileURL == document.standardizedFileURL else {
+                        throw NativeTextFixtureFailure.unexpectedOutcome("Approval no longer targets the owned document")
+                    }
+                    let qualifiedEdit = call.toolName == "set_element_attribute" && call.arguments["name"] == .string("AXValue")
+                        && call.arguments["value"] == .string(expected)
+                    let qualifiedSave = call.toolName == "press_key" && call.arguments["key"] == .string("s")
+                        && call.arguments["modifiers"] == .array([.string("command")])
+                        && snapshot.text.value.utf8.elementsEqual(expected.utf8)
+                    guard call.taskID == taskID, qualifiedEdit || qualifiedSave else {
+                        throw NativeTextFixtureFailure.unexpectedOutcome("The proposed action is outside the qualified edit/save experiment")
+                    }
+                    if rejectStaleEdit {
+                        guard qualifiedEdit, approvals.count == 1 else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("A changed document must not receive another action")
+                        }
+                        guard AXUIElementSetAttributeValue(snapshot.focusedElement, kAXValueAttribute as CFString,
+                            externalEdit as CFString) == .success else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("The owned interference could not be installed")
+                        }
+                    }
+                    let response = ComputerUseEnvelope(senderID: request.senderID, targetID: request.targetID,
+                        pairingCode: request.pairingCode, sessionID: request.sessionID, kind: .approvalResponse,
+                        body: try ComputerUseApprovalResponse(requestID: approval.requestID, approved: true,
+                            taskID: approval.taskID, appliedControlRevision: approval.appliedControlRevision,
+                            hostControlEpoch: approval.hostControlEpoch).encodedBody())
+                    XCTAssertTrue(host.handle(response, channel: channel))
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            editorExact = try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(expected.utf8) == true
+            savedExact = try Data(contentsOf: document) == Data(expected.utf8)
+            externalEditPreserved = try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(externalEdit.utf8) == true
+        } catch { failure = error }
+        if let manager { await manager.stop().value }
+        await pool.cancelAll()
+        let calls = await pool.approvedCalls()
+        let effects = try JSONSerialization.jsonObject(with: JSONEncoder().encode(calls))
+        let history = try? ledger.approvedActionHistory(taskID: taskID, senderID: "TEXTEDIT-TEST", sessionID: "TEXTEDIT-SESSION")
+        let sentMessages = await channel.messages()
+        let messages = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sentMessages))
+        app.forceTerminate()
+        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
+        let report: [String: Any] = ["scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
+            "goal": goal, "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
+            "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(), "terminalText": terminal?.text as Any? ?? NSNull(),
+            "fallbackCalls": fallbackCalls, "approvalCount": approvals.count, "approvedCalls": effects, "messages": messages,
+            "documentProposals": proposals.values(),
+            "staleEditExperiment": rejectStaleEdit, "externalEditPreserved": externalEditPreserved,
+            "confirmedActionCount": history?.filter { $0.response != nil }.count as Any? ?? NSNull(),
+            "editorExact": editorExact, "savedFileExact": savedExact, "ownedTextEditExited": app.isTerminated]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("mcp-host-task-result.json"), options: .withoutOverwriting)
+        XCTAssertTrue(app.isTerminated)
+        if let failure { throw failure }
+        if rejectStaleEdit {
+            XCTAssertEqual(terminal?.outcome, .unableToComplete)
+            XCTAssertTrue(externalEditPreserved); XCTAssertFalse(editorExact); XCTAssertFalse(savedExact)
+            XCTAssertEqual(approvals.count, 1); XCTAssertEqual(calls.count, 0); XCTAssertEqual(fallbackCalls, 0)
+            XCTAssertEqual(history?.filter { $0.response != nil }.count, 0)
+            return
+        }
+        XCTAssertEqual(terminal?.outcome, .taskCompleted)
+        XCTAssertTrue(editorExact); XCTAssertTrue(savedExact)
+        XCTAssertEqual(fallbackCalls, 0); XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(history?.filter { $0.response != nil }.count, 2)
     }
 
     /// Real helper capability experiment. This owns all input and its target;
@@ -2768,6 +3022,51 @@ private final class NativeAXProbeLog: @unchecked Sendable {
         })
         return ComputerUseAccessibilityTextTarget(access: access)
     }
+}
+
+private final class NativeMCPDocumentProposalLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var contents: [String] = []
+    func append(_ value: String) { lock.withLock { contents.append(value) } }
+    func values() -> [String] { lock.withLock { contents } }
+}
+
+private actor NativeMCPTaskObservedPool: MCPClientPooling {
+    let base: MCPClientPool
+    private var pending: MCPToolCall?
+    private var approved: [MCPToolCall] = []
+    init(base: MCPClientPool) { self.base = base }
+    func start(binaryURL: URL) async throws -> MCPProcessIdentity { try await base.start(binaryURL: binaryURL) }
+    func allowedTools() async throws -> [MCPAllowedTool] { try await base.allowedTools() }
+    func execute(_ call: MCPToolCall) async throws -> MCPToolResult { try await base.execute(call) }
+    func prepareApproval(_ call: MCPToolCall) async throws -> MCPPreparedApproval {
+        let result = try await base.prepareApproval(call)
+        pending = call
+        return result
+    }
+    func performApproved(_ call: MCPToolCall, fingerprint: MCPApprovalFingerprint) async throws -> MCPToolResult {
+        approved.append(call)
+        return try await base.performApproved(call, fingerprint: fingerprint)
+    }
+    func cancel(processGeneration: UInt64) async { await base.cancel(processGeneration: processGeneration) }
+    func cancelAll() async { await base.cancelAll() }
+    func latestPrepared() -> MCPToolCall? { pending }
+    func approvedCalls() -> [MCPToolCall] { approved }
+}
+
+private actor NativeMCPTaskChannel: HostComputerUseChannel {
+    private var sent: [ComputerUseEnvelope] = []
+    func send(kind: ComputerUseEnvelope.Kind, body: String, to targetID: String?, sessionID: String?,
+        messageID: String?) async throws -> ComputerUseEnvelope {
+        let envelope = ComputerUseEnvelope(id: messageID ?? UUID().uuidString, senderID: "HOST-ID",
+            targetID: targetID ?? "TEXTEDIT-TEST", pairingCode: "123456", sessionID: sessionID ?? "TEXTEDIT-SESSION",
+            kind: kind, body: body)
+        sent.append(envelope)
+        return envelope
+    }
+    func poll() async throws -> [ComputerUseEnvelope] { [] }
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {}
+    func messages() -> [ComputerUseEnvelope] { sent }
 }
 
 private final class NativeAXProbeMonitor: ComputerUseAXLifecycleMonitoring {
