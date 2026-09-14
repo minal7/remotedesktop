@@ -70,6 +70,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private var session: Session?
     private var isExecuting = false
     private(set) var lastRevalidationDiagnostic: [String: String] = [:]
+    /// Read-only access to the already bounded task history for opt-in
+    /// diagnostics; reading it performs no capture, model request or input.
+    var diagnosticHistory: [ComputerUseFaraModel.Step] { session?.history ?? [] }
     let isReady = true
     let requiresMacControlHelper = false
     let runtimeName = "Native desktop computer use"

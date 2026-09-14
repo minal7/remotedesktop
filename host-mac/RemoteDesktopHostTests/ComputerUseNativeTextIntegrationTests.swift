@@ -79,6 +79,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runNativeScrollFixture(useHolo: true, managedHolo: true)
     }
 
+    func testOptInHoloPackageLoaderRunsTheNativeDocumentTask() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_PACKAGE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in verified Holo package activation and native execution with diagnostic 5 GiB worker cap") }
+        try await runNativeScrollFixture(useHolo: true, managedHolo: true, loadedHolo: true)
+    }
+
     private static func managedHoloInputs(_ environment: [String: String]) async throws -> ComputerUseHoloRuntimeInputs {
         let directory = URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_ASSETS"]))
         for (name, expected) in [(ComputerUseHoloRuntimeInputs.modelFileName, "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"),
@@ -118,7 +123,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runNativeScrollFixture(useHolo: Bool, managedHolo: Bool = false) async throws {
+    private func runNativeScrollFixture(useHolo: Bool, managedHolo: Bool = false, loadedHolo: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_COMPUTER_USE_NATIVE_SCROLL_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in disposable AppKit scroll fixture") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -150,7 +155,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try FileManager.default.createDirectory(at: proposalDirectory, withIntermediateDirectories: false)
         var responses: [[String: Any]] = [], diagnosticProbe: HoloProbeProcess?
         let started = Date()
-        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("journals"), propose: { input in
+        let observedExecutor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("journals"), propose: { input in
             if !useHolo, input.actionError != nil { throw ComputerUseDesktopExecutor.Failure.changedScreen }
             guard responses.count < (useHolo ? 6 : 9) else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
             if !useHolo, !responses.isEmpty {
@@ -208,6 +213,19 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             responses.append(["response": proposal.response, "actionError": input.actionError ?? "", "nativeControls": input.nativeControls?.jsonObject ?? [:]])
             return proposal
         }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil; await managedRuntime?.shutdown() })
+        let executor: ComputerUseDesktopExecutor
+        var loaderActivationSeconds: TimeInterval = 0
+        if loadedHolo {
+            let manifest = ComputerUseArtifactManifest.holo31
+            let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: manifest), runtime: try XCTUnwrap(managedRuntime),
+                nativeJournalDirectory: directory.appendingPathComponent("journals"))
+            let beforeLoad = Date()
+            let loaded = try await loader.load(receipt: .init(installationVersion: manifest.installationVersion, modelVariant: manifest.modelVariant,
+                modelDirectory: try XCTUnwrap(managedInputs).modelURL.deletingLastPathComponent().path, installedAt: Date()), progress: { _ in })
+            loaderActivationSeconds = Date().timeIntervalSince(beforeLoad)
+            executor = try XCTUnwrap(loaded as? ComputerUseDesktopExecutor, "The Holo package must create the native executor")
+            XCTAssertTrue(executor.isReady); XCTAssertFalse(executor.requiresMacControlHelper)
+        } else { executor = observedExecutor }
         let memory = managedInputs.map { inputs in Task.detached { () -> (UInt64, Int) in
             var peak: UInt64 = 0, samples = 0
             while !Task.isCancelled {
@@ -231,7 +249,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let dispatches = journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count
         let workersGone = useHolo ? try DarwinOSAtlasProcessInspector().matchingProcesses(for: URL(fileURLWithPath: XCTUnwrap(environment["HOLO_BINARY"]))).isEmpty : true
         let workerStop = await managedRuntime?.lastWorkerStop
-        var report: [String: Any] = ["scope": managedHolo ? "managed-Holo-native-scroll" : useHolo ? "actual-Holo-native-scroll" : "scripted-native-scroll", "goal": goal,
+        if loadedHolo {
+            responses = executor.diagnosticHistory.map { ["response": $0.response, "actionError": $0.actionError ?? "",
+                "screenshotSHA256": SHA256.hash(data: $0.screenshotPNG).map { String(format: "%02x", $0) }.joined()] }
+        }
+        var report: [String: Any] = ["scope": loadedHolo ? "loader-Holo-native-scroll" : managedHolo ? "managed-Holo-native-scroll" : useHolo ? "actual-Holo-native-scroll" : "scripted-native-scroll", "goal": goal,
             "responses": responses, "fixtureState": final, "dispatchJournalCount": dispatches, "elapsedSeconds": Date().timeIntervalSince(started),
             "result": result.map { String(describing: $0) } ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
             "revalidation": executor.lastRevalidationDiagnostic, "ownedWorkerExited": workersGone, "diagnosticWorkerLimitGiB": useHolo ? 5 : 0,
@@ -243,11 +265,24 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             report["credentialsRemoved"] = managedLauncher.credentialDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }
             if let workerStop { report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(workerStop)) }
         }
+        if loadedHolo {
+            report["productionLoaderUsed"] = true; report["loaderActivationSeconds"] = loaderActivationSeconds
+            report["modelResponseTraceAvailable"] = true; report["memorySamplingStartsAfterLoaderActivation"] = true
+            report["proposalTraceSource"] = "bounded executor history after return"
+            let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+            let prepared = try ComputerUseDesktopImage(observation: screen)
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: prepared.png)), image = try XCTUnwrap(bitmap.cgImage)
+            let crop = CGRect(x: (window.minX - screen.displayBounds.minX) / screen.displayBounds.width * CGFloat(image.width),
+                y: (window.minY - screen.displayBounds.minY) / screen.displayBounds.height * CGFloat(image.height),
+                width: window.width / screen.displayBounds.width * CGFloat(image.width), height: window.height / screen.displayBounds.height * CGFloat(image.height)).integral
+            let imageAttachment = XCTAttachment(image: NSImage(cgImage: try XCTUnwrap(image.cropping(to: crop)), size: .zero))
+            imageAttachment.name = "Loaded Holo final native document"; imageAttachment.lifetime = .keepAlways; add(imageAttachment)
+        }
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
         attachment.name = "Native scroll workflow"; attachment.lifetime = .keepAlways; add(attachment)
         XCTAssertTrue(workersGone)
         if managedHolo {
-            XCTAssertEqual(managedLauncher.credentialDirectories.count, 1, "The managed worker must be reused across proposals")
+            XCTAssertEqual(managedLauncher.credentialDirectories.count, loadedHolo ? 2 : 1, "One activation check, when loading the package, then one worker for the task")
             XCTAssertTrue(managedLauncher.credentialDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
             XCTAssertEqual(workerStop?.cleanupSucceeded, true)
         }
@@ -264,6 +299,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let replay = try await executor.execute(taskID: "native-scroll", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
         XCTAssertEqual(replay, result)
         XCTAssertEqual(responses.count, calls)
+        if loadedHolo { XCTAssertEqual(executor.diagnosticHistory.count, calls) }
         XCTAssertEqual((try read()["events"] as? [[String: Any]])?.count, events.count)
     }
 

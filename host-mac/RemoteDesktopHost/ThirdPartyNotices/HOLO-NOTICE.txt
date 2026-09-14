@@ -1,0 +1,21 @@
+Remote Desktop Host - Holo native computer-use candidate
+
+Holo-3.1-4B is developed by H Company. Its pinned model card declares the
+Apache License 2.0 and identifies the Qwen 3.5 family as its base.
+Model: https://huggingface.co/Hcompany/Holo-3.1-4B
+Model revision: 8c88265a5a159bfd1492db9243733dd2e6e04a6e
+Model card: https://huggingface.co/Hcompany/Holo-3.1-4B/blob/8c88265a5a159bfd1492db9243733dd2e6e04a6e/README.md
+The Apache License 2.0 text is included as QWEN35-APACHE-2.0-LICENSE.txt.
+
+The packaged model data are modified GGUF conversions: Q4_K_M model weights
+and an f16 vision projector, pinned together from:
+https://huggingface.co/mradermacher/Holo-3.1-4B-GGUF
+Revision: 6d76eab0233f62783ddec95a7a2e2b057c6d7e66
+Holo-3.1-4B.Q4_K_M.gguf: 3066386464 bytes
+SHA-256: cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9
+Holo-3.1-4B.mmproj-f16.gguf: 672424256 bytes
+SHA-256: 4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f
+
+Inference uses the signed app's bundled llama.cpp b9992 runtime.
+Source revision: 6eddde06a4f25d55d538b5d15628dcc2b6882147
+See LLAMA-CPP-MIT-LICENSE.txt. Downloads contain data only.

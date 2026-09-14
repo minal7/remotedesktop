@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00102 /* FARA-NOTICE.txt */; };
+		E0F002F002F002F002F00203 /* HOLO-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */; };
 		E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */; };
 		F7191DAA5A805A98C4E9BA8A /* GUI-OWL-DESKTOP-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */; };
 		FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */; };
@@ -305,6 +306,7 @@
 
 /* Begin PBXFileReference section */
 		E0F001F001F001F001F00102 /* FARA-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-NOTICE.txt"; sourceTree = "<group>"; };
+		E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "HOLO-NOTICE.txt"; sourceTree = "<group>"; };
 		E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "GUI-OWL-DESKTOP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraBrowserExecutor.swift; sourceTree = "<group>"; };
@@ -592,6 +594,7 @@
 				F144A5766AF6CD0F4844FCE2 /* QWEN35-APACHE-2.0-LICENSE.txt */,
 				74BAA05E5EEF67FEE4C9E15B /* QWEN35-NOTICE.txt */,
 				E0F001F001F001F001F00102 /* FARA-NOTICE.txt */,
+				E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */,
 				E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */,
 				43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */,
 			);
@@ -1056,6 +1059,7 @@
 				17A6F88D8EC53C06727CF4BD /* QWEN35-APACHE-2.0-LICENSE.txt in Resources */,
 				C2CF8FD36B956E505B66B5FF /* QWEN35-NOTICE.txt in Resources */,
 				E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */,
+				E0F002F002F002F002F00203 /* HOLO-NOTICE.txt in Resources */,
 				E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */,
 				F7191DAA5A805A98C4E9BA8A /* GUI-OWL-DESKTOP-MIT-LICENSE.txt in Resources */,
 			);

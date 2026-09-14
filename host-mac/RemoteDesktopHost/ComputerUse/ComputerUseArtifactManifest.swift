@@ -11,6 +11,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         case base4B = "os-atlas-base-4b"
         case nativeText4B = "qwen35-native-text-4b"
         case fara15_4B = "fara15-4b"
+        case holo31_4B = "holo31-4b"
     }
 
     struct DownloadableArtifact: Codable, Equatable, Sendable {
@@ -100,6 +101,20 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         minimumMemoryBytes: 12 * 1_024 * 1_024 * 1_024)
     static let current = fara15
 
+    /// Native desktop candidate. Selection remains explicit until whole-task
+    /// and whole-app resource qualification is complete.
+    static let holo31 = ComputerUseArtifactManifest(
+        installationVersion: "holo31-4b-q4-k-m-b9992", modelVariant: .holo31_4B,
+        modelRepository: "mradermacher/Holo-3.1-4B-GGUF", modelRevision: "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+        modelArtifacts: [
+            .init(kind: .textModelShard, fileName: "Holo-3.1-4B.Q4_K_M.gguf", byteCount: 3_066_386_464,
+                sha256: "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9",
+                downloadURL: URL(string: "https://huggingface.co/mradermacher/Holo-3.1-4B-GGUF/resolve/6d76eab0233f62783ddec95a7a2e2b057c6d7e66/Holo-3.1-4B.Q4_K_M.gguf")!),
+            .init(kind: .visionProjector, fileName: "Holo-3.1-4B.mmproj-f16.gguf", byteCount: 672_424_256,
+                sha256: "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f",
+                downloadURL: URL(string: "https://huggingface.co/mradermacher/Holo-3.1-4B-GGUF/resolve/6d76eab0233f62783ddec95a7a2e2b057c6d7e66/Holo-3.1-4B.mmproj-f16.gguf")!)],
+        minimumMemoryBytes: 12 * 1_024 * 1_024 * 1_024)
+
     /// Separate installation/receipt from the visual package. The native form
     /// planner does not require its projector, helper or Apple Intelligence.
     static let nativeTextV2 = ComputerUseArtifactManifest(
@@ -126,10 +141,14 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     var legalArtifacts: [BundledArtifact] {
         switch modelVariant {
         case .fara15_4B: return [Self.faraLicense, Self.qwen35License, Self.llamaCPPLicense, Self.faraNotice]
+        case .holo31_4B: return [Self.qwen35License, Self.llamaCPPLicense, Self.holoNotice]
         case .nativeText4B: return [Self.qwen35License, Self.llamaCPPLicense, Self.qwen35Notice]
         default: return Self.modelLegalArtifacts
         }
     }
+
+    static let holoNotice = BundledArtifact(fileName: "HOLO-NOTICE.txt", byteCount: 1144,
+        sha256: "81aa0042cc34c7b841e26f5b88a3f83610a3a7a1abddf13a5407d030c72e5821")
 
     static let faraLicense = BundledArtifact(fileName: "FARA-MIT-LICENSE.txt", byteCount: 1066,
         sha256: "98a96c38494df4963951e32b81ec4effebe4c8a812ab8d9e7d185d59e86fe2fc")

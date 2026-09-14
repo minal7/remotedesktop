@@ -1,0 +1,325 @@
+{
+  "date": "2026-09-13",
+  "parentCommit": "132cc61421a4c0878a2dcdc1d25a2851db120138",
+  "sourceFiles": [
+    {
+      "path": "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj",
+      "sha256": "e8f37444fc4ac077bacdf7ac8575d2a6af8892818a0a99e4249b30ada718c836"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseArtifactManifest.swift",
+      "sha256": "1f95ca8cdf87f83c1eba10654a562f6e82147f665f944cc9489ce133c81873c7"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift",
+      "sha256": "f155d638f2a462b8ce801bfccd92c49df7f20f02364369020f0d39f09c3b3b27"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift",
+      "sha256": "db81542b7fe9482c1e093ad928ae7f8eb7a7de3892f306c197c8103dd11587ce"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift",
+      "sha256": "0d4fd995fef1504125c956a5249c74a00f9bb71f62dfb6c269a3802cfa824558"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift",
+      "sha256": "a16ef068deb1f8fb3e49b052747469a5cac40777441bf0d766feb4c8d459c6d9"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ThirdPartyNotices/HOLO-NOTICE.txt",
+      "sha256": "81aa0042cc34c7b841e26f5b88a3f83610a3a7a1abddf13a5407d030c72e5821"
+    }
+  ],
+  "failedLoaderTask": {
+    "path": ".build/repair-verification/native-desktop-loaded-holo-scroll-01-attachments/0EDFD11A-64A7-4E45-90C3-2FE25CECE238.json",
+    "sha256": "276c2a9ac7f66903c6cb7ca5b4b232e28d2460a15102ab354d43e4d1f729465b",
+    "report": {
+      "credentialsRemoved": true,
+      "diagnosticWorkerLimitGiB": 5,
+      "dispatchJournalCount": 1,
+      "elapsedSeconds": 59.9123409986496,
+      "failure": "",
+      "fixtureFrontmostAtReturn": true,
+      "fixtureState": {
+        "events": [
+          {
+            "dx": 0,
+            "dy": -500,
+            "precise": true,
+            "type": "scroll"
+          }
+        ],
+        "lowerCodeVisible": false,
+        "maxX": 825,
+        "maxY": 857,
+        "mode": "scroll",
+        "pid": 14060,
+        "x": 0,
+        "y": 500
+      },
+      "goal": "Find and report the lower section code in this document by scrolling vertically. Keep the horizontal position at the left edge and leave the window open.",
+      "loaderActivationSeconds": 1.7657359838485718,
+      "managedLaunchCount": 2,
+      "managedRuntime": true,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memorySamples": 468,
+      "memorySamplingStartsAfterLoaderActivation": true,
+      "modelResponseTraceAvailable": false,
+      "ownedWorkerExited": true,
+      "peakWorkerMemoryBytes": 4601905152,
+      "productionLoaderUsed": true,
+      "responses": [],
+      "result": "userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\")",
+      "revalidation": {
+        "editableAuthorityMatches": "true",
+        "focusMatches": "true",
+        "pointerPoint": "269,537",
+        "pointerRequiresFullDisplayMatch": "true",
+        "pointerTargetFrame": "nil",
+        "screenMatches": "false",
+        "textFrameAfter": "nil",
+        "textFrameBefore": "nil",
+        "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+      },
+      "scope": "loader-Holo-native-scroll",
+      "wholeApp12GBQualified": false,
+      "workerStop": {
+        "cleanupSucceeded": true,
+        "generation": 2,
+        "reason": {
+          "requested": {}
+        }
+      }
+    }
+  },
+  "passedLoaderTask": {
+    "path": ".build/repair-verification/native-desktop-loaded-holo-scroll-02-attachments/D38D77CC-4303-498B-9DFF-2707AD468FAA.json",
+    "sha256": "6be9ddad9b8e2b8d27545d2a103db5c34addda3189ec835263f6e16afa3be1ea",
+    "report": {
+      "credentialsRemoved": true,
+      "diagnosticWorkerLimitGiB": 5,
+      "dispatchJournalCount": 2,
+      "elapsedSeconds": 44.93163704872131,
+      "failure": "",
+      "fixtureFrontmostAtReturn": true,
+      "fixtureState": {
+        "events": [
+          {
+            "dx": 0,
+            "dy": -500,
+            "precise": true,
+            "type": "scroll"
+          },
+          {
+            "dx": 0,
+            "dy": -800,
+            "precise": true,
+            "type": "scroll"
+          }
+        ],
+        "lowerCodeVisible": true,
+        "maxX": 825,
+        "maxY": 857,
+        "mode": "scroll",
+        "pid": 17741,
+        "x": 0,
+        "y": 800
+      },
+      "goal": "Find and report the lower section code in this document by scrolling vertically. Keep the horizontal position at the left edge and leave the window open.",
+      "loaderActivationSeconds": 1.8150889873504639,
+      "managedLaunchCount": 2,
+      "managedRuntime": true,
+      "memoryMetric": "sampled max of resident size and physical footprint",
+      "memorySamples": 344,
+      "memorySamplingStartsAfterLoaderActivation": true,
+      "modelResponseTraceAvailable": true,
+      "ownedWorkerExited": true,
+      "peakWorkerMemoryBytes": 4569055232,
+      "productionLoaderUsed": true,
+      "proposalTraceSource": "bounded executor history after return",
+      "responses": [
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"direction\\\":\\\"down\\\",\\\"distance\\\":500,\\\"x\\\":400,\\\"y\\\":500}\",\"name\":\"scroll\"},\"id\":\"Bm6du8KIRkdLDaSj0LtZM1fIM6BrrcS3\",\"type\":\"function\"}]}",
+          "screenshotSHA256": "5411ebf54e1fadca3c83c9ec1faa6332faef23dc8f082ce5f85757b84acbc92a"
+        },
+        {
+          "actionError": "",
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"direction\\\":\\\"down\\\",\\\"distance\\\":800,\\\"x\\\":300,\\\"y\\\":600}\",\"name\":\"scroll\"},\"id\":\"Oal8LwjHbnvSoTcdO6LAkvvrhDQyjoUI\",\"type\":\"function\"}]}",
+          "screenshotSHA256": "427ede30e38fdccf34a1115514ed4d873b6ab1787adce9eb30a6099bd8f87c67"
+        }
+      ],
+      "result": "completed(\"The lower section code in the document is: **FJ-482**\\n\\nThis was found by scrolling vertically in the \\\"Remote Desktop native scroll fixture\\\" document. The code appears in a popup dialog labeled \\\"Lower section code: FJ-482\\\".\")",
+      "revalidation": {},
+      "scope": "loader-Holo-native-scroll",
+      "wholeApp12GBQualified": false,
+      "workerStop": {
+        "cleanupSucceeded": true,
+        "generation": 2,
+        "reason": {
+          "requested": {}
+        }
+      }
+    }
+  },
+  "failedImage": {
+    "path": ".build/repair-verification/native-desktop-loaded-holo-scroll-01-attachments/FE19325A-9250-4D64-AD37-C93D0D88B663.png",
+    "sha256": "0480b37f68e50c7f18bacdab59224e22feb7cbb6afb03067681be84e2ff56110"
+  },
+  "passedImage": {
+    "path": ".build/repair-verification/native-desktop-loaded-holo-scroll-02-attachments/56256335-4D6D-4C11-ABDC-9A697DA305E3.png",
+    "sha256": "7e1d4f50f579fdbfbbad6c097993cf8bef57d22c03868dda45d7d007abeaa682"
+  },
+  "bundledNotice": {
+    "path": "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/HOLO-NOTICE.txt",
+    "sha256": "81aa0042cc34c7b841e26f5b88a3f83610a3a7a1abddf13a5407d030c72e5821"
+  },
+  "scope": "Explicit Holo package manifest, shared receipt resolution and production-loader creation of the native executor",
+  "repair": [
+    "Adds an explicit Holo 3.1 4B candidate manifest with the already-tested immutable GGUF revision, exact model/projector bytes and SHA-256 values, and a 12 GiB installation floor. The current default remains Fara.",
+    "Fara and Holo share receipt/version/variant, exact two-artifact shape, strict data-directory, regular-file/non-symlink, size and containment checks. Runtime code must resolve within the signed application bundle. Installer checksum verification remains a separate prerequisite.",
+    "The existing visual executor loader recognizes a Holo package, activates and joins a validation worker, then returns the shared native desktop executor using managed Holo proposals and shutdown. Native task journals have a separate configurable directory.",
+    "Bundles a pinned Holo attribution notice alongside the existing Apache 2.0 and llama.cpp license texts. The upstream pinned model card declares Apache 2.0; it has no LICENSE file at that revision. The notice identifies the GGUF conversion and both exact artifacts.",
+    "A read-only diagnosticHistory accessor exposes the executor's already-retained, at-most-20 action records without extra capture, inference, input or storage. The loader test exports original retained proposals, rejection feedback and screenshot hashes after return. Terminal completion is not an action-history record; the final result retains its answer."
+  ],
+  "sources": [
+    {
+      "url": "https://huggingface.co/Hcompany/Holo-3.1-4B/blob/8c88265a5a159bfd1492db9243733dd2e6e04a6e/README.md",
+      "supports": "Pinned model card's Apache 2.0 declaration and Qwen-family base-model attribution",
+      "checked": "2026-09-13"
+    },
+    {
+      "url": "https://huggingface.co/mradermacher/Holo-3.1-4B-GGUF/tree/6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+      "supports": "Pinned conversion source; exact local data were hashed before both real-loader tasks"
+    }
+  ],
+  "attempts": [
+    {
+      "bundle": ".build/repair-verification/holo-package-red-01.xcresult",
+      "log": ".build/repair-verification/holo-package-red-01.log",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 1,
+        "failedTests": 2,
+        "skippedTests": 0,
+        "startTime": 1789368376.074,
+        "finishTime": 1789368435.128,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"[\"OS-ATLAS-APACHE-2.0-LICENSE.txt\", \"LLAMA-CPP-MIT-LICENSE.txt\", \"GRANITE-APACHE-2.0-LICENSE.txt\", \"NOTICE.txt\"]\") is not equal to (\"[\"LLAMA-CPP-MIT-LICENSE.txt\", \"HOLO-NOTICE.txt\", \"QWEN35-APACHE-2.0-LICENSE.txt\"]\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "OSAtlasRuntimeInstallationTests/testHoloManifestRetainsDataPinsAndBundledAttributionWithoutChangingDefault()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testHoloManifestRetainsDataPinsAndBundledAttributionWithoutChangingDefault",
+            "testName": "testHoloManifestRetainsDataPinsAndBundledAttributionWithoutChangingDefault()"
+          },
+          {
+            "failureText": "failed: caught error: \"proModelRequired\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 2,
+            "testIdentifierString": "OSAtlasRuntimeInstallationTests/testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage",
+            "testName": "testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/holo-package-green-01.xcresult",
+      "log": ".build/repair-verification/holo-package-green-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 5,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789368621.688,
+        "finishTime": 1789368684.958,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-loaded-holo-scroll-01.xcresult",
+      "log": ".build/repair-verification/native-desktop-loaded-holo-scroll-01.log",
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789368714.973,
+        "finishTime": 1789368791.977,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native scroll did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\"))",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInHoloPackageLoaderRunsTheNativeDocumentTask()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInHoloPackageLoaderRunsTheNativeDocumentTask",
+            "testName": "testOptInHoloPackageLoaderRunsTheNativeDocumentTask()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/holo-package-final-01.xcresult",
+      "log": ".build/repair-verification/holo-package-final-01.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 7,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789368923.891,
+        "finishTime": 1789368949.725,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-loaded-holo-scroll-02.xcresult",
+      "log": ".build/repair-verification/native-desktop-loaded-holo-scroll-02.log",
+      "summary": {
+        "result": "Passed",
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789369042.441,
+        "finishTime": 1789369090.806,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    }
+  ],
+  "verification": {
+    "red": "Two executed failures reproduce rejection of the Holo receipt and absent bundled attribution; the rejection matrix already passes.",
+    "green": "Five methods pass Holo receipt/pin/legal packaging, ten rejection scenarios and existing Fara resolution/rejection checks.",
+    "final": "Current source compiles; seven methods pass package/Fara checks and existing rejected-history/uncertain-delivery regressions.",
+    "firstLoaderRun": "Activation succeeded and the native executor sent one -500 wheel event. The task then returned user control after three rejections. The last recorded rejected click was in the title bar and required full-display agreement; the code remained hidden. The original proposals were unavailable in this first report, so their intent is not established.",
+    "diagnosticRepeat": "With only read-only diagnostic history collection added, the same task passes: two scroll events reveal the code, horizontal position remains zero, the window stays open/frontmost and terminal replay posts no new input. This does not resolve the earlier failure or establish repeatability.",
+    "workerCleanup": "Both real runs use exactly two sequential managed launches: package validation, then one task worker. All four workers exit and their credentials are removed. Sampling begins after activation and excludes the activation peak.",
+    "answerAccuracy": "The passing answer reports the correct code but falsely calls the document a popup. Full answer accuracy remains unaccepted.",
+    "newDistinctPassingMacMethods": 4,
+    "conservativeHistoricalMacMinimum": 351,
+    "historicalIOSMinimum": 10,
+    "fullSuite": false
+  },
+  "acceptance": {
+    "packageAndNativeLoader": "Implemented, compiled and tested",
+    "nativeDocumentRepeatabilityAccepted": false,
+    "fullAnswerAccuracyAccepted": false,
+    "defaultSelectionChanged": false,
+    "productionWorkerLimitGiB": 4,
+    "diagnosticWorkerLimitGiB": 5,
+    "targetMacRAMGB": 12,
+    "wholeApp12GBQualified": false,
+    "remaining": [
+      "Diagnose native scene/window interpretation and rejected actions using the retained original proposals; do not infer a coordinate or authority fix from one successful repeat.",
+      "Connect the candidate through full host/client task composition and qualification before selecting it by default.",
+      "Broader native actions, cross-app/browser tasks, real provider login and physical-phone controls remain open.",
+      "Both measured task-worker peaks exceed the unchanged 4 GiB production ceiling; whole-app memory/swap and thermal qualification remain open.",
+      "No fixture answer, domain/selector branch, coordinate correction or weaker native admission was introduced."
+    ]
+  }
+}

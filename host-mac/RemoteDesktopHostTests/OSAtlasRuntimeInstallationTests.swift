@@ -3,6 +3,60 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
+    func testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage() throws {
+        let fixture = try makeTrainedFixture(.holo31)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let package = try OSAtlasRuntimeInputResolver(manifest: fixture.manifest).resolveAvailablePackage(receipt: fixture.receipt,
+            runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory)
+        guard case .holo(let inputs) = package else { return XCTFail("Holo must resolve to its own model family") }
+        XCTAssertEqual(inputs.modelURL.lastPathComponent, ComputerUseHoloRuntimeInputs.modelFileName)
+        XCTAssertEqual(inputs.projectorURL.lastPathComponent, ComputerUseHoloRuntimeInputs.projectorFileName)
+        XCTAssertEqual(inputs.llamaServerURL, fixture.runtimeDirectory.appendingPathComponent("llama-server"))
+    }
+
+    func testHoloResolverRejectsChangedReceiptsArtifactsAndExecutableScope() throws {
+        for scenario in ["stale", "variant", "missing model", "missing projector", "truncated", "symlink model", "symlink projector", "external runtime", "extra artifact", "wrong kind"] {
+            let fixture = try makeTrainedFixture(.holo31)
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var receipt = fixture.receipt, manifest = fixture.manifest, runtime = fixture.runtimeDirectory
+            let model = fixture.modelDirectory.appendingPathComponent(ComputerUseHoloRuntimeInputs.modelFileName)
+            let projector = fixture.modelDirectory.appendingPathComponent(ComputerUseHoloRuntimeInputs.projectorFileName)
+            switch scenario {
+            case "stale", "variant": receipt = .init(installationVersion: scenario == "stale" ? "old" : manifest.installationVersion,
+                modelVariant: scenario == "variant" ? .fara15_4B : .holo31_4B, modelDirectory: fixture.modelDirectory.path, installedAt: Date())
+            case "missing model": try FileManager.default.removeItem(at: model)
+            case "missing projector": try FileManager.default.removeItem(at: projector)
+            case "truncated": try Data([1]).write(to: model)
+            case "symlink model", "symlink projector":
+                let target = scenario == "symlink model" ? model : projector, external = fixture.root.appendingPathComponent("outside.gguf")
+                try FileManager.default.moveItem(at: target, to: external)
+                try FileManager.default.createSymbolicLink(at: target, withDestinationURL: external)
+            case "external runtime": runtime = fixture.modelDirectory
+            case "extra artifact": manifest = self.manifest(from: manifest, artifacts: manifest.modelArtifacts + [manifest.modelArtifacts[0]])
+            case "wrong kind":
+                let a = manifest.modelArtifacts[0]
+                manifest = self.manifest(from: manifest, artifacts: [.init(kind: .nativeTextPlannerModel, fileName: a.fileName, byteCount: a.byteCount, sha256: a.sha256, downloadURL: a.downloadURL), manifest.modelArtifacts[1]])
+            default: break
+            }
+            XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(manifest: manifest).resolveAvailablePackage(receipt: receipt,
+                runtimeDirectoryURL: runtime, enclosingBundleURL: fixture.bundleDirectory), scenario)
+        }
+    }
+
+    func testHoloManifestRetainsDataPinsAndBundledAttributionWithoutChangingDefault() throws {
+        let manifest = ComputerUseArtifactManifest.holo31
+        XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
+        XCTAssertEqual(manifest.minimumMemoryBytes, 12 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [3_066_386_464, 672_424_256])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), ["cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9", "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"])
+        XCTAssertTrue(manifest.modelArtifacts.allSatisfy { $0.downloadURL.path.contains("/resolve/" + manifest.modelRevision + "/") })
+        XCTAssertEqual(Set(manifest.legalArtifacts.map(\.fileName)), Set(["HOLO-NOTICE.txt", "QWEN35-APACHE-2.0-LICENSE.txt", "LLAMA-CPP-MIT-LICENSE.txt"]))
+        for artifact in manifest.legalArtifacts {
+            let url = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
+            XCTAssertEqual(try Data(contentsOf: url).count, Int(artifact.byteCount))
+        }
+    }
+
     func testFaraReceiptResolvesCurrentTwoFilePackageWithoutLegacyModels() throws {
         let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -47,21 +101,25 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
     }
 
     private func makeFaraFixture() throws -> Fixture {
+        try makeTrainedFixture(.fara15)
+    }
+
+    private func makeTrainedFixture(_ selected: ComputerUseArtifactManifest) throws -> Fixture {
         let fixture = try makeFixture()
         for artifact in fixture.manifest.modelArtifacts {
             try FileManager.default.removeItem(at: fixture.modelDirectory.appendingPathComponent(artifact.fileName))
         }
-        let artifacts = ComputerUseArtifactManifest.fara15.modelArtifacts.map {
+        let artifacts = selected.modelArtifacts.map {
             ComputerUseArtifactManifest.DownloadableArtifact(kind: $0.kind, fileName: $0.fileName,
                 byteCount: 3, sha256: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
                 downloadURL: $0.downloadURL)
         }
         for artifact in artifacts { try Data([1, 2, 3]).write(to: fixture.modelDirectory.appendingPathComponent(artifact.fileName)) }
-        let manifest = ComputerUseArtifactManifest(installationVersion: "fara-fixture", modelVariant: .fara15_4B,
+        let manifest = ComputerUseArtifactManifest(installationVersion: "trained-fixture", modelVariant: selected.modelVariant,
             modelRepository: "test/fara", modelRevision: "test-revision", modelArtifacts: artifacts, minimumMemoryBytes: 0)
         return Fixture(root: fixture.root, bundleDirectory: fixture.bundleDirectory,
             runtimeDirectory: fixture.runtimeDirectory, modelDirectory: fixture.modelDirectory, manifest: manifest,
-            receipt: .init(installationVersion: manifest.installationVersion, modelVariant: .fara15_4B,
+            receipt: .init(installationVersion: manifest.installationVersion, modelVariant: selected.modelVariant,
                 modelDirectory: fixture.modelDirectory.path, installedAt: Date()))
     }
 

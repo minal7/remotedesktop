@@ -38,6 +38,7 @@ struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
 /// legacy package. Each model family resolves through its own exact shape.
 enum OSAtlasResolvedRuntimePackage: Equatable, Sendable {
     case fara(ComputerUseFaraRuntimeInputs)
+    case holo(ComputerUseHoloRuntimeInputs)
     case visualOnly(OSAtlasLlamaRuntimeInputs)
     case visualAndSemantic(OSAtlasResolvedRuntimeInstallation)
 }
@@ -211,6 +212,10 @@ struct OSAtlasRuntimeInputResolver {
             return .fara(try resolveFara(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
                 enclosingBundleURL: enclosingBundleURL))
         }
+        if manifest.modelVariant == .holo31_4B {
+            return .holo(try resolveHolo(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
+                enclosingBundleURL: enclosingBundleURL))
+        }
         let semanticArtifactCount = manifest.modelArtifacts.filter {
             $0.kind == .semanticRouterModel
         }.count
@@ -267,12 +272,30 @@ struct OSAtlasRuntimeInputResolver {
     /// the exact two-file shape, receipt identity and current file containment.
     func resolveFara(receipt: ComputerUseInstallationReceipt,
         runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> ComputerUseFaraRuntimeInputs {
-        guard manifest.modelVariant == .fara15_4B, receipt.modelVariant == .fara15_4B,
+        let directory = try resolveTrainedVisionDirectory(receipt: receipt, variant: .fara15_4B,
+            modelFileName: ComputerUseFaraRuntimeInputs.modelFileName, projectorFileName: ComputerUseFaraRuntimeInputs.projectorFileName)
+        return ComputerUseFaraRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
+            projectorURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName),
+            llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+    }
+
+    func resolveHolo(receipt: ComputerUseInstallationReceipt,
+        runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> ComputerUseHoloRuntimeInputs {
+        let directory = try resolveTrainedVisionDirectory(receipt: receipt, variant: .holo31_4B,
+            modelFileName: ComputerUseHoloRuntimeInputs.modelFileName, projectorFileName: ComputerUseHoloRuntimeInputs.projectorFileName)
+        return ComputerUseHoloRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.modelFileName),
+            projectorURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.projectorFileName),
+            llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+    }
+
+    private func resolveTrainedVisionDirectory(receipt: ComputerUseInstallationReceipt,
+        variant: ComputerUseArtifactManifest.ModelVariant, modelFileName: String, projectorFileName: String) throws -> URL {
+        guard manifest.modelVariant == variant, receipt.modelVariant == variant,
               receipt.installationVersion == manifest.installationVersion,
               (receipt.modelDirectory as NSString).isAbsolutePath,
               manifest.modelArtifacts.count == 2,
-              manifest.modelArtifacts.filter({ $0.kind == .textModelShard && $0.fileName == ComputerUseFaraRuntimeInputs.modelFileName }).count == 1,
-              manifest.modelArtifacts.filter({ $0.kind == .visionProjector && $0.fileName == ComputerUseFaraRuntimeInputs.projectorFileName }).count == 1 else {
+              manifest.modelArtifacts.filter({ $0.kind == .textModelShard && $0.fileName == modelFileName }).count == 1,
+              manifest.modelArtifacts.filter({ $0.kind == .visionProjector && $0.fileName == projectorFileName }).count == 1 else {
             throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
         let directory = URL(fileURLWithPath: receipt.modelDirectory, isDirectory: true).standardizedFileURL
@@ -286,9 +309,7 @@ struct OSAtlasRuntimeInputResolver {
                 throw OSAtlasRuntimeInstallationError.invalidModelArtifact(artifact.fileName)
             }
         }
-        return ComputerUseFaraRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName),
-            projectorURL: directory.appendingPathComponent(ComputerUseFaraRuntimeInputs.projectorFileName),
-            llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+        return directory
     }
 
     private func resolveBundledExecutable(runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> URL {
@@ -373,6 +394,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
     private let faraJournalDirectory: URL
+    private let nativeJournalDirectory: URL
     private let browserActionAttestationLedger:
         ComputerUseBrowserActionAttestationLedger
 
@@ -382,6 +404,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         runtime: OSAtlasLlamaRuntime = .shared,
         faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
+        nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
+            .deletingLastPathComponent().appendingPathComponent("NativeDesktop", isDirectory: true),
         browserActionAttestationLedger:
             ComputerUseBrowserActionAttestationLedger =
                 ComputerUseBrowserActionAttestationLedger()
@@ -390,6 +414,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.bundle = bundle
         self.runtime = runtime
         self.faraJournalDirectory = faraJournalDirectory
+        self.nativeJournalDirectory = nativeJournalDirectory
         self.browserActionAttestationLedger =
             browserActionAttestationLedger
     }
@@ -404,6 +429,23 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: bundle.bundleURL)
         switch package {
+        case .holo(let inputs):
+            progress("Checking Holo native computer use…")
+            do {
+                _ = try await runtime.activateHolo(inputs)
+                try Task.checkCancellation()
+                await runtime.shutdown()
+                try Task.checkCancellation()
+                let runtime = self.runtime
+                return try ComputerUseDesktopExecutor(journalDirectory: nativeJournalDirectory,
+                    propose: { input in
+                        let endpoint = try await runtime.activateHolo(inputs)
+                        return try await .init(runtime.proposeHolo(endpoint: endpoint, input: input))
+                    }, finishRun: { await runtime.shutdown() })
+            } catch {
+                await runtime.shutdown()
+                throw error
+            }
         case .fara(let inputs):
             progress("Checking Fara browser computer use…")
             do {
