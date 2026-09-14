@@ -5,6 +5,27 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testBrowserCompletionChecksAcceptedAnswersWithoutPromotingQuestions() throws {
+        let original = try ComputerUseUnresolvedTextGoal(userRequest: "Read the store hours.")
+        let plan = ComputerUseMCPBrowserStepPlanner.Plan(kind: .answer, reference: "", text: "The store closes at six.")
+        let clarified = try original.answering("Anything else?", with: "Purchase a gift for me.")
+            .answering("Which gift?", with: "The blue one.")
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
+            goal: clarified, hasPageObservation: true)) {
+            XCTAssertTrue($0 is ComputerUseMCPBrowserStepPlanner.Failure)
+        }
+        let contextOnly = try original.answering("Should I purchase a gift?", with: "Just report the opening hours.")
+        XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
+            goal: contextOnly, hasPageObservation: true))
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
+            goal: contextOnly, hasPageObservation: false))
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+            plan: .init(kind: .incomplete, reference: "", text: "The requested work remains incomplete."),
+            goal: clarified, hasPageObservation: true)) {
+            XCTAssertEqual($0 as? MCPFirstComputerUseExecutor.ExecutorError, .structuredToolFailed("The requested work remains incomplete."))
+        }
+    }
+
     func testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback() throws {
         for (goal, answer, hasPage) in [
             ("Find the store hours and purchase a gift.", "The store closes at 6 PM.", true),

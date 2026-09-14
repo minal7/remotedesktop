@@ -1,5 +1,23 @@
 **Computer Use repair TODO — live implementation tracker**
 
+**Retained browser clarification and native planner experiments — September 14:** macOS MCP/native capabilities remain first. Planner, context, intent and completion defects do not establish a need for computer-use models. The browser already retained validated answers, but both proposal inputs still exposed the original goal plus transient history. The new executed regression fails on that missing input before the repair.
+
+Initial and loaded browser proposals now carry the existing typed user goal, with exact root bytes and browser-surface validation. Ordered answers and their questions remain available independently of history eviction. Only user turns supply user URL candidates; questions, page records and model history cannot add that authority. Fara's current request also retains the exact clarification pairs within its existing bounds. MCP completion checks now consider every accepted user turn. Those checks remain narrow and conservative: they do not prove intent, effect completion or semantic correctness, and the known prohibition false positive is still open.
+
+**Thirteen distinct final methods pass, zero failures or skips:** twelve focused/native/client regressions plus one actual Apple/MCP host task. The tests cover clarification before and after navigation, exact Unicode/whitespace, history eviction, replay, task roots, desktop separation, stale/expired/cancelled answers, client login Pause/Resume and Stop. The first broader batch's two failures were stale string assertions that omitted native page data added by `713e29b`; updated assertions explicitly verify the source, captured text, omission flags and exact answer. Both failed and passing results are retained. The controlled host task completes in **14.61 s**, visits each page once and makes **zero visual-model launches or worker observations**. Responsiveness/priority-inversion warnings remain open.
+
+Eight separate native-record model probes compare installed Qwen3.5-4B and the pinned Agents-A1-4B candidate, including native function calls. None qualifies: non-thinking outputs mark policy-only answers complete while a return remains undone; thinking runs exceed the output/deadline bounds, and one explanation assigns a donation procedure to ticket returns. Goal-last presentation does not resolve the failure. Native call decoding works in the prototype, but it does not prove whole-task success. Three small Apple intent variants also fail, including ordinary navigation misclassified as a change. Their code/results are retained outside the app; the failed classifier was not installed. Production model selection is unchanged, and no Mac specialty was established.
+
+| Repair scope | Implemented | Compiled | Tested | Accepted |
+| --- | --- | --- | --- | --- |
+| Retained browser user turns and native destination provenance | Yes | Yes | Executed RED→GREEN; twelve-method regression batch | Scoped input/continuation mechanics |
+| Completion checks include accepted answers | Yes | Yes | Later purchase request rejects; question-only request does not gain authority | Existing narrow checks only |
+| Actual MCP host informational task | Yes | Yes | Complete result in 14.61 s, one visit per page, zero visual workers | Controlled workflow only |
+| Qwen/Agents native planning and Apple intent classifier | Diagnostics only | Actual runtime loads / Apple build | Eight model runs, three intent variants; failures retained | No |
+| General public/native work, HostSession/provider/phone and whole-Mac resources | Partial | Yes | Remaining acceptance gates open | No |
+
+[Source-bound evidence, all eight app attempts and eight model runs](docs/audits/2026-09-04-mac-computer-use/browser-clarification-native-planner-results.json) preserve the full external oracles and limitations. Removed **4.67 GiB** of rejected task-created LFM/Granite weights plus an obsolete preparation script; pins and experiment evidence remain. Next qualify whole-goal native planning and evidence association before loosening completion guards, then complete public/mixed tasks through normal HostSession and real provider/phone handoff. Whole-Mac 12 GB and sustained heat acceptance remain open.
+
 Companion to [the detailed audit](docs/audits/2026-09-04-mac-computer-use/AUDIT.md). Baseline: main at 603e79e9f877a4a1c9a0b462d8db4da06dc46cf2. Status: in progress. This is the authoritative working TODO for the repair goal. A checkbox is completed only after the implementation and its stated verification are recorded here. The audit checklist is retained as the original plan.
 
 **Current execution plan — compile, test, then accept**

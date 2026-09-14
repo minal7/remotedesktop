@@ -851,7 +851,7 @@ final class MCPFirstComputerUseExecutor:
         case .answer, .incomplete:
             let hasPage: Bool
             if case .page = observation { hasPage = true } else { hasPage = false }
-            try Self.validateBrowserCompletion(plan: plan, goal: input.goal, hasPageObservation: hasPage)
+            try Self.validateBrowserCompletion(plan: plan, goal: input.validatedBrowserGoal(), hasPageObservation: hasPage)
             arguments = ["action": "terminate", "answer": plan.text]
         case .askUser:
             guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
@@ -870,6 +870,15 @@ final class MCPFirstComputerUseExecutor:
 
     // Completion admission is separate from deciding whether native tools
     // have a capability gap. A rejected answer cannot authorize vision.
+    static func validateBrowserCompletion(plan: ComputerUseMCPBrowserStepPlanner.Plan,
+        goal: ComputerUseUnresolvedTextGoal, hasPageObservation: Bool) throws {
+        // Preserve the existing conservative checks for every accepted user
+        // turn. This is not semantic intent classification or effect proof.
+        for turn in goal.userTurns {
+            try validateBrowserCompletion(plan: plan, goal: turn, hasPageObservation: hasPageObservation)
+        }
+    }
+
     static func validateBrowserCompletion(plan: ComputerUseMCPBrowserStepPlanner.Plan, goal: String, hasPageObservation: Bool) throws {
         guard !plan.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AppleFoundationMCPPlannerError.unknownProposal

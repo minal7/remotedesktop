@@ -70,7 +70,24 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
                 let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
                 let content = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
-                XCTAssertEqual(content.last?["text"] as? String, initialQuestion ? answer : "Current URL: \(base.appendingPathComponent("form").absoluteString)\n\(answer)")
+                let currentText = try XCTUnwrap(content.last?["text"] as? String)
+                if initialQuestion { XCTAssertEqual(currentText, answer) }
+                else {
+                    let parts = currentText.components(separatedBy: "\n")
+                    XCTAssertEqual(parts.count, 3)
+                    XCTAssertEqual(parts.first, "Current URL: \(base.appendingPathComponent("form").absoluteString)")
+                    XCTAssertEqual(parts.last, answer)
+                    let nativeLine = try XCTUnwrap(parts.dropFirst().first)
+                    let native = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(nativeLine.utf8)) as? [String: [String: Any]])
+                    let page = try XCTUnwrap(native["observed_page"])
+                    XCTAssertEqual(page["source_url"] as? String, base.appendingPathComponent("form").absoluteString)
+                    XCTAssertEqual(page["text"] as? String, "Origin\nDestination")
+                    XCTAssertEqual(page["text_truncated"] as? Bool, false)
+                    XCTAssertEqual(page["embedded_content_omitted"] as? Bool, false)
+                }
+                let retained = try XCTUnwrap(content.compactMap { $0["text"] as? String }.first { $0.hasPrefix("{\"clarifications\":") })
+                let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(retained.utf8)) as? [String: [[String: String]]])
+                XCTAssertEqual(context["clarifications"], [["question": question, "answer": answer]])
                 XCTAssertTrue(input.history.last?.response.contains("ask_user_question") == true)
             }
             let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + actions[calls] + "}</tool_call>"

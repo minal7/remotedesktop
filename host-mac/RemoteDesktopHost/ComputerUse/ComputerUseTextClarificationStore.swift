@@ -26,6 +26,12 @@ struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
     let userTurns: [String]
     let questions: [String]
 
+    /// Ordered interpretation context. Only answers are user-authored;
+    /// questions cannot supply destinations, effect authority or task success.
+    var clarificationContext: [[String: String]] {
+        zip(questions, userTurns.dropFirst()).map { ["question": $0.0, "answer": $0.1] }
+    }
+
     /// Contract identity only; never parse this value as user instructions.
     /// Single-turn identities remain compatible with existing text tasks.
     var taskIdentityText: String {

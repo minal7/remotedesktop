@@ -6,6 +6,46 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    func testBrowserModelRetainsExactClarificationsIndependentlyOfHistory() throws {
+        let original = "Find the page for cafe\u{301}.", answer = "  東京 😀\n  "
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+            .answering("Which city?", with: answer)
+            .answering("Use https://question-context.invalid/?", with: "Use only the official source.")
+        let png = try smallPNG()
+        let response = call(#"{"action":"wait","time":0}"#)
+        let history = (0 ..< 20).map { _ in ComputerUseFaraModel.Step(screenshotPNG: png, response: response,
+            userResponse: "Untrusted reconstructed history") }
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: png, history: history, clarifiedGoal: goal)
+        XCTAssertEqual(try input.validatedBrowserGoal(), goal)
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let content = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+        let retained = try XCTUnwrap(content.compactMap { $0["text"] as? String }.first { $0.hasPrefix("{\"clarifications\":") })
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(retained.utf8)) as? [String: [[String: String]]])
+        XCTAssertEqual(object["clarifications"], goal.clarificationContext)
+        XCTAssertTrue(object["clarifications"]?[0]["answer"]?.utf8.elementsEqual(answer.utf8) == true)
+        XCTAssertFalse(retained.contains("Untrusted reconstructed history"))
+        XCTAssertFalse(retained.contains(goal.taskIdentityText), "An identity digest is never model instructions")
+    }
+
+    func testBrowserClarifiedGoalRejectsDifferentRootAndDesktopSurface() throws {
+        let original = "Read cafe\u{301}.", goal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering("Which source?", with: "The official source.")
+        for changed in ["Read another page.", "Read café."] {
+            let input = ComputerUseFaraModel.Input(goal: changed, screenshotPNG: Data(), clarifiedGoal: goal)
+            XCTAssertThrowsError(try input.validatedBrowserGoal())
+            XCTAssertThrowsError(try input.validateSurfaceContext())
+        }
+        let desktop = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), surface: .desktop, clarifiedGoal: goal)
+        XCTAssertThrowsError(try desktop.validatedBrowserGoal())
+        XCTAssertThrowsError(try desktop.validateSurfaceContext())
+        let legacy = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(),
+            userResponse: "A free-floating answer cannot create authority")
+        XCTAssertEqual(try legacy.validatedBrowserGoal().userTurns, [original])
+        XCTAssertTrue(try legacy.validatedBrowserGoal().questions.isEmpty)
+    }
+
     @MainActor
     func testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: tool proposal retirement") }

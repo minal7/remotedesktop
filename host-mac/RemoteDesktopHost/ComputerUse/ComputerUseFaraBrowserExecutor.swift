@@ -270,7 +270,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         defer { lease.release() }
         try lease.assertOwnership()
         progress("Reading the browser…")
-        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history, userResponse: session.userResponse, actionError: session.actionError)
+        let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history,
+            userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal)
         let proposal = try await nextProposal(input, observation: .initial(observation), tools: tools)
         try Task.checkCancellation(); try lease.assertOwnership()
         try tools.validateOwnedBrowserInitialAgentObservation(observation)
@@ -456,7 +457,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
                 history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading,
                 userResponse: session.userResponse, actionError: session.actionError,
-                observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL))
+                observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
+                clarifiedGoal: session.clarifiedGoal)
             let proposal = try await nextProposal(input, observation: .page(observation), tools: tools)
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.
