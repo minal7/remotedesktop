@@ -115,6 +115,15 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, actualDesktopModel: .holo)
     }
 
+    func testOptInOneHoloProposalPreservesNativeFieldBinding() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_NATIVE_MODEL_BINDING_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: one model proposal with AX diagnostics and no generated input")
+        }
+        try await runFixture(browser: false, actualDesktopModel: .holo, nativeBindingProbe: true)
+    }
+
+    private enum BindingProbeStop: Error { case observed }
+
     func testNativeKeyChordsRemainLiteralAndRejectAmbiguousSequences() throws {
         for (keys, usage, modifiers) in [(["Alt", "Left"], 0x50, UInt16(4)), (["Left", "Option"], 0x50, 4),
             (["Control", "a"], 0x04, 2), (["Command", "a"], 0x04, 8), (["Shift", "ArrowRight"], 0x4F, 1),
@@ -515,6 +524,37 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds() throws {
+        let bounds = CGRect(x: -400, y: 100, width: 1728, height: 1117)
+        for window in [CGRect(x: -180, y: 625, width: 640, height: 332),
+                       CGRect(x: -80.25, y: 300.75, width: 450.5, height: 280.5)] {
+            let field = CGRect(x: window.minX + 30, y: window.minY + 100, width: 250, height: 25)
+            func image(changing rect: CGRect? = nil) throws -> ComputerUseDesktopImage {
+                var image = CIImage(color: .white).cropped(to: CGRect(x: 0, y: 0, width: bounds.width * 2, height: bounds.height * 2))
+                if let rect {
+                    let local = CGRect(x: (rect.minX - bounds.minX) * 2, y: (bounds.maxY - rect.maxY) * 2,
+                        width: rect.width * 2, height: rect.height * 2)
+                    image = CIImage(color: .blue).cropped(to: local).composited(over: image)
+                }
+                return try .init(observation: .init(image: image, displayBounds: bounds))
+            }
+            let before = try image()
+            for outside in [CGRect(x: window.maxX, y: window.minY + 20, width: 4, height: 160),
+                            CGRect(x: window.minX - 4, y: window.minY + 20, width: 4, height: 160),
+                            CGRect(x: window.minX + 20, y: window.minY - 4, width: 160, height: 4),
+                            CGRect(x: window.minX + 20, y: window.maxY, width: 160, height: 4)] {
+                XCTAssertTrue(try before.matchesInsertionPointPixels(of: image(changing: outside), window: window, field: field),
+                    "Resampling must not import an adjacent window's pixels into the current window: \(outside)")
+            }
+            for inside in [CGRect(x: window.maxX - 3, y: window.minY + 20, width: 2, height: 160),
+                           CGRect(x: window.minX + 1, y: window.minY + 20, width: 2, height: 160),
+                           CGRect(x: field.minX + 20, y: field.minY, width: 10, height: 20)] {
+                XCTAssertFalse(try before.matchesInsertionPointPixels(of: image(changing: inside), window: window, field: field),
+                    "Visible edge content and text changes remain significant: \(inside)")
+            }
+        }
+    }
+
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
         try await runFixture(browser: false)
     }
@@ -572,7 +612,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private enum NativeModel: String { case fara, faraDiagnostic, guiOwl, holo }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero, nativeBindingProbe: Bool = false) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -615,9 +655,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
         let injector = InputInjector()
         var simulatedLogin = false
+        let axLog = NativeAXProbeLog()
+        let diagnosticTarget = nativeBindingProbe ? NativeAXProbeLog.makeTarget(log: axLog) : nil
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
-        }, authenticationContextProvider: nativeModelLoop ? {
+        }, nativeTextTarget: diagnosticTarget, authenticationContextProvider: nativeModelLoop ? {
             simulatedLogin ? .init(focusedElement: "AXTextField AXSecureTextField Password", boundedWindowContext: "Sign in\nPassword\nContinue") : nil
         } : nil)
         if let actualDesktopModel {
@@ -645,11 +687,18 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 return (peak, samples)
             }
             var responses: [[String: Any]] = []
+            var bindingObservation: [String: Any] = [:]
             let started = Date()
             let goal = "In the Destination field, type Tokyo. Leave Origin empty and leave the form open."
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("actual-native"), propose: { input in
                 guard responses.count < 6 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
                 XCTAssertEqual(input.surface, .desktop)
+                if nativeBindingProbe, responses.isEmpty {
+                    let response = "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"time\\\":0}\",\"name\":\"wait\"},\"id\":\"binding-probe-observation\",\"type\":\"function\"}]}"
+                    responses.append(["response": response, "source": "scripted observation; no input"])
+                    return .init(response: response, action: .wait(0))
+                }
+                guard !nativeBindingProbe || responses.count == 1 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
                 // Preserve only this disposable native window for visual
                 // grounding diagnosis. Record its position in the exact
                 // full-display image supplied to the model; no input changes.
@@ -667,6 +716,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 let imageAttachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
                 imageAttachment.name = "\(actualDesktopModel.rawValue) native fixture observation \(responses.count)"; imageAttachment.lifetime = .keepAlways; self.add(imageAttachment)
                 let began = Date()
+                let beforeBinding = diagnosticTarget?.snapshot()
+                if nativeBindingProbe { axLog.mark("model-enter") }
                 let proposal: ComputerUseDesktopProposal
                 switch actualDesktopModel {
                 case .fara:
@@ -685,6 +736,16 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
                     "fixtureCropInModelImage": NSStringFromRect(crop), "modelImageWidth": source.width, "modelImageHeight": source.height])
+                if nativeBindingProbe {
+                    axLog.mark("model-returned")
+                    let afterBinding = diagnosticTarget?.snapshot()
+                    bindingObservation = ["beforeTargetID": beforeBinding?.targetID ?? "nil", "afterTargetID": afterBinding?.targetID ?? "nil",
+                        "sameTarget": beforeBinding?.targetID == afterBinding?.targetID,
+                        "sameValue": beforeBinding?.value == afterBinding?.value, "sameSelection": beforeBinding?.selection == afterBinding?.selection,
+                        "beforeAvailable": beforeBinding != nil, "afterAvailable": afterBinding != nil]
+                    axLog.mark("post-model-read")
+                    throw BindingProbeStop.observed
+                }
                 return proposal
             }, finishRun: { await runtime.shutdown() })
             let run = Task { try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
@@ -711,9 +772,23 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             if let stop = await runtime.lastWorkerStop {
                 report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(stop))
             }
+            if nativeBindingProbe {
+                report["scope"] = "one-Holo-proposal-native-binding-diagnostic-no-generated-effects"
+                report["bindingObservation"] = bindingObservation; report["axDiagnostics"] = axLog.snapshot()
+            }
             let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
             attachment.name = "Actual \(actualDesktopModel.rawValue) native desktop workflow"; attachment.lifetime = .keepAlways; add(attachment)
             XCTAssertTrue(gone)
+            if nativeBindingProbe {
+                XCTAssertTrue(failure is BindingProbeStop)
+                XCTAssertEqual(responses.count, 2, "One scripted observation followed by one real model proposal")
+                XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] })
+                try await verify(state, field: "origin", equals: ""); try await verify(state, field: "destination", equals: "")
+                XCTAssertEqual(bindingObservation["beforeAvailable"] as? Bool, true)
+                XCTAssertEqual(bindingObservation["afterAvailable"] as? Bool, true)
+                XCTAssertEqual(bindingObservation["sameTarget"] as? Bool, true, "A model call must not change the selected field binding")
+                return
+            }
             if let failure { return XCTFail("Native \(actualDesktopModel.rawValue) task failed: \(failure)") }
             guard case .completed = result else { return XCTFail("Native \(actualDesktopModel.rawValue) task did not complete: \(String(describing: result))") }
             XCTAssertTrue(process.isRunning)
@@ -1357,4 +1432,79 @@ private actor CountingNativeTextPlanner: ComputerUseTextGoalPlanning {
         try await afterProposal()
         return proposal
     }
+}
+
+/// Opt-in diagnostic only: record AX status codes and event names, never
+/// values, selected text or queries against destroyed event handles.
+private final class NativeAXProbeLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = Date()
+    private var counts: [String: Int] = [:]
+    private var events: [String] = []
+    private var observedReferences: [(String, AXUIElement)] = []
+    func observeReference(_ name: String, value: CFTypeRef?) {
+        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return }
+        lock.lock(); defer { lock.unlock() }
+        if observedReferences.count < 128 { observedReferences.append((name, value as! AXUIElement)) }
+    }
+    func relation(to element: AXUIElement?) -> String {
+        guard let element else { return "unknown" }
+        lock.lock(); defer { lock.unlock() }
+        return Set(observedReferences.filter { CFEqual($0.1, element) }.map(\.0)).sorted().joined(separator: ",")
+    }
+    func mark(_ value: String) {
+        lock.lock(); defer { lock.unlock() }
+        if events.count < 128 { events.append(String(format: "%.3f ", Date().timeIntervalSince(started)) + value) }
+    }
+    func record(_ operation: String, name: String, status: AXError, elapsed: TimeInterval) {
+        guard status != .success || elapsed >= 0.1 else { return }
+        let key = "\(operation):\(name):\(status.rawValue)"
+        lock.lock()
+        if counts[key] != nil || counts.count < 128 { counts[key, default: 0] += 1 }
+        lock.unlock()
+        if status == .cannotComplete || status == .invalidUIElement || elapsed >= 0.1 {
+            mark(key + String(format: " duration=%.3f", elapsed))
+        }
+    }
+    func snapshot() -> [String: Any] {
+        lock.lock(); defer { lock.unlock() }
+        return ["readStatusCounts": counts, "events": events]
+    }
+    @MainActor static func makeTarget(log: NativeAXProbeLog) -> ComputerUseAccessibilityTextTarget {
+        let live = ComputerUseAccessibilityTextTarget.Access.live
+        let access = ComputerUseAccessibilityTextTarget.Access(frontmost: live.frontmost, read: { name, element in
+            let began = Date(); var value: CFTypeRef?
+            let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+            if [kAXFocusedUIElementAttribute, kAXFocusedWindowAttribute, kAXParentAttribute, kAXTitleUIElementAttribute].contains(name) {
+                log.observeReference(name, value: status == .success ? value : nil)
+            }
+            log.record("read", name: name, status: status, elapsed: Date().timeIntervalSince(began))
+            return status == .success ? value : nil
+        }, canSet: { name, element in
+            let began = Date(); var settable: DarwinBoolean = false
+            let status = AXUIElementIsAttributeSettable(element, name as CFString, &settable)
+            log.record("canSet", name: name, status: status, elapsed: Date().timeIntervalSince(began))
+            return status == .success && settable.boolValue
+        }, write: live.write, timeout: live.timeout, makeLifecycleMonitor: { application in
+            log.observeReference("application", value: application.root)
+            return NativeAXProbeMonitor(base: ComputerUseAXLifecycleMonitor(application: application.root), log: log)
+        })
+        return ComputerUseAccessibilityTextTarget(access: access)
+    }
+}
+
+private final class NativeAXProbeMonitor: ComputerUseAXLifecycleMonitoring {
+    private let base: any ComputerUseAXLifecycleMonitoring
+    private let log: NativeAXProbeLog
+    init(base: any ComputerUseAXLifecycleMonitoring, log: NativeAXProbeLog) { self.base = base; self.log = log }
+    func drain() -> [ComputerUseAXLifecycleEvent] {
+        let events = base.drain()
+        for event in events {
+            let relation = log.relation(to: event.element)
+            log.mark("lifecycle:\(event.kind):" + (event.notification ?? "unknown") + ":references=" + (relation.isEmpty ? "unrelated" : relation))
+        }
+        return events
+    }
+    func cancel() { base.cancel() }
+    deinit { base.cancel() }
 }

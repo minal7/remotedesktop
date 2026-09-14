@@ -169,7 +169,7 @@ struct ComputerUseDesktopImage: Sendable {
     func matchesInsertionPointPixels(of other: Self, window: CGRect, field: CGRect,
         onDifference: ((CGRect, CGRect, CGRect) -> Void)? = nil) throws -> Bool {
         guard displayBounds == other.displayBounds, pixelWidth == other.pixelWidth, pixelHeight == other.pixelHeight,
-              window.contains(field), !field.isEmpty, let rect = imageRect(for: window),
+              window.contains(field), !field.isEmpty, let rect = imageRect(for: window, wholePixelsOnly: true),
               let fieldPixels = imageRect(for: field) else { return false }
         let a = try Self.pixels(png, in: rect), b = try Self.pixels(other.png, in: rect)
         let width = Int(rect.width), height = Int(rect.height)
@@ -203,15 +203,24 @@ struct ComputerUseDesktopImage: Sendable {
         return paintFootprint.contains(changedPixels) && changed.width <= 4 && changed.height >= changed.width * 2
     }
 
-    private func imageRect(for displayRect: CGRect) -> CGRect? {
+    private func imageRect(for displayRect: CGRect, wholePixelsOnly: Bool = false) -> CGRect? {
         guard displayRect.origin.x.isFinite, displayRect.origin.y.isFinite,
               displayRect.width.isFinite, displayRect.height.isFinite, !displayRect.isEmpty else { return nil }
         let clipped = displayRect.intersection(displayBounds)
         guard !clipped.isEmpty, !clipped.isNull else { return nil }
-        return CGRect(x: (clipped.minX - displayBounds.minX) * CGFloat(pixelWidth) / displayBounds.width,
+        let scaled = CGRect(x: (clipped.minX - displayBounds.minX) * CGFloat(pixelWidth) / displayBounds.width,
             y: (clipped.minY - displayBounds.minY) * CGFloat(pixelHeight) / displayBounds.height,
             width: clipped.width * CGFloat(pixelWidth) / displayBounds.width,
-            height: clipped.height * CGFloat(pixelHeight) / displayBounds.height).integral
+            height: clipped.height * CGFloat(pixelHeight) / displayBounds.height)
+        // Window-only proof must not import an adjacent surface through an
+        // outward-rounded, partially covered pixel. Pointer/field footprints
+        // still round outward to include their full rendered target/context.
+        let rounded = wholePixelsOnly
+            ? CGRect(x: ceil(scaled.minX), y: ceil(scaled.minY),
+                     width: floor(scaled.maxX) - ceil(scaled.minX), height: floor(scaled.maxY) - ceil(scaled.minY))
+            : scaled.integral
+        guard rounded.width > 0, rounded.height > 0 else { return nil }
+        return rounded
             .intersection(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
     }
 

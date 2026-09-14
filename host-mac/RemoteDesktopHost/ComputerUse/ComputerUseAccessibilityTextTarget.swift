@@ -330,6 +330,11 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             }
         }
         let titleElement = elementAttribute(kAXTitleUIElementAttribute, on: element)
+        if let titleElement, !isUsable(titleElement) {
+            // A destroyed label is invalid context, not an unlabeled field.
+            // Retain the handle for snapshot's local liveness check; never query it.
+            return Label(text: "", element: titleElement)
+        }
         if let titleElement, stringAttribute(kAXRoleAttribute, on: titleElement) == kAXStaticTextRole as String,
            stringAttribute(kAXSubroleAttribute, on: titleElement) != kAXSecureTextFieldSubrole as String,
            boolAttribute("AXProtectedContent", on: titleElement) != true,
@@ -397,12 +402,26 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     private func synchronizeLifecycle() {
         guard let lifecycle else { return }
         for event in lifecycle.drain() {
+            if event.kind == .created, let element = event.element,
+               observedRoot.map({ CFEqual($0, element) }) != true,
+               !bindings.contains(where: { $0.mentions(element) }) {
+                // A newly created, unrelated object cannot repurpose a retained
+                // reference. Do not interrupt a read in progress either. Focus,
+                // modal scope and destruction events still retire authority;
+                // fresh object/ancestry/value/selection checks remain mandatory.
+                // Compare locally: this handle may already have been destroyed.
+                continue
+            }
             lifecycleRevision = UUID()
             switch event.kind {
             case .coverageLost:
                 lifecycleUnavailable = true; bindings.removeAll()
             case .scopeChanged:
                 bindings.removeAll()
+            case .created:
+                guard let element = event.element else { bindings.removeAll(); continue }
+                if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
+                else { bindings.removeAll { $0.mentions(element) } }
             case .elementChanged:
                 guard let element = event.element else { continue }
                 if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }

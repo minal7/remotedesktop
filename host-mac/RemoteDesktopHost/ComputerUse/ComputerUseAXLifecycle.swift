@@ -9,7 +9,7 @@ protocol ComputerUseAXLifecycleMonitoring: AnyObject {
 }
 
 struct ComputerUseAXLifecycleEvent {
-    enum Kind: Equatable { case scopeChanged, elementChanged, valueChanged, destroyed, coverageLost }
+    enum Kind: Equatable { case scopeChanged, created, elementChanged, valueChanged, destroyed, coverageLost }
     let kind: Kind
     let element: AXUIElement?
     var notification: String? = nil
@@ -98,15 +98,16 @@ final class ComputerUseAXLifecycleMonitor: ComputerUseAXLifecycleMonitoring {
 
     static let scopeNotifications = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
         kAXApplicationActivatedNotification, kAXApplicationDeactivatedNotification,
-        kAXApplicationHiddenNotification, kAXApplicationShownNotification, kAXWindowCreatedNotification,
+        kAXApplicationHiddenNotification, kAXApplicationShownNotification,
         kAXWindowMiniaturizedNotification, kAXWindowDeminiaturizedNotification,
-        kAXSheetCreatedNotification, kAXDrawerCreatedNotification, kAXCreatedNotification,
+        kAXSheetCreatedNotification, kAXDrawerCreatedNotification,
         kAXLayoutChangedNotification, kAXRowCountChangedNotification,
         kAXRowExpandedNotification, kAXRowCollapsedNotification].map { $0 as String }
 
     static func kind(for notification: String) -> ComputerUseAXLifecycleEvent.Kind? {
         if scopeNotifications.contains(notification) { return .scopeChanged }
         switch notification {
+        case kAXCreatedNotification as String, kAXWindowCreatedNotification as String: return .created
         case kAXUIElementDestroyedNotification as String: return .destroyed
         case kAXTitleChangedNotification as String: return .elementChanged
         case kAXValueChangedNotification as String: return .valueChanged
@@ -147,7 +148,8 @@ final class ComputerUseAXLifecycleMonitor: ComputerUseAXLifecycleMonitoring {
         // Application-root subscriptions receive notifications from that
         // application's elements, including objects not yet discovered.
         _ = AXUIElementSetMessagingTimeout(application, 0.15)
-        let names = Self.scopeNotifications + [kAXUIElementDestroyedNotification as String,
+        let names = Self.scopeNotifications + [kAXCreatedNotification as String, kAXWindowCreatedNotification as String,
+            kAXUIElementDestroyedNotification as String,
             kAXTitleChangedNotification as String, kAXValueChangedNotification as String]
         for name in names {
             registrationResults[name] = AXObserverAddNotification(created, application, name as CFString, nil)

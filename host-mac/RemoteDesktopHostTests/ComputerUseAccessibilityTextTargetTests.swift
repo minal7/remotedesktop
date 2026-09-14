@@ -499,6 +499,62 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         }
     }
 
+    func testUnrelatedNativeCreationPreservesExactFieldAuthorityAcrossInputBoundaries() throws {
+        for notification in [kAXCreatedNotification, kAXWindowCreatedNotification] {
+            for unrelated in ["other-window", "source", "other-label"] {
+                for stage in ["before-read", "during-read", "capability"] {
+                    let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+                    graph.lifecycleFactory = { _ in monitor }
+                    let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+                    let before = try XCTUnwrap(target.snapshot())
+                    var delivered = false
+                    func deliver() {
+                        guard !delivered else { return }
+                        delivered = true
+                        monitor.notify(notification as String, element: graph.element(unrelated))
+                    }
+                    if stage == "before-read" { deliver() }
+                    else if stage == "during-read" {
+                        graph.afterRead = { element, attribute in
+                            if element == "destination", attribute == kAXValueAttribute { deliver() }
+                        }
+                    } else { graph.onCapabilityQuery = { deliver() } }
+                    XCTAssertEqual(target.snapshot(targetID: before.targetID), before, "\(notification):\(unrelated):\(stage)")
+                    XCTAssertEqual(try target.replaceSelectedText("🗺️ café", expected: before), true)
+                    XCTAssertTrue(delivered)
+                    XCTAssertEqual(graph.value("destination"), "old🗺️ café")
+                    XCTAssertEqual(graph.value("source"), "source text")
+                    XCTAssertFalse(graph.calls.contains { $0.element == unrelated }, "Creation handling only compares retained object identity")
+                }
+            }
+        }
+    }
+
+    func testRelatedOrUnscopedNativeCreationStillRetiresRetainedAuthority() throws {
+        for notification in [kAXCreatedNotification, kAXWindowCreatedNotification] {
+            for related in ["destination", "label", "group", "window", "application"] {
+                let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+                graph.set("destination", kAXTitleAttribute, nil)
+                graph.lifecycleFactory = { _ in monitor }
+                let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+                let before = try XCTUnwrap(target.snapshot())
+                monitor.notify(notification as String, element: graph.element(related))
+                XCTAssertNil(target.snapshot(targetID: before.targetID), "\(notification):\(related)")
+                assertRejected(target, expected: before)
+                XCTAssertTrue(graph.writes.isEmpty)
+                XCTAssertNotEqual(try XCTUnwrap(target.snapshot()).targetID, before.targetID)
+            }
+        }
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let before = try XCTUnwrap(target.snapshot())
+        monitor.record(.init(kind: .created, element: nil))
+        XCTAssertNil(target.snapshot(targetID: before.targetID))
+        assertRejected(target, expected: before)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
     func testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary() throws {
         for name in ["destination", "label", "group", "window", "application"] {
             let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
@@ -518,6 +574,26 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             XCTAssertFalse(graph.calls.dropFirst(start).contains { $0.element == name }, "No read, settable query, timeout or write may use the destroyed \(name)")
             XCTAssertTrue(graph.writes.isEmpty)
         }
+    }
+
+    func testNativeDestroyedLabelRejectsObservationUntilFreshLabelAuthorityExists() throws {
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.set("destination", kAXTitleAttribute, nil)
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let before = try XCTUnwrap(target.snapshot())
+        monitor.notify(kAXUIElementDestroyedNotification as String, element: graph.element("label"))
+        let callCount = graph.calls.count
+        XCTAssertNil(target.snapshot())
+        assertRejected(target, expected: before)
+        XCTAssertFalse(graph.calls.dropFirst(callCount).contains { $0.element == "label" })
+        XCTAssertTrue(graph.writes.isEmpty)
+        graph.set("destination", kAXTitleUIElementAttribute, graph.element("other-label"))
+        let fresh = try XCTUnwrap(target.snapshot())
+        XCTAssertNotEqual(fresh.targetID, before.targetID)
+        XCTAssertEqual(fresh.value, before.value)
+        XCTAssertEqual(try target.replaceSelectedText("!", expected: fresh), true)
+        XCTAssertEqual(graph.value("destination"), "old!")
     }
 
     func testNativeLifecycleDistinguishesTextStateFromLabelMeaning() throws {
@@ -837,6 +913,7 @@ private final class AXFixtureLifecycleMonitor: ComputerUseAXLifecycleMonitoring 
     private(set) var cancellations = 0
     init() { registration = callbacks.register(source: source, inbox: inbox) }
     func notify(_ notification: String, element: AXUIElement) { callbacks.deliver(source: source, element: element, notification: notification) }
+    func record(_ event: ComputerUseAXLifecycleEvent) { inbox.record(event) }
     func drain() -> [ComputerUseAXLifecycleEvent] { inbox.drain() }
     func cancel() { cancellations += 1; callbacks.remove(registration); inbox.close() }
 }
