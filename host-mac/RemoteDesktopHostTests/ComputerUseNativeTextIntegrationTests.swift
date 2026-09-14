@@ -93,12 +93,23 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, captureOnly: true)
     }
 
+    func testOptInRealTextEditReadUsesMCPBeforeModelFallback() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpReadOnly: true)
+    }
+
+    func testOptInRealTextEditMCPReadPreservesLongUnicodeAndSelection() async throws {
+        let content = "Unicode notes\n" + String(repeating: "Zürich → 東京 👩🏽‍💻 e\u{301}\n", count: 70) + "End of document.\n"
+        try await runRealTextEditTask(actualModel: false, mcpReadOnly: true, mcpReadText: content,
+            mcpReadPrompt: "Show me all the contents in the current document.", mcpReadSelection: NSRange(location: 0, length: 7))
+    }
+
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
     }
 
-    private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false) async throws {
+    private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
+        mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -109,7 +120,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativeTextEdit-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let document = directory.appendingPathComponent("Travel notes.txt")
-        let original = "Meeting notes\nRoute: Seattle\nStatus: draft\n"
+        let original = mcpReadText ?? "Meeting notes\nRoute: Seattle\nStatus: draft\n"
         let expected = "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
         let goal = "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
         try Data(original.utf8).write(to: document, options: .withoutOverwriting)
@@ -151,6 +162,18 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         do {
             for _ in 0..<100 { if ownsDocument() { break }; try await Task.sleep(for: .milliseconds(50)) }
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
+            if mcpReadOnly {
+                if let mcpReadSelection {
+                    var focused: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+                          let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { throw NativeTextFixtureFailure.unexpectedOutcome("Missing owned editor") }
+                    var range = CFRange(location: mcpReadSelection.location, length: mcpReadSelection.length)
+                    let axRange = try XCTUnwrap(AXValueCreate(.cfRange, &range))
+                    XCTAssertEqual(AXUIElementSetAttributeValue(unsafeBitCast(focused, to: AXUIElement.self), kAXSelectedTextRangeAttribute as CFString, axRange), .success)
+                }
+                try await readTextEditUsingMacTools(tools: tools, app: app, original: original, document: document, output: output, prompt: mcpReadPrompt)
+                return
+            }
             let initialEditor = try XCTUnwrap(tools.nativeFocusedEditorObservation())
             XCTAssertEqual(initialEditor.textState?.valuePrefix, original, "TextEdit must observe the complete independent starting document")
             let initialFrame = try XCTUnwrap(tools.nativeFocusedTextFrame())
@@ -299,6 +322,90 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
+    private func readTextEditUsingMacTools(tools: ComputerUseHostTools, app: NSRunningApplication,
+        original: String, document: URL, output: URL, prompt: String? = nil) async throws {
+        let initialSnapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
+        XCTAssertTrue(initialSnapshot.text.value.utf8.elementsEqual(original.utf8))
+        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
+        let mutations = output.appendingPathComponent("mcp-mutations.json")
+        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: mutations), sessionFactory: { binary, generation in
+            MCPClientSession(validatedBinary: binary, processGeneration: generation, stateDirectory: output.appendingPathComponent("helper-state"))
+        })
+        var fallbackCalls = 0, result: ComputerUseExecutionResult?, failure: Error?
+        var progress: [String] = [], diagnostic: MCPToolResult?, schemas: [String: MCPJSONValue] = [:]
+        var targeted: MCPToolResult?, attributes: MCPToolResult?
+        var scopeSamples: [String] = []
+        let observedTools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            mcpFocusedTextSnapshotProvider: {
+                let snapshot = try tools.mcpFocusedTextSnapshot()
+                scopeSamples.append(String(reflecting: snapshot))
+                return snapshot
+            }, frontmostApplicationIdentityProvider: { tools.frontmostApplicationSnapshot().identity },
+            frontmostApplicationProvider: { tools.frontmostApplicationSnapshot().localizedName })
+        let started = Date()
+        do {
+            let fallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+                fallbackCalls += 1
+                return .unableToComplete("The read task was delegated to model fallback")
+            })
+            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper, visualFallback: fallback,
+                clientPool: pool, planningTimeout: 5)
+            let goal = prompt ?? "Tell me the complete text of the open TextEdit document."
+            result = try await executor.execute(taskID: "textedit-mcp-read", prompt: goal, trustedUserPrompt: goal,
+                tools: observedTools, progress: { progress.append($0) })
+            // Independently inspect the same helper after the product route.
+            // Diagnostic data never supplies the planner's answer or task ID.
+            let available = try await pool.allowedTools()
+            for tool in available where ["get_ui_tree", "get_element_attributes", "read_value", "find_element", "find_elements", "query_elements"].contains(tool.toolName) {
+                schemas[tool.toolName] = tool.inputSchema
+            }
+            let tree = try XCTUnwrap(available.first { $0.toolName == "get_ui_tree" })
+            diagnostic = try await pool.execute(tree.makeCall(taskID: "independent-tree-diagnostic", arguments: [
+                "pid": .integer(Int(app.processIdentifier)), "max_depth": .integer(12)]))
+            let query = try XCTUnwrap(available.first { $0.toolName == "find_elements" })
+            targeted = try await pool.execute(query.makeCall(taskID: "independent-area-diagnostic", arguments: [
+                "pid": .integer(Int(app.processIdentifier)), "role": .string("AXTextArea")]))
+            if case .object(let root)? = targeted?.structuredContent, case .array(let elements)? = root["elements"],
+               elements.count == 1, case .object(let element) = elements[0], case .string(let identifier)? = element["id"] {
+                let read = try XCTUnwrap(available.first { $0.toolName == "get_element_attributes" })
+                attributes = try await pool.execute(read.makeCall(taskID: "independent-value-diagnostic", arguments: [
+                    "element_id": .string(identifier), "names": .array([.string("AXRole"), .string("AXValue"), .string("AXSubrole")])]))
+            }
+        } catch { failure = error }
+        await pool.cancelAll()
+        let unchanged = try Data(contentsOf: document) == Data(original.utf8)
+        let finalSnapshot = try tools.mcpFocusedTextSnapshot()
+        let editorUnchanged = finalSnapshot?.text.value.utf8.elementsEqual(original.utf8) == true
+        let selectionUnchanged = finalSnapshot?.text.selection == initialSnapshot.text.selection
+        var documentNodes: [MCPJSONValue] = []
+        if case .object(let root)? = diagnostic?.structuredContent, case .array(let nodes)? = root["nodes"] {
+            documentNodes = nodes.filter { if case .object(let node) = $0 { return node["role"] == .string("AXTextArea") }; return false }
+        }
+        let schemaJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(schemas))
+        let nodeJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(documentNodes))
+        let targetedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(targeted?.structuredContent ?? .null), options: .fragmentsAllowed)
+        let attributesJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(attributes?.structuredContent ?? .null), options: .fragmentsAllowed)
+        app.forceTerminate()
+        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
+        let report: [String: Any] = ["scope": "real-TextEdit-default-MCP-planner-read-only",
+            "elapsedSeconds": Date().timeIntervalSince(started), "result": String(reflecting: result), "failure": String(reflecting: failure),
+            "fallbackCalls": fallbackCalls, "progress": progress, "scopeSamples": scopeSamples, "diagnosticSchemas": schemaJSON, "diagnosticDocumentNodes": nodeJSON,
+            "diagnosticError": diagnostic?.isError as Any? ?? NSNull(), "diagnosticTruncated": diagnostic?.wasTruncated as Any? ?? NSNull(),
+            "targetedResult": targetedJSON, "targetedError": targeted?.isError as Any? ?? NSNull(), "targetedTruncated": targeted?.wasTruncated as Any? ?? NSNull(),
+            "attributeResult": attributesJSON, "attributeError": attributes?.isError as Any? ?? NSNull(), "attributeTruncated": attributes?.wasTruncated as Any? ?? NSNull(),
+            "savedBytesMatchOriginal": unchanged, "editorTextUnchanged": editorUnchanged, "selectionUnchanged": selectionUnchanged,
+            "inputUTF8Bytes": original.utf8.count, "initialSelection": NSStringFromRange(initialSnapshot.text.selection), "ownedTextEditExited": app.isTerminated,
+            "mutationLedgerCreated": FileManager.default.fileExists(atPath: mutations.path)]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("mcp-read-result.json"), options: .withoutOverwriting)
+        XCTAssertTrue(unchanged); XCTAssertTrue(editorUnchanged); XCTAssertTrue(selectionUnchanged); XCTAssertTrue(app.isTerminated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mutations.path))
+        if let failure { throw failure }
+        guard case .completed(let answer) = result else { return XCTFail("MCP did not complete the native document read") }
+        XCTAssertTrue(answer.utf8.elementsEqual(original.utf8))
+        XCTAssertEqual(fallbackCalls, 0)
     }
 
     /// Diagnostic only: no inference or input. A single test-owned backdrop

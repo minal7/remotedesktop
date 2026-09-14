@@ -474,6 +474,15 @@ final class MCPFirstComputerUseExecutor:
             return browserResult
         }
 
+        if ComputerUseMCPFocusedTextRead.matches(
+            trustedUserPrompt, application: tools.frontmostApplicationSnapshot().localizedName),
+           let snapshot = try tools.mcpFocusedTextSnapshot(), snapshot.isReadable,
+           ComputerUseMCPFocusedTextRead.matches(trustedUserPrompt, application: snapshot.application.localizedName),
+           let result = try await executeFocusedTextRead(
+               taskID: taskID, snapshot: snapshot, tools: tools, progress: progress) {
+            return result
+        }
+
         // A fully specified Mail mutation already has an exact, bounded local
         // representation. Prepare its fingerprinted approval immediately so
         // the user never waits for either local model to rediscover values the
@@ -791,9 +800,9 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
-    private func withNewHelperGeneration(
-        operation: (UInt64) async throws -> ComputerUseExecutionResult
-    ) async throws -> ComputerUseExecutionResult {
+    private func withNewHelperGeneration<Result>(
+        operation: (UInt64) async throws -> Result
+    ) async throws -> Result {
         try await waitForStartedCancellation()
         let identity: MCPProcessIdentity
         do { identity = try await clientPool.start(binaryURL: binaryURL) }
@@ -812,6 +821,46 @@ final class MCPFirstComputerUseExecutor:
         return try await withGenerationCancellation(generation: identity.processGeneration) {
             try checkGenerationCancellation(identity.processGeneration)
             return try await operation(identity.processGeneration)
+        }
+    }
+
+    /// A complete focused-document read needs neither visual inference nor a
+    /// generated summary. Discover and read through the actual MCP helper;
+    /// independently verify the target and exact bytes across every await.
+    private func executeFocusedTextRead(
+        taskID: String, snapshot: ComputerUseMCPFocusedTextSnapshot,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult? {
+        try await withNewHelperGeneration { generation -> ComputerUseExecutionResult? in
+            @MainActor func checkScope() throws {
+                try checkGenerationCancellation(generation)
+                guard try tools.mcpFocusedTextSnapshot() == snapshot else {
+                    throw ExecutorError.structuredToolFailed(
+                        "The focused document changed during the read. Please retry on the document you want to read.")
+                }
+            }
+            let available = try await clientPool.allowedTools()
+            try checkScope()
+            func tool(_ name: String) -> MCPAllowedTool? {
+                available.first { $0.toolName == name && $0.risk == .readOnly
+                    && $0.serverID == MCPServerRegistry.macControl.serverID
+                    && $0.processGeneration == generation }
+            }
+            guard let find = tool("find_elements"), let read = tool("get_element_attributes") else { return nil }
+            progress("Reading the focused document with Mac tools…")
+            try checkScope()
+            let discovery = try await clientPool.execute(find.makeCall(taskID: taskID, arguments: [
+                "pid": .integer(Int(snapshot.window.applicationProcessIdentifier)),
+                "role": .string(snapshot.role),
+            ]))
+            try checkScope()
+            guard let elementID = ComputerUseMCPFocusedTextRead.elementID(in: discovery, matching: snapshot) else { return nil }
+            let value = try await clientPool.execute(read.makeCall(taskID: taskID, arguments: [
+                "element_id": .string(elementID), "names": .array([.string("AXRole"), .string("AXValue")]),
+            ]))
+            try checkScope()
+            guard let text = ComputerUseMCPFocusedTextRead.text(in: value, elementID: elementID, matching: snapshot) else { return nil }
+            return .completed(text.isEmpty ? "The focused document is empty." : text)
         }
     }
 
@@ -2974,4 +3023,72 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
+}
+
+/// A typed, bounded operation shared by Accessibility text-area editors. It
+/// handles only a whole current-document read; transformations and compound
+/// tasks keep their normal planner path. Helper text is data, never a prompt.
+enum ComputerUseMCPFocusedTextRead {
+    static func matches(_ prompt: String, application: String?) -> Bool {
+        guard prompt.utf8.count <= 2_000 else { return false }
+        let input = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let app = application.map { "(?:" + NSRegularExpression.escapedPattern(for: $0) + #"\s+)?"# } ?? ""
+        let target = #"(?:the\s+)?(?:current|open|focused|frontmost|active)\s+"# + app + #"(?:document|editor|text\s+area)"#
+        let content = #"(?:the\s+)?(?:(?:complete|full|entire)\s+|all\s+(?:of\s+)?(?:the\s+)?)?(?:text|contents?)"#
+        let polite = #"(?:please[ ,]+)?(?:(?:can|could|would)\s+you\s+)?"#
+        let operation = #"(?:(?:read|show|display|get|give|tell)\s+(?:me\s+)?"# + content + #"\s+(?:of|in|from)\s+"# + target
+            + #"|read\s+(?:me\s+)?"# + target
+            + #"|what\s+does\s+"# + target + #"\s+say"#
+            + #"|what(?:\s+is|['’]s)\s+(?:written\s+in\s+"# + target + "|" + content + #"\s+(?:of|in)\s+"# + target + "))"
+        return input.range(of: "^" + polite + operation + #"[.?!]*$"#,
+                           options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func elementID(in result: MCPToolResult, matching snapshot: ComputerUseMCPFocusedTextSnapshot) -> String? {
+        guard snapshot.isReadable, let root = successfulObject(result),
+              root["pid"]?.exactInteger == Int(snapshot.window.applicationProcessIdentifier),
+              root["limit_reached"] == .bool(false), case .array(let rows)? = root["elements"],
+              root["count"]?.exactInteger == rows.count else { return nil }
+        var ids = Set<String>(), matches: [String] = []
+        for row in rows {
+            guard case .object(let fields) = row, case .string(let id)? = fields["id"],
+                  !id.isEmpty, ids.insert(id).inserted else { return nil }
+            if fields["role"] == .string(snapshot.role), let frame = frame(fields), frame == snapshot.frame {
+                matches.append(id)
+            }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func text(in result: MCPToolResult, elementID: String, matching snapshot: ComputerUseMCPFocusedTextSnapshot) -> String? {
+        guard snapshot.isReadable, let root = successfulObject(result),
+              root["element_id"] == .string(elementID), case .object(let values)? = root["values"],
+              values["AXRole"] == .string(snapshot.role), case .string(let value)? = values["AXValue"],
+              value.utf8.elementsEqual(snapshot.text.value.utf8) else { return nil }
+        if let unavailable = root["unavailable"] {
+            guard case .array(let names) = unavailable,
+                  !names.contains(.string("AXRole")), !names.contains(.string("AXValue")) else { return nil }
+        }
+        return value
+    }
+
+    private static func successfulObject(_ result: MCPToolResult) -> [String: MCPJSONValue]? {
+        guard !result.isError, !result.wasTruncated, case .object(let root)? = result.structuredContent,
+              root["ok"] == .bool(true) else { return nil }
+        return root
+    }
+
+    private static func frame(_ fields: [String: MCPJSONValue]) -> CGRect? {
+        func number(_ value: MCPJSONValue?) -> Double? {
+            switch value {
+            case .integer(let value): return Double(value)
+            case .double(let value) where value.isFinite: return value
+            default: return nil
+            }
+        }
+        guard case .object(let position)? = fields["position"], case .object(let size)? = fields["size"],
+              let x = number(position["x"]), let y = number(position["y"]),
+              let width = number(size["width"]), let height = number(size["height"]), width > 0, height > 0 else { return nil }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
 }

@@ -765,6 +765,41 @@ struct ComputerUseFrontmostWindowCaptureIdentity: Equatable {
     let bounds: CGRect
 }
 
+/// Full text remains local until a current-turn document read is verified.
+/// This identity is independent of helper element IDs, which expire with it.
+struct ComputerUseMCPFocusedTextSnapshot: Equatable {
+    let application: ComputerUseFrontmostApplicationSnapshot
+    let window: ComputerUseFrontmostWindowCaptureIdentity
+    let text: ComputerUseTextSnapshot
+    let frame: CGRect
+    let role: String
+    let focusedElement: AXUIElement
+    let documentIdentity: String?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // Text-edit bindings deliberately retire on scope notifications. A
+        // read does not inherit mutation authority from that transient UUID.
+        // Retain/compare the actual AX reference and exact current document.
+        lhs.application == rhs.application && lhs.window == rhs.window
+            && CFEqual(lhs.focusedElement, rhs.focusedElement)
+            && lhs.documentIdentity == rhs.documentIdentity
+            && lhs.frame == rhs.frame && lhs.role == rhs.role
+            && lhs.text.value.utf8.elementsEqual(rhs.text.value.utf8)
+            && lhs.text.selection == rhs.text.selection
+            && lhs.text.isEditable == rhs.text.isEditable && lhs.text.isSecure == rhs.text.isSecure
+    }
+
+    var isReadable: Bool {
+        application.identityIsAuthoritative
+            && application.identity?.processIdentifier == window.applicationProcessIdentifier
+            && role == "AXTextArea" && text.isEditable && !text.isSecure
+            && !text.targetID.isEmpty
+            && frame.width > 0 && frame.height > 0
+            && [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            && window.bounds.intersects(frame)
+    }
+}
+
 /// Value-free identity of the UI state a semantic route was selected from.
 /// The executor compares this fingerprint across every asynchronous planning
 /// and grounding boundary and immediately before effects. Pixel hashing is
@@ -1021,6 +1056,7 @@ final class ComputerUseHostTools {
     private let accessibilityContextProvider:
         ((ComputerUsePredictedAction) -> String)?
     private let calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)?
+    private let mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)?
     private let authenticationContextProvider:
         (() -> ComputerUseAuthenticationContextSnapshot?)?
     private let screenCaptureConsentContextProvider:
@@ -1055,6 +1091,7 @@ final class ComputerUseHostTools {
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
         calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)? = nil,
+        mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)? = nil,
         authenticationContextProvider:
             (() -> ComputerUseAuthenticationContextSnapshot?)? = nil,
         screenCaptureConsentContextProvider:
@@ -1116,6 +1153,7 @@ final class ComputerUseHostTools {
         }
         self.accessibilityContextProvider = accessibilityContextProvider
         self.calculatorSnapshotProvider = calculatorSnapshotProvider
+        self.mcpFocusedTextSnapshotProvider = mcpFocusedTextSnapshotProvider
         if let authenticationContextProvider {
             self.authenticationContextProvider = authenticationContextProvider
         } else if screenProvider != nil {
@@ -2415,6 +2453,40 @@ final class ComputerUseHostTools {
               let frame = focusedElementSnapshot()?.frame, !frame.isEmpty,
               try currentTextSnapshot() == snapshot else { return nil }
         return frame
+    }
+
+    func mcpFocusedTextSnapshot() throws -> ComputerUseMCPFocusedTextSnapshot? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        if let mcpFocusedTextSnapshotProvider {
+            return try mcpFocusedTextSnapshotProvider()
+        }
+        // Synthetic screens or app identities cannot authorize live AX reads.
+        guard usesLiveFrontmostApplicationIdentity, screenProvider == nil,
+              accessibilityContextProvider == nil else { return nil }
+        let application = frontmostApplicationSnapshot()
+        guard let window = liveFrontmostWindowSnapshot(),
+              let text = try currentTextSnapshot(), let element = focusedElement(),
+              let role = Self.stringAttribute(kAXRoleAttribute as CFString, from: element),
+              let frame = accessibilitySnapshot(for: element).frame else { return nil }
+        var elementPID: pid_t = 0
+        guard AXUIElementGetPid(element, &elementPID) == .success,
+              elementPID == window.applicationProcessIdentifier else { return nil }
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue) == .success,
+              let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
+        let windowElement = unsafeBitCast(windowValue, to: AXUIElement.self)
+        guard CFHash(windowElement) == window.accessibilityWindowHash else { return nil }
+        let snapshot = ComputerUseMCPFocusedTextSnapshot(
+            application: application, window: window, text: text, frame: frame, role: role,
+            focusedElement: element,
+            documentIdentity: Self.stringAttribute(kAXDocumentAttribute as CFString, from: windowElement))
+        guard snapshot.isReadable, try currentTextSnapshot() == text,
+              liveFrontmostWindowSnapshot() == window,
+              frontmostApplicationSnapshot() == application else { return nil }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        return snapshot
     }
 
     func nativeFocusedEditorDescription() throws -> String? {
