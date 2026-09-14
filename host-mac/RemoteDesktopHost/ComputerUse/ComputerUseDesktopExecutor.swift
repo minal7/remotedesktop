@@ -164,7 +164,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     private func record(_ proposal: ComputerUseFaraModel.Proposal, observation: Observation, session: Session) {
         session.turns += 1
-        session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response, action: proposal.action))
+        session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
+            actionError: session.actionError, action: proposal.action))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 

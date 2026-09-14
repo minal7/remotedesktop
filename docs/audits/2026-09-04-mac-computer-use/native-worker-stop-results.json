@@ -1,0 +1,383 @@
+{
+  "date": "2026-09-13",
+  "baseCommit": "ac4e840",
+  "historicalFocusedMinimum": {
+    "macOS": 311,
+    "iOS": 10
+  },
+  "repairs": [
+    "Keep the first supervised resource/inspection stop or observed process exit/signal through subsequent cleanup. Record ordinary cleanup requests distinctly. No process signaling or resource threshold changes.",
+    "Store a generation-bound last-worker-stop report with cleanup success; repeated shutdown and stale cancellation cannot overwrite it with another generation.",
+    "Retain rejected native action feedback with the observation where it was received, including after it moves into history."
+  ],
+  "verification": [
+    "One sleeping task-owned process under a one-byte cap is stopped by the existing supervisor. Red returns no cause; green reports its measured memory/count and unchanged limits through cleanup, and releases its exact lifetime lease.",
+    "Ordinary native process shutdown reports requested and retains the original exact-lifetime cleanup proof.",
+    "Synthetic runtime generations prove unavailable new-worker causes cannot inherit old failures, and repeated shutdown/stale cancellation preserve generation identity.",
+    "Focused feedback red loses the rejection when its observation becomes history; green retains it, with zero effects.",
+    "Existing monitor-quiescence/lifetime replacement and model cancellation regressions pass.",
+    "The first build/test filter named the file main class instead of OSAtlasLlamaRuntimeTests and selected zero tests. It is retained and is not a passing test."
+  ],
+  "actualModelTrial": {
+    "dispatchJournalCount": 0,
+    "elapsedSeconds": 16.057680010795593,
+    "failure": "Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\" UserInfo={_kCFStreamErrorCodeKey=-4, NSUnderlyingError=0x7595bf3a80 {Error Domain=kCFErrorDomainCFNetwork Code=-1005 \"(null)\" UserInfo={NSErrorPeerAddressKey=<CFData 0x75952afb10 [0x1fd05abf0]>{length = 16, capacity = 16, bytes = 0x1002c18b7f0000010000000000000000}, _kCFStreamErrorCodeKey=-4, _kCFStreamErrorDomainKey=4}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <77FEC8C7-C515-45FF-AF05-3E37F74BAC12>.<12>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\n    \"LocalDataTask <77FEC8C7-C515-45FF-AF05-3E37F74BAC12>.<12>\"\n), NSLocalizedDescription=The network connection was lost., NSErrorFailingURLStringKey=http://127.0.0.1:49547/v1/chat/completions, NSErrorFailingURLKey=http://127.0.0.1:49547/v1/chat/completions, _kCFStreamErrorDomainKey=4}",
+    "fixtureState": {
+      "destination": "",
+      "generation": 0,
+      "origin": "",
+      "pid": 32775
+    },
+    "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+    "memorySamples": 56,
+    "ownedWorkerExited": true,
+    "peakSampledWorkerBytes": 4382621696,
+    "responses": [
+      {
+        "actionError": "",
+        "displayBounds": "{{0, 0}, {1728, 1117}}",
+        "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+        "modelImageHeight": 1323,
+        "modelImageWidth": 2048,
+        "response": "<think>\nI can see the small form overlay in the center-left of the screen with two fields: “Origin” on top and “Destination” below. The user wants only the Destination field filled with “Tokyo,” while leaving Origin empty and keeping the form open. I will first click inside the Destination input area to focus it before typing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\":\"left_click\", \"coordinate\": [294, 623]}}\n</tool_call>",
+        "seconds": 8.115521907806396,
+        "windowBounds": "{{220, 525}, {640, 332}}"
+      },
+      {
+        "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+        "displayBounds": "{{0, 0}, {1728, 1117}}",
+        "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+        "modelImageHeight": 1323,
+        "modelImageWidth": 2048,
+        "response": "<think>\nThe previous click did not visibly focus the Destination field; the screen still shows the form without a clear text cursor. I can see the Destination input as the lower blank box in the small form. I will click more centrally inside that lower field to ensure the Destination input is focused before typing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\":\"left_click\", \"coordinate\": [305, 622]}}\n</tool_call>",
+        "seconds": 5.17480194568634,
+        "windowBounds": "{{220, 525}, {640, 332}}"
+      }
+    ],
+    "result": "",
+    "revalidation": {
+      "editableAuthorityMatches": "true",
+      "focusMatches": "true",
+      "screenMatches": "false",
+      "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+      "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+      "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+    },
+    "scope": "actual-Fara-Q4-native-desktop-form",
+    "targetMacRAMGB": 12,
+    "wholeApp12GBQualified": false,
+    "workerStop": {
+      "cleanupSucceeded": true,
+      "generation": 1,
+      "reason": {
+        "resourceLimit": {
+          "limitBytes": 4294967296,
+          "limitProcesses": 1,
+          "observedBytes": 4382621696,
+          "observedProcesses": 1
+        }
+      }
+    }
+  },
+  "groundingEvidence": {
+    "image": ".build/repair-verification/native-desktop-fara-model-02-attachments/45039824-F2E4-4D92-85A8-046E21970740.png",
+    "sha256": "9a25e7f6e2cc9dc0513e4731d3c18369bdb76465a5f3b7fef9f9e36575ad9c89",
+    "visuallyInspected": true,
+    "modelImageSize": [
+      2048,
+      1323
+    ],
+    "fixtureCrop": [
+      260,
+      621,
+      760,
+      395
+    ],
+    "firstProposedPointNormalized": [
+      294,
+      623
+    ],
+    "firstPointInCropApprox": [
+      342,
+      203
+    ],
+    "nativeInputRowInCropApproxY": [
+      243,
+      264
+    ],
+    "finding": "Both returned clicks land on the Destination label line, above the visibly separate input row. Do not add a coordinate offset or change the fixture to accept those points."
+  },
+  "actualFindings": [
+    "Fara Q4 native trial remains failed: zero dispatch journals; both independently read fixture fields empty.",
+    "Supervisor confirms observed 4,382,621,696 bytes exceeded 4,294,967,296 bytes. Process count was 1/1. Cleanup succeeded and the owned worker exited.",
+    "Task/cleanup span was 16.06 seconds, 33.74 seconds including setup.",
+    "Separate model grounding errors from resource incompatibility. The confirmed stop cause is memory limit, not a network service outage."
+  ],
+  "limitations": [
+    "No production model promotion, native route selection, completed actual-model native form, provider login, physical phone or whole-app 12 GB/thermal acceptance.",
+    "The structured stop cause is available internally and in diagnostic evidence; transport errors have not yet been mapped to a specific product error.",
+    "Native Holo and GUI-Owl profiles and status/handoff semantics remain open. Fara remains eligible.",
+    "No new inference after the diagnostic failure; review image/context budgets before another comparison."
+  ],
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "c8dce9582deed8d2315f96912f0e8728c0280ec8b2e575227fc9e3a6788fa0d0",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "151ec11d205e009eaa5929eb664a469372ce4338cd2eeb7fc81c45aa03a0342c",
+    "host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift": "e5eb50fe07e4eefbf8e3e896643671944ba539e31fe218c942ce1a00c07a386b",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "b563d4c3511f885f52b59d784e74fd043dcef969d64d6b63bd5d93fe1c643882"
+  },
+  "results": [
+    {
+      "label": "native-worker-stop-red-01",
+      "bundle": ".build/repair-verification/native-worker-stop-red-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789353940.414,
+        "passedTests": 0,
+        "result": "unknown",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353828.051,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 0
+      }
+    },
+    {
+      "label": "native-worker-stop-red-02",
+      "bundle": ".build/repair-verification/native-worker-stop-red-02.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789353984.656,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353976.896,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Expected an explicit resource stop, got nil",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "OSAtlasLlamaRuntimeTests/testOptInNativeMemoryStopRetainsItsCauseThroughCleanup()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/OSAtlasLlamaRuntimeTests/testOptInNativeMemoryStopRetainsItsCauseThroughCleanup",
+            "testName": "testOptInNativeMemoryStopRetainsItsCauseThroughCleanup()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-worker-stop-green-01",
+      "bundle": ".build/repair-verification/native-worker-stop-green-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789354168.314,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789354077.054,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "label": "native-desktop-feedback-red-01",
+      "bundle": ".build/repair-verification/native-desktop-feedback-red-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789354239.75,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789354217.567,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(\"The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.\")\") - The observation after rejection must retain that result when it becomes history",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation",
+            "testName": "testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-worker-feedback-green-01",
+      "bundle": ".build/repair-verification/native-worker-feedback-green-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789354367.996,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789354346.447,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "label": "native-desktop-fara-model-02",
+      "bundle": ".build/repair-verification/native-desktop-fara-model-02.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789354479.25,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789354445.509,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native Fara task failed: Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\" UserInfo={_kCFStreamErrorCodeKey=-4, NSUnderlyingError=0x7595bf3a80 {Error Domain=kCFErrorDomainCFNetwork Code=-1005 \"(null)\" UserInfo={NSErrorPeerAddressKey=<CFData 0x75952afb10 [0x1fd05abf0]>{length = 16, capacity = 16, bytes = 0x1002c18b7f0000010000000000000000}, _kCFStreamErrorCodeKey=-4, _kCFStreamErrorDomainKey=4}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <77FEC8C7-C515-45FF-AF05-3E37F74BAC12>.<12>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\n    \"LocalDataTask <77FEC8C7-C515-45FF-AF05-3E37F74BAC12>.<12>\"\n), NSLocalizedDescription=The network connection was lost., NSErrorFailingURLStringKey=http://127.0.0.1:49547/v1/chat/completions, NSErrorFailingURLKey=http://127.0.0.1:49547/v1/chat/completions, _kCFStreamErrorDomainKey=4}",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInFaraModelEditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInFaraModelEditsANativeDesktopForm",
+            "testName": "testOptInFaraModelEditsANativeDesktopForm()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ]
+}

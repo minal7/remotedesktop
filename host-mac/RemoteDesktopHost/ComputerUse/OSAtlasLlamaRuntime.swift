@@ -859,8 +859,27 @@ protocol OSAtlasLlamaResourceInspecting: Sendable {
 }
 
 protocol OSAtlasLlamaServerProcess: Sendable {
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? { get }
     func terminate() async
     func waitUntilExit() async throws
+}
+
+extension OSAtlasLlamaServerProcess {
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? { nil }
+}
+
+enum OSAtlasLlamaWorkerStopReason: Equatable, Sendable, Codable {
+    case resourceLimit(observedBytes: UInt64, limitBytes: UInt64, observedProcesses: Int, limitProcesses: Int)
+    case inspectionFailed
+    case exited(status: Int32)
+    case signal(Int32)
+    case requested
+}
+
+struct OSAtlasLlamaWorkerStop: Equatable, Sendable, Codable {
+    let generation: UInt64
+    let reason: OSAtlasLlamaWorkerStopReason?
+    let cleanupSucceeded: Bool
 }
 
 protocol OSAtlasLlamaServerLaunching: Sendable {
@@ -1907,6 +1926,7 @@ actor OSAtlasLlamaRuntime {
     }
 
     var queuedModelAccessRequestCount: Int { modelAccessGate.queuedRequestCount }
+    private(set) var lastWorkerStop: OSAtlasLlamaWorkerStop?
 
     func residencyGeneration(
         endpoint: OSAtlasLlamaEndpoint
@@ -2398,6 +2418,8 @@ actor OSAtlasLlamaRuntime {
                 return false
             }
         }.value
+        lastWorkerStop = .init(generation: server.endpoint.generation,
+            reason: server.process.workerStopReason, cleanupSucceeded: cleanupSucceeded)
         server.routerPresetFile?.remove()
         server.authenticationFile?.remove()
 
@@ -3846,6 +3868,15 @@ struct OSAtlasEmergencyProcessReaper: Sendable {
     }
 }
 
+private final class OSAtlasLlamaWorkerStopState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reason: OSAtlasLlamaWorkerStopReason?
+    var value: OSAtlasLlamaWorkerStopReason? { lock.withLock { reason } }
+    func recordFirst(_ value: OSAtlasLlamaWorkerStopReason) {
+        lock.withLock { if reason == nil { reason = value } }
+    }
+}
+
 final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     @unchecked Sendable {
     private let process: Process
@@ -3855,10 +3886,20 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     private let processReaper: OSAtlasExclusiveProcessReaper
     private let processInspector: any OSAtlasProcessInspecting
     private let cleanupState = OSAtlasProcessCleanupState()
+    private let stopState = OSAtlasLlamaWorkerStopState()
     private let lock = NSLock()
     private var lifetimeLease: OSAtlasLlamaServerLifetimeLease?
     private var memoryMonitor: Task<Void, Never>?
     private var terminationRequested = false
+
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? {
+        if let reason = stopState.value { return reason }
+        // Foundation's exit-status getters require an exited, launched process.
+        guard process.processIdentifier > 0, !process.isRunning else { return nil }
+        stopState.recordFirst(process.terminationReason == .uncaughtSignal
+            ? .signal(process.terminationStatus) : .exited(status: process.terminationStatus))
+        return stopState.value
+    }
 
     init(
         process: Process,
@@ -3890,7 +3931,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
         } else {
             memoryMonitor = Task.detached(priority: .utility) {
             [weak process, processTreeController, emergencyReaper,
-             executableURL, cleanupState] in
+             executableURL, cleanupState, stopState] in
             while !Task.isCancelled {
                 guard let process, process.isRunning else { return }
                 let snapshot: OSAtlasProcessTreeSnapshot
@@ -3901,6 +3942,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
                     // An uninspectable live process tree cannot be proven to
                     // obey the resource or worker bound. Kill the root now;
                     // waitUntilExit performs exact-executable orphan cleanup.
+                    stopState.recordFirst(.inspectionFailed)
                     do {
                         try await emergencyReaper.killAndReap(
                             rootProcess: rootIdentity,
@@ -3919,6 +3961,9 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
                     // This is the last safety boundary if a future mtmd
                     // regression ignores the image/batch limits or the router
                     // exceeds this profile's permitted model-worker count.
+                    stopState.recordFirst(.resourceLimit(observedBytes: snapshot.aggregateResidentMemoryBytes,
+                        limitBytes: maximumResidentMemoryBytes, observedProcesses: snapshot.processIdentitiesChildFirst.count,
+                        limitProcesses: maximumProcessCount))
                     do {
                         try await emergencyReaper.killAndReap(
                             rootProcess: rootIdentity,
@@ -3951,6 +3996,8 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     }
 
     func terminate() async {
+        // Observe an existing exit before recording our cleanup request.
+        _ = workerStopReason
         await quiesceMemoryMonitor()
         let shouldTerminate = lock.withLock { () -> Bool in
             guard !terminationRequested else { return false }
@@ -3958,6 +4005,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
             return process.isRunning
         }
         if shouldTerminate {
+            stopState.recordFirst(.requested)
             do {
                 try processTreeController.signalTree(
                     rootProcess: rootIdentity,

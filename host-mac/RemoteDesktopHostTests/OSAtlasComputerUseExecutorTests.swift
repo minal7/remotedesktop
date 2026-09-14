@@ -11683,7 +11683,48 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(process.isRunning)
         XCTAssertEqual(process.terminationReason, .uncaughtSignal)
         XCTAssertEqual(process.terminationStatus, SIGTERM)
+        XCTAssertEqual(server.workerStopReason, .requested)
         XCTAssertNil(try inspector.identity(processID: identity.processIdentifier))
+        let replacement = try await OSAtlasLlamaServerLifetimeLease.acquire(executableURL: executable,
+            lockDirectoryURL: directory, retryDelay: .milliseconds(5))
+        replacement.release()
+    }
+
+    func testOptInNativeMemoryStopRetainsItsCauseThroughCleanup() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SINGLE_PROCESS_PROBE"] == "1" else {
+            throw XCTSkip("Opt in to one sleeping process with a one-byte supervisor limit; no model")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("worker-stop-probe-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("sleep-probe")
+        let probe = try XCTUnwrap(ProcessInfo.processInfo.environment["REPAIR_SLEEP_PROBE_BINARY"])
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: probe), to: executable)
+        let process = Process(); process.executableURL = executable
+        process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+        defer {
+            if process.isRunning { process.terminate() }
+            else { try? FileManager.default.removeItem(at: directory) }
+        }
+        let lease = try await OSAtlasLlamaServerLifetimeLease.acquire(executableURL: executable,
+            lockDirectoryURL: directory, retryDelay: .milliseconds(5))
+        do { try process.run() } catch { lease.release(); throw error }
+        let identity = try XCTUnwrap(DarwinOSAtlasProcessInspector().identity(processID: process.processIdentifier))
+        let server = FoundationOSAtlasLlamaServerProcess(process: process, rootIdentity: identity,
+            executableURL: executable, lifetimeLease: lease, maximumResidentMemoryBytes: 1, maximumProcessCount: 1)
+        for _ in 0..<100 {
+            if !process.isRunning { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(process.isRunning, "The supervisor must stop the sleeping process within two seconds")
+        let beforeCleanup = server.workerStopReason
+        await server.terminate(); try await server.waitUntilExit()
+        XCTAssertEqual(server.workerStopReason, beforeCleanup, "Cleanup must preserve the first stop cause")
+        guard case .resourceLimit(let bytes, let limit, let processes, let processLimit) = beforeCleanup else {
+            return XCTFail("Expected an explicit resource stop, got \(String(describing: beforeCleanup))")
+        }
+        XCTAssertGreaterThan(bytes, 1); XCTAssertEqual(limit, 1)
+        XCTAssertEqual(processes, 1); XCTAssertEqual(processLimit, 1)
+        XCTAssertEqual(process.terminationStatus, SIGKILL)
         let replacement = try await OSAtlasLlamaServerLifetimeLease.acquire(executableURL: executable,
             lockDirectoryURL: directory, retryDelay: .milliseconds(5))
         replacement.release()
@@ -12908,6 +12949,32 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertNil(activeVariant)
     }
 
+    func testWorkerStopReportRemainsBoundToItsGenerationAndSurvivesRepeatedShutdown() async throws {
+        let events = RuntimeEventLog()
+        let reason = OSAtlasLlamaWorkerStopReason.resourceLimit(observedBytes: 1001, limitBytes: 1000,
+            observedProcesses: 1, limitProcesses: 1)
+        let runtime = OSAtlasLlamaRuntime(launcher: FakeLlamaLauncher(events: events, processStopReasons: [reason, nil]),
+            transportMaker: FakeTransportMaker(events: events), portProvider: FixedPortProvider(port: 43123),
+            tokenProvider: FixedTokenProvider(token: "token"), readinessAttempts: 1, readinessDelay: .zero,
+            resourceInspector: FixedResourceInspector.sufficient)
+        let first = try await runtime.activate(inputs(variant: .pro4B, name: "first"))
+        await runtime.shutdown()
+        let firstReport = await runtime.lastWorkerStop
+        XCTAssertEqual(firstReport, .init(generation: first.generation, reason: reason, cleanupSucceeded: true))
+        await runtime.shutdown()
+        let repeated = await runtime.lastWorkerStop
+        XCTAssertEqual(repeated, firstReport)
+        let second = try await runtime.activate(inputs(variant: .pro4B, name: "second"))
+        await runtime.cancel(endpoint: first)
+        let afterStaleCancellation = await runtime.lastWorkerStop
+        XCTAssertEqual(afterStaleCancellation, firstReport)
+        await runtime.shutdown()
+        let secondReport = await runtime.lastWorkerStop
+        XCTAssertNotEqual(second.generation, first.generation)
+        XCTAssertEqual(secondReport, .init(generation: second.generation, reason: nil, cleanupSucceeded: true),
+            "An unavailable cause for the new worker cannot inherit the old worker's resource failure")
+    }
+
     func testActivationFailsClosedBeforeLaunchBelowEightGiB() async {
         let events = RuntimeEventLog()
         let runtime = OSAtlasLlamaRuntime(
@@ -13755,6 +13822,7 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
     let events: RuntimeEventLog
     let blockedLaunchNumber: Int?
     let processWaitFails: Bool
+    let processStopReasons: [OSAtlasLlamaWorkerStopReason?]
     private var launchCount = 0
     private var launchedConfigurations: [OSAtlasLlamaLaunchConfiguration] = []
     private var firstLaunchStarted = false
@@ -13764,12 +13832,14 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
         events: RuntimeEventLog,
         blocksFirstLaunch: Bool = false,
         blockedLaunchNumber: Int? = nil,
-        processWaitFails: Bool = false
+        processWaitFails: Bool = false,
+        processStopReasons: [OSAtlasLlamaWorkerStopReason?] = []
     ) {
         self.events = events
         self.blockedLaunchNumber = blockedLaunchNumber
             ?? (blocksFirstLaunch ? 1 : nil)
         self.processWaitFails = processWaitFails
+        self.processStopReasons = processStopReasons
     }
 
     func launch(
@@ -13788,7 +13858,8 @@ private actor FakeLlamaLauncher: OSAtlasLlamaServerLaunching {
         return FakeLlamaProcess(
             name: name,
             events: events,
-            waitFails: processWaitFails)
+            waitFails: processWaitFails,
+            workerStopReason: processStopReasons.indices.contains(launchCount - 1) ? processStopReasons[launchCount - 1] : nil)
     }
 
     func waitUntilFirstLaunchStarted() async {
@@ -13809,15 +13880,18 @@ private actor FakeLlamaProcess: OSAtlasLlamaServerProcess {
     let name: String
     let events: RuntimeEventLog
     let waitFails: Bool
+    nonisolated let workerStopReason: OSAtlasLlamaWorkerStopReason?
 
     init(
         name: String,
         events: RuntimeEventLog,
-        waitFails: Bool = false
+        waitFails: Bool = false,
+        workerStopReason: OSAtlasLlamaWorkerStopReason? = nil
     ) {
         self.name = name
         self.events = events
         self.waitFails = waitFails
+        self.workerStopReason = workerStopReason
     }
 
     func terminate() async {

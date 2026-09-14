@@ -238,6 +238,36 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, .changedTask) }
     }
 
+    func testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var focus = "first field", effects = 0, calls = 0
+        var rejectedFeedback: String?
+        let tools = desktopTestTools(focus: { focus }, perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            calls += 1
+            switch calls {
+            case 1:
+                focus = "another field"
+                return .init(response: "key", action: .key(["a"]))
+            case 2:
+                rejectedFeedback = try XCTUnwrap(input.actionError)
+                XCTAssertEqual(input.history.count, 1)
+                XCTAssertNil(input.history.first?.actionError)
+                return .init(response: "wait", action: .wait(0))
+            case 3:
+                XCTAssertNil(input.actionError)
+                XCTAssertEqual(input.history.count, 2)
+                XCTAssertEqual(input.history[1].actionError, rejectedFeedback,
+                    "The observation after rejection must retain that result when it becomes history")
+                return .init(response: "done", action: .reportCompletion("Done"))
+            default: throw ComputerUseDesktopExecutor.Failure.stepLimit
+            }
+        })
+        let result = try await executor.execute(taskID: "feedback", prompt: "Use the current field", trustedUserPrompt: "Use the current field", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(calls, 3); XCTAssertEqual(effects, 0)
+    }
+
     func testDesktopImagePreservesOrientationAndFullOffsetDisplayCoordinates() throws {
         let extent = CGRect(x: 0, y: 0, width: 640, height: 320)
         let redTop = CIImage(color: .red).cropped(to: CGRect(x: 0, y: 160, width: 640, height: 160))
@@ -454,10 +484,28 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("actual-native"), propose: { input in
                 guard responses.count < 6 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
                 XCTAssertEqual(input.surface, .desktop)
+                // Preserve only this disposable native window for visual
+                // grounding diagnosis. Record its position in the exact
+                // full-display image supplied to the model; no input changes.
+                let observation = try tools.currentScreen()
+                let window = try XCTUnwrap(observation.frontmostWindowBounds)
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: input.screenshotPNG))
+                let source = try XCTUnwrap(bitmap.cgImage)
+                let display = observation.displayBounds
+                let crop = CGRect(x: (window.minX - display.minX) * CGFloat(source.width) / display.width,
+                    y: (window.minY - display.minY) * CGFloat(source.height) / display.height,
+                    width: window.width * CGFloat(source.width) / display.width,
+                    height: window.height * CGFloat(source.height) / display.height).integral
+                let cropped = try XCTUnwrap(source.cropping(to: crop))
+                let png = try XCTUnwrap(NSBitmapImageRep(cgImage: cropped).representation(using: .png, properties: [:]))
+                let imageAttachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                imageAttachment.name = "Fara native fixture observation \(responses.count)"; imageAttachment.lifetime = .keepAlways; self.add(imageAttachment)
                 let began = Date()
                 let endpoint = try await runtime.activateFara(inputs)
                 let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
-                responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? ""])
+                responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
+                    "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
+                    "fixtureCropInModelImage": NSStringFromRect(crop), "modelImageWidth": source.width, "modelImageHeight": source.height])
                 return proposal
             }, finishRun: { await runtime.shutdown() })
             let run = Task { try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
@@ -471,12 +519,15 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("actual-native"), includingPropertiesForKeys: nil)
                 .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
             let fieldState = try JSONSerialization.jsonObject(with: Data(contentsOf: state))
-            let report: [String: Any] = ["scope": "actual-Fara-Q4-native-desktop-form", "goal": goal,
+            var report: [String: Any] = ["scope": "actual-Fara-Q4-native-desktop-form", "goal": goal,
                 "responses": responses, "result": result.map { String(describing: $0) } ?? "",
                 "failure": failure.map { String(reflecting: $0) } ?? "", "elapsedSeconds": Date().timeIntervalSince(started),
                 "peakSampledWorkerBytes": measured.0, "memorySamples": measured.1, "ownedWorkerExited": gone,
                 "fixtureState": fieldState, "dispatchJournalCount": journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count,
                 "targetMacRAMGB": 12, "wholeApp12GBQualified": false, "revalidation": executor.lastRevalidationDiagnostic]
+            if let stop = await runtime.lastWorkerStop {
+                report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(stop))
+            }
             let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
             attachment.name = "Actual Fara native desktop workflow"; attachment.lifetime = .keepAlways; add(attachment)
             XCTAssertTrue(gone)
