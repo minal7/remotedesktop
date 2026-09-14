@@ -98,6 +98,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.showSetupWindow()
             }, openSettings: { [weak self] in
                 self?.showSettingsWindow()
+            }, dismissPopover: { [weak self] in
+                self?.popover.close()
             }).environmentObject(session))
 
         // Re-read permissions whenever the app regains focus — this

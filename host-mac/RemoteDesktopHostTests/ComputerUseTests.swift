@@ -6,6 +6,7 @@ import CryptoKit
 import CoreImage
 import Darwin
 import Foundation
+import SwiftUI
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -1810,6 +1811,80 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertEqual(executor.planner.inputs, [owner.input])
             XCTAssertNil(fixture.browser.taskID)
         }
+    }
+
+    func testOptInHostMenuExposesNativeTaskControlLifecycle() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOST_MENU_CONTROLS"] == "1" else {
+            throw XCTSkip("Opt-in: render the real host menu for an isolated native task")
+        }
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor(requiresMacControlHelper: false), channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false)
+        let session = HostSession(computerUseManager: manager)
+        let menu = HostMenuTestSurface(session: session)
+        defer { menu.close() }
+        var failure: Error?
+        do {
+            let request = makeEnvelope(id: "native-host-menu", kind: .prompt, body: "Edit the open document")
+            manager.authorizePeer(senderID: request.senderID)
+            XCTAssertTrue(manager.handle(request, channel: channel))
+            await waitUntil { executor.callCount == 1 }
+            try await menu.waitForControl("Take control") { manager.activity == .paused }
+            XCTAssertEqual(manager.activity, .paused)
+            await waitUntil { executor.cancellationCount == 1 }
+            try await menu.waitForControl("Let AI continue") { executor.callCount == 2 }
+            await waitUntil { executor.callCount == 2 }
+            try await menu.waitForControl("Stop AI") { manager.activity == .idle }
+            XCTAssertEqual(manager.activity, .idle)
+            await waitUntil { executor.cancellationCount == 2 }
+            XCTAssertEqual(try ComputerUseTaskLedger(fileURL: url).claim(taskID: request.id,
+                senderID: request.senderID, sessionID: request.sessionID, promptBody: request.body),
+                .completed(ComputerUseTaskLedger.stoppedResponse))
+        } catch { failure = error }
+        await session.shutdown()
+        if let failure { throw failure }
+    }
+
+    func test_localNativeControlsRejectStaleResumeAndOldTaskStop() async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let executor = SuspendingComputerUseExecutor(requiresMacControlHelper: false), channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false)
+        let request = makeEnvelope(id: "native-local-control-1", kind: .prompt, body: "Edit the open document")
+        manager.authorizePeer(senderID: request.senderID)
+        XCTAssertNil(manager.localTaskControls)
+        XCTAssertTrue(manager.handle(request, channel: channel))
+        await waitUntil { executor.callCount == 1 }
+        let first = try XCTUnwrap(manager.localTaskControls)
+        XCTAssertEqual(first.taskID, request.id)
+        manager.requestLocalTaskControl(.takeControl, displayed: first)
+        await waitUntil { executor.cancellationCount == 1 }
+        let paused = try XCTUnwrap(manager.localTaskControls)
+        XCTAssertEqual(paused.phase, .paused)
+        manager.requestLocalTaskControl(.resume, displayed: first)
+        XCTAssertEqual(manager.activity, .paused)
+        manager.requestLocalTaskControl(.resume, displayed: paused)
+        await waitUntil { executor.callCount == 2 }
+        let resumed = try XCTUnwrap(manager.localTaskControls)
+        manager.requestLocalTaskControl(.stop, displayed: first)
+        XCTAssertEqual(manager.localTaskControls, resumed)
+        manager.userIntervened()
+        manager.requestLocalTaskControl(.stop, displayed: resumed)
+        await waitUntil { executor.cancellationCount == 2 }
+        XCTAssertEqual(manager.activity, .idle)
+        XCTAssertNil(manager.localTaskControls)
+        let next = makeEnvelope(id: "native-local-control-2", kind: .prompt, body: "Check another document")
+        XCTAssertTrue(manager.handle(next, channel: channel))
+        await waitUntil { executor.callCount == 3 }
+        let nextControls = try XCTUnwrap(manager.localTaskControls)
+        manager.requestLocalTaskControl(.stop, displayed: resumed)
+        manager.requestLocalTaskControl(.resume, displayed: paused)
+        XCTAssertEqual(manager.localTaskControls, nextControls)
+        XCTAssertEqual(executor.callCount, 3)
+        await manager.shutdown()
     }
 
     func test_localBrowserControlsPauseResumeAndStopOnlyTheirDisplayedRun() async throws {
@@ -12642,6 +12717,8 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
 private final class SuspendingComputerUseExecutor: ComputerUseExecuting {
     let isReady = true
     let runtimeName = "Suspending test runtime"
+    let requiresMacControlHelper: Bool
+    init(requiresMacControlHelper: Bool = true) { self.requiresMacControlHelper = requiresMacControlHelper }
     private(set) var prompts: [String] = []
     private(set) var trustedUserPrompts: [String] = []
     private(set) var cancellationCount = 0
@@ -12818,6 +12895,51 @@ private final class CapturedCGEventStore: @unchecked Sendable {
 
     func values() -> [CapturedCGEvent] {
         lock.withLock { snapshots }
+    }
+}
+
+/// Renders production menu content in an explicitly opt-in, owned surface.
+@MainActor
+final class HostMenuTestSurface {
+    let window: NSPanel
+    private var popover: NSPopover?
+    init(session: HostSession, usesPopover: Bool = false) {
+        window = NSPanel(contentRect: NSRect(x: 60, y: 140, width: 372, height: 520),
+            styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.title = "Remote Desktop Host control test"
+        window.isReleasedWhenClosed = false
+        if !usesPopover {
+            window.contentViewController = NSHostingController(rootView: MenuContent().environmentObject(session))
+        } else {
+            window.setContentSize(NSSize(width: 180, height: 28))
+            window.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 180, height: 28))
+        }
+        window.orderFrontRegardless()
+        window.contentView?.layoutSubtreeIfNeeded()
+        if usesPopover, let anchor = window.contentView {
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.contentSize = NSSize(width: 340, height: 460)
+            popover.contentViewController = NSHostingController(rootView: MenuContent(dismissPopover: { [weak self] in
+                self?.popover?.close()
+            }).environmentObject(session))
+            self.popover = popover
+            popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+            popover.contentViewController?.view.window?.makeKey()
+        }
+    }
+    func close() { popover?.close(); window.close() }
+    /// Computer Use drives the rendered production buttons; the test checks
+    /// resulting manager/ledger state independently of the UI action driver.
+    func waitForControl(_ title: String, outcome: () -> Bool) async throws {
+        FileHandle.standardError.write(Data("Host menu awaiting: \(title)\n".utf8))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(40))
+        while ContinuousClock.now < deadline {
+            if outcome() { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        throw NSError(domain: "HostMenuTest", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Rendered control did not produce its outcome: " + title])
     }
 }
 

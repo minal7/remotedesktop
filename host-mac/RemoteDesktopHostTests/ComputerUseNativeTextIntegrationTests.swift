@@ -237,6 +237,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, managedHostSession: true)
     }
 
+    func testOptInRealTextEditTaskResumesThroughHostMenu() async throws {
+        try await runRealTextEditTask(actualModel: false, managedHostSession: true, managedMenuHandoff: true)
+    }
+
     func testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument() async throws {
         try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpTask: (
             prompt: "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
@@ -272,7 +276,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
         mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
-        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false, managedHostSession: Bool = false,
+        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false, managedHostSession: Bool = false, managedMenuHandoff: Bool = false,
         mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false,
         mcpHandoffBeforeTool: String? = nil, mcpChangeDuringHandoff: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -329,7 +333,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
             if managedHostSession {
                 try await runManagedTextEditHostSession(tools: tools, app: app, goal: goal,
-                    expected: expected, document: document, output: output)
+                    expected: expected, document: document, output: output, menuHandoff: managedMenuHandoff)
                 return
             }
             if mcpHostTask {
@@ -506,7 +510,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     }
 
     private func runManagedTextEditHostSession(tools: ComputerUseHostTools, app: NSRunningApplication,
-        goal: String, expected: String, document: URL, output: URL) async throws {
+        goal: String, expected: String, document: URL, output: URL, menuHandoff: Bool = false) async throws {
         let helperReceipt = await MacControlMCPInstaller().currentInstallation()
         let helper = try XCTUnwrap(helperReceipt, "Run the opt-in normal managed installation first")
         let native = ComputerUseInstaller.nativeText(), visual = ComputerUseInstaller()
@@ -531,6 +535,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }
         }
         var failure: Error?, terminal: ComputerUseTaskUpdate?, approvals = Set<String>()
+        var deliveredApprovals = 0, didMenuHandoff = false, menuRetainedNativeFocus = false
+        var popoverNativeSnapshotReadable = false
         var editorExact = false, savedExact = false
         do {
             host.start(pairingCode: "123456", additionalChannels: [channel], includeDefaultChannel: false)
@@ -546,7 +552,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 pairingCode: "123456", sessionID: "TEXTEDIT-SESSION", kind: .prompt,
                 body: try ComputerUsePromptRequest(prompt: goal, supportsApprovedActionEvidence: true).encodedBody())
             XCTAssertTrue(host.handle(request, channel: channel))
-            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(menuHandoff ? 110 : 30))
             while ContinuousClock.now < deadline {
                 let messages = await channel.messages()
                 if let message = messages.last(where: { $0.kind == .assistant }) {
@@ -555,11 +561,21 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 for message in messages where message.kind == .approvalRequest {
                     let approval = try ComputerUseApprovalRequest.decodeBody(message.body)
                     guard approvals.insert(approval.requestID).inserted else { continue }
+                    if menuHandoff && !didMenuHandoff {
+                        let menu = HostMenuTestSurface(session: session, usesPopover: true)
+                        defer { menu.close() }
+                        try await menu.waitForControl("Take control") { host.activity == .paused }
+                        popoverNativeSnapshotReadable = (try? tools.mcpFocusedTextSnapshot())?.isReadable == true
+                        try await menu.waitForControl("Let AI continue") { host.activity != .paused }
+                        didMenuHandoff = true
+                        menuRetainedNativeFocus = NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+                        continue
+                    }
                     let detail = try XCTUnwrap(approval.details?.first { $0.label == "Exact local action" })
                     let arguments = try JSONDecoder().decode([String: MCPJSONValue].self, from: Data(detail.value.utf8))
                     let snapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
-                    let edit = approvals.count == 1 && arguments["name"] == .string("AXValue") && arguments["value"] == .string(expected)
-                    let save = approvals.count == 2 && arguments["key"] == .string("s")
+                    let edit = deliveredApprovals == 0 && arguments["name"] == .string("AXValue") && arguments["value"] == .string(expected)
+                    let save = deliveredApprovals == 1 && arguments["key"] == .string("s")
                         && arguments["modifiers"] == .array([.string("command")])
                         && snapshot.text.value.utf8.elementsEqual(expected.utf8)
                     guard approval.taskID == taskID, edit || save,
@@ -572,6 +588,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                         body: try ComputerUseApprovalResponse(requestID: approval.requestID, approved: true,
                             taskID: approval.taskID, appliedControlRevision: approval.appliedControlRevision,
                             hostControlEpoch: approval.hostControlEpoch).encodedBody()), channel: channel))
+                    deliveredApprovals += 1
                 }
                 try await Task.sleep(for: .milliseconds(25))
             }
@@ -585,6 +602,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let report: [String: Any] = ["scope": "real-TextEdit-managed-HostSession-default-installers-and-executors",
             "goal": goal, "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
             "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(), "approvalCount": approvals.count,
+            "menuHandoff": menuHandoff, "didMenuHandoff": didMenuHandoff, "menuRetainedNativeFocus": menuRetainedNativeFocus,
+            "popoverNativeSnapshotReadable": popoverNativeSnapshotReadable,
             "confirmedActionCount": history.filter { $0.response != nil }.count, "editorExact": editorExact, "savedFileExact": savedExact,
             "workerSamples": samples, "maximumObservedWorkerCount": maximumWorkers, "helperBinaryPath": helper.binaryPath,
             "isolatedDependencies": ["task ledger", "transport"],
@@ -594,7 +613,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         if let failure { throw failure }
         XCTAssertEqual(terminal?.outcome, .taskCompleted)
         XCTAssertTrue(editorExact); XCTAssertTrue(savedExact); XCTAssertFalse(app.isTerminated)
-        XCTAssertEqual(approvals.count, 2); XCTAssertEqual(history.filter { $0.response != nil }.count, 2)
+        XCTAssertEqual(approvals.count, menuHandoff ? 3 : 2); XCTAssertEqual(history.filter { $0.response != nil }.count, 2)
+        if menuHandoff { XCTAssertTrue(didMenuHandoff); XCTAssertTrue(menuRetainedNativeFocus) }
         XCTAssertGreaterThan(samples, 0); XCTAssertEqual(maximumWorkers, 0)
         XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
     }

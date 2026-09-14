@@ -4123,7 +4123,7 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
     private var browserControlIdentity: BrowserControlIdentity?
-    private var browserControlSnapshot: ComputerUseBrowserTaskControls?
+    @Published private(set) var localTaskControls: ComputerUseBrowserTaskControls?
     private struct PausedInputOwner: Equatable {
         let taskID: String
         let senderID: String
@@ -4457,7 +4457,7 @@ final class HostComputerUseManager: ObservableObject {
             installLocalInterventionMonitors()
         }
         tools.bindOwnedBrowserTaskControls { [weak self] controls, action in
-            self?.handleBrowserTaskControl(action, displayed: controls)
+            self?.requestLocalTaskControl(action, displayed: controls)
         }
         refreshBrowserTaskControls()
     }
@@ -5180,7 +5180,7 @@ final class HostComputerUseManager: ObservableObject {
         }
         guard !isShuttingDown, let context else {
             browserControlIdentity = nil
-            browserControlSnapshot = nil
+            localTaskControls = nil
             tools.updateOwnedBrowserTaskControls(nil)
             return
         }
@@ -5204,19 +5204,19 @@ final class HostComputerUseManager: ObservableObject {
             identity.sameOwner(as: $0) && identity.executionToken == $0.executionToken
         } ?? false
         let snapshot = ComputerUseBrowserTaskControls(taskID: identity.taskID,
-            scopeID: sameRun ? (browserControlSnapshot?.scopeID ?? UUID()) : UUID(),
+            scopeID: sameRun ? (localTaskControls?.scopeID ?? UUID()) : UUID(),
             presentationID: UUID(), phase: phase, canResume: identity.canResume,
             ownerID: browserControlIdentity.map { identity.sameOwner(as: $0) } == true
-                ? (browserControlSnapshot?.ownerID ?? UUID()) : UUID())
+                ? (localTaskControls?.ownerID ?? UUID()) : UUID())
         browserControlIdentity = identity
-        browserControlSnapshot = snapshot
+        localTaskControls = snapshot
         tools.updateOwnedBrowserTaskControls(snapshot)
     }
 
-    private func handleBrowserTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
+    func requestLocalTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
                                          displayed: ComputerUseBrowserTaskControls) {
         refreshBrowserTaskControls()
-        guard let current = browserControlSnapshot,
+        guard let current = localTaskControls,
               current.taskID == displayed.taskID, current.scopeID == displayed.scopeID,
               let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
               tools.ownedBrowserTaskID(forExecution: context.envelope.id) == current.taskID else { return }
