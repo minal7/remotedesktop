@@ -1,0 +1,857 @@
+{
+  "date": "2026-09-14",
+  "parentCommit": "f7fae9964b5d523a48cdc367411bd841a23980bd",
+  "scope": "Actual local model execution in the app-owned native WebKit browser on public websites; not a browser mock or assistant-operated task",
+  "sourceFiles": [
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseAccessibilityTextTarget.swift",
+      "sha256": "e3b625d1ec08c0bf2c2215e753135dbe00532fae4b02593081340de716d0f0dd"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+      "sha256": "6ee2e574d057d93862a268dd49aaab32c6e1c69ef84c535995561cf94aaaa849"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseRuntimeTypes.swift",
+      "sha256": "ac8c06e3360d6cc056a229f5c63d8677f39412e259af343b2d10523feb2554fb"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseAccessibilityTextTargetTests.swift",
+      "sha256": "2fc4a4617e0ba9e0f6e4a9cd64c044200ba5d0baf27c1de4624a1f90cd8b7c18"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift",
+      "sha256": "860f156216320271eaf6a2b73fa5f347832f05b9ec9f34d5d953bf3616ac3987"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift",
+      "sha256": "dfa9a2e9494f8c2eb2ecf95a09d74f94e279b6cb72dfdeff343542886c9e2700"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseHoloModelTests.swift",
+      "sha256": "c1cb219b079a7b0d9b074ba9b7e0fad8ec249f8273fef4049a0095f8a228ba00"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+      "sha256": "83ec80cd52b7b8aa639c891a6addd43bee5625655553d77cbede63fb3f647fba"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseHoloModel.swift",
+      "sha256": "be222c1cbcea97a58b19ac0f1fe6c3cae96ea9d98ba348ea675a881823c53458"
+    },
+    {
+      "path": "host-mac/scripts/holo_one_proposal.py",
+      "sha256": "3208dafa659d0370c9643d8424da4b3f552e9f00d15074eec49dcd50524fd13e"
+    }
+  ],
+  "attempts": [
+    {
+      "name": "fara-realworld-concert-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789370500.512,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "[Internal] Thread running at User-interactive quality-of-service class waiting on a lower QoS thread running at Default quality-of-service class. Investigate ways to avoid priority inversions"
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789370245.196,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "name": "holo-realworld-movie-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789370624.822,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789370538.977,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Live ticket task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInHoloFindsLiveRoxieMovieTimePriceAndTicketLink()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInHoloFindsLiveRoxieMovieTimePriceAndTicketLink",
+            "testName": "testOptInHoloFindsLiveRoxieMovieTimePriceAndTicketLink()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "independentOracleRecheck": {
+    "date": "2026-09-14",
+    "originalHarnessOracleDate": "2026-09-13",
+    "sources": [
+      {
+        "url": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+        "facts": {
+          "date": "2026-09-17",
+          "time": "7:30 PM",
+          "venue": "Miner Auditorium",
+          "advertisedPriceRangeUSD": [
+            55,
+            155
+          ]
+        }
+      },
+      {
+        "url": "https://roxie.com/film/the-cycle-of-love/",
+        "facts": {
+          "date": "2026-09-17",
+          "time": "6:20 PM",
+          "screen": "Little Roxie",
+          "runtimeMinutes": 95
+        }
+      },
+      {
+        "url": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c",
+        "facts": {
+          "date": "2026-09-17",
+          "time": "6:20 PM",
+          "screen": "Little Roxie",
+          "runtimeMinutes": 95,
+          "generalAdmissionIncludingFeeUSD": 15.62,
+          "bookingFeeUSD": 1.62
+        }
+      }
+    ],
+    "method": "Read the current official listings independently before the model tests. The exact screening page was reached through the link in the official film page. Reference facts were not inserted into model prompts."
+  },
+  "concert": {
+    "path": ".build/repair-verification/fara-realworld-concert-01-attachments/D094679F-2CA8-4ECE-962A-8164C108EF71.json",
+    "sha256": "de2897b0bb7482cc80000db963423e73599b6b4798b39d5e240d952b9cf985f4",
+    "report": {
+      "failure": "",
+      "finalDocumentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+      "goal": "Find tickets for Branford Marsalis and Dianne Reeves at SFJAZZ on September 17, 2026. Report the start time, venue, advertised price range and official event link. Stop before purchasing.",
+      "lastAgentCaptureStage": "complete",
+      "lastAgentTargetStatus": "agent-target",
+      "model": "Fara1.5-4B",
+      "nativeAttemptOutcomes": [
+        "documentCommitted"
+      ],
+      "nativeDispatchJournalStatuses": [
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ],
+        [
+          "verified"
+        ]
+      ],
+      "nativeObservations": [
+        "4:locationChanged:pendingSlot:observed",
+        "5:navigationAction:pendingSlot:allowed",
+        "6:provisionalStart:exactPendingNavigation:observed",
+        "7:locationChanged:pendingSlot:observed",
+        "8:navigationAction:pendingSlot:allowed",
+        "9:serverRedirect:exactPendingNavigation:observed",
+        "10:response:pendingSlot:allowed",
+        "11:documentCommitStarted:exactPendingNavigation:observed",
+        "12:documentFinished:exactPendingNavigation:observed",
+        "14:navigationAction:none:allowed",
+        "15:locationChanged:none:observed",
+        "16:provisionalStart:exactObservedNavigation:observed",
+        "17:response:observedSlot:allowed",
+        "18:documentCommitStarted:exactObservedNavigation:observed",
+        "19:documentFinished:exactObservedNavigation:observed",
+        "20:observedNavigationEnded:exactObservedNavigation:observed",
+        "23:navigationAction:none:allowed",
+        "24:locationChanged:none:observed",
+        "25:provisionalStart:exactObservedNavigation:observed",
+        "26:response:observedSlot:allowed",
+        "27:documentCommitStarted:exactObservedNavigation:observed",
+        "28:documentFinished:exactObservedNavigation:observed",
+        "29:observedNavigationEnded:exactObservedNavigation:observed"
+      ],
+      "oracleCheckedOn": "2026-09-13",
+      "oracleURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+      "ownedProcessExited": true,
+      "progress": [
+        "Reading the browser…",
+        "Reading the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…",
+        "Using the browser…",
+        "Reading the browser…"
+      ],
+      "proposalLimit": 24,
+      "responses": [
+        {
+          "actionError": "",
+          "currentURL": "",
+          "historyCount": 0,
+          "response": "<think>\nI’m starting from a blank browser page. The task explicitly names SFJAZZ, so the most direct and policy-compliant first step is to open the official San Francisco Jazz Orchestra website and use its own interface to find the requested event and ticket details. I’ll navigate straight to the official site rather than using a search engine because the site is known and the instructions prefer on-site actions.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"visit_url\", \"url\": \"https://sfjazz.org\"}}\n</tool_call>",
+          "seconds": 7.195795893669128
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 1,
+          "response": "<think>\nThe homepage hero prominently shows a 'View Lineup' button for the 2026–27 season. Since the task is to find a specific September 17, 2026 event on SFJAZZ, the most efficient on-site path is to open the official lineup/calendar from here and then locate the matching date and artists. I can ignore the cookie banner for now because it does not block the main button.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [122, 681]}}\n</tool_call>",
+          "seconds": 3.3128130435943604
+        },
+        {
+          "actionError": "left_click at [122.0, 681.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 2,
+          "response": "<think>\nThe cookie banner is still present and may interfere with clicks or scrolling. Before trying another navigation action, I should dismiss it by clicking the visible OK button so the page is fully usable. This is a safe, reversible site-preference action and helps ensure subsequent clicks land correctly.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [51, 913]}}\n</tool_call>",
+          "seconds": 2.8180140256881714
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 3,
+          "response": "<think>\nThe cookie banner is gone, so the page is fully interactive. The previous attempt to use the hero lineup button did not change the page, likely because that control either didn’t respond or wasn’t the best route. The top navigation has a clear SEARCH option, which is a reliable on-site way to locate a specific artist or event. I’ll use the site’s own search to look for Branford Marsalis first.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [283, 82]}}\n</tool_call>",
+          "seconds": 8.399818897247314
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 4,
+          "response": "<think>\nThe site search overlay is open with a visible search field. To locate the relevant event within SFJAZZ’s own catalog, I’ll enter the first artist name, Branford Marsalis. Using the site’s search is the most direct way to find the event page and confirm date, venue, price, and link details.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Branford Marsalis\"}}\n</tool_call>",
+          "seconds": 8.288122057914734
+        },
+        {
+          "actionError": "The browser proposal was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 5,
+          "response": "<think>\nThe search text did not appear in the field, which means the input likely wasn’t actually focused. I can see the search box clearly in the left panel, so I’ll click directly inside it to place the cursor before typing again. This is the most reliable way to correct the missed input.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [143, 297]}}\n</tool_call>",
+          "seconds": 8.4755939245224
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 6,
+          "response": "<think>\nI clicked directly inside the search field, so the cursor should now be in the input. I’ll type the artist name again to trigger SFJAZZ’s search suggestions or results. This should surface the relevant event entry if it exists in the site catalog.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"Branford Marsalis\"}}\n</tool_call>",
+          "seconds": 8.513828992843628
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/",
+          "historyCount": 7,
+          "response": "<think>\nThe artist name is now correctly entered in the site search field. The next step is to submit the search so SFJAZZ can show matching events or pages. Pressing Enter is the standard way to run the search from a focused search box.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"key\", \"keys\": [\"Enter\"]}}\n</tool_call>",
+          "seconds": 8.536864995956421
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/search/?query=Branford+Marsalis",
+          "historyCount": 8,
+          "response": "<think>\nThe search results page loaded, but only the heading and search form are visible; the actual results appear to be below the fold. I need to scroll down to inspect the matching events and identify the one for September 17, 2026 involving Branford Marsalis and Dianne Reeves.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"scroll\", \"pixels\": -694}}\n</tool_call>",
+          "seconds": 8.888105034828186
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/search/?query=Branford+Marsalis",
+          "historyCount": 9,
+          "response": "<think>\nThe search results are now visible, and I can see the top of result cards featuring the two artists. However, the crucial details like event title, date, venue, and price are likely lower on each card. I’ll scroll further down to bring the text details for these results into view so I can identify the September 17, 2026 listing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"scroll\", \"pixels\": -547}}\n</tool_call>",
+          "seconds": 9.382153034210205
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/search/?query=Branford+Marsalis",
+          "historyCount": 10,
+          "response": "<think>\nI’m still mostly looking at the large artist images, and the descriptive text for the search results hasn’t come into view yet. To identify which result corresponds to the September 17, 2026 show and whether it includes both artists, I need to continue scrolling until the result titles and metadata are visible.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"scroll\", \"pixels\": -560}}\n</tool_call>",
+          "seconds": 9.460755109786987
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/search/?query=Branford+Marsalis",
+          "historyCount": 11,
+          "response": "<think>\nI’ve found the relevant search result: 'Branford Marsalis Quartet Featuring Dianne Reeves | SFJAZZ 2026-27 Season,' and the listing already confirms the September 17–20, 2026 date range and Miner Auditorium venue. To gather the remaining required details—especially the start time and advertised price range—I need to open the official event page.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [329, 478]}}\n</tool_call>",
+          "seconds": 10.085376977920532
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 12,
+          "response": "<think>\nI’m on the official event page now. The hero confirms the event title, date range, and venue, but the start time and advertised price range are not yet visible. The page includes a 'DETAILS' button, which is likely the best on-page control for revealing the specific event information needed without moving toward purchase. I’ll open details first to look for schedule and pricing information.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [378, 945]}}\n</tool_call>",
+          "seconds": 11.00987994670868
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 13,
+          "response": "<think>\nThe event page is open and the hero confirms the title, date range, and venue. To quickly locate the exact start time on this long page, I’ll use the browser’s find function rather than blindly scrolling through several thousand pixels. This is efficient and still keeps me on the official event page.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"key\", \"keys\": [\"Control\", \"f\"]}}\n</tool_call>",
+          "seconds": 10.222637057304382
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 14,
+          "response": "<think>\nThe browser find bar is open at the top. I want to jump directly to the schedule information, and '8:00 PM' is a likely start time for a jazz event like this. Searching for the time should quickly reveal whether that exact phrase appears on the page and take me to the relevant section.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"type\", \"text\": \"8:00 PM\"}}\n</tool_call>",
+          "seconds": 10.652847051620483
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 15,
+          "response": "<think>\nThe browser find bar shows no match for '8:00 PM', so that exact phrase does not appear on this page. I still need the official start time, and the most reliable next step is to continue down the event page to the sections that typically list program details, schedule, and ticket pricing. I’ll scroll deeper into the page to look for those official details.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"scroll\", \"pixels\": -846}}\n</tool_call>",
+          "seconds": 12.160382986068726
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 16,
+          "response": "<think>\nI’m now in the details section of the official event page, but the visible content is still descriptive text. The start time and price range are likely farther down in a schedule, FAQ, or ticket details block. I’ll continue scrolling through the official page to locate those concrete details.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"scroll\", \"pixels\": -807}}\n</tool_call>",
+          "seconds": 12.47760796546936
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 17,
+          "response": "<think>\nThe browser find bar is still open and may interfere with page navigation. I no longer need it, so I’ll close it with Escape before using the page’s own navigation to reach ticket information. This keeps me on the official event page while avoiding the browser search overlay.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"key\", \"keys\": [\"Escape\"]}}\n</tool_call>",
+          "seconds": 12.28691303730011
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 18,
+          "response": "<think>\nThe event page has a sticky navigation bar, and the 'TICKETS' tab is visible. Since the task is specifically about finding tickets and reporting the official event link, start time, venue, and advertised price range, the most direct next step is to open the ticketing section for this event. This should reveal the official purchase page and any advertised price range, while still stopping short of any purchase action.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [113, 462]}}\n</tool_call>",
+          "seconds": 12.766126036643982
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/",
+          "historyCount": 19,
+          "response": "<think>\nI’ve gathered the key facts directly from the official SFJAZZ event page and ticket section. The page shows the event title, date range, venue, and the ticket listing for Thursday, September 17, 2026. The ticket card clearly lists the start time and advertised price range, and the official event URL is the current page. I should now report these findings and stop before any purchase action, as requested.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"terminate\", \"answer\": \"I found the official SFJAZZ event listing for Branford Marsalis and Dianne Reeves.\\n\\nDetails:\\n- Event: Branford Marsalis & Dianne Reeves Celebrate John Coltrane\\n- Start time: Thu, Sept 17, 2026 at 7:30 PM\\n- Venue: Miner Auditorium\\n- Advertised price range: $55.00\\u2013$155.00\\n- Official event link: https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/\\n\\nHow I found it:\\n- Opened the official SFJAZZ site\\n- Searched for \\u201cBranford Marsalis\\u201d on sfjazz.org\\n- Opened the official event page\\n- Switched to the Tickets section, where the Sept 17 listing showed the start time and price range\\n\\nI stopped before purchasing.\"}}\n</tool_call>",
+          "seconds": 15.885450005531311
+        }
+      ],
+      "result": "Optional(RemoteDesktopHost.ComputerUseExecutionResult.completed(\"I found the official SFJAZZ event listing for Branford Marsalis and Dianne Reeves.\\n\\nDetails:\\n- Event: Branford Marsalis & Dianne Reeves Celebrate John Coltrane\\n- Start time: Thu, Sept 17, 2026 at 7:30 PM\\n- Venue: Miner Auditorium\\n- Advertised price range: $55.00–$155.00\\n- Official event link: https://www.sfjazz.org/tickets/productions/26-27/branford-marsalis-and-dianne-reeves-celebrate-john-coltrane/\\n\\nHow I found it:\\n- Opened the official SFJAZZ site\\n- Searched for “Branford Marsalis” on sfjazz.org\\n- Opened the official event page\\n- Switched to the Tickets section, where the Sept 17 listing showed the start time and price range\\n\\nI stopped before purchasing.\"))",
+      "seconds": 239.17027592658997,
+      "timeoutSeconds": 300
+    },
+    "finalScreenshot": {
+      "path": ".build/repair-verification/fara-realworld-concert-01-attachments/674CFF58-F0B4-44C6-9B1E-F76DE33B1E39.png",
+      "sha256": "43a9fa7daf152b58961235793c09940c305668ac438ef4022c5ae338010b0f5c",
+      "visuallyInspected": true
+    },
+    "interpretation": "Task oracle passed: blank owned browser, native navigation to SFJAZZ, on-site search and event navigation, correct final facts and official URL. Twenty proposals, seventeen verified dispatch journals, two pre-dispatch rejections recovered, 239.1703 seconds. Answer uses actual newlines, not literal escaped newlines. One existing thread-priority runtime warning recurs. Worker exited. No purchase performed. No new model change is claimed from this repeat."
+  },
+  "movie": {
+    "path": ".build/repair-verification/holo-realworld-movie-01/workflow.json",
+    "sha256": "1303c944cb7c8dd2ad699d49a0d8ea8d498e136fe36acda8375cdc8d2695b3b9",
+    "report": {
+      "failure": "",
+      "finalDocumentURL": "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH",
+      "goal": "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing.",
+      "lastAgentCaptureStage": "complete",
+      "lastAgentTargetStatus": "stale-agent-point",
+      "model": "Holo-3.1-4B",
+      "nativeAttemptOutcomes": [
+        "documentCommitted"
+      ],
+      "nativeDispatchJournalStatuses": [
+        [
+          "verified"
+        ]
+      ],
+      "nativeObservations": [
+        "4:locationChanged:pendingSlot:observed",
+        "5:navigationAction:pendingSlot:allowed",
+        "6:provisionalStart:exactPendingNavigation:observed",
+        "7:response:pendingSlot:allowed",
+        "8:documentCommitStarted:exactPendingNavigation:observed",
+        "9:documentFinished:exactPendingNavigation:observed"
+      ],
+      "oracleCheckedOn": "2026-09-13",
+      "oracleURL": "https://ticketing.uswest.veezi.com/purchase/21982?siteToken=4m48btf3yavn7xjk5yxk6nc40c",
+      "ownedProcessExited": true,
+      "progress": [
+        "Reading the browser…",
+        "Reading the browser…",
+        "Reading the browser…",
+        "Reading the browser…",
+        "Reading the browser…"
+      ],
+      "proposalLimit": 24,
+      "responses": [
+        {
+          "actionError": "",
+          "currentURL": "",
+          "historyCount": 0,
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"query\\\":\\\"The Cycle of Love Roxie San Francisco September 17 2026 showtime\\\"}\",\"name\":\"web_search\"},\"id\":\"eCKEuqDOo5iDRNdcG02JlVqEbAdBz0QN\",\"type\":\"function\"}]}",
+          "seconds": 8.506571054458618
+        },
+        {
+          "actionError": "",
+          "currentURL": "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH",
+          "historyCount": 1,
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Roxie Theater showtimes section showing The Cycle of Love\\\",\\\"x\\\":280,\\\"y\\\":720}\",\"name\":\"click\"},\"id\":\"3BfkAjFhhfTiJkO8SXuG2nmhnGyWNRpw\",\"type\":\"function\"}]}",
+          "seconds": 10.37873089313507
+        },
+        {
+          "actionError": "left_click at [280.0, 720.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "currentURL": "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH",
+          "historyCount": 2,
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"THU, SEP 17 date tab in the Roxie Theater showtimes navigation\\\",\\\"x\\\":425,\\\"y\\\":510}\",\"name\":\"click\"},\"id\":\"SSwIxZjZKWq8qFVjZ2wxKg8NVu899gpl\",\"type\":\"function\"}]}",
+          "seconds": 12.012770056724548
+        },
+        {
+          "actionError": "left_click at [425.0, 510.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "currentURL": "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH",
+          "historyCount": 3,
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"THU, SEP 17 tab in the date navigation bar\\\",\\\"x\\\":430,\\\"y\\\":515}\",\"name\":\"click\"},\"id\":\"D4TJdMBhete7b0tDxS8qlCOe0qipOM1J\",\"type\":\"function\"}]}",
+          "seconds": 12.611454963684082
+        },
+        {
+          "actionError": "left_click at [430.0, 515.0] was not performed: the observed page or target could not be verified. No input was sent. Inspect the latest screenshot and choose a visible control, scroll, or wait as appropriate.",
+          "currentURL": "https://www.bing.com/search?q=The+Cycle+of+Love+Roxie+San+Francisco+September+17+2026+showtime&FORM=QBLH",
+          "historyCount": 4,
+          "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"THU, SEP 17 tab showing Thursday September 17 date\\\",\\\"x\\\":445,\\\"y\\\":510}\",\"name\":\"click\"},\"id\":\"8kCBDui8SZICUjpYzUDLYsLhU8oYq0PS\",\"type\":\"function\"}]}",
+          "seconds": 12.107155919075012
+        }
+      ],
+      "result": "Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.\"))",
+      "seconds": 70.42693400382996,
+      "timeoutSeconds": 300
+    },
+    "finalScreenshot": {
+      "path": ".build/repair-verification/holo-realworld-movie-01-attachments/684F1F94-37E6-4FF4-824B-B57355B73203.png",
+      "sha256": "985e1961dc203d78bc8750029d61bd51f41aabd0b6b6c4925855e5cf3416d9dd",
+      "visuallyInspected": true
+    },
+    "processReports": [
+      {
+        "path": ".build/repair-verification/holo-realworld-movie-01/proposal-0/report.json",
+        "sha256": "473247915996301596243e711a138b031c21190afe5ba00f4a8b3116eb6f3953",
+        "report": {
+          "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+          "requestSHA256": "f3a104003e358043c1c8068498877c362feb7fa1bd6309152b2f70a138604db6",
+          "modelAssets": {
+            "repository": "mradermacher/Holo-3.1-4B-GGUF",
+            "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+            "upstream": "Hcompany/Holo-3.1-4B",
+            "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+            "files": [
+              {
+                "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                "bytes": 3066386464,
+                "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+              },
+              {
+                "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                "bytes": 672424256,
+                "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+              }
+            ]
+          },
+          "binarySHA256": "8b9c3766e77e6ea4ac05afe699a0df13aea516f3df15c19219cabc088666aae8",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 5368709120,
+          "diagnosticMemoryLimitOnly": true,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 4344791040,
+          "memorySamples": 22,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "minimumImageTokensEnvironment": null,
+          "pid": 41897,
+          "startupSeconds": 1.3518226660089567,
+          "generationSeconds": 4.5449036250356585,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 86,
+            "prompt_tokens": 1957,
+            "total_tokens": 2043,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "tool_calls",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 5.975092125008814
+        }
+      },
+      {
+        "path": ".build/repair-verification/holo-realworld-movie-01/proposal-1/report.json",
+        "sha256": "a029530be40c52ef138e793ef63681f22e2515f7eff7a103bf91fde3b06f86f3",
+        "report": {
+          "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+          "requestSHA256": "09091c987bc9cee92ad5d4ea701d9c5afea5cf154db16377399cf96b3c712215",
+          "modelAssets": {
+            "repository": "mradermacher/Holo-3.1-4B-GGUF",
+            "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+            "upstream": "Hcompany/Holo-3.1-4B",
+            "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+            "files": [
+              {
+                "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                "bytes": 3066386464,
+                "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+              },
+              {
+                "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                "bytes": 672424256,
+                "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+              }
+            ]
+          },
+          "binarySHA256": "8b9c3766e77e6ea4ac05afe699a0df13aea516f3df15c19219cabc088666aae8",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 5368709120,
+          "diagnosticMemoryLimitOnly": true,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 4364075008,
+          "memorySamples": 31,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "minimumImageTokensEnvironment": null,
+          "pid": 41904,
+          "startupSeconds": 1.3043464579386637,
+          "generationSeconds": 6.8396945839049295,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 152,
+            "prompt_tokens": 2667,
+            "total_tokens": 2819,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "tool_calls",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 8.2761954999296
+        }
+      },
+      {
+        "path": ".build/repair-verification/holo-realworld-movie-01/proposal-2/report.json",
+        "sha256": "c195f3b074d6af8e2634fe980e2385b1519474c47c64b82c313005d297b72cb0",
+        "report": {
+          "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+          "requestSHA256": "779b594af236c493aade57b8913990a6db8540e1d0a1fd29796a2d7ff23b2d91",
+          "modelAssets": {
+            "repository": "mradermacher/Holo-3.1-4B-GGUF",
+            "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+            "upstream": "Hcompany/Holo-3.1-4B",
+            "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+            "files": [
+              {
+                "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                "bytes": 3066386464,
+                "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+              },
+              {
+                "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                "bytes": 672424256,
+                "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+              }
+            ]
+          },
+          "binarySHA256": "8b9c3766e77e6ea4ac05afe699a0df13aea516f3df15c19219cabc088666aae8",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 5368709120,
+          "diagnosticMemoryLimitOnly": true,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 4377198592,
+          "memorySamples": 38,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "minimumImageTokensEnvironment": null,
+          "pid": 42220,
+          "startupSeconds": 1.301558000035584,
+          "generationSeconds": 8.465535124996677,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 163,
+            "prompt_tokens": 3452,
+            "total_tokens": 3615,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "tool_calls",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 9.851014457992278
+        }
+      },
+      {
+        "path": ".build/repair-verification/holo-realworld-movie-01/proposal-3/report.json",
+        "sha256": "3d5f9d6baa78a31c2f3eeaf333dca2f4676bd7541ae165f8376e5f2f5d8ba219",
+        "report": {
+          "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+          "requestSHA256": "1ce7317b98f7069cae34a42e4f664d7b1d930367e4c3753e1c8f7306fc6ad9e5",
+          "modelAssets": {
+            "repository": "mradermacher/Holo-3.1-4B-GGUF",
+            "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+            "upstream": "Hcompany/Holo-3.1-4B",
+            "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+            "files": [
+              {
+                "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                "bytes": 3066386464,
+                "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+              },
+              {
+                "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                "bytes": 672424256,
+                "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+              }
+            ]
+          },
+          "binarySHA256": "8b9c3766e77e6ea4ac05afe699a0df13aea516f3df15c19219cabc088666aae8",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 5368709120,
+          "diagnosticMemoryLimitOnly": true,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 4361633792,
+          "memorySamples": 40,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "minimumImageTokensEnvironment": null,
+          "pid": 42226,
+          "startupSeconds": 1.3026591669768095,
+          "generationSeconds": 9.119427624973468,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 222,
+            "prompt_tokens": 3431,
+            "total_tokens": 3653,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "tool_calls",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 10.491694041993469
+        }
+      },
+      {
+        "path": ".build/repair-verification/holo-realworld-movie-01/proposal-4/report.json",
+        "sha256": "4c4e812737b9e638275355289cbdac3b1659c7de250a1f2e5e19ec9ad3c7a581",
+        "report": {
+          "scope": "one-native-Holo-protocol-proposal-no-tool-execution",
+          "requestSHA256": "65ccf44c1c6b45d77f179995d4083bd3f282f066cc7432bdf71273f93d7f7f89",
+          "modelAssets": {
+            "repository": "mradermacher/Holo-3.1-4B-GGUF",
+            "revision": "6d76eab0233f62783ddec95a7a2e2b057c6d7e66",
+            "upstream": "Hcompany/Holo-3.1-4B",
+            "upstreamRevision": "8c88265a5a159bfd1492db9243733dd2e6e04a6e",
+            "files": [
+              {
+                "name": "Holo-3.1-4B.Q4_K_M.gguf",
+                "bytes": 3066386464,
+                "sha256": "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"
+              },
+              {
+                "name": "Holo-3.1-4B.mmproj-f16.gguf",
+                "bytes": 672424256,
+                "sha256": "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"
+              }
+            ]
+          },
+          "binarySHA256": "8b9c3766e77e6ea4ac05afe699a0df13aea516f3df15c19219cabc088666aae8",
+          "targetMacRAMGB": 12,
+          "wholeApp12GBQualified": false,
+          "selectedProductionModelChanged": false,
+          "memoryMetric": "sampled max of resident size and physical footprint",
+          "memoryStopLimitBytes": 5368709120,
+          "diagnosticMemoryLimitOnly": true,
+          "productionMemoryLimitChanged": false,
+          "peakSampledProcessMemoryBytes": 4357701632,
+          "memorySamples": 38,
+          "startupDeadlineSeconds": 45,
+          "generationDeadlineSeconds": 45,
+          "totalDeadlineSeconds": 100,
+          "runnerExecutesNoActions": true,
+          "minimumImageTokensEnvironment": null,
+          "pid": 42539,
+          "startupSeconds": 1.3136532920179889,
+          "generationSeconds": 8.554236333002336,
+          "responseReceived": true,
+          "usage": {
+            "completion_tokens": 162,
+            "prompt_tokens": 3680,
+            "total_tokens": 3842,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          },
+          "finishReason": "tool_calls",
+          "exitCode": 0,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "totalSeconds": 9.998871333082207
+        }
+      }
+    ],
+    "interpretation": "Task oracle failed: five proposals, one verified search/navigation dispatch, four rejected clicks, then manual intervention after 70.4269 seconds. Never reached the official venue or ticket page. In the final 960x568 screenshot, the declared final point [445,510] in the 0...1000 model coordinate space maps to [427.2,289.68], left of the intended Thursday tab. This demonstrates a mismatch between the stated target and model point; the precise DOM reason for every stale-agent-point rejection has not been independently isolated. All five diagnostic workers exited and credentials were removed; sampled peak 4,377,198,592 bytes under the diagnostic 5 GiB allowance. This test uses Holo's browser adapter and per-proposal diagnostic runner, separate from the managed native package-loader document trial."
+  },
+  "status": {
+    "concertTask": "tested and accepted only for the stated live oracle",
+    "movieTask": "tested and failed",
+    "generalComputerUseAccepted": false,
+    "wholeApp12GBQualified": false
+  },
+  "next": [
+    "Reproduce the retained public browser target mismatch with a shared, source-independent observation/grounding test; preserve rejection and no-replay rules.",
+    "Add real tasks on previously unused sites for travel, reference research and product information; count provider-side changes separately from application/model failures.",
+    "Exercise real native applications and cross-app workflows, then provider-login Take Control/Resume/Stop with account entry handed to the user. Controlled form handoff does not qualify real-provider login.",
+    "Qualify the full host/client composition, repeated tasks, physical phone and whole-app 12 GB/thermal limits before release."
+  ]
+}

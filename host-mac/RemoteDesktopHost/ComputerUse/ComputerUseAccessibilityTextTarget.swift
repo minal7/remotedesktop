@@ -14,7 +14,12 @@ enum ComputerUseNativeControlReader {
             try Task.checkCancellation()
             guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
             guard now() < deadline else { expired = true; return nil }
-            return access.read(name, element)
+            let value = access.read(name, element)
+            // AX IPC may return after ownership or its time budget expires.
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+            guard now() < deadline else { expired = true; return nil }
+            return value
         }
         func element(_ name: String, _ source: AXUIElement) throws -> AXUIElement? {
             guard let value = try read(name, source), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
@@ -36,6 +41,20 @@ enum ComputerUseNativeControlReader {
         guard let window = try element(kAXFocusedWindowAttribute, app.root) else { return nil }
         access.timeout(window, 0.1)
         guard try frame(window) == windowBounds else { return nil }
+        func windowContext() throws -> ComputerUseNativeControls.Window? {
+            let role = try read(kAXRoleAttribute, window) as? String
+            let subrole = try read(kAXSubroleAttribute, window) as? String
+            guard role != "AXSecureTextField", subrole != kAXSecureTextFieldSubrole as String,
+                  (try read("AXProtectedContent", window) as? NSNumber)?.boolValue != true,
+                  (try read("AXHidden", window) as? NSNumber)?.boolValue != true else { return nil }
+            let title = try read(kAXTitleAttribute, window) as? String
+            let rawModal = try read(kAXModalAttribute, window)
+            // Unsupported and malformed attributes stay unknown. In
+            // particular, a number or a title containing "dialog" is no proof.
+            let modal = rawModal.flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? ($0 as? NSNumber)?.boolValue : nil }
+            return .init(role: role, subrole: subrole, title: title, modal: modal)
+        }
+        let observedWindow = try windowContext()
         let roles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
             "AXComboBox", "AXTextField", "AXTextArea", "AXMenuItem", "AXSlider", "AXIncrementor", "AXScrollArea"]
         var queue: [(AXUIElement, Bool)] = [(window, false)], visited: [AXUIElement] = []
@@ -82,12 +101,12 @@ enum ComputerUseNativeControlReader {
         }
         // Geometry is planning data, but still must belong to the screenshot's
         // foreground window. A changed scope cannot publish a mixed catalogue.
-        guard let current = access.frontmost(), current.identity.utf8.elementsEqual(app.identity.utf8), CFEqual(current.root, app.root),
-              let currentWindow = try element(kAXFocusedWindowAttribute, app.root), CFEqual(currentWindow, window),
-              try frame(window) == windowBounds, !expired else { return nil }
+        guard let currentWindow = try element(kAXFocusedWindowAttribute, app.root), CFEqual(currentWindow, window),
+              try frame(window) == windowBounds, try windowContext() == observedWindow, !expired,
+              let current = access.frontmost(), current.identity.utf8.elementsEqual(app.identity.utf8), CFEqual(current.root, app.root) else { return nil }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
-        return ComputerUseNativeControls(items: items, truncated: truncated)
+        return ComputerUseNativeControls(items: items, truncated: truncated, window: observedWindow)
     }
 }
 

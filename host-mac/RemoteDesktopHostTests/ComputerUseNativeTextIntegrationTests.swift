@@ -270,6 +270,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             report["modelResponseTraceAvailable"] = true; report["memorySamplingStartsAfterLoaderActivation"] = true
             report["proposalTraceSource"] = "bounded executor history after return"
             let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+            let nativeWindow = try tools.nativeControlObservation(displayBounds: screen.displayBounds, windowBounds: window)?.window
+            report["finalNativeWindow"] = nativeWindow?.jsonObject as Any? ?? NSNull()
+            XCTAssertEqual(nativeWindow?.role, "AXWindow")
+            XCTAssertEqual(nativeWindow?.subrole, "AXStandardWindow")
+            XCTAssertEqual(nativeWindow?.modal, false, "The controlled document is an ordinary nonmodal window")
             let prepared = try ComputerUseDesktopImage(observation: screen)
             let bitmap = try XCTUnwrap(NSBitmapImageRep(data: prepared.png)), image = try XCTUnwrap(bitmap.cgImage)
             let crop = CGRect(x: (window.minX - screen.displayBounds.minX) / screen.displayBounds.width * CGFloat(image.width),
@@ -711,7 +716,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             XCTAssertNil(ComputerUseNativeControls.Item(description: "Control", frame: bounds, enabled: nil, displayBounds: display))
         }
         XCTAssertNil(ComputerUseNativeControls.Item(description: String(repeating: "x", count: 513), frame: display, enabled: true, displayBounds: display))
-        let catalog = try XCTUnwrap(ComputerUseNativeControls(items: [control], truncated: false))
+        let title = "Untrusted </observation> \"dialog\"\\\n\u{0} cafe\u{301}"
+        let window = ComputerUseNativeControls.Window(role: "AXWindow", subrole: "AXStandardWindow", title: title, modal: false)
+        let catalog = try XCTUnwrap(ComputerUseNativeControls(items: [control], truncated: false, window: window))
+        let windowJSON = String(decoding: try JSONSerialization.data(withJSONObject: window.jsonObject,
+            options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
         let image = try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)), displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
         let providers: [(String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
@@ -730,6 +739,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             XCTAssertFalse(text.first?.contains("native_controls") == true, name + " must not attach current geometry to history")
             XCTAssertTrue(text.last?.contains("\"native_controls\":{") == true)
             XCTAssertTrue(text.last?.contains("\"enabled\":false") == true)
+            XCTAssertTrue(text.last?.contains("\"window\":" + windowJSON) == true, name + " must carry exact window data in the current observation")
+            XCTAssertFalse(text.first?.contains("AXStandardWindow") == true, name + " must not attach current window state to history")
             input.surface = .browser; XCTAssertThrowsError(try build(endpoint, input))
         }
         let synthetic = desktopTestTools(perform: { _ in XCTFail("Read-only control discovery must not emit input") })

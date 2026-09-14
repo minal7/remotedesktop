@@ -131,6 +131,50 @@ struct ComputerUseNativeTextState: Equatable, Sendable {
 /// recipient or authorize effects, and the list need not cover every control.
 struct ComputerUseNativeControls: Equatable, Sendable {
     static let maximumItems = 16
+    /// AX metadata describes only this focused window. A false modal flag
+    /// does not rule out a sheet, web dialog or overlay elsewhere in the UI.
+    struct Window: Equatable, Sendable {
+        let role: String?
+        let subrole: String?
+        let title: String?
+        let modal: Bool?
+        let truncated: Bool
+
+        init(role: String?, subrole: String?, title: String?, modal: Bool?) {
+            var clipped = false
+            func identifier(_ value: String?) -> String? {
+                guard let value, !value.isEmpty else { return nil }
+                guard value.utf8.count <= 128 else { clipped = true; return nil }
+                return value
+            }
+            self.role = identifier(role); self.subrole = identifier(subrole)
+            if let title {
+                var prefix = "", bytes = 0
+                for character in title {
+                    let next = String(character)
+                    guard bytes + next.utf8.count <= 384 else { break }
+                    prefix += next; bytes += next.utf8.count
+                }
+                self.title = prefix; clipped = clipped || bytes < title.utf8.count
+            } else { self.title = nil }
+            self.modal = modal; truncated = clipped
+        }
+        var jsonObject: [String: Any] {
+            ["role": role as Any? ?? NSNull(), "subrole": subrole as Any? ?? NSNull(),
+             "title": title as Any? ?? NSNull(), "modal": modal as Any? ?? NSNull(), "truncated": truncated]
+        }
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            func exact(_ a: String?, _ b: String?) -> Bool {
+                switch (a, b) {
+                case (nil, nil): return true
+                case (let a?, let b?): return a.utf8.elementsEqual(b.utf8)
+                default: return false
+                }
+            }
+            return exact(lhs.role, rhs.role) && exact(lhs.subrole, rhs.subrole) && exact(lhs.title, rhs.title)
+                && lhs.modal == rhs.modal && lhs.truncated == rhs.truncated
+        }
+    }
     struct Item: Equatable, Sendable {
         let description: String
         let bounds1000: [Double]
@@ -158,11 +202,14 @@ struct ComputerUseNativeControls: Equatable, Sendable {
     }
     let items: [Item]
     let truncated: Bool
-    init?(items: [Item], truncated: Bool) {
+    let window: Window?
+    init?(items: [Item], truncated: Bool, window: Window? = nil) {
         guard items.count <= Self.maximumItems else { return nil }
-        self.items = items; self.truncated = truncated
+        self.items = items; self.truncated = truncated; self.window = window
     }
-    var jsonObject: [String: Any] { ["items": items.map(\.jsonObject), "truncated": truncated] }
+    var jsonObject: [String: Any] {
+        ["items": items.map(\.jsonObject), "truncated": truncated, "window": window?.jsonObject as Any? ?? NSNull()]
+    }
 }
 
 /// A bounded full-display image. This is geometry and model input only, never

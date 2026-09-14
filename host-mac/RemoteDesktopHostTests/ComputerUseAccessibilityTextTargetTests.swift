@@ -5,6 +5,100 @@ import XCTest
 
 @MainActor
 final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
+    func testNativeWindowContextPreservesObservedRolesAndUnknownModality() throws {
+        for (role, subrole, modal) in [("AXWindow", "AXStandardWindow", false), ("AXWindow", "AXDialog", true),
+                                       ("AXSheet", "", nil), ("", "", nil)] as [(String, String, Bool?)] {
+            let graph = AXTextGraph(), bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", bounds)
+            graph.set("window", kAXRoleAttribute, role.isEmpty ? nil : role as NSString)
+            graph.set("window", kAXSubroleAttribute, subrole.isEmpty ? nil : subrole as NSString)
+            graph.set("window", kAXModalAttribute, modal.map { $0 ? kCFBooleanTrue : kCFBooleanFalse })
+            graph.set("window", kAXTitleAttribute, "Untrusted \"title\" — cafe\u{301}" as NSString)
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: bounds, windowBounds: bounds,
+                access: graph.access, mayAct: { true }))
+            let window = try XCTUnwrap(catalog.jsonObject["window"] as? [String: Any])
+            if role.isEmpty { XCTAssertTrue(window["role"] is NSNull) } else { XCTAssertEqual(window["role"] as? String, role) }
+            if subrole.isEmpty { XCTAssertTrue(window["subrole"] is NSNull) } else { XCTAssertEqual(window["subrole"] as? String, subrole) }
+            if let modal { XCTAssertEqual(window["modal"] as? Bool, modal) } else { XCTAssertTrue(window["modal"] is NSNull) }
+            XCTAssertEqual(Array((try XCTUnwrap(window["title"] as? String)).utf8), Array("Untrusted \"title\" — cafe\u{301}".utf8))
+            XCTAssertEqual(window["truncated"] as? Bool, false)
+            XCTAssertEqual(graph.readCount("window", kAXValueAttribute), 0)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeWindowContextBoundsTitlesAndDoesNotExposeProtectedWindows() throws {
+        for mode in ["long-title", "malformed", "secure", "protected", "hidden"] {
+            let graph = AXTextGraph(), bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", bounds)
+            graph.set("window", kAXTitleAttribute, String(repeating: "👩🏽‍💻", count: 80) as NSString)
+            switch mode {
+            case "malformed":
+                graph.set("window", kAXModalAttribute, NSNumber(value: 2))
+                graph.set("window", kAXRoleAttribute, String(repeating: "x", count: 129) as NSString)
+                graph.set("window", kAXSubroleAttribute, NSNumber(value: 1))
+                graph.set("window", kAXTitleAttribute, NSNumber(value: 1))
+            case "secure": graph.set("window", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
+            case "protected": graph.set("window", "AXProtectedContent", kCFBooleanTrue)
+            case "hidden": graph.set("window", "AXHidden", kCFBooleanTrue)
+            default: break
+            }
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: bounds, windowBounds: bounds,
+                access: graph.access, mayAct: { true }))
+            if ["secure", "protected", "hidden"].contains(mode) {
+                XCTAssertTrue(catalog.jsonObject["window"] is NSNull, mode)
+                XCTAssertTrue(catalog.items.isEmpty)
+                XCTAssertEqual(graph.readCount("window", kAXTitleAttribute), 0)
+            } else {
+                let window = try XCTUnwrap(catalog.jsonObject["window"] as? [String: Any])
+                XCTAssertEqual(window["truncated"] as? Bool, true)
+                if mode == "long-title" {
+                    XCTAssertEqual(window["title"] as? String, String(repeating: "👩🏽‍💻", count: 25))
+                } else {
+                    for key in ["role", "subrole", "title", "modal"] { XCTAssertTrue(window[key] is NSNull, key) }
+                }
+            }
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeWindowContextRejectsMetadataChangesDuringObservation() throws {
+        for attribute in [kAXRoleAttribute, kAXSubroleAttribute, kAXModalAttribute, kAXTitleAttribute, "AXProtectedContent", "AXHidden"] {
+            let graph = AXTextGraph(), bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", bounds); graph.setFrame("destination", CGRect(x: 20, y: 70, width: 200, height: 20))
+            graph.set("window", kAXTitleAttribute, "café" as NSString)
+            graph.afterRead = { node, name in
+                guard node == "destination", name == kAXTitleAttribute else { return }
+                if [kAXModalAttribute, "AXProtectedContent", "AXHidden"].contains(attribute) {
+                    graph.set("window", attribute, kCFBooleanTrue)
+                } else { graph.set("window", attribute, (attribute == kAXTitleAttribute ? "cafe\u{301}" : "AXChanged") as NSString) }
+            }
+            XCTAssertNil(try ComputerUseNativeControlReader.observe(displayBounds: bounds, windowBounds: bounds,
+                access: graph.access, mayAct: { true }), attribute)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeWindowContextRejectsWithdrawalDuringTheLastAXReply() throws {
+        for mode in ["permission", "deadline", "application"] {
+            let graph = AXTextGraph(), bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", bounds)
+            var allowed = true, expired = false
+            graph.afterRead = { node, attribute in
+                guard node == "window", attribute == kAXModalAttribute, graph.readCount(node, attribute) == 2 else { return }
+                switch mode {
+                case "permission": allowed = false
+                case "deadline": expired = true
+                default: graph.applicationIdentity = "replacement-launch"
+                }
+            }
+            let observe = { try ComputerUseNativeControlReader.observe(displayBounds: bounds, windowBounds: bounds,
+                access: graph.access, mayAct: { allowed }, now: { Date(timeIntervalSinceReferenceDate: expired ? 1 : 0) }) }
+            if mode == "permission" { XCTAssertThrowsError(try observe()) } else { XCTAssertNil(try observe(), mode) }
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
     func testNativeControlCatalogueUsesBoundsAndNeverReadsEditableValues() throws {
         let graph = AXTextGraph()
         let display = CGRect(x: -1280, y: -200, width: 1280, height: 800)
