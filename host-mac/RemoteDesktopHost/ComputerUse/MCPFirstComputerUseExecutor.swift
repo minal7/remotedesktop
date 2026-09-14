@@ -849,7 +849,9 @@ final class MCPFirstComputerUseExecutor:
             }
             arguments = ["action": "visit_url", "url": destination.absoluteString]
         case .answer:
-            guard case .page = observation, !plan.text.isEmpty, !Self.requestsConsequentialMutation(input.goal) else { return nil }
+            let hasPage: Bool
+            if case .page = observation { hasPage = true } else { hasPage = false }
+            try Self.validateBrowserCompletion(answer: plan.text, goal: input.goal, hasPageObservation: hasPage)
             arguments = ["action": "terminate", "answer": plan.text]
         case .askUser:
             guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
@@ -864,6 +866,17 @@ final class MCPFirstComputerUseExecutor:
         let response = "<tool_call>" + encoded + "</tool_call>"
         let proposal = try ComputerUseFaraModel.Proposal(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
         return proposal
+    }
+
+    // Completion admission is separate from deciding whether native tools
+    // have a capability gap. A rejected answer cannot authorize vision.
+    static func validateBrowserCompletion(answer: String, goal: String, hasPageObservation: Bool) throws {
+        guard hasPageObservation, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw AppleFoundationMCPPlannerError.unknownProposal
+        }
+        guard !requestsConsequentialMutation(goal) else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
     }
 
     private func readBrowserLinkWithMCP(_ link: ComputerUseBrowserPageSnapshot.Link,

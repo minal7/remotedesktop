@@ -5,6 +5,20 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback() throws {
+        for (goal, answer, hasPage) in [
+            ("Find the store hours and purchase a gift.", "The store closes at 6 PM.", true),
+            ("Read the fare policy. Do not purchase any tickets.", "Here is the fare policy.", true),
+            ("Read the page.", "", true),
+            ("Read the page.", "Some information.", false),
+        ] {
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                answer: answer, goal: goal, hasPageObservation: hasPage), goal)
+        }
+        XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+            answer: "The store closes at 6 PM.", goal: "Read the store hours.", hasPageObservation: true))
+    }
+
     func testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback() async throws {
         let planner = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED", "VISUAL_FALLBACK_REQUIRED"])
         let browser = StubVisualExecutor(result: .completed("Browser result")), native = StubVisualExecutor()

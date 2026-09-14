@@ -12,9 +12,11 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
     enum Failure: Error, LocalizedError {
         case contextLimit
         case unsupportedAnswerClaim
+        case incompleteEvidence
         var errorDescription: String? {
             switch self {
             case .contextLimit: "The page exceeds the current local tool planner's capacity. The task has not completed."
+            case .incompleteEvidence: "The assistant could not verify completion from the page information it checked. The task has not completed."
             case .unsupportedAnswerClaim: "The proposed answer contains a number, date or source that the current records do not support. The task has not completed."
             }
         }
@@ -223,7 +225,7 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
         // Bounded record reads preserve navigation choices, but this planner
         // does not yet retain a verified whole-goal evidence set across views.
         // A partial view cannot certify completion or establish a Mac-tool gap.
-        if context.isPartialRecordView && (kind == .answer || kind == .visualFallback) { throw Failure.contextLimit }
+        if context.isPartialRecordView && (kind == .answer || kind == .visualFallback) { throw Failure.incompleteEvidence }
         if kind == .answer { try validateAnswerClaims(text, context: context) }
         return .init(kind: kind, reference: usesReference ? reference : "", text: usesReference ? "" : text)
     }

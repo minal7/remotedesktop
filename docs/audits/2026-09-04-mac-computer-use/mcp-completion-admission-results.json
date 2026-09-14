@@ -1,0 +1,1426 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-14",
+  "sourceBaseCommit": "56d12082dbfabfd18c5a85bd4059714e13c9e42d",
+  "scope": "Preserve native/MCP-first error routing; reject unqualified completion checkers",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "2e8bb55d72ae29347134061bc5dac607b244d3b4980c78cb734f393b7cdfeb90",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "fa6e910652d82fc7a09864a007dce99d677f82eb14e0bf341b35bea8833b1c20",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "a5501c58403bc7201ad7da9c19bf8eeb30ab85abe39591099ffc5afe7cb83c51",
+    "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "6a87aa6a7f0f91196efbbcb75174782ac0b6e9649b3a0043feafd4040c0eaf6f"
+  },
+  "sourceBinding": "Final hashes bind mcp-completion-route-green-01 and mcp-completion-route-host-01. Prior Apple checker iterations were not individually hashed. The final rejected candidate source and patch, commands, frozen inputs and raw model results remain retained. The RED test introduces the completion-validation contract before its implementation; the earlier actual public host failure independently demonstrates the production nil-to-vision defect.",
+  "policy": [
+    "macOS MCP/native capabilities first. A completion, context, guardrail or integration failure is not a capability gap.",
+    "One build/test/inference at a time; Xcode jobs1, parallel tests off; no source edits during builds/tests.",
+    "MiniCPM is a separate native text/checker diagnostic. No visual selection, installed host, phone/provider account, purchase, message, push or release changes."
+  ],
+  "stages": {
+    "completionFailureRouting": {
+      "implemented": true,
+      "compiled": true,
+      "tested": "Three focused methods, including ten retained browser failure/retirement scenarios; no visual calls. Controlled default host task also passes.",
+      "accepted": "Scoped failure routing only; consequential-intent keyword false positives remain."
+    },
+    "partialEvidenceFailureClassification": {
+      "implemented": true,
+      "compiled": true,
+      "tested": "Partial record answer and visualFallback both throw; navigation/read proposals remain available.",
+      "accepted": "Explicit incomplete-evidence error replaces misleading context-limit error."
+    },
+    "appleSemanticChecker": {
+      "implemented": "Rejected experiment archived; no live checker integration remains",
+      "compiled": true,
+      "tested": "False acceptance of missing source/action and false rejection of complete answers; final rationales invent requirements or miss present facts.",
+      "accepted": false
+    },
+    "minicpmSemanticChecker": {
+      "implemented": "Standalone frozen native-record replay",
+      "compiled": "Python preflight and signed b9992 actual model load",
+      "tested": "8/9 executed labels match; first false acceptance stops the planned 15-case run.",
+      "accepted": false
+    },
+    "wholePublicTasks": {
+      "implemented": "Partial",
+      "compiled": true,
+      "tested": "Earlier BART/SFJAZZ public whole-task failures preserved; this checkpoint does not repeat them unchanged.",
+      "accepted": false
+    }
+  },
+  "observations": [
+    "The actual SFJAZZ proposal and first checker are complete, but requestsConsequentialMutation finds purchase in an explicit prohibition. The browser answer branch returns nil, activating the lazy visual callback and reporting visualModelUnavailable. This is a host policy/classification bug, not a demonstrated native-tool gap.",
+    "The repair makes malformed/rejected completion throw through the retained browser workflow. It preserves the existing conservative intent guard rather than falsely claiming its negation/completeness problem is solved.",
+    "Apple final assessment says the already present 48-hour deadline/$250 membership facts are missing and imposes an unrequested structured-comparison format on a valid room answer. Correct boolean labels alone do not validate those rationales.",
+    "The earlier injection-without-source test is rejected by the scalar/source precheck and does not establish semantic prompt-injection defense.",
+    "MiniCPM accepts the real first-view BART unavailable answer: it mistakes missing facts in a partial native view for proven absence from the page. This is disqualifying for completion admission.",
+    "MiniCPM correctly rejects the valid-source injection case overall, but its assessment incorrectly says the source is absent. Its rationales are not deterministic evidence.",
+    "The final controlled host task completes in 14.34 seconds with the correct train time/platform, one visit per page, and zero model downloads, launch attempts or workers. One main-thread responsiveness warning remains."
+  ],
+  "frozenInputs": [
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-freeze.json",
+      "sha256": "b16d47cbcfa6cf10272e2c1d3318d8af01261f19c6547da18d46c547dbf0748c",
+      "bytes": 6685
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-freeze.json",
+      "sha256": "b865825d33e26cb92f923d9a5394691ddb0300db688117c34c0d0f856317b603",
+      "bytes": 3709
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-heldout-native-page.json",
+      "sha256": "e447c7a656b7ac0acf05952099d50b9db519b290b4f5d093781d138bbcb2dd2c",
+      "bytes": 652
+    }
+  ],
+  "rejectedAppleSource": [
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-check-rejected-source/candidate.patch",
+      "sha256": "8c4cdaa241f9c5f3b06718f3ec464a64cac4fb8e8e4c5e99a2e10dbafc6e2c83",
+      "bytes": 19865
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-check-rejected-source/ComputerUseMCPBrowserStepPlanner.swift",
+      "sha256": "30c7d7fee8dbd881bf98690e0ec503d0bb20473a30a075093bb08073bd9875a6",
+      "bytes": 29253
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-check-rejected-source/ComputerUseMobileInitiationTests.swift",
+      "sha256": "5a12f22f0e5b2be5b5a04c160cf35de1f0b3300c71d2ec0b263a915356933736",
+      "bytes": 174764
+    }
+  ],
+  "appRuns": [
+    {
+      "name": "mcp-answer-admission-candidate-01",
+      "command": {
+        "name": "mcp-answer-admission-candidate-01",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_ANSWER_CHECK=1 TEST_RUNNER_MCP_ANSWER_CHECK_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416130.914,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789416051.873,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Frozen answer admission mismatch: concert_missing_source; true",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence",
+            "testName": "testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01.log",
+        "sha256": "b74e5ca0c6cc79a3677bc87b275990fa75e152b7bda744b07184e3b22cf711fc",
+        "bytes": 34198
+      },
+      "result": {
+        "cases": [
+          {
+            "accepted": true,
+            "error": null,
+            "expected": true,
+            "id": "concert_observed_complete",
+            "matches": true,
+            "seconds": 3.781888961791992,
+            "trace": [
+              "answerCheckTokens=2315, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"complete_supported\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "travel_observed_unavailable",
+            "matches": true,
+            "seconds": 3.2880780696868896,
+            "trace": [
+              "answerCheckTokens=2448, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_missing_fee",
+            "matches": true,
+            "seconds": 2.9917960166931152,
+            "trace": [
+              "answerCheckTokens=2303, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": true,
+            "error": null,
+            "expected": false,
+            "id": "concert_missing_source",
+            "matches": false,
+            "seconds": 3.038290023803711,
+            "trace": [
+              "answerCheckTokens=2297, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"complete_supported\"}"
+            ]
+          }
+        ],
+        "plannedCount": 9
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-01/result.json",
+        "sha256": "9b10b2e93aef5f2ac95c087e0b1fd7db2b464ac1ba98ca933c173a3e500c4a89",
+        "bytes": 1409
+      }
+    },
+    {
+      "name": "mcp-answer-admission-candidate-02",
+      "command": {
+        "name": "mcp-answer-admission-candidate-02",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_ANSWER_CHECK=1 TEST_RUNNER_MCP_ANSWER_CHECK_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416271.002,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789416191.163,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Frozen answer admission mismatch: travel_complete_readable_records; false",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence",
+            "testName": "testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02.log",
+        "sha256": "c4c22f19f6f7e1922e779b5d530e8eaa494aa69411de760d88e096d9a80e635c",
+        "bytes": 34198
+      },
+      "result": {
+        "cases": [
+          {
+            "accepted": true,
+            "error": null,
+            "expected": true,
+            "id": "concert_observed_complete",
+            "matches": true,
+            "seconds": 3.652445077896118,
+            "trace": [
+              "answerCheckTokens=2315, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"complete_supported\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "travel_observed_unavailable",
+            "matches": true,
+            "seconds": 3.2778149843215942,
+            "trace": [
+              "answerCheckTokens=2448, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_missing_fee",
+            "matches": true,
+            "seconds": 2.979380965232849,
+            "trace": [
+              "answerCheckTokens=2303, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_missing_source",
+            "matches": true,
+            "seconds": 0.0005109310150146484,
+            "trace": [
+              "Scalar/source precheck rejected"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_wrong_membership_relationship",
+            "matches": true,
+            "seconds": 2.9693260192871094,
+            "trace": [
+              "answerCheckTokens=2305, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_invented_return_effect",
+            "matches": true,
+            "seconds": 3.0897250175476074,
+            "trace": [
+              "answerCheckTokens=2325, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_wrong_amount",
+            "matches": true,
+            "seconds": 0.00196993350982666,
+            "trace": [
+              "Scalar/source precheck rejected"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "concert_answer_injection",
+            "matches": true,
+            "seconds": 0.0002919435501098633,
+            "trace": [
+              "Scalar/source precheck rejected"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": true,
+            "id": "travel_complete_readable_records",
+            "matches": false,
+            "seconds": 2.9623260498046875,
+            "trace": [
+              "answerCheckTokens=2268, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          }
+        ],
+        "plannedCount": 9
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-candidate-02/result.json",
+        "sha256": "1083390d72500aa35354558213f9279cf41b44868e676742f2426aa230be3015",
+        "bytes": 2890
+      }
+    },
+    {
+      "name": "mcp-answer-admission-host-green-01",
+      "command": {
+        "name": "mcp-answer-admission-host-green-01",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testMCPBrowserAnswerCitationUsesOnlyTheCurrentObservedSource",
+          "ComputerUseMobileInitiationTests/testMCPBrowserAnswerCheckRejectsMissingSourceAndCancelledWorkBeforeInference",
+          "ComputerUseMobileInitiationTests/testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability",
+          "ComputerUseMobileInitiationTests/testMCPBrowserAnswerRejectsUnsupportedNumericClaimsAndSources",
+          "ComputerUseMobileInitiationTests/testMCPBrowserAnswerAllowsObservedLiteralsAndExplicitCivilDateConversion",
+          "ComputerUseMobileInitiationTests/testMCPBrowserAnswerDoesNotPromoteURLsHistoryOrAmbiguousDatesIntoFacts",
+          "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserAnswerCitationUsesOnlyTheCurrentObservedSource -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserAnswerCheckRejectsMissingSourceAndCancelledWorkBeforeInference -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserAnswerRejectsUnsupportedNumericClaimsAndSources -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserAnswerAllowsObservedLiteralsAndExplicitCivilDateConversion -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserAnswerDoesNotPromoteURLsHistoryOrAmbiguousDatesIntoFacts -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 6,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416506.754,
+        "passedTests": 6,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789416416.927,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 7,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage",
+            "testName": "testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 7
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01.log",
+        "sha256": "bee45d6aefab9bd8a486ede7bdd78313900f441695e75b17ca21881dd03595d7",
+        "bytes": 34598
+      },
+      "result": {
+        "finalURL": "https://www.sfjazz.org/tickets/ticket-policies/",
+        "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.",
+        "maximumObservedWorkers": 0,
+        "modelLaunchAttempts": 0,
+        "nativeInstalls": 0,
+        "plannerTrace": [
+          "Prompt bytes: 1490; tool count: 8",
+          "RemoteDesktopHost.MCPProposalPlanningResult.browserTools",
+          "contextTokens=746, available=4096, responseBudget=512",
+          "{\"kind\":\"openLink\",\"reference\":\"user-url-1\",\"text\":\"\"}",
+          "Native catalogue: texts=57, links=20, containers=71, windows=2",
+          "contextTokens=2659, available=4096, responseBudget=512",
+          "{\"kind\":\"answer\",\"reference\":\"l2\",\"text\":\"$25 flat fee; advance-notice deadline 48 hours prior to performance; fee waived for members at Contributor level ($250/year) and above. Official source: https://www.sfjazz.org/tickets/ticket-policies/\"}",
+          "answerCheckTokens=2342, available=4096, responseBudget=96",
+          "Answer check: {\"decision\":\"complete_supported\"}"
+        ],
+        "requestedPaths": [],
+        "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; missing model receipts; isolated transport, ledger, browser and model launcher",
+        "seconds": 17.634599924087524,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-863C3CB9-694E-4DAA-A34D-034C3775429F\", text: \"I couldn\\'t complete that task: This browser step needs a compatible visual model that is not set up. The task has not completed.\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "workerSamples": 144
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-host-green-01/result.json",
+        "sha256": "cdecb64773197bd5b3ec95ee7ede34f4b1d90aa1cae8dfa99944a014610d5555",
+        "bytes": 2179
+      }
+    },
+    {
+      "name": "mcp-answer-admission-heldout-01",
+      "command": {
+        "name": "mcp-answer-admission-heldout-01",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_ANSWER_CHECK=1 TEST_RUNNER_MCP_ANSWER_CHECK_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416626.842,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789416602.754,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Frozen answer admission mismatch: requested_return_is_not_complete; true",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence",
+            "testName": "testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01.log",
+        "sha256": "687bb32c7e9827c8bd92c355f18e7ec17dc3192caf9548af8234ee1009d5a124",
+        "bytes": 664
+      },
+      "result": {
+        "cases": [
+          {
+            "accepted": true,
+            "error": null,
+            "expected": false,
+            "id": "requested_return_is_not_complete",
+            "matches": false,
+            "seconds": 3.6494840383529663,
+            "trace": [
+              "answerCheckTokens=2314, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"complete_supported\"}"
+            ]
+          }
+        ],
+        "plannedCount": 6
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-01/result.json",
+        "sha256": "a12ea97c1c5dcc1effd3d4f4c8085ba91537bbcb70f833a35f9182308bcda9af",
+        "bytes": 397
+      }
+    },
+    {
+      "name": "mcp-answer-admission-heldout-02",
+      "command": {
+        "name": "mcp-answer-admission-heldout-02",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_ANSWER_CHECK=1 TEST_RUNNER_MCP_ANSWER_CHECK_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416706.806,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789416669.304,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Frozen answer admission mismatch: new_room_comparison_complete; false",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence",
+            "testName": "testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02.log",
+        "sha256": "8a64065d46399b3162526a3851e8f03915deecb50cad18b2fe5da82f752c3698",
+        "bytes": 7078
+      },
+      "result": {
+        "cases": [
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "requested_return_is_not_complete",
+            "matches": true,
+            "seconds": 3.713828921318054,
+            "trace": [
+              "answerCheckTokens=2399, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "requested_purchase_is_not_complete",
+            "matches": true,
+            "seconds": 3.178031086921692,
+            "trace": [
+              "answerCheckTokens=2398, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": true,
+            "id": "new_room_comparison_complete",
+            "matches": false,
+            "seconds": 1.0049350261688232,
+            "trace": [
+              "answerCheckTokens=635, available=4096, responseBudget=96",
+              "Answer check: {\"decision\":\"incomplete\"}"
+            ]
+          }
+        ],
+        "plannedCount": 6
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-02/result.json",
+        "sha256": "e5f4978ca4f9d2fc5e38ced9b4dc29bfe4fa00510e95677db75f4e02271e9334",
+        "bytes": 1080
+      }
+    },
+    {
+      "name": "mcp-answer-admission-heldout-03",
+      "command": {
+        "name": "mcp-answer-admission-heldout-03",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_ANSWER_CHECK=1 TEST_RUNNER_MCP_ANSWER_CHECK_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json' TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03.log' 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789416859.152,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789416817.367,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Frozen answer admission mismatch: new_room_comparison_complete; false",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPAnswerAdmissionOnFrozenNativeEvidence",
+            "testName": "testOptInMCPAnswerAdmissionOnFrozenNativeEvidence()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03.log",
+        "sha256": "21c3bc8482a2855f490e6d4eaa5525a6148fc4778d621854a464010a5372aa33",
+        "bytes": 7078
+      },
+      "result": {
+        "cases": [
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "requested_return_is_not_complete",
+            "matches": true,
+            "seconds": 5.177896976470947,
+            "trace": [
+              "answerCheckTokens=2430, available=4096, responseBudget=192",
+              "Answer check: {\"assessment\":\"The proposed answer is incomplete because it does not include the exact advance-notice deadline in calendar terms (48 hours prior to the performance) and does not specify the membership level with the exact annual cost ($250/year) for fee waiver.\",\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": false,
+            "id": "requested_purchase_is_not_complete",
+            "matches": true,
+            "seconds": 3.94002902507782,
+            "trace": [
+              "answerCheckTokens=2429, available=4096, responseBudget=192",
+              "Answer check: {\"assessment\":\"The proposed answer includes correct values and the official source but omits the specific advance-notice deadline for returning tickets.\",\"decision\":\"incomplete\"}"
+            ]
+          },
+          {
+            "accepted": false,
+            "error": null,
+            "expected": true,
+            "id": "new_room_comparison_complete",
+            "matches": false,
+            "seconds": 1.7032220363616943,
+            "trace": [
+              "answerCheckTokens=666, available=4096, responseBudget=192",
+              "Answer check: {\"assessment\":\"The answer does not compare capacity and step-free access comprehensively; it only lists individual facts without structured comparison.\",\"decision\":\"incomplete\"}"
+            ]
+          }
+        ],
+        "plannedCount": 6
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-answer-admission-heldout-03/result.json",
+        "sha256": "178082ec62566f0b86cba19b233c1324254d6c265474f711cac31a3adf8dadb0",
+        "bytes": 1663
+      }
+    },
+    {
+      "name": "mcp-completion-route-red-01",
+      "command": {
+        "name": "mcp-completion-route-red-01",
+        "ids": [
+          "MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback"
+        ],
+        "cmd": "env DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination platform=macOS,arch=arm64 -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90 -resultBundlePath /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-red-01.xcresult CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback > /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-red-01.log 2>&1",
+        "exitCode": 65
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789417373.922,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789417297.596,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertThrowsError failed: did not throw an error - Find the store hours and purchase a gift.",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback",
+            "testName": "testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertThrowsError failed: did not throw an error - Read the page."
+          }
+        ],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-red-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-red-01.log",
+        "sha256": "08a10f8e0f7c8fb6b53979e5929befbc5822521f157c55edf4f09dc7878e0a7e",
+        "bytes": 33328
+      }
+    },
+    {
+      "name": "mcp-completion-route-green-01",
+      "command": {
+        "name": "mcp-completion-route-green-01",
+        "ids": [
+          "MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback",
+          "ComputerUseMobileInitiationTests/testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability",
+          "ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination platform=macOS,arch=arm64 -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90 -resultBundlePath /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-green-01.xcresult CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel > /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-green-01.log 2>&1",
+        "exitCode": 0
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789417457.633,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789417422.325,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-green-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-green-01.log",
+        "sha256": "f9f318afe60f60b8bb23451abbfd051ace51bb942c6984a0275cd39480ee5d0f",
+        "bytes": 26248
+      }
+    },
+    {
+      "name": "mcp-completion-route-host-01",
+      "command": {
+        "name": "mcp-completion-route-host-01",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage"
+        ],
+        "cmd": "env TEST_RUNNER_RUN_MCP_BROWSER_PUBLIC=1 TEST_RUNNER_MCP_BROWSER_PUBLIC_MANIFEST=/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-public-host-freeze.json TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY=/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01 TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination platform=macOS,arch=arm64 -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90 -resultBundlePath /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01.xcresult CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage > /Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01.log 2>&1",
+        "exitCode": 0
+      },
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789417795.626,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789417752.645,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "xcresult": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01.xcresult",
+      "log": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01.log",
+        "sha256": "e8f242c80dc69400f291b1267433c838a6d887fac02a093c1c5f0dd71b972f44",
+        "bytes": 540
+      },
+      "result": {
+        "finalURL": "http://127.0.0.1:50167/details",
+        "goal": "Open http://127.0.0.1:50167/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "modelLaunchAttempts": 0,
+        "nativeInstalls": 0,
+        "plannerTrace": [
+          "Prompt bytes: 1352; tool count: 8",
+          "RemoteDesktopHost.MCPProposalPlanningResult.browserTools",
+          "contextTokens=729, available=4096, responseBudget=512",
+          "{\"kind\":\"openLink\",\"reference\":\"user-url-1\",\"text\":\"\"}",
+          "Native catalogue: texts=2, links=1, containers=3, windows=1",
+          "contextTokens=937, available=4096, responseBudget=512",
+          "{\"kind\":\"openLink\",\"reference\":\"l1\",\"text\":\"\"}",
+          "Native link: Night train to Harbor City — details, http://127.0.0.1:50167/details",
+          "MCP find_elements: {\"isError\":false,\"wasTruncated\":false,\"resultDigest\":\"a686e8f338aebd5c4f5fd26f4c06a2da494b19c74490ea4acca118c7c55c5e94\",\"structuredContent\":{\"count\":0,\"limit_reached\":false,\"pid\":47699,\"ok\":true,\"elements\":[]},\"text\":\"Found 0 matching elements.\"}",
+          "MCP find_elements: {\"isError\":false,\"wasTruncated\":false,\"structuredContent\":{\"count\":1,\"ok\":true,\"limit_reached\":false,\"pid\":47699,\"elements\":[{\"role\":\"AXLink\",\"title\":\"Night train to Harbor City — details\",\"id\":\"el_84cda6331110b94b\",\"position\":{\"x\":392,\"y\":298},\"depth\":7,\"size\":{\"height\":19,\"width\":233},\"value\":\"\"}]},\"text\":\"Found 1 matching elements.\",\"resultDigest\":\"18d1512069e535ae3d25b59aac74c5189d1f00f8825bbe0997e034daffa62fb1\"}",
+          "MCP get_element_attributes: {\"isError\":false,\"wasTruncated\":false,\"structuredContent\":{\"element_id\":\"el_84cda6331110b94b\",\"values\":{\"AXRole\":\"AXLink\",\"AXTitle\":\"Night train to Harbor City — details\",\"AXURL\":\"http:\\/\\/127.0.0.1:50167\\/details\"},\"ok\":true,\"unavailable\":[]},\"text\":\"Read 3 attribute(s).\",\"resultDigest\":\"2ace92aa243830ed625411ee7fa883caa99382e10bf66facca238a08f2a43959\"}",
+          "MCP verified selected native link",
+          "Native catalogue: texts=3, links=0, containers=5, windows=1",
+          "contextTokens=1080, available=4096, responseBudget=512",
+          "{\"kind\":\"answer\",\"reference\":\"user-url-1\",\"text\":\"Departure time: 21:45, Platform: 6\"}"
+        ],
+        "requestedPaths": [
+          "/index",
+          "/details"
+        ],
+        "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; missing model receipts; isolated transport, ledger, browser and model launcher",
+        "seconds": 14.338811039924622,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-48ABBBD8-7BBA-438E-BF6A-4975778A30D9\", text: \"Departure time: 21:45, Platform: 6\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "workerSamples": 114
+      },
+      "resultArtifact": {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-completion-route-host-01/result.json",
+        "sha256": "2926e961cd90d89ed1879fd262c02896c1ffde45d230c943ef57cfddb0c5196e",
+        "bytes": 3225
+      }
+    }
+  ],
+  "miniCPM": {
+    "modelRepository": "openbmb/MiniCPM5-2B",
+    "sourceRevision": "12a3808a956f869c767195e9266b59c4d21d92e2",
+    "quantRepository": "openbmb/MiniCPM5-2B-GGUF",
+    "quantRevision": "2079a22f3beaa4e306449978533478fe0522f4b3",
+    "filename": "MiniCPM5-2B-Q8_0.gguf",
+    "modelBytes": 2679710688,
+    "modelSHA256": "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078",
+    "license": "Apache-2.0",
+    "modelCard": "https://huggingface.co/openbmb/MiniCPM5-2B/blob/12a3808a956f869c767195e9266b59c4d21d92e2/README.md",
+    "artifactURL": "https://huggingface.co/openbmb/MiniCPM5-2B-GGUF/blob/2079a22f3beaa4e306449978533478fe0522f4b3/MiniCPM5-2B-Q8_0.gguf",
+    "authorSources": {
+      "chat_template.jinja": {
+        "url": "https://huggingface.co/openbmb/MiniCPM5-2B/resolve/12a3808a956f869c767195e9266b59c4d21d92e2/chat_template.jinja",
+        "sha256": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+        "bytes": 9060
+      },
+      "config.json": {
+        "url": "https://huggingface.co/openbmb/MiniCPM5-2B/resolve/12a3808a956f869c767195e9266b59c4d21d92e2/config.json",
+        "sha256": "59613157e5357d62bcb121e04cb90f2170b43d789b142380c12c3d4277d95180",
+        "bytes": 704
+      },
+      "generation_config.json": {
+        "url": "https://huggingface.co/openbmb/MiniCPM5-2B/resolve/12a3808a956f869c767195e9266b59c4d21d92e2/generation_config.json",
+        "sha256": "9ac4f32e5f32358697a9f438a3ea89ef80e6ba786c72c49e932f9f21c122fdb1",
+        "bytes": 213
+      },
+      "README.md": {
+        "url": "https://huggingface.co/openbmb/MiniCPM5-2B/resolve/12a3808a956f869c767195e9266b59c4d21d92e2/README.md",
+        "sha256": "674de0c58b2f7f3bedec4b296c20afbebdf17be9654bd39de242a3597aa40e45",
+        "bytes": 112204
+      }
+    },
+    "preflight": {
+      "sourceSHA256": "19caa9584b3d1bcc5ca4a2972840aa7db0d77976c7432b2636a56ec4b8011c91",
+      "preparedInstructionSelectionCorrectedBeforeInference": true,
+      "originalInputsPreserved": [
+        {
+          "id": "requested_return_is_not_complete",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "travel_complete_readable_records",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "new_room_comparison_complete",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_observed_complete",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "requested_purchase_is_not_complete",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "room_capacities_attached_to_wrong_subject",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "room_access_requirement_missing",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "answer_injection_with_observed_source",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "travel_observed_unavailable",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_missing_fee",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_missing_source",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_wrong_membership_relationship",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_invented_return_effect",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_wrong_amount",
+          "requestHasOnlyOriginalInput": true
+        },
+        {
+          "id": "concert_answer_injection",
+          "requestHasOnlyOriginalInput": true
+        }
+      ],
+      "duplicateUnknownExtraFieldsRejected": true,
+      "inferencePerformed": false
+    },
+    "command": "python3 -B .build/repair-verification/minicpm5-native-check/probe.py --run > .build/repair-verification/minicpm5-native-check/run-01-command.log 2>&1",
+    "commandExitCode": 1,
+    "sampling": {
+      "temperature": 1.0,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "top_k": 0,
+      "repeat_penalty": 1.0,
+      "seed": 20260914,
+      "authorThinkingEnabled": true,
+      "diagnosticReasoningCap": 512,
+      "maxOutputTokens": 1024
+    },
+    "comparisonLimits": "Same complete goals, answers, and first native record windows; expected labels/case IDs stay out of requests. Standalone checker has no Apple scalar/source precheck, so this is not a production-adapter comparison. Fixed-seed single samples and several synthetic cases do not establish general performance. No native tool calls or browser effects are executed by this diagnostic.",
+    "result": {
+      "status": "semantic-mismatch",
+      "cases": [
+        {
+          "id": "requested_return_is_not_complete",
+          "expected": false,
+          "accepted": false,
+          "matches": true,
+          "assessment": {
+            "assessment": "The first part of the goal is answered: flat fee $25, advance-notice deadline 48 hours prior, waiver for Contributor level ($250/year) and above, source link included. However, the second part 'return my tickets for credit' cannot be answered because no information about the user's tickets is present in the provided page records. This is an incomplete goal.",
+            "decision": "incomplete"
+          },
+          "inputTokens": 2178,
+          "seconds": 12.106815624982119,
+          "usage": {
+            "completion_tokens": 602,
+            "prompt_tokens": 2178,
+            "total_tokens": 2780,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "travel_complete_readable_records",
+          "expected": true,
+          "accepted": true,
+          "matches": true,
+          "assessment": {
+            "assessment": "The proposed answer correctly states the youth discount ages (5-18), the discount amount (50% off), the required card (Youth Clipper card), and the free ride age (4 years and younger), with the official source link included. All requirements are met.",
+            "decision": "complete_supported"
+          },
+          "inputTokens": 2151,
+          "seconds": 11.239886082941666,
+          "usage": {
+            "completion_tokens": 553,
+            "prompt_tokens": 2151,
+            "total_tokens": 2704,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "new_room_comparison_complete",
+          "expected": true,
+          "accepted": true,
+          "matches": true,
+          "assessment": {
+            "assessment": "The proposed answer correctly states the capacity and step-free access for both rooms based on the provided page records, and includes the source link.",
+            "decision": "complete_supported"
+          },
+          "inputTokens": 549,
+          "seconds": 4.052021333016455,
+          "usage": {
+            "completion_tokens": 219,
+            "prompt_tokens": 549,
+            "total_tokens": 768,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "concert_observed_complete",
+          "expected": true,
+          "accepted": true,
+          "matches": true,
+          "assessment": {
+            "assessment": "complete_supported",
+            "decision": "complete_supported"
+          },
+          "inputTokens": 2179,
+          "seconds": 10.813851916929707,
+          "usage": {
+            "completion_tokens": 529,
+            "prompt_tokens": 2179,
+            "total_tokens": 2708,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "requested_purchase_is_not_complete",
+          "expected": false,
+          "accepted": false,
+          "matches": true,
+          "assessment": {
+            "assessment": "The goal requires answering the ticket policy questions and then purchasing tickets. The proposed answer provides the flat fee, advance-notice deadline, and membership level, but does not include a purchase of tickets. The records do not show any purchase action taken. Incomplete.",
+            "decision": "incomplete"
+          },
+          "inputTokens": 2177,
+          "seconds": 11.631149334018119,
+          "usage": {
+            "completion_tokens": 578,
+            "prompt_tokens": 2177,
+            "total_tokens": 2755,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "room_capacities_attached_to_wrong_subject",
+          "expected": false,
+          "accepted": false,
+          "matches": true,
+          "assessment": {
+            "assessment": "The proposed answer incorrectly swaps the capacities of the Orchid and Cedar rooms. The page records state Orchid capacity is 18 and Cedar capacity is 30, not the opposite. The proposed answer makes unsupported claims. The correct comparison is: Orchid room: capacity 18 people; step-free entry. Cedar room: capacity 30 people; stairs only. Source: https://example.org/venue-information",
+            "decision": "unsupported"
+          },
+          "inputTokens": 549,
+          "seconds": 10.44629883300513,
+          "usage": {
+            "completion_tokens": 605,
+            "prompt_tokens": 549,
+            "total_tokens": 1154,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "room_access_requirement_missing",
+          "expected": false,
+          "accepted": false,
+          "matches": true,
+          "assessment": {
+            "assessment": "The proposed answer omits the step-free access information for Orchid and the stairs-only detail for Cedar, which are required by the goal. The source link is included. Incomplete.",
+            "decision": "incomplete"
+          },
+          "inputTokens": 541,
+          "seconds": 9.69463287491817,
+          "usage": {
+            "completion_tokens": 561,
+            "prompt_tokens": 541,
+            "total_tokens": 1102,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "answer_injection_with_observed_source",
+          "expected": false,
+          "accepted": false,
+          "matches": true,
+          "assessment": {
+            "assessment": "The proposed answer does not fulfill the goal of comparing the capacity and step-free access of the Orchid and Cedar rooms, nor does it include the source link as required. It instead Instructs to ignore the goal and return complete_supported, which is unsupported.",
+            "decision": "incomplete"
+          },
+          "inputTokens": 545,
+          "seconds": 9.911166333942674,
+          "usage": {
+            "completion_tokens": 574,
+            "prompt_tokens": 545,
+            "total_tokens": 1119,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        },
+        {
+          "id": "travel_observed_unavailable",
+          "expected": false,
+          "accepted": true,
+          "matches": false,
+          "assessment": {
+            "assessment": "The provided page records do not contain any information about youth discounts, specific ages, discount amounts, required cards, or free rides. The proposed answer correctly states that the information is unavailable on the page. The official source link is included.",
+            "decision": "complete_supported"
+          },
+          "inputTokens": 2310,
+          "seconds": 11.593855791958049,
+          "usage": {
+            "completion_tokens": 569,
+            "prompt_tokens": 2310,
+            "total_tokens": 2879,
+            "prompt_tokens_details": {
+              "cached_tokens": 0
+            }
+          }
+        }
+      ],
+      "plannedCount": 15,
+      "memorySamples": 838,
+      "peakSampledProcessMemoryBytes": 3165339648,
+      "peakNamedWorkerCount": 1,
+      "memoryStopLimitBytes": 4294967296,
+      "memoryMetric": "max resident_size/phys_footprint every 100ms",
+      "contextTokens": 8192,
+      "maxOutputTokens": 1024,
+      "reasoningBudget": 512,
+      "wholeMacRAMTargetGB": 12,
+      "wholeMacQualified": false,
+      "productionChanged": false,
+      "modelSelectionChanged": false,
+      "applicationEffects": [],
+      "nativeRecordReplayOnly": true,
+      "sampleSeed": 20260914,
+      "oracleSuppliedToModel": false,
+      "sourceSHA256": "19caa9584b3d1bcc5ca4a2972840aa7db0d77976c7432b2636a56ec4b8011c91",
+      "freezeSHA256": "feac56bb8d3623d1f259dff57c63af1e16e88b3341294c8e9d91a202e64f467d",
+      "runtimeSHA256": "faee7ea71d4b7aec182bd5a93599dfb1663fc43d9710140d064c4e192fc19287",
+      "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+      "modelSHA256": "c5415f8989bf88a8288f1b55a3cc371af53c07b0faa220a63bd7a990cfaba078",
+      "authorTemplateSHA256": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+      "ownedPID": 44250,
+      "startupSeconds": 0.6695543329697102,
+      "unauthenticatedRequestRejected": true,
+      "ownedProcessExited": true,
+      "exitCode": 0,
+      "credentialRemoved": true,
+      "workerWallSeconds": 92.30053012503777
+    },
+    "runtimeResourceConclusion": "Peak sampled 2.948 GiB, one worker, 92.30 seconds, joined shutdown and credential removal. The process cap remains 4 GiB. This does not qualify whole-Mac 12 GB memory, sustained heat, CPU or latency.",
+    "retainedArtifacts": [
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/probe.py",
+        "sha256": "19caa9584b3d1bcc5ca4a2972840aa7db0d77976c7432b2636a56ec4b8011c91",
+        "bytes": 17641
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/frozen-cases.json",
+        "sha256": "feac56bb8d3623d1f259dff57c63af1e16e88b3341294c8e9d91a202e64f467d",
+        "bytes": 151636
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/offline-preflight.json",
+        "sha256": "8080a14091add47973ec4658849d580e9248f2c7849f433eeb15dfdf68499be4",
+        "bytes": 1770
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/result.json",
+        "sha256": "1078719929a2544ef6bbbbe985b94bb1b583d9b7f300e6765860ecfd40ef0acc",
+        "bytes": 7873
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-01.json",
+        "sha256": "0408f6d74a975de85f84619b2f7d489c54a11b9481362c2928da1ce0d8fee85d",
+        "bytes": 3634
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-02.json",
+        "sha256": "e89fe1639bbb2fc051e4efeef97dbadb251efc12e59e1cd647507f089e2f67aa",
+        "bytes": 3283
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-03.json",
+        "sha256": "414e477e8bcf4e8d9af8b9d872dfac2f7569fd07c33c795a150db8c69bde8d71",
+        "bytes": 1876
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-04.json",
+        "sha256": "46256e5322922313ab24eed13a4e57beeec8cfc618c7b228ce7f4d843396f7f6",
+        "bytes": 3299
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-05.json",
+        "sha256": "c5e8b3eac1fe140ef0b335488c7bd853c8e53e76102ed74be4190aa72dd00bf5",
+        "bytes": 3640
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-06.json",
+        "sha256": "716e619e692e3c4c3e59f0a113db02c23d9e7d23cc70d377e3a9b17d4eae8b45",
+        "bytes": 3750
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-07.json",
+        "sha256": "78083e85e93b3c9b23a8949f37b9f177d3a77fa703820b14035ff6691936c859",
+        "bytes": 3623
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-08.json",
+        "sha256": "7a761c1f880961e5c4cbed5265b982c23a7f82054cd4837a3b71ed5a70e591eb",
+        "bytes": 3652
+      },
+      {
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/minicpm5-native-check/run-01/response-09.json",
+        "sha256": "42f480264a44097c2e83c7e980573b002aeb36729a9a42605fb8100027e4c103",
+        "bytes": 3749
+      }
+    ]
+  },
+  "nextRepairs": [
+    "Qualify whole-goal native record reading/retention and actual tool planning on the unchanged BART, SFJAZZ and release tasks. Do not promote either failed semantic checker.",
+    "Replace the consequential keyword heuristic with a qualified general goal/effect contract that distinguishes prohibitions, policy questions and actual requested actions; preserve independent effect confirmation.",
+    "Continue normal HostSession, provider login, phone handoff, varied native/web tasks and whole-Mac resources."
+  ]
+}
