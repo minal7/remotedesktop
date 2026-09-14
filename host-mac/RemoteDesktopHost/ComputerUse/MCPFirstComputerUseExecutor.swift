@@ -507,7 +507,16 @@ final class MCPFirstComputerUseExecutor:
         pendingApprovalDigest = nil
 
         if let run = documentRun, run.contract.taskID == taskID {
-            throw ExecutorError.approvalStateChanged
+            // A cancelled approval has no dispatch authority. Before the
+            // first claim only, retain the semantic task and bind it again to
+            // the same unchanged document in the replacement helper.
+            guard run.plan == nil, run.confirmed.isEmpty,
+                  run.prompt.utf8.elementsEqual(trustedUserPrompt.utf8),
+                  let result = try await executeDocumentTask(taskID: taskID, prompt: trustedUserPrompt,
+                    tools: tools, progress: progress, retained: run) else {
+                throw ExecutorError.approvalStateChanged
+            }
+            return result
         }
         documentRun = nil
 
@@ -931,10 +940,16 @@ final class MCPFirstComputerUseExecutor:
     }
 
     private func executeDocumentTask(taskID: String, prompt: String, tools: ComputerUseHostTools,
-        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        progress: @escaping (String) -> Void, retained: DocumentRun? = nil) async throws -> ComputerUseExecutionResult? {
         guard let snapshot = try tools.mcpFocusedTextSnapshot(), snapshot.isReadable,
               let identity = snapshot.documentIdentity, let document = URL(string: identity), document.isFileURL,
               let bytes = try? ComputerUseMCPPlainDocument.read(document), bytes == Data(snapshot.text.value.utf8) else { return nil }
+        if let retained {
+            guard snapshot.hasSameDocumentTarget(as: retained.snapshot), document == retained.document,
+                  snapshot.text.value.utf8.elementsEqual(retained.snapshot.text.value.utf8) else {
+                throw ExecutorError.approvalStateChanged
+            }
+        }
         let application = snapshot.application.localizedName ?? ""
         let filename = document.lastPathComponent
         return try await withNewHelperGeneration { generation in
@@ -955,15 +970,23 @@ final class MCPFirstComputerUseExecutor:
             }
             try checkBefore()
             guard available.contains(where: { $0.toolName == "set_element_attribute" || $0.toolName == "press_key" }) else { return nil }
-            progress("Planning the document task with on-device Apple Intelligence…")
-            try checkBefore()
-            let documentPlanner = self.documentPlanner
-            let proposal = try await planningWorker.perform(timeout: planningTimeout) {
-                try await documentPlanner.propose(prompt: prompt, application: application, document: filename)
+            let edit: ComputerUseMCPDocumentEdit
+            if let retained {
+                progress("Checking the document after you resumed…")
+                try checkBefore()
+                edit = retained.edit
+            } else {
+                progress("Planning the document task with on-device Apple Intelligence…")
+                try checkBefore()
+                let documentPlanner = self.documentPlanner
+                let proposal = try await planningWorker.perform(timeout: planningTimeout) {
+                    try await documentPlanner.propose(prompt: prompt, application: application, document: filename)
+                }
+                try checkBefore()
+                guard let proposal, let compiled = try ComputerUseMCPDocumentEdit.compile(proposal, prompt: prompt,
+                    application: application, document: filename, original: snapshot.text.value) else { return nil }
+                edit = compiled
             }
-            try checkBefore()
-            guard let proposal, let edit = try ComputerUseMCPDocumentEdit.compile(proposal, prompt: prompt,
-                application: application, document: filename, original: snapshot.text.value) else { return nil }
             let editsText = !edit.expected.utf8.elementsEqual(snapshot.text.value.utf8)
             let needed = (editsText ? ["find_elements", "set_element_attribute"] : []) + (edit.save ? ["press_key"] : [])
             guard needed.allSatisfy({ name in available.contains { $0.toolName == name } }) else { return nil }

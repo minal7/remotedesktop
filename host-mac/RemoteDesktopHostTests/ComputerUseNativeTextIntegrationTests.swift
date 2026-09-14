@@ -243,6 +243,24 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, mcpHostTask: true, rejectStaleMCPEdit: true)
     }
 
+    func testOptInRealTextEditMCPResumesBeforeFirstApproval() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpHandoffBeforeTool: "set_element_attribute")
+    }
+
+    func testOptInRealTextEditMCPResumesBetweenEditAndSave() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpHandoffBeforeTool: "press_key")
+    }
+
+    func testOptInRealTextEditMCPPreservesChangesDuringHandoffBeforeEdit() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true,
+            mcpHandoffBeforeTool: "set_element_attribute", mcpChangeDuringHandoff: true)
+    }
+
+    func testOptInRealTextEditMCPPreservesChangesDuringHandoffBeforeSave() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpHostTask: true,
+            mcpHandoffBeforeTool: "press_key", mcpChangeDuringHandoff: true)
+    }
+
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
@@ -251,7 +269,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
         mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
         mcpWriteProbe: Bool = false, mcpHostTask: Bool = false,
-        mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false) async throws {
+        mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false,
+        mcpHandoffBeforeTool: String? = nil, mcpChangeDuringHandoff: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -306,7 +325,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
             if mcpHostTask {
                 try await runTextEditMCPHostTask(tools: tools, app: app, goal: goal, expected: expected,
-                    document: document, output: output, rejectStaleEdit: rejectStaleMCPEdit)
+                    document: document, output: output, rejectStaleEdit: rejectStaleMCPEdit, handoffBeforeTool: mcpHandoffBeforeTool,
+                    changeDuringHandoff: mcpChangeDuringHandoff)
                 return
             }
             if mcpWriteProbe {
@@ -477,7 +497,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     }
 
     private func runTextEditMCPHostTask(tools: ComputerUseHostTools, app: NSRunningApplication,
-        goal: String, expected: String, document: URL, output: URL, rejectStaleEdit: Bool = false) async throws {
+        goal: String, expected: String, document: URL, output: URL, rejectStaleEdit: Bool = false,
+        handoffBeforeTool: String? = nil, changeDuringHandoff: Bool = false) async throws {
         let started = Date(), taskID = "real-textedit-mcp-task"
         let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
         let base = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mcp-mutations.json")),
@@ -492,6 +513,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         var savedExact = false, editorExact = false
         let externalEdit = "Edited independently during approval.\n"
         var externalEditPreserved = false
+        var didHandoff = false, helperJoinedBeforeResume = false, staleApprovalIgnored = false
+        var invalidatedResponse: ComputerUseEnvelope?, invalidatedCall: MCPToolCall?
+        var staleApprovalAfterResumeIgnored = false
+        var selectionChangedDuringHandoff = false
         do {
             let fallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
                 fallbackCalls += 1
@@ -532,6 +557,22 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     guard call.taskID == taskID, qualifiedEdit || qualifiedSave else {
                         throw NativeTextFixtureFailure.unexpectedOutcome("The proposed action is outside the qualified edit/save experiment")
                     }
+                    if let oldResponse = invalidatedResponse, let oldCall = invalidatedCall {
+                        let priorCalls = await pool.approvedCalls()
+                        XCTAssertTrue(host.handle(oldResponse, channel: channel))
+                        try await Task.sleep(for: .milliseconds(100))
+                        let afterCalls = await pool.approvedCalls()
+                        let current = try tools.mcpFocusedTextSnapshot()
+                        staleApprovalAfterResumeIgnored = priorCalls == afterCalls && current == snapshot
+                        guard staleApprovalAfterResumeIgnored, call.processGeneration != oldCall.processGeneration else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("Resume reused an old approval or helper generation")
+                        }
+                        if oldCall.toolName == "press_key" {
+                            XCTAssertEqual(call.canonicalDigest, oldCall.canonicalDigest)
+                            XCTAssertEqual(call.stepEffectID, oldCall.stepEffectID)
+                        }
+                        invalidatedResponse = nil
+                    }
                     if rejectStaleEdit {
                         guard qualifiedEdit, approvals.count == 1 else {
                             throw NativeTextFixtureFailure.unexpectedOutcome("A changed document must not receive another action")
@@ -546,6 +587,65 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                         body: try ComputerUseApprovalResponse(requestID: approval.requestID, approved: true,
                             taskID: approval.taskID, appliedControlRevision: approval.appliedControlRevision,
                             hostControlEpoch: approval.hostControlEpoch).encodedBody())
+                    if call.toolName == handoffBeforeTool, !didHandoff {
+                        didHandoff = true
+                        let callsBefore = await pool.approvedCalls()
+                        let cancellationsBefore = await pool.cancelledGenerations()
+                        func control(_ kind: ComputerUseEnvelope.Kind, revision: UInt64) throws -> ComputerUseEnvelope {
+                            .init(senderID: request.senderID, targetID: request.targetID,
+                                pairingCode: request.pairingCode, sessionID: request.sessionID, kind: kind,
+                                body: try ComputerUseControlRequest(taskID: taskID, revision: revision,
+                                    observedHostControlEpoch: ledger.hostControlEpoch(taskID: taskID)).encodedBody())
+                        }
+                        XCTAssertTrue(host.handle(try control(.pause, revision: 1), channel: channel))
+                        XCTAssertEqual(host.activity, .paused)
+                        let joinDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+                        while ContinuousClock.now < joinDeadline {
+                            if await pool.cancelledGenerations().count > cancellationsBefore.count { break }
+                            try await Task.sleep(for: .milliseconds(25))
+                        }
+                        do { _ = try await pool.allowedTools() }
+                        catch MCPClientError.notRunning { helperJoinedBeforeResume = true }
+                        guard helperJoinedBeforeResume else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("Take Control did not join the old helper")
+                        }
+                        if changeDuringHandoff {
+                            guard AXUIElementSetAttributeValue(snapshot.focusedElement, kAXValueAttribute as CFString,
+                                externalEdit as CFString) == .success else {
+                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff edit could not be installed")
+                            }
+                        } else {
+                            // Literal document edits and Save do not depend on
+                            // the caret. Exercise a normal user selection change.
+                            let selection = snapshot.text.selection == NSRange(location: 0, length: 3)
+                                ? NSRange(location: 1, length: 2) : NSRange(location: 0, length: 3)
+                            var range = CFRange(location: selection.location, length: selection.length)
+                            guard let selected = AXValueCreate(.cfRange, &range),
+                                  AXUIElementSetAttributeValue(snapshot.focusedElement,
+                                    kAXSelectedTextRangeAttribute as CFString, selected) == .success else {
+                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff selection could not be installed")
+                            }
+                            selectionChangedDuringHandoff = try tools.mcpFocusedTextSnapshot()?.text.selection == selection
+                            guard selectionChangedDuringHandoff else {
+                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff selection was not observed")
+                            }
+                        }
+                        let ownedPausedSnapshot = try tools.mcpFocusedTextSnapshot()
+                        // A late response to the invalidated approval cannot
+                        // act while the user owns the document.
+                        XCTAssertTrue(host.handle(response, channel: channel))
+                        try await Task.sleep(for: .milliseconds(100))
+                        let callsWhilePaused = await pool.approvedCalls()
+                        let pausedSnapshot = try tools.mcpFocusedTextSnapshot()
+                        staleApprovalIgnored = callsWhilePaused == callsBefore
+                            && pausedSnapshot == ownedPausedSnapshot
+                        guard staleApprovalIgnored else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("The stale approval changed the owned document")
+                        }
+                        invalidatedResponse = response; invalidatedCall = call
+                        XCTAssertTrue(host.handle(try control(.resume, revision: 2), channel: channel))
+                        continue
+                    }
                     XCTAssertTrue(host.handle(response, channel: channel))
                 }
                 try await Task.sleep(for: .milliseconds(25))
@@ -569,12 +669,27 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             "fallbackCalls": fallbackCalls, "approvalCount": approvals.count, "approvedCalls": effects, "messages": messages,
             "documentProposals": proposals.values(),
             "staleEditExperiment": rejectStaleEdit, "externalEditPreserved": externalEditPreserved,
+            "handoffBeforeTool": handoffBeforeTool as Any? ?? NSNull(), "didHandoff": didHandoff,
+            "helperJoinedBeforeResume": helperJoinedBeforeResume, "staleApprovalIgnored": staleApprovalIgnored,
+            "changeDuringHandoff": changeDuringHandoff, "staleApprovalAfterResumeIgnored": staleApprovalAfterResumeIgnored,
+            "selectionChangedDuringHandoff": selectionChangedDuringHandoff,
             "confirmedActionCount": history?.filter { $0.response != nil }.count as Any? ?? NSNull(),
             "editorExact": editorExact, "savedFileExact": savedExact, "ownedTextEditExited": app.isTerminated]
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("mcp-host-task-result.json"), options: .withoutOverwriting)
         XCTAssertTrue(app.isTerminated)
         if let failure { throw failure }
+        if changeDuringHandoff {
+            let priorEffects = handoffBeforeTool == "press_key" ? 1 : 0
+            XCTAssertEqual(terminal?.outcome, .unableToComplete)
+            XCTAssertTrue(externalEditPreserved); XCTAssertFalse(editorExact)
+            XCTAssertTrue(didHandoff); XCTAssertTrue(helperJoinedBeforeResume); XCTAssertTrue(staleApprovalIgnored)
+            XCTAssertEqual(approvals.count, priorEffects + 1); XCTAssertEqual(calls.count, priorEffects)
+            XCTAssertEqual(history?.filter { $0.response != nil }.count, priorEffects)
+            XCTAssertEqual(fallbackCalls, 0); XCTAssertEqual(proposals.values().count, 1)
+            XCTAssertFalse(calls.contains { $0.toolName == "press_key" })
+            return
+        }
         if rejectStaleEdit {
             XCTAssertEqual(terminal?.outcome, .unableToComplete)
             XCTAssertTrue(externalEditPreserved); XCTAssertFalse(editorExact); XCTAssertFalse(savedExact)
@@ -586,6 +701,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertTrue(editorExact); XCTAssertTrue(savedExact)
         XCTAssertEqual(fallbackCalls, 0); XCTAssertEqual(calls.count, 2)
         XCTAssertEqual(history?.filter { $0.response != nil }.count, 2)
+        if handoffBeforeTool != nil {
+            XCTAssertTrue(didHandoff); XCTAssertTrue(helperJoinedBeforeResume); XCTAssertTrue(staleApprovalIgnored)
+            XCTAssertTrue(staleApprovalAfterResumeIgnored)
+            XCTAssertTrue(selectionChangedDuringHandoff)
+            XCTAssertEqual(approvals.count, 3); XCTAssertEqual(proposals.values().count, 1, "Resume must retain the semantic task")
+        }
     }
 
     /// Real helper capability experiment. This owns all input and its target;
@@ -3035,6 +3156,7 @@ private actor NativeMCPTaskObservedPool: MCPClientPooling {
     let base: MCPClientPool
     private var pending: MCPToolCall?
     private var approved: [MCPToolCall] = []
+    private var cancellations: [UInt64] = []
     init(base: MCPClientPool) { self.base = base }
     func start(binaryURL: URL) async throws -> MCPProcessIdentity { try await base.start(binaryURL: binaryURL) }
     func allowedTools() async throws -> [MCPAllowedTool] { try await base.allowedTools() }
@@ -3048,10 +3170,14 @@ private actor NativeMCPTaskObservedPool: MCPClientPooling {
         approved.append(call)
         return try await base.performApproved(call, fingerprint: fingerprint)
     }
-    func cancel(processGeneration: UInt64) async { await base.cancel(processGeneration: processGeneration) }
+    func cancel(processGeneration: UInt64) async {
+        await base.cancel(processGeneration: processGeneration)
+        cancellations.append(processGeneration)
+    }
     func cancelAll() async { await base.cancelAll() }
     func latestPrepared() -> MCPToolCall? { pending }
     func approvedCalls() -> [MCPToolCall] { approved }
+    func cancelledGenerations() -> [UInt64] { cancellations }
 }
 
 private actor NativeMCPTaskChannel: HostComputerUseChannel {
