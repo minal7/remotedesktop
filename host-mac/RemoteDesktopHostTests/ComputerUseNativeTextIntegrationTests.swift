@@ -233,6 +233,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, mcpHostTask: true)
     }
 
+    func testOptInRealTextEditNaturalLanguageTaskUsesManagedHostSession() async throws {
+        try await runRealTextEditTask(actualModel: false, managedHostSession: true)
+    }
+
     func testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument() async throws {
         try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpTask: (
             prompt: "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
@@ -268,7 +272,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
         mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
-        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false,
+        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false, managedHostSession: Bool = false,
         mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false,
         mcpHandoffBeforeTool: String? = nil, mcpChangeDuringHandoff: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -323,6 +327,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         do {
             for _ in 0..<100 { if ownsDocument() { break }; try await Task.sleep(for: .milliseconds(50)) }
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
+            if managedHostSession {
+                try await runManagedTextEditHostSession(tools: tools, app: app, goal: goal,
+                    expected: expected, document: document, output: output)
+                return
+            }
             if mcpHostTask {
                 try await runTextEditMCPHostTask(tools: tools, app: app, goal: goal, expected: expected,
                     document: document, output: output, rejectStaleEdit: rejectStaleMCPEdit, handoffBeforeTool: mcpHandoffBeforeTool,
@@ -494,6 +503,100 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
+    private func runManagedTextEditHostSession(tools: ComputerUseHostTools, app: NSRunningApplication,
+        goal: String, expected: String, document: URL, output: URL) async throws {
+        let helperReceipt = await MacControlMCPInstaller().currentInstallation()
+        let helper = try XCTUnwrap(helperReceipt, "Run the opt-in normal managed installation first")
+        let native = ComputerUseInstaller.nativeText(), visual = ComputerUseInstaller()
+        let nativeInterrupted = await native.interruptedInstallationExists()
+        let visualInterrupted = await visual.interruptedInstallationExists()
+        guard !nativeInterrupted, !visualInterrupted else {
+            throw XCTSkip("No-inference acceptance cannot resume an incomplete model installation")
+        }
+        let runtime = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
+        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("host-ledger.json"))
+        let session = HostSession(computerUseTaskLedger: ledger, allowsExternalComputerUseServices: true)
+        let host = session.computerUse, channel = NativeMCPTaskChannel()
+        let taskID = "managed-textedit-" + UUID().uuidString, started = Date()
+        var samples = 0, maximumWorkers = 0
+        let monitor = Task { @MainActor in
+            while !Task.isCancelled {
+                maximumWorkers = max(maximumWorkers, try inspector.matchingProcesses(for: runtime).count)
+                samples += 1
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
+            }
+        }
+        var failure: Error?, terminal: ComputerUseTaskUpdate?, approvals = Set<String>()
+        var editorExact = false, savedExact = false
+        do {
+            host.start(pairingCode: "123456", additionalChannels: [channel], includeDefaultChannel: false)
+            for _ in 0..<300 {
+                if host.capability.state == .ready { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            guard host.capability.state == .ready else {
+                throw NativeTextFixtureFailure.unexpectedOutcome("Managed HostSession did not become ready")
+            }
+            host.authorizePeer(senderID: "TEXTEDIT-TEST")
+            let request = ComputerUseEnvelope(id: taskID, senderID: "TEXTEDIT-TEST", targetID: "HOST-ID",
+                pairingCode: "123456", sessionID: "TEXTEDIT-SESSION", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: goal, supportsApprovedActionEvidence: true).encodedBody())
+            XCTAssertTrue(host.handle(request, channel: channel))
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+            while ContinuousClock.now < deadline {
+                let messages = await channel.messages()
+                if let message = messages.last(where: { $0.kind == .assistant }) {
+                    terminal = try ComputerUseTaskUpdate.decodeBody(message.body); break
+                }
+                for message in messages where message.kind == .approvalRequest {
+                    let approval = try ComputerUseApprovalRequest.decodeBody(message.body)
+                    guard approvals.insert(approval.requestID).inserted else { continue }
+                    let detail = try XCTUnwrap(approval.details?.first { $0.label == "Exact local action" })
+                    let arguments = try JSONDecoder().decode([String: MCPJSONValue].self, from: Data(detail.value.utf8))
+                    let snapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
+                    let edit = approvals.count == 1 && arguments["name"] == .string("AXValue") && arguments["value"] == .string(expected)
+                    let save = approvals.count == 2 && arguments["key"] == .string("s")
+                        && arguments["modifiers"] == .array([.string("command")])
+                        && snapshot.text.value.utf8.elementsEqual(expected.utf8)
+                    guard approval.taskID == taskID, edit || save,
+                          snapshot.window.applicationProcessIdentifier == app.processIdentifier,
+                          snapshot.documentIdentity.flatMap(URL.init(string:))?.standardizedFileURL == document.standardizedFileURL else {
+                        throw NativeTextFixtureFailure.unexpectedOutcome("Managed approval left the owned edit/save experiment")
+                    }
+                    XCTAssertTrue(host.handle(ComputerUseEnvelope(senderID: request.senderID, targetID: request.targetID,
+                        pairingCode: request.pairingCode, sessionID: request.sessionID, kind: .approvalResponse,
+                        body: try ComputerUseApprovalResponse(requestID: approval.requestID, approved: true,
+                            taskID: approval.taskID, appliedControlRevision: approval.appliedControlRevision,
+                            hostControlEpoch: approval.hostControlEpoch).encodedBody()), channel: channel))
+                }
+                try await Task.sleep(for: .milliseconds(25))
+            }
+            editorExact = try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(expected.utf8) == true
+            savedExact = try Data(contentsOf: document) == Data(expected.utf8)
+        } catch { failure = error }
+        await session.shutdown()
+        monitor.cancel(); try await monitor.value
+        let history = try ledger.approvedActionHistory(taskID: taskID, senderID: "TEXTEDIT-TEST", sessionID: "TEXTEDIT-SESSION")
+        let messages = await channel.messages()
+        let report: [String: Any] = ["scope": "real-TextEdit-managed-HostSession-default-installers-and-executors",
+            "goal": goal, "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
+            "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(), "approvalCount": approvals.count,
+            "confirmedActionCount": history.filter { $0.response != nil }.count, "editorExact": editorExact, "savedFileExact": savedExact,
+            "workerSamples": samples, "maximumObservedWorkerCount": maximumWorkers, "helperBinaryPath": helper.binaryPath,
+            "isolatedDependencies": ["task ledger", "transport"],
+            "messages": try JSONSerialization.jsonObject(with: JSONEncoder().encode(messages))]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("managed-host-session-result.json"), options: .withoutOverwriting)
+        if let failure { throw failure }
+        XCTAssertEqual(terminal?.outcome, .taskCompleted)
+        XCTAssertTrue(editorExact); XCTAssertTrue(savedExact); XCTAssertFalse(app.isTerminated)
+        XCTAssertEqual(approvals.count, 2); XCTAssertEqual(history.filter { $0.response != nil }.count, 2)
+        XCTAssertGreaterThan(samples, 0); XCTAssertEqual(maximumWorkers, 0)
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
     }
 
     private func runTextEditMCPHostTask(tools: ComputerUseHostTools, app: NSRunningApplication,

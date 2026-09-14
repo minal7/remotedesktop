@@ -100,6 +100,7 @@ final class HostSession: ObservableObject {
             },
         computerUseExecutor: (any ComputerUseExecuting)? = nil,
         computerUseManager: HostComputerUseManager? = nil,
+        computerUseTaskLedger: ComputerUseTaskLedger? = nil,
         allowsExternalComputerUseServices: Bool =
             !HostRuntimeContext.isRunningUnitTests,
         signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil
@@ -110,6 +111,7 @@ final class HostSession: ObservableObject {
             injector: injector,
             executor: computerUseExecutor,
             nativeTextInstaller: ComputerUseInstaller.nativeText(),
+            taskLedger: computerUseTaskLedger ?? ComputerUseTaskLedger(),
             allowsExternalServices: allowsExternalComputerUseServices)
         self.permissionsProvider = permissionsProvider
         self.validateAudioInputEntitlements = validateAudioInputEntitlements

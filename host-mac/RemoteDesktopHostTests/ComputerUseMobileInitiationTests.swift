@@ -4,6 +4,82 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInManagedInstallationAndHostSessionReachMCPApprovalWithoutModelWorker() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_MCP_HOST_SESSION"] == "1" else {
+            throw XCTSkip("Opt-in: installs the pinned helper in normal Application Support and exercises HostSession startup")
+        }
+        let started = Date(), fixture = try makeFixture(markerPresent: false)
+        defer { try? FileManager.default.removeItem(at: fixture.parent) }
+        let native = ComputerUseInstaller.nativeText(), visual = ComputerUseInstaller()
+        let nativeReceipt = await native.currentInstallation()
+        _ = try XCTUnwrap(nativeReceipt, "This acceptance requires the existing verified native package")
+        let nativeInterrupted = await native.interruptedInstallationExists()
+        let visualInterrupted = await visual.interruptedInstallationExists()
+        guard !nativeInterrupted, !visualInterrupted else {
+            throw XCTSkip("Complete the existing model installation before this no-inference startup check")
+        }
+        let runtime = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+            .appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
+        let helper = MacControlMCPInstaller()
+        let previouslyInstalled = await helper.currentInstallation()
+        let receipt = try await helper.install { update in
+            FileHandle.standardError.write(Data("Managed Mac tools: \(update.phase.rawValue)\n".utf8))
+        }
+        let validated = await helper.currentInstallation()
+        XCTAssertEqual(validated, receipt)
+        // Keep the verified installation. Only request storage and transport
+        // are isolated; HostSession builds its normal manager and executors.
+        let session = HostSession(computerUseTaskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
+            allowsExternalComputerUseServices: true)
+        let manager = session.computerUse, channel = MobileInitiationTestChannel()
+        var samples = 0, maximumWorkerCount = 0
+        let monitor = Task { @MainActor in
+            while !Task.isCancelled {
+                maximumWorkerCount = max(maximumWorkerCount, try inspector.matchingProcesses(for: runtime).count)
+                samples += 1
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { break }
+            }
+        }
+        var failure: Error?
+        do {
+            manager.start(pairingCode: "123456", additionalChannels: [channel], includeDefaultChannel: false)
+            await waitUntil(timeoutIterations: 1_500) { manager.capability.state == .ready }
+            XCTAssertEqual(manager.capability.state, .ready)
+            manager.authorizePeer(senderID: "IOS-PEER")
+            let prompt = ComputerUseEnvelope(id: "managed-mcp-" + UUID().uuidString, senderID: "IOS-PEER", targetID: "HOST-ID",
+                pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
+                body: "Draft an email to codex-acceptance@example.invalid with subject \"Status\" and body \"Everything is on schedule.\"")
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil(timeoutIterations: 1_000) { if case .awaitingApproval = manager.activity { return true }; return false }
+            let approvals = await channel.approvalRequests()
+            let approval = try XCTUnwrap(approvals.first { $0.taskID == prompt.id })
+            for value in ["codex-acceptance@example.invalid", "Status", "Everything is on schedule."] {
+                XCTAssertTrue(approval.details?.contains { $0.value == value } == true)
+            }
+            // Never deliver approval: no Mail tool is executed by this test.
+        } catch { failure = error }
+        await session.shutdown()
+        monitor.cancel()
+        try await monitor.value
+        XCTAssertGreaterThan(samples, 0)
+        XCTAssertEqual(maximumWorkerCount, 0)
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
+        let nativeAfter = await native.currentInstallation()
+        XCTAssertEqual(nativeAfter, nativeReceipt)
+        let report: [String: Any] = ["scope": "managed-helper-installation-default-HostSession-MCP-approval",
+            "helperVersion": receipt.packageVersion, "helperPreviouslyInstalled": previouslyInstalled != nil,
+            "helperReceiptValidated": validated == receipt, "helperBinaryPath": receipt.binaryPath,
+            "nativeReceiptUnchanged": nativeAfter == nativeReceipt, "workerSamples": samples,
+            "maximumObservedWorkerCount": maximumWorkerCount, "approvalDelivered": false,
+            "isolatedDependencies": ["task ledger", "transport"], "elapsedSeconds": Date().timeIntervalSince(started)]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]),
+            uniformTypeIdentifier: "public.json")
+        attachment.name = "Managed MCP HostSession startup"; attachment.lifetime = .keepAlways; add(attachment)
+        if let failure { throw failure }
+    }
+
     func testOptInPackagedNativePreparationAndRealMCPReachApprovalWithoutModelWorker() async throws {
         guard ProcessInfo.processInfo.environment["RUN_NATIVE_DEMAND_PREPARATION"] == "1" else {
             throw XCTSkip("Opt-in: installed native package and real signed Mac helper, no approved effect")
