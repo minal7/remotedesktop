@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CryptoKit
 import XCTest
+import Vision
 @testable import RemoteDesktopHost
 
 @MainActor
@@ -59,6 +60,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testOptInNativeDesktopCaptureContainsTheFrontmostFixture() async throws {
+        try await runFixture(browser: false, captureOnly: true)
+    }
+
     func testRealNativeFieldsReceiveExactVerifiedEdits() async throws {
         try await runFixture(browser: false)
     }
@@ -114,7 +119,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -159,6 +164,31 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let tools = ComputerUseHostTools(injector: injector, mayAct: {
             NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier
         })
+        if captureOnly {
+            // One real display capture, no model or input. OCR is confined to
+            // this disposable native window and checks independent fixture text.
+            let started = Date()
+            do {
+                let observation = try tools.currentScreen()
+                let captureSeconds = Date().timeIntervalSince(started)
+                let bounds = try XCTUnwrap(observation.normalizedFrontmostWindowBounds)
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.regionOfInterest = bounds
+                try VNImageRequestHandler(ciImage: observation.image).perform([request])
+                let lines = request.results?.compactMap { $0.topCandidates(1).first?.string } ?? []
+                XCTAssertTrue(lines.contains("Origin"), "Native capture did not show Origin")
+                XCTAssertTrue(lines.contains("Destination"), "Native capture did not show Destination")
+                let report: [String: Any] = ["captureSeconds":captureSeconds,
+                    "imageWidth":observation.image.extent.width,"imageHeight":observation.image.extent.height,
+                    "displayBounds":NSStringFromRect(observation.displayBounds),
+                    "windowBounds":observation.frontmostWindowBounds.map(NSStringFromRect) ?? "missing",
+                    "fixtureVisible":lines.contains("Origin") && lines.contains("Destination"),"inference":false,"input":false]
+                let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted,.sortedKeys]), uniformTypeIdentifier: "public.json")
+                attachment.name = "Native desktop capture metadata"; attachment.lifetime = .keepAlways; add(attachment)
+            } catch { XCTFail("Native desktop fixture capture failed: \(String(reflecting: error))") }
+            return
+        }
         if signedPackage {
             try await runSignedPackageGoals(browser: browser, pid: process.processIdentifier,
                 state: state, directory: directory, tools: tools)

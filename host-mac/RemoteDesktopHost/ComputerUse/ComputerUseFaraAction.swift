@@ -90,11 +90,6 @@ enum ComputerUseFaraAction: Equatable, Sendable {
                     return name
                 }
                 guard Set(names).count == names.count else { throw Failure.invalidResponse }
-                // Fara also expresses browser Back using its training platform's
-                // Alt+Left shortcut. Translate that exact chord to native history
-                // traversal; preserve the raw response in conversation history.
-                if names.count == 2, names[0].uppercased() == "ALT",
-                   ["LEFT", "ARROWLEFT"].contains(names[1].uppercased()) { return .historyBack }
                 return .key(names)
             case "scroll", "hscroll":
                 try keys("pixels")

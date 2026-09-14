@@ -192,12 +192,12 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var proposal: ComputerUseFaraModel.Proposal?, failure: Error?, requestSHA256 = "none"
         do {
             if let recordedResponse {
-                proposal = try ComputerUseFaraModel.decode(Data(contentsOf: recordedResponse))
+                proposal = try ComputerUseFaraModel.decode(Data(contentsOf: recordedResponse)).compatibleBrowserProposal()
             } else if let inputs {
                 let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
                 let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
                 requestSHA256 = SHA256.hash(data: try XCTUnwrap(request.httpBody)).map { String(format: "%02x", $0) }.joined()
-                proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+                proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input) }
             }
         } catch { failure = error }
         await runtime.shutdown()
@@ -2060,16 +2060,49 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertEqual(journals.count, 4); XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
     }
 
-    func testFaraBrowserBackShortcutUsesHistoryWithoutBroadeningOtherKeys() throws {
-        func decode(_ keys: [String]) throws -> ComputerUseFaraAction {
+    func testModelDecodersPreserveLiteralDesktopKeyChords() throws {
+        for keys in [["Alt", "Left"], ["Alt", "ArrowLeft"], ["alt", "left"], ["Left"],
+                     ["Command", "Left"], ["Control", "Left"], ["Alt", "Right"],
+                     ["Alt", "Shift", "Left"], ["Left", "Alt"], ["Control", "a"]] {
             let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": ["action": "key", "keys": keys]])
-            return try ComputerUseFaraAction.decode("<tool_call>" + String(decoding: data, as: UTF8.self) + "</tool_call>")
+            let content = "<tool_call>" + String(decoding: data, as: UTF8.self) + "</tool_call>"
+            func envelope(_ model: String, _ content: String) throws -> Data {
+                try JSONSerialization.data(withJSONObject: ["model": model, "choices": [["finish_reason": "stop",
+                    "message": ["role": "assistant", "content": content]]]])
+            }
+            XCTAssertEqual(try ComputerUseFaraAction.decode(content), .key(keys))
+            XCTAssertEqual(try ComputerUseFaraModel.decode(envelope(ComputerUseFaraRuntimeInputs.modelAlias, content)).action, .key(keys))
+            XCTAssertEqual(try ComputerUseGUIOwlModel.decode(envelope(ComputerUseGUIOwlModel.modelAlias, "Action: Press the key chord.\n" + content)).decision, .browser(.key(keys)))
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["keys": keys]), as: UTF8.self)
+            let holo = try JSONSerialization.data(withJSONObject: ["model": ComputerUseHoloModel.modelAlias,
+                "choices": [["finish_reason": "tool_calls", "message": ["role": "assistant", "content": "",
+                    "tool_calls": [["id": "literal-key", "type": "function", "function": ["name": "key", "arguments": arguments]]]]]]])
+            XCTAssertEqual(try ComputerUseHoloModel.decode(holo).action, .key(keys))
         }
-        for keys in [["Alt", "Left"], ["Alt", "ArrowLeft"], ["alt", "left"]] {
-            XCTAssertEqual(try decode(keys), .historyBack)
-        }
-        for keys in [["Left"], ["Control", "Left"], ["Alt", "Right"], ["Alt", "Shift", "Left"], ["Left", "Alt"], ["Control", "a"]] {
-            XCTAssertEqual(try decode(keys), .key(keys))
+    }
+
+    func testBrowserShortcutProjectionPreservesWireHistoryAndOtherChords() throws {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let png = try smallPNG()
+        for keys in [["Alt", "Left"], ["Alt", "ArrowLeft"], ["alt", "left"], ["Command", "Left"],
+                     ["Control", "Left"], ["Alt", "Right"], ["Alt", "Shift", "Left"], ["Left", "Alt"]] {
+            let args = try JSONSerialization.data(withJSONObject: ["action": "key", "keys": keys])
+            let response = "Press the requested keys.\n" + call(String(decoding: args, as: UTF8.self))
+            let literal = try ComputerUseFaraModel.Proposal(response: response, action: .decodeNativeMessage(response))
+            let browser = literal.compatibleBrowserProposal()
+            let expected: ComputerUseFaraAction = [["Alt", "Left"], ["Alt", "ArrowLeft"], ["alt", "left"]].contains(keys) ? .historyBack : .key(keys)
+            XCTAssertEqual(browser.action, expected)
+            XCTAssertEqual(browser.response, response)
+            let owl = ComputerUseGUIOwlModel.Proposal(response: "Action: " + response, decision: .browser(literal.action))
+            XCTAssertEqual(try owl.compatibleBrowserProposal().action, expected)
+            XCTAssertEqual(try owl.compatibleBrowserProposal().response, owl.response)
+            let input = ComputerUseFaraModel.Input(goal: "Continue the task", screenshotPNG: png,
+                history: [.init(screenshotPNG: png, response: browser.response, action: browser.action)])
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.compactMap { $0["content"] as? String }, [response])
         }
     }
 
@@ -2189,7 +2222,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.history.count, calls)
             if let inputs {
                 let endpoint = try await runtime.activateFara(inputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
                 calls += 1; modelResponses.append(proposal.response)
                 if case .historyBack = proposal.action { backProposals += 1 }
                 return proposal
@@ -2200,7 +2233,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 : calls < 4 ? back : #"{"action":"terminate","answer":"Returned to A."}"#
             calls += 1
             let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + action + "}</tool_call>"
-            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            return try ComputerUseFaraModel.Proposal(response: response,
+                action: ComputerUseFaraAction.decodeNativeMessage(response)).compatibleBrowserProposal()
         }, readPage: { reading in
             guard let inputs else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
             let endpoint = try await runtime.activateFara(inputs)
@@ -2541,7 +2575,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     reading.answer = extractedAnswer
                     input.pageReading = reading
                 }
-                proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
             }
         } catch { failure = error }
         await runtime.shutdown()
@@ -3605,7 +3639,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 proposal = try await HoloTestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
             } else {
                 let endpoint = try await runtime.activateFara(XCTUnwrap(inputs))
-                proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
             }
             responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "currentURL": input.currentURL?.absoluteString ?? "",
                 "actionError": input.actionError ?? "", "historyCount": input.history.count])
@@ -4418,7 +4452,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 guard responses.count < 6 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 let began = Date()
                 let endpoint = try await runtime.activateFara(inputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began),
                     "currentURL": input.currentURL?.absoluteString ?? ""])
                 return proposal
@@ -5468,7 +5502,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 let input = ComputerUseFaraModel.Input(goal: "In the Destination field, type Tokyo. Leave Origin as Seattle.",
                     screenshotPNG: observation.png, history: history)
                 let start = Date()
-                let proposal = try await worker.perform(timeout: 25) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+                let proposal = try await worker.perform(timeout: 25) { try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input) }
                 responses.append(["response":proposal.response,"generationSeconds":Date().timeIntervalSince(start),
                     "imageWidth":observation.pixelWidth,"imageHeight":observation.pixelHeight])
                 if case .typeText(let text) = proposal.action {
@@ -5566,7 +5600,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let endpoint = try await worker.perform(timeout: 45) { try await runtime.activateFara(inputs) }
             report["startupSeconds"] = Date().timeIntervalSince(began)
             let startedGeneration = Date()
-            let proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFara(endpoint: endpoint, input: input) }
+            let proposal = try await worker.perform(timeout: 45) { try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input) }
             report["generationSeconds"] = Date().timeIntervalSince(startedGeneration)
             guard case .pointer(.leftClick, let point) = proposal.action else { throw ComputerUseFaraAction.Failure.invalidResponse }
             let width = try XCTUnwrap(oracle["imageWidth"] as? Int), height = try XCTUnwrap(oracle["imageHeight"] as? Int)
@@ -5830,7 +5864,7 @@ enum FaraQ6TestProposalRunner {
     }
     static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String]) async throws -> ComputerUseFaraModel.Proposal {
         let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment))
+        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment)).compatibleBrowserProposal()
     }
     static func readPage(_ reading: ComputerUseFaraModel.PageReading, directory: URL, index: Int, environment: [String:String]) async throws -> String {
         let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)

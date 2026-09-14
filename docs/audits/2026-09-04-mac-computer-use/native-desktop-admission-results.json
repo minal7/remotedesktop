@@ -1,0 +1,267 @@
+{
+  "baseCommit": "e5328c1",
+  "capture": {
+    "captureSeconds": 0.03483903408050537,
+    "displayBounds": "{{0, 0}, {1728, 1117}}",
+    "fixtureVisible": true,
+    "imageHeight": 2234,
+    "imageWidth": 3456,
+    "inference": false,
+    "input": false,
+    "windowBounds": "{{220, 525}, {640, 332}}"
+  },
+  "date": "2026-09-13",
+  "historicalFocusedMinimum": {
+    "iOS": 10,
+    "macOS": 296
+  },
+  "limitations": [
+    "No trained-model desktop executor is connected yet.",
+    "Raw captured image is 3456 by 2234 and exceeds the model PNG pixel limit; bounded native image preparation and full-display coordinate mapping remain next.",
+    "Browser and native keyboard behavior are separate contracts. Raw literal decoding does not establish native key dispatch acceptance.",
+    "Actual-model workflows, generic native actions, provider login, physical phone and whole-app 12 GB/thermal acceptance remain open.",
+    "Fara Q4 remains selected under 4 GiB; Q6 remains diagnostic under 5 GiB. No inference or model promotion ran."
+  ],
+  "red": "One executed test fails nine assertions: shared Fara action, Fara transport and GUI-Owl decode Alt+Left/ArrowLeft/case aliases as historyBack. Holo retains literal chords.",
+  "repair": "Shared decoders retain literal desktop chords. Explicit Fara browser composition and GUI-Owl browser projection retain their existing Back alias without modifying original response history. Holo is unchanged.",
+  "results": [
+    {
+      "bundle": ".build/repair-verification/native-desktop-capture-01.xcresult",
+      "label": "native-desktop-capture-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789346405.624,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789346340.524,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-literal-keys-red-01.xcresult",
+      "label": "native-literal-keys-red-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789347127.297,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789347097.115,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"historyBack\") is not equal to (\"key([\"Alt\", \"Left\"])\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testModelDecodersPreserveLiteralDesktopKeyChords()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testModelDecodersPreserveLiteralDesktopKeyChords",
+            "testName": "testModelDecodersPreserveLiteralDesktopKeyChords()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"historyBack\") is not equal to (\"key([\"alt\", \"left\"])\")"
+          },
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"historyBack\") is not equal to (\"key([\"Alt\", \"Left\"])\")"
+          },
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"historyBack\") is not equal to (\"key([\"Alt\", \"ArrowLeft\"])\")"
+          }
+        ],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-literal-keys-green-01.xcresult",
+      "label": "native-literal-keys-green-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789347300.471,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789347221.293,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-literal-keys-browser-01.xcresult",
+      "label": "native-literal-keys-browser-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789347317.632,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789347315.319,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-literal-keys-protocols-01.xcresult",
+      "label": "native-literal-keys-protocols-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 4,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789347357.146,
+        "passedTests": 4,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789347356.117,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 4
+      }
+    }
+  ],
+  "scope": "Native desktop capture probe and surface-specific key semantics",
+  "verified": [
+    "Ten chords across three protocols",
+    "Eight browser projection variants and original request history",
+    "Real native WebKit A/B/C/Back/Back history traversal, including shortcut syntax, without URL replay",
+    "GUI-Owl and Holo native request/response/result-binding regressions",
+    "One actual native display capture, independent fixture labels visible in its window, no input/inference"
+  ]
+}

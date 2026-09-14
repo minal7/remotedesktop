@@ -59,6 +59,17 @@ enum ComputerUseFaraModel {
     struct Proposal: Equatable, Sendable {
         let response: String
         let action: ComputerUseFaraAction
+
+        /// Fara's browser training uses Alt+Left for Back. Apply that alias
+        /// only when composing its browser executor. Native desktop decoding
+        /// retains the literal chord (Option+Left on macOS), and the wire
+        /// response stays unchanged for subsequent model history.
+        func compatibleBrowserProposal() -> Self {
+            guard case .key(let keys) = action, keys.count == 2,
+                  keys[0].uppercased() == "ALT",
+                  ["LEFT", "ARROWLEFT"].contains(keys[1].uppercased()) else { return self }
+            return .init(response: response, action: .historyBack)
+        }
     }
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: Input) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)

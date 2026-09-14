@@ -417,7 +417,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                 return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
                     propose: { input in
                         let endpoint = try await runtime.activateFara(inputs)
-                        return try await runtime.proposeFara(endpoint: endpoint, input: input)
+                        return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
                     }, readPage: { reading in
                         let endpoint = try await runtime.activateFara(inputs)
                         return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)

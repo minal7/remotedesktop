@@ -185,7 +185,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             let screenshot = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
             screenshot.name = "Fara question observation \(responses.count + 1)"; screenshot.lifetime = .keepAlways; self.add(screenshot)
             let endpoint = try await runtime.activateFara(assets)
-            let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+            let proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
             responses.append(proposal.response)
             return proposal
         }, finishRun: { await runtime.shutdown() })
@@ -510,7 +510,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             XCTAssertEqual(input.history.count, faraCalls, "Resume must retain native action history")
             if let faraInputs {
                 let endpoint = try await runtime.activateFara(faraInputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
                 faraCalls += 1; faraResponses.append(proposal.response)
                 return proposal
             }

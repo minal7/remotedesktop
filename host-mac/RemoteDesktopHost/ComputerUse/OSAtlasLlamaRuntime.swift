@@ -1467,6 +1467,12 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
+    /// Explicit browser composition preserves the browser shortcut convention
+    /// without changing the literal actions returned by the model transport.
+    func proposeFaraBrowser(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+        try await proposeFara(endpoint: endpoint, input: input).compatibleBrowserProposal()
+    }
+
     /// Fara's native multimodal request uses the same serialized model owner.
     /// No caller-supplied URL, action or model alias bypasses this boundary.
     func proposeFara(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {

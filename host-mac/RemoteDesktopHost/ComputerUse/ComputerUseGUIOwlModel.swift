@@ -15,7 +15,7 @@ enum ComputerUseGUIOwlModel {
         let decision: Decision
         func compatibleBrowserProposal() throws -> ComputerUseFaraModel.Proposal {
             guard case .browser(let action) = decision else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
-            return .init(response: response, action: action)
+            return ComputerUseFaraModel.Proposal(response: response, action: action).compatibleBrowserProposal()
         }
     }
     static func decode(_ data: Data) throws -> Proposal {

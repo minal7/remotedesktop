@@ -111,7 +111,7 @@ final class ComputerUseTests: XCTestCase {
             if let inputs {
                 let began = Date()
                 let endpoint = try await runtime.activateFara(inputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began)])
                 calls += 1
                 return proposal
