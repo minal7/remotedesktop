@@ -1,5 +1,22 @@
 **Computer Use repair TODO — live implementation tracker**
 
+**Native link errors cannot authorize visual inference — September 14:** macOS MCP/native tools remain first. Native link discovery previously returned no proposal for malformed, failed or truncated replies; attribute-read failures were skipped. That could invoke the computer-use callback even though no capability gap had been demonstrated.
+
+Shared native reply decoding now throws on invalid replies and mismatched identities, requires explicit accounting for requested attributes, and retains valid missing-attribute results. An incomplete search with no verified match reports incomplete evidence. A matching native link remains usable even when discovery has more results. No site, goal, value or coordinate special cases were added.
+
+**Nine final methods pass, zero failures or skips.** Two executed RED methods reproduce the old behavior. Five retained-browser cases verify errors stop before the visual callback, a valid link navigates once, and explicit URL-attribute unavailability reaches fallback. The actual default host, Apple planner and installed MCP helper complete the controlled task in **13.81 s**, visiting each page once with **zero model installs, launch attempts or workers**. One test compile error and two fixture-setup failures are retained. Existing compiler concurrency warnings and the runtime responsiveness warning remain open.
+
+| Repair scope | Implemented | Compiled | Tested | Accepted |
+| --- | --- | --- | --- | --- |
+| Native link reply/error routing | Yes | Yes | Executed RED→GREEN; five retained-loop cases | Scoped contract |
+| Actual host/MCP browser workflow | Yes | Yes | Complete controlled task, zero CU workers | Controlled workflow only |
+| Qwen goal-intent classifier | Diagnostic only | Actual pinned runtime loads | Five new model probes; typed clarification fails | No |
+| General production, public tasks and whole-Mac resources | Partial | Yes | Acceptance gates remain open | No |
+
+The five new Qwen probes remain **unqualified**. An assessment field does not repair false completion or policy-condition associations. Revised goal-only instructions match 32 flat intent labels, but a validated destination answer causes the first multi-turn case to misclassify ordinary searching as an external change. No classifier or new model selection was integrated. Intent labels cannot prove authorization, effects, conditions or completion.
+
+[Six app attempts, five model runs, exact outputs and source hashes](docs/audits/2026-09-04-mac-computer-use/native-link-reply-admission-results.json) preserve failures and scope. Next resolve native planner capacity and whole-goal/evidence association, and qualify remaining fallback decisions using actual capabilities. Full public tasks, normal HostSession/provider/phone login handoff, varied native work and the 12 GB whole-Mac target remain unaccepted.
+
 **Retained browser clarification and native planner experiments — September 14:** macOS MCP/native capabilities remain first. Planner, context, intent and completion defects do not establish a need for computer-use models. The browser already retained validated answers, but both proposal inputs still exposed the original goal plus transient history. The new executed regression fails on that missing input before the repair.
 
 Initial and loaded browser proposals now carry the existing typed user goal, with exact root bytes and browser-surface validation. Ordered answers and their questions remain available independently of history eviction. Only user turns supply user URL candidates; questions, page records and model history cannot add that authority. Fara's current request also retains the exact clarification pairs within its existing bounds. MCP completion checks now consider every accepted user turn. Those checks remain narrow and conservative: they do not prove intent, effect completion or semantic correctness, and the known prohibition false positive is still open.

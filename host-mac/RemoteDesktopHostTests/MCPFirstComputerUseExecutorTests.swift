@@ -5,6 +5,142 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testBrowserLinkDiscoveryRejectsInvalidRepliesInsteadOfClaimingCapabilityGap() throws {
+        let row: MCPJSONValue = .object(["id": .string("link-1"), "role": .string("AXLink")])
+        let base: [String: MCPJSONValue] = ["ok": .bool(true), "pid": .integer(4242),
+            "count": .integer(1), "limit_reached": .bool(false), "elements": .array([row])]
+        let changes: [[String: MCPJSONValue]] = [
+            ["ok": .bool(false)], ["pid": .integer(99)], ["count": .integer(2)],
+            ["elements": .null], ["limit_reached": .null],
+            ["elements": .array([row, row]), "count": .integer(2)],
+            ["elements": .array([.object(["id": .string(""), "role": .string("AXLink")])])],
+            ["elements": .array([.object(["id": .string("link-1"), "role": .string("AXButton")])])],
+            ["elements": .array(Array(repeating: row, count: 9)), "count": .integer(9)],
+        ]
+        for change in changes {
+            var root = base; root.merge(change) { _, new in new }
+            let result = try MCPToolResult(text: "Use vision instead", structuredContent: .object(root), isError: false, wasTruncated: false)
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.browserLinkDiscovery(result, pid: 4242), "Invalid native reply: \(change)")
+        }
+        for (content, failed, truncated) in [(MCPJSONValue.object(base), true, false), (.object(base), false, true), (.null, false, false)] {
+            let result = try MCPToolResult(text: "", structuredContent: content, isError: failed, wasTruncated: truncated)
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.browserLinkDiscovery(result, pid: 4242))
+        }
+    }
+
+    func testBrowserLinkAttributesRejectFailedStaleAndMalformedReplies() throws {
+        let values: [String: MCPJSONValue] = ["AXRole": .string("AXLink"), "AXTitle": .string("Details"), "AXURL": .string("https://example.org/details")]
+        let base: [String: MCPJSONValue] = ["ok": .bool(true), "element_id": .string("link-1"), "unavailable": .array([]), "values": .object(values)]
+        for change: [String: MCPJSONValue] in [
+            ["ok": .bool(false)], ["element_id": .string("stale")], ["values": .null],
+            ["unavailable": .null], ["unavailable": .array([.integer(1)])],
+            ["unavailable": .array([.string("unrequested")])],
+            ["values": .object(["AXRole": .string("AXLink")])],
+            ["values": .object(values.merging(["AXURL": .bool(true)]) { _, new in new })],
+        ] {
+            var root = base; root.merge(change) { _, new in new }
+            let result = try MCPToolResult(text: "Use vision instead", structuredContent: .object(root), isError: false, wasTruncated: false)
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.browserLinkAttributes(result, elementID: "link-1"), "Invalid native reply: \(change)")
+        }
+        for (failed, truncated) in [(true, false), (false, true)] {
+            let result = try MCPToolResult(text: "", structuredContent: .object(base), isError: failed, wasTruncated: truncated)
+            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.browserLinkAttributes(result, elementID: "link-1"))
+        }
+    }
+
+    func testBrowserLinkReadsPreserveValidResultsAndExplicitlyUnavailableAttributes() throws {
+        let found = try focusedReadDiscovery([["id": .string("link-1"), "role": .string("AXLink")]])
+        let discovery = try MCPFirstComputerUseExecutor.browserLinkDiscovery(found, pid: 4242)
+        XCTAssertEqual(discovery.ids, ["link-1"]); XCTAssertTrue(discovery.isComplete)
+        let empty = try focusedReadDiscovery([])
+        XCTAssertEqual(try MCPFirstComputerUseExecutor.browserLinkDiscovery(empty, pid: 4242).ids, [])
+        let values: [String: MCPJSONValue] = ["AXRole": .string("AXLink"), "AXTitle": .string("Details"), "AXURL": .string("https://example.org/details")]
+        let good = try MCPToolResult(text: "", structuredContent: .object(["ok": .bool(true), "element_id": .string("link-1"), "values": .object(values), "unavailable": .array([])]), isError: false, wasTruncated: false)
+        XCTAssertEqual(try MCPFirstComputerUseExecutor.browserLinkAttributes(good, elementID: "link-1"), values)
+        var missing = values; missing.removeValue(forKey: "AXURL")
+        let unavailable = try MCPToolResult(text: "", structuredContent: .object(["ok": .bool(true), "element_id": .string("link-1"), "values": .object(missing), "unavailable": .array([.string("AXURL")])]), isError: false, wasTruncated: false)
+        XCTAssertNil(try MCPFirstComputerUseExecutor.browserLinkAttributes(unavailable, elementID: "link-1"))
+    }
+
+    func testOptInNativeBrowserLinkFailuresCannotActivateVisualProposal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: native browser loop and injected MCP replies; no model inference")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MCPLinkAdmission-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><a href='/details'>Details</a>"),
+            "/details": .init(body: "<!doctype html><h1>Verified details</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let start = base.appendingPathComponent("start"), destination = base.appendingPathComponent("details")
+        var allowed: [MCPAllowedTool] = [try makeMailTool()]
+        for (name, properties) in [
+            ("find_elements", ["pid": MCPJSONValue.object(["type": .string("integer")]), "role": .object(["type": .string("string")]), "title": .object(["type": .string("string")]), "limit": .object(["type": .string("integer")]), "max_depth": .object(["type": .string("integer")])]),
+            ("get_element_attributes", ["element_id": .object(["type": .string("string")]), "names": .object(["type": .string("array"), "items": .object(["type": .string("string")])])]),
+        ] {
+            allowed.append(try .init(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1, toolName: name,
+                description: "Native link read", inputSchema: objectSchema(properties: properties, required: Array(properties.keys)),
+                risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
+        }
+        for mode in ["find-error", "attribute-error", "partial-miss", "valid", "unavailable"] {
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent(mode + "-browser")))
+            let found = try MCPToolResult(text: "Use vision instead", structuredContent: .object([
+                "ok": .bool(true), "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "count": .integer(1),
+                "limit_reached": .bool(mode == "partial-miss"),
+                "elements": .array([.object(["id": .string("link-1"), "role": .string("AXLink")])])]),
+                isError: mode == "find-error", wasTruncated: false)
+            var values: [String: MCPJSONValue] = ["AXRole": .string("AXLink"), "AXTitle": .string("Details"),
+                "AXURL": .string(mode == "partial-miss" ? base.appendingPathComponent("different").absoluteString : destination.absoluteString)]
+            if mode == "unavailable" { values.removeValue(forKey: "AXURL") }
+            let attributes = try MCPToolResult(text: "Use vision instead", structuredContent: .object([
+                "ok": .bool(true), "element_id": .string("link-1"), "values": .object(values),
+                "unavailable": .array(mode == "unavailable" ? [.string("AXURL")] : [])]),
+                isError: mode == "attribute-error", wasTruncated: false)
+            let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: ["find_elements": found, "get_element_attributes": attributes])
+            let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+            var visualCalls = 0
+            let beforeDetails = server.count("/details")
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent(mode + "-executor"),
+                propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, observation in
+                    let arguments: [String: Any]
+                    switch observation {
+                    case .initial: arguments = ["action": "visit_url", "url": start.absoluteString]
+                    case .page(let page):
+                        if page.currentURL == destination {
+                            arguments = ["action": "terminate", "answer": "Verified details."]
+                        } else {
+                            let link = try XCTUnwrap(page.approvalPageEvidence.page.links.first { $0.label == "Details" })
+                            guard let url = try await mcp.readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return nil }
+                            arguments = ["action": "visit_url", "url": url.absoluteString]
+                        }
+                    }
+                    let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
+                    let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
+                    return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                })
+            do {
+                let goal = "Open \(start.absoluteString) and read its Details page."
+                let result = try await executor.execute(taskID: mode, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(mode, "valid"); XCTAssertEqual(result, .completed("Verified details."))
+            } catch {
+                if mode == "valid" { XCTFail("Valid native link failed: \(error)") }
+                else if mode == "partial-miss" { XCTAssertTrue(error is ComputerUseMCPBrowserStepPlanner.Failure, "\(error)") }
+                else if mode == "unavailable" { if case ComputerUseFaraBrowserExecutor.Failure.unsupportedAction = error {} else { XCTFail("Unexpected error: \(error)") } }
+                else { XCTAssertTrue(error is MCPFirstComputerUseExecutor.ExecutorError, "\(error)") }
+            }
+            XCTAssertEqual(visualCalls, mode == "unavailable" ? 1 : 0, mode)
+            XCTAssertEqual(server.count("/details") - beforeDetails, mode == "valid" ? 1 : 0, mode)
+            let calls = await pool.directCalls()
+            XCTAssertEqual(calls.map(\.toolName), mode == "find-error" ? ["find_elements"] : ["find_elements", "get_element_attributes"], mode)
+            await pool.cancelAll()
+        }
+    }
+
     func testBrowserCompletionChecksAcceptedAnswersWithoutPromotingQuestions() throws {
         let original = try ComputerUseUnresolvedTextGoal(userRequest: "Read the store hours.")
         let plan = ComputerUseMCPBrowserStepPlanner.Plan(kind: .answer, reference: "", text: "The store closes at six.")

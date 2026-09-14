@@ -892,7 +892,44 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
-    private func readBrowserLinkWithMCP(_ link: ComputerUseBrowserPageSnapshot.Link,
+    // A missing accessible value is distinct from an invalid helper reply.
+    // These decoders are shared with the native link read's admission tests.
+    static func browserLinkDiscovery(_ result: MCPToolResult, pid: Int) throws -> (ids: [String], isComplete: Bool) {
+        let invalid = ExecutorError.structuredToolFailed("The native browser link lookup returned an invalid or incomplete reply. The task has not completed.")
+        guard !result.isError, !result.wasTruncated, case .object(let root)? = result.structuredContent,
+              root["ok"] == .bool(true), root["pid"]?.exactInteger == pid,
+              case .array(let rows)? = root["elements"], rows.count <= 8,
+              root["count"]?.exactInteger == rows.count, case .bool(let limited)? = root["limit_reached"] else { throw invalid }
+        var ids: [String] = []
+        for row in rows {
+            guard case .object(let item) = row, item["role"] == .string("AXLink"),
+                  case .string(let id)? = item["id"], !id.isEmpty, !ids.contains(id) else { throw invalid }
+            ids.append(id)
+        }
+        return (ids, !limited)
+    }
+
+    static func browserLinkAttributes(_ result: MCPToolResult, elementID: String) throws -> [String: MCPJSONValue]? {
+        let invalid = ExecutorError.structuredToolFailed("The native browser link read returned an invalid or incomplete reply. The task has not completed.")
+        guard !result.isError, !result.wasTruncated, case .object(let root)? = result.structuredContent,
+              root["ok"] == .bool(true), root["element_id"] == .string(elementID),
+              case .array(let unavailable)? = root["unavailable"],
+              case .object(let values)? = root["values"] else { throw invalid }
+        let requested: Set<String> = ["AXRole", "AXTitle", "AXURL"]
+        var missing = Set<String>()
+        for attribute in unavailable {
+            guard case .string(let name) = attribute, requested.contains(name),
+                  missing.insert(name).inserted, values[name] == nil else { throw invalid }
+        }
+        guard Set(values.keys).union(missing) == requested,
+              values.values.allSatisfy({ if case .string = $0 { return true }; return false }) else { throw invalid }
+        // Only an explicit, well-formed unavailable attribute is a capability
+        // gap. Errors and omitted fields cannot manufacture that evidence.
+        guard missing.isEmpty else { return nil }
+        return values
+    }
+
+    func readBrowserLinkWithMCP(_ link: ComputerUseBrowserPageSnapshot.Link,
         observation: ComputerUseOwnedBrowser.AgentObservation, tools: ComputerUseHostTools) async throws -> URL? {
         let page = observation.approvalPageEvidence
         guard !link.label.isEmpty, page.page.links.filter({ $0.id == link.id }) == [link],
@@ -913,7 +950,7 @@ final class MCPFirstComputerUseExecutor:
                     && $0.serverID == MCPServerRegistry.macControl.serverID }
             }
             guard let find = tool("find_elements"), let read = tool("get_element_attributes") else { return nil }
-            var rows: [MCPJSONValue] = []
+            var ids: [String] = [], discoveryIsComplete = false
             for attempt in 0 ..< 2 {
                 let found = try await clientPool.execute(find.makeCall(taskID: page.document.taskID, arguments: [
                     "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXLink"),
@@ -922,12 +959,10 @@ final class MCPFirstComputerUseExecutor:
                     inspect("MCP find_elements: " + String(decoding: try JSONEncoder().encode(found), as: UTF8.self))
                 }
                 try await check()
-                guard !found.isError, !found.wasTruncated, case .object(let root)? = found.structuredContent,
-                      root["ok"] == .bool(true), root["pid"]?.exactInteger == Int(ProcessInfo.processInfo.processIdentifier),
-                      case .array(let matches)? = root["elements"], matches.count <= 8, root["count"]?.exactInteger == matches.count else { return nil }
-                rows = matches
-                if !rows.isEmpty { break }
-                guard root["limit_reached"] == .bool(false) else { return nil }
+                let discovery = try Self.browserLinkDiscovery(found, pid: Int(ProcessInfo.processInfo.processIdentifier))
+                ids = discovery.ids; discoveryIsComplete = discovery.isComplete
+                if !ids.isEmpty { break }
+                guard discovery.isComplete else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
                 if attempt == 0 {
                     // A first AX read can expose an empty WebKit tree while
                     // accessibility is being activated. Retry the same read
@@ -936,26 +971,21 @@ final class MCPFirstComputerUseExecutor:
                     try await check()
                 }
             }
-            var ids = Set<String>()
-            for row in rows {
-                guard case .object(let item) = row, item["role"] == .string("AXLink"),
-                      case .string(let id)? = item["id"], !id.isEmpty, ids.insert(id).inserted else { return nil }
+            for id in ids {
                 let result = try await clientPool.execute(read.makeCall(taskID: page.document.taskID, arguments: [
                     "element_id": .string(id), "names": .array(["AXRole", "AXTitle", "AXURL"].map(MCPJSONValue.string))]))
                 if let inspect = browserStepPlanner.inspectProposal {
                     inspect("MCP get_element_attributes: " + String(decoding: try JSONEncoder().encode(result), as: UTF8.self))
                 }
                 try await check()
-                guard !result.isError, !result.wasTruncated, case .object(let object)? = result.structuredContent,
-                      object["ok"] == .bool(true), object["element_id"] == .string(id),
-                      case .array(let unavailable)? = object["unavailable"], unavailable.isEmpty,
-                      case .object(let values)? = object["values"] else { continue }
+                guard let values = try Self.browserLinkAttributes(result, elementID: id) else { continue }
                 if values["AXRole"] == .string("AXLink"), values["AXTitle"] == .string(link.label),
                    values["AXURL"] == .string(destination.absoluteString) {
                     browserStepPlanner.inspectProposal?("MCP verified selected native link")
                     return destination
                 }
             }
+            guard discoveryIsComplete else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
             return nil
         }
     }
