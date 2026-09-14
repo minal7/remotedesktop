@@ -284,6 +284,20 @@ struct ComputerUseDesktopImage: Sendable {
         return try Self.pixels(png, in: rect) == Self.pixels(other.png, in: rect)
     }
 
+    /// The caller supplies a focused field only after separately verifying
+    /// unchanged editable text, collapsed selection and signed app authority.
+    func matchesPointerPixels(of other: Self, window: CGRect, target: CGRect, unchangedFocusedField: CGRect? = nil,
+        onInsertionPointDifference: ((CGRect, CGRect, CGRect) -> Void)? = nil) throws -> Bool {
+        guard !target.isEmpty, window.contains(target) else { return false }
+        if unchangedFocusedField == target {
+            return try matchesInsertionPointPixels(of: other, window: window, field: target,
+                onDifference: onInsertionPointDifference)
+        }
+        // Surrounding context belongs to this window. Padding an edge control
+        // must not import another application's pixels or partial edge cells.
+        return try matchesPixels(of: other, in: target.insetBy(dx: -40, dy: -40).intersection(window), wholePixelsOnly: true)
+    }
+
     /// This is only valid with separately verified, unchanged editable text,
     /// collapsed selection, application/window identity and native field bounds.
     /// Allow a narrow vertical insertion-point change inside that field, while

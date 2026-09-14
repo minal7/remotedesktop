@@ -140,6 +140,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         var result: ComputerUseExecutionResult?, failure: Error?, executor: ComputerUseDesktopExecutor?
         var scriptCalls = 0, activationSeconds: TimeInterval = 0
         var approvedSaves = 0, approvedEditorClicks = 0, saveEffects = 0, editorClickEffects = 0, rejectedApprovalReplays = 0
+        var approvalRequests: [[String: String]] = []
         let started = Date()
         var memory: Task<(UInt64, Int), Never>?
         do {
@@ -148,7 +149,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let initialEditor = try XCTUnwrap(tools.nativeFocusedEditorObservation())
             XCTAssertEqual(initialEditor.textState?.valuePrefix, original, "TextEdit must observe the complete independent starting document")
             let initialFrame = try XCTUnwrap(tools.nativeFocusedTextFrame())
-            let editorPoint = ComputerUsePredictedAction.click(x: Int(initialFrame.midX), y: Int(initialFrame.midY), button: 0, count: 1)
+            let editorPoint = ComputerUsePredictedAction.click(x: Int(initialFrame.midX), y: Int(initialFrame.midY), button: 1, count: 1)
             XCTAssertEqual(try tools.nativePointerTargetFrame(for: editorPoint), initialFrame,
                 "An editor's unlabeled AX geometry must remain available for native pointer validation")
             if let inputs {
@@ -170,18 +171,23 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     return (peak, samples)
                 }
             } else {
+                let display = try tools.currentScreen().displayBounds
                 executor = try ComputerUseDesktopExecutor(journalDirectory: output.appendingPathComponent("journals"), propose: { input in
                     // A Save may repaint its title/text while completion is
                     // being checked. Reconsider only completion on fresh
                     // evidence; never replay an input to handle that repaint.
-                    guard input.actionError == nil || scriptCalls >= 4 else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
+                    guard input.actionError == nil || scriptCalls >= 5 else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
                     defer { scriptCalls += 1 }
                     let action: ComputerUseFaraAction
                     switch scriptCalls {
-                    case 0: action = .key(["Command", "a"])
-                    case 1: action = .typeText(expected)
-                    case 2: action = .key(["Command", "s"])
-                    case 3...5:
+                    case 0:
+                        try await Task.sleep(for: .seconds(1))
+                        action = .pointer(.leftClick, .init(x: (initialFrame.midX - display.minX) / display.width * 1000,
+                            y: (initialFrame.midY - display.minY) / display.height * 1000))
+                    case 1: action = .key(["Command", "a"])
+                    case 2: action = .typeText(expected)
+                    case 3: action = .key(["Command", "s"])
+                    case 4...6:
                         guard input.focusedTextState?.valuePrefix == expected else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
                         action = .reportCompletion("Updated the route and saved the document.")
                     default: throw ComputerUseDesktopExecutor.Failure.stepLimit
@@ -192,7 +198,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let executor = try XCTUnwrap(executor)
             let run = Task {
                 var outcome = try await executor.execute(taskID: "real-textedit", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-                while case .approvalRequired(_, let action, let continuation) = outcome {
+                while case .approvalRequired(let message, let action, let continuation) = outcome {
+                    result = outcome
+                    approvalRequests.append(["message": message, "action": String(describing: action)])
                     // This task authorizes editing/saving only our disposable document.
                     // Exercise the real approval continuation without relaxing
                     // the policy or admitting unrelated desktop effects.
@@ -202,8 +210,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                         guard approvedSaves == 0 else { throw NativeTextFixtureFailure.unexpectedOutcome("The test permits one approved Save") }
                     } else {
                         guard approvedEditorClicks < 3,
-                              case .click(let x, let y, 0, 1) = action,
-                              let frame = try tools.nativeFocusedTextFrame(), frame.contains(CGPoint(x: x, y: y)) else {
+                              case .click(let x, let y, 1, 1) = action,
+                              let frame = try tools.nativePointerTargetFrame(for: action), frame == initialFrame,
+                              frame.contains(CGPoint(x: x, y: y)) else {
                             throw NativeTextFixtureFailure.unexpectedOutcome("The test authorizes only Save or bounded single clicks inside its own current editor")
                         }
                     }
@@ -247,6 +256,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             "loaderActivationSeconds": activationSeconds, "documentOpenAndFrontmostAtReturn": openAtReturn,
             "scriptCalls": scriptCalls, "approvedSaves": approvedSaves, "saveEffects": saveEffects,
             "approvedEditorClicks": approvedEditorClicks, "editorClickEffects": editorClickEffects,
+            "approvalRequests": approvalRequests,
             "rejectedApprovalReplays": rejectedApprovalReplays, "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
             "revalidation": executor?.lastRevalidationDiagnostic ?? [:],
             "responses": executor?.diagnosticHistory.map { ["response": $0.response, "actionError": $0.actionError ?? "",
@@ -275,7 +285,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         guard case .completed = result else { return XCTFail("Real TextEdit task did not complete: \(String(describing: result))") }
         XCTAssertEqual(saved, Data(expected.utf8), "The saved file is the independent completion oracle")
         if actualModel { XCTAssertEqual(launcher.credentialDirectories.count, 2 + approvedSaves + approvedEditorClicks); XCTAssertEqual(stop?.cleanupSucceeded, true) }
-        else { XCTAssertTrue((4...6).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1) }
+        else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
     }
@@ -740,6 +750,45 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
         XCTAssertThrowsError(try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: mixed))
         XCTAssertThrowsError(try ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: mixed))
+    }
+
+    func testNativePointerIgnoresBackgroundBeyondItsWindowButRejectsChangedTargetContext() async throws {
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 300, height: 250)
+        for (name, target, change, admitted) in [
+            ("left background", CGRect(x: 100, y: 100, width: 300, height: 100), CGRect(x: 90, y: 110, width: 9, height: 40), true),
+            ("right background", CGRect(x: 100, y: 100, width: 300, height: 100), CGRect(x: 401, y: 110, width: 9, height: 40), true),
+            ("top background", CGRect(x: 150, y: 50, width: 100, height: 250), CGRect(x: 160, y: 40, width: 40, height: 9), true),
+            ("bottom background", CGRect(x: 150, y: 50, width: 100, height: 250), CGRect(x: 160, y: 301, width: 40, height: 9), true),
+            ("target content", CGRect(x: 100, y: 100, width: 300, height: 100), CGRect(x: 160, y: 120, width: 10, height: 20), false),
+            ("surrounding context", CGRect(x: 100, y: 100, width: 300, height: 100), CGRect(x: 160, y: 70, width: 40, height: 10), false)
+        ] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var changed = false, calls = 0, effects = 0
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: "editor", frame: target) },
+                actionPerformer: { _ in effects += 1 }, screenProvider: {
+                    let base = CIImage(color: .white).cropped(to: display)
+                    let local = CGRect(x: change.minX, y: display.maxY - change.maxY, width: change.width, height: change.height)
+                    let image = changed ? CIImage(color: .blue).cropped(to: local).composited(over: base) : base
+                    return .init(image: image, displayBounds: display, frontmostWindowBounds: window)
+                }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+                authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+                planningAccessibilityIdentityProvider: { "editor" }, frontmostApplicationProvider: { "Fixture" })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                calls += 1
+                if calls == 1 {
+                    changed = true
+                    return .init(response: "click", action: .pointer(.leftClick,
+                        .init(x: target.midX / display.width * 1000, y: target.midY / display.height * 1000)))
+                }
+                XCTAssertEqual(calls, 2, name); XCTAssertEqual(input.actionError == nil, admitted, name)
+                return .init(response: "done", action: .reportCompletion("Checked"))
+            })
+            let result = try await executor.execute(taskID: "pointer-region", prompt: "Click Query", trustedUserPrompt: "Click Query", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Checked"), name); XCTAssertEqual(effects, admitted ? 1 : 0, name)
+        }
     }
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
@@ -1311,6 +1360,35 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         for change in [CGRect(x: -50, y: 222, width: 8, height: 20), CGRect(x: -50, y: 150, width: 1, height: 20),
                        CGRect(x: -50, y: 242, width: 10, height: 1), CGRect(x: -123, y: 220, width: 2, height: 20)] {
             XCTAssertFalse(try before.matchesInsertionPointPixels(of: image(changing: change), window: window, field: field), "\(change)")
+        }
+    }
+
+    func testNativePointerPixelsTolerateOnlyAProvenEditorCaretAndPreserveWindowContext() throws {
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 300, height: 250)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 200)
+        func image(changing rect: CGRect? = nil) throws -> ComputerUseDesktopImage {
+            let base = CIImage(color: .white).cropped(to: display)
+            let image: CIImage
+            if let rect {
+                let local = CGRect(x: rect.minX, y: display.maxY - rect.maxY, width: rect.width, height: rect.height)
+                image = CIImage(color: .blue).cropped(to: local).composited(over: base)
+            } else { image = base }
+            return try .init(observation: .init(image: image, displayBounds: display))
+        }
+        let before = try image(), caret = try image(changing: CGRect(x: 130, y: 130, width: 1, height: 16))
+        XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: field, unchangedFocusedField: field))
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: field), "No editor proof means no caret exception")
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: field,
+            unchangedFocusedField: CGRect(x: 110, y: 110, width: 200, height: 100)), "A different field cannot authorize the exception")
+        for change in [CGRect(x: 130, y: 130, width: 8, height: 16), CGRect(x: 130, y: 70, width: 1, height: 16),
+                       CGRect(x: 130, y: 150, width: 20, height: 1)] {
+            XCTAssertFalse(try before.matchesPointerPixels(of: image(changing: change), window: window, target: field,
+                unchangedFocusedField: field), "Text, window context and horizontal paint changes remain significant: \(change)")
+        }
+        for change in [CGRect(x: 90, y: 110, width: 9, height: 40), CGRect(x: 401, y: 110, width: 9, height: 40)] {
+            XCTAssertTrue(try before.matchesPointerPixels(of: image(changing: change), window: window, target: field), "Outside-window context cannot invalidate an in-window target")
+            XCTAssertTrue(try before.matchesPointerPixels(of: image(changing: change), window: window, target: field, unchangedFocusedField: field))
         }
     }
 

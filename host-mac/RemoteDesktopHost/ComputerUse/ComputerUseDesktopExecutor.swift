@@ -143,11 +143,21 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                let target, !target.isEmpty,
                window.contains(target), target.contains(CGPoint(x: x, y: y)) {
                 let authorityMatches = expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
-                let pixelsMatch = try expected.image.matchesPixels(of: fresh.image, in: target.insetBy(dx: -40, dy: -40))
+                let unchangedField = expected.focusedTextFrame == fresh.focusedTextFrame
+                    && expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint) ? expected.focusedTextFrame : nil
+                var difference: [String: String] = [:]
+                let pixelsMatch = try expected.image.matchesPointerPixels(of: fresh.image, window: window, target: target,
+                    unchangedFocusedField: unchangedField,
+                    onInsertionPointDifference: { changed, pixels, field in
+                        difference = ["pointerChangedDisplayBounds": String(describing: changed),
+                            "pointerChangedPixelBounds": String(describing: pixels), "pointerFieldPixelBounds": String(describing: field)]
+                    })
                 matches = authorityMatches && pixelsMatch
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
                     "pointerPoint": "\(x),\(y)", "pointerAuthorityMatches": String(authorityMatches),
-                    "pointerTargetPixelsMatch": String(pixelsMatch)] }
+                    "pointerTargetPixelsMatch": String(pixelsMatch), "pointerHasUnchangedEditorProof": String(unchangedField == target)]
+                    lastRevalidationDiagnostic.merge(difference) { _, value in value }
+                }
             } else {
                 // A point outside the focused window was grounded in the full
                 // desktop. Changes elsewhere cannot inherit window-only proof.
