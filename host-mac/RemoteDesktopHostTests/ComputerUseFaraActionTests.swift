@@ -2736,6 +2736,64 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInPageReadingExcludesViewportFixedOffscreenMenusButKeepsScrollableText() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native fixed-surface text capture") }
+        let menu = (0 ..< 280).map { "<li><a href='/hidden/\($0)'>Hidden menu \($0)</a></li>" }.joined()
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><meta charset=utf-8><style>body{margin:0;overflow-x:hidden}</style>
+            <nav style="position:fixed;left:100vw;top:0;width:500px"><ul>\(menu)</ul></nav>
+            <div style="position:fixed;right:100vw;top:0">Offscreen left</div>
+            <div style="position:fixed;bottom:100vh;left:0">Offscreen above</div>
+            <div style="position:fixed;top:100vh;left:0">Offscreen below</div>
+            <div style="position:fixed;top:5px;right:5px">Visible fixed notice</div>
+            <main><h1>Actual information</h1><p>Departure: 17:20. Platform: 9.</p>
+            <div style="margin-top:1200px">Scrollable ordinary text</div>
+            <div style="transform:translateX(0);height:80px"><span style="position:fixed">Transformed ancestor text</span></div>
+            </main>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "fixed-reading")
+        let document = try await browser.navigate(taskID: "fixed-reading", operationID: "open", to: base.appendingPathComponent("page"))
+        let observed = try await browser.observePage(document: document)
+        let text = observed.page.texts.map(\.text).joined(separator: "\n")
+        for expected in ["Actual information", "Departure: 17:20. Platform: 9.", "Visible fixed notice", "Scrollable ordinary text", "Transformed ancestor text"] {
+            XCTAssertTrue(text.contains(expected), expected)
+        }
+        for excluded in ["Hidden menu", "Offscreen left", "Offscreen above", "Offscreen below"] { XCTAssertFalse(text.contains(excluded), excluded) }
+        XCTAssertTrue(observed.page.links.isEmpty)
+        XCTAssertFalse(observed.page.truncated); XCTAssertFalse(observed.page.omittedStructure)
+    }
+
+    @MainActor
+    func testOptInPageReadingKeepsScrollableContentInVisibleFixedPanels() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native fixed scroll-panel text capture") }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><meta charset=utf-8><style>body{margin:0}</style>
+            <aside style="position:fixed;top:20px;left:20px;width:200px;height:120px;overflow:auto">
+              <p>Visible panel</p><div style="margin-top:1400px">Scrollable fixed-panel details</div>
+            </aside>
+            <aside style="position:fixed;top:160px;left:20px;width:200px;height:120px;overflow:auto">
+              <div style="width:1800px"><span style="margin-left:1500px">Horizontal panel details</span></div>
+            </aside>
+            <aside style="position:fixed;top:0;left:100vw;width:200px;height:120px;overflow:auto">
+              <p>Closed panel caption</p><div style="margin-top:1400px">Closed panel details</div>
+            </aside>
+            <p style="position:fixed;left:-4px;top:300px">Partially visible fixed text</p>
+            <div style="position:fixed;left:10px;top:360px"><span style="display:contents">Fixed contents text</span></div>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "fixed-panel-reading")
+        let document = try await browser.navigate(taskID: "fixed-panel-reading", operationID: "open", to: base.appendingPathComponent("page"))
+        let page = try await browser.observePage(document: document)
+        let text = page.page.texts.map(\.text).joined(separator: "\n")
+        for expected in ["Visible panel", "Scrollable fixed-panel details", "Horizontal panel details", "Partially visible fixed text", "Fixed contents text"] { XCTAssertTrue(text.contains(expected), expected) }
+        XCTAssertFalse(text.contains("Closed panel"))
+        XCTAssertFalse(page.page.truncated)
+    }
+
+    @MainActor
     func testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native tooltip reading without inference") }
         let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

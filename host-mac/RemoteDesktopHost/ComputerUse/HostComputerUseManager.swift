@@ -4426,6 +4426,7 @@ final class HostComputerUseManager: ObservableObject {
         macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
         mcpPlanner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
+        mcpBrowserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init(),
         executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
         textClarifications: ComputerUseTextClarificationStore? = nil,
@@ -4478,7 +4479,7 @@ final class HostComputerUseManager: ObservableObject {
                 binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
                 visualFallback: visualFallback,
                 planner: mcpPlanner,
-                clientPool: MCPClientPool(), browserExecutorFactory: {
+                clientPool: MCPClientPool(), browserStepPlanner: mcpBrowserStepPlanner, browserExecutorFactory: {
                     let receipt = await modelInstaller.currentInstallation()
                     try Task.checkCancellation()
                     return try modelLoader.prepareBrowser(receipt: receipt)

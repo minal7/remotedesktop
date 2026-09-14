@@ -1,0 +1,30 @@
+{
+  "date": "2026-09-14",
+  "policy": "Goals only enter planners; expectedPatterns/expectedHost and oracle sources are external test assertions. Original full tasks remain unchanged after first inference.",
+  "travel": {
+    "goal": "Open https://www.bart.gov/tickets/discounts. Tell me which ages qualify for the youth discount, how much the discount is, which card is required, and which children ride free. Include the official source link.",
+    "expectedHost": "www.bart.gov",
+    "expectedPatterns": [
+      "(?i)5.{0,30}18",
+      "50\\s*%",
+      "(?i)youth\\s+Clipper",
+      "(?i)(4.{0,30}(under|younger)|under\\s+5)",
+      "(?i)free",
+      "https://www\\.bart\\.gov/tickets/discounts"
+    ],
+    "source": "https://www.bart.gov/tickets/discounts",
+    "oracle": "Ages 5–18 receive 50% off using Youth Clipper; children 4 and younger ride free."
+  },
+  "concert": {
+    "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.",
+    "expectedHost": "www.sfjazz.org",
+    "expectedPatterns": [
+      "\\$\\s*25",
+      "(?i)48.{0,10}hours",
+      "(?i)Contributor",
+      "https://www\\.sfjazz\\.org/tickets/ticket-policies/?"
+    ],
+    "source": "https://www.sfjazz.org/tickets/ticket-policies/",
+    "oracle": "$25 flat return fee; accepted up to 48 hours prior to performance; waived at Contributor level ($250/year) and above."
+  }
+}

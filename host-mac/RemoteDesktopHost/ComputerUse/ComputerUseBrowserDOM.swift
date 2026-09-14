@@ -1255,11 +1255,43 @@ enum ComputerUseBrowserDOM {
           }
           return parentID;
         }
-        function visibleInPage(element) {
+        function visibleInPage(element, textRects = null) {
+          const original = element;
+          let viewportFixed = false;
+          const scrollPorts = [];
+          const intersectsViewport = rect => Number.isFinite(rect.x) && Number.isFinite(rect.y)
+            && Number.isFinite(rect.width) && Number.isFinite(rect.height) && rect.width > 0 && rect.height > 0
+            && rect.left < innerWidth && rect.right > 0 && rect.top < innerHeight && rect.bottom > 0;
           for (let depth = 0; element && depth < 128; element = pageParent(element), depth++) {
             const style = getComputedStyle(element);
             if (element.matches(excluded) || style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0) return false;
-            if (element === root) return true;
+            // A visible scrolling panel can expose descendants beyond the
+            // viewport without moving its fixed surface. The document's own
+            // scrollport, above a fixed ancestor, cannot expose a closed menu.
+            if (!viewportFixed && ((['auto','scroll'].includes(style.overflowY) && element.scrollHeight > element.clientHeight)
+                || (['auto','scroll'].includes(style.overflowX) && element.scrollWidth > element.clientWidth))) {
+              scrollPorts.push(element.getBoundingClientRect());
+            }
+            // A transformed/contained ancestor makes a fixed descendant part
+            // of scrollable document content. Do not discard that text merely
+            // because it is currently below the viewport.
+            if (viewportFixed && (style.transform !== 'none' || style.perspective !== 'none'
+                || style.filter !== 'none' || (style.backdropFilter && style.backdropFilter !== 'none')
+                || /\b(layout|paint|strict|content)\b/.test(style.contain)
+                || /\b(transform|perspective|filter|backdrop-filter)\b/.test(style.willChange))) viewportFixed = false;
+            if (style.position === 'fixed') viewportFixed = true;
+            if (element === root) {
+              if (!viewportFixed) return true;
+              // Off-canvas fixed menus cannot be reached by document scroll.
+              // Their laid-out text must not exhaust the readable catalogue.
+              // Ordinary offscreen content remains available above.
+              let rects = textRects || original.getClientRects();
+              if (!rects.length && getComputedStyle(original).display === 'contents') {
+                const range = doc.createRange(); range.selectNodeContents(original); rects = range.getClientRects();
+              }
+              if (rects.length > 512) { truncated = true; return false; }
+              return Array.from(rects).some(intersectsViewport) || scrollPorts.some(intersectsViewport);
+            }
           }
           truncated = true;
           return false;
@@ -1291,12 +1323,12 @@ enum ComputerUseBrowserDOM {
             continue;
           }
           if (texts.length >= 256) { truncated = true; break; }
-          if (!visibleInPage(pageParent(node))) continue;
           // A text node may live in unassigned light DOM or unused slot
           // fallback. Computed style alone does not prove it participates in
           // layout. Ranges also preserve text under display:contents parents.
           textRange.selectNodeContents(node);
-          if (textRange.getClientRects().length === 0) continue;
+          const textRects = textRange.getClientRects();
+          if (textRects.length === 0 || !visibleInPage(pageParent(node), textRects)) continue;
           const raw = node.nodeValue || '';
           if (raw.length > 8192) { truncated = true; continue; }
           const text = raw.replace(/\s+/g, ' ').trim();

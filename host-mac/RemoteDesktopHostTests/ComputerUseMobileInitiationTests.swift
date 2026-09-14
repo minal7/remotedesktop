@@ -134,6 +134,62 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     func testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage() async throws {
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: nil)
+    }
+
+    func testOptInMCPBrowserHostReadsPublicTravelWithoutModelPackage() async throws {
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "travel")
+    }
+
+    func testOptInMCPBrowserHostReadsPublicConcertWithoutModelPackage() async throws {
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "concert")
+    }
+
+    func testOptInNativePublicPageCatalogueCoverage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
+            throw XCTSkip("Opt-in: inspect native public page rendering and capture limits without inference")
+        }
+        let manifestURL = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_PUBLIC_MANIFEST"]))
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+        let task = try XCTUnwrap(manifest["travel"] as? [String: Any])
+        let url = try XCTUnwrap(URL(string: try XCTUnwrap(task["source"] as? String)))
+        let output = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_LOOP_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "public-native-catalogue")
+        let document = try await browser.navigate(taskID: "public-native-catalogue", operationID: "open", to: url)
+        let page = try await browser.observePage(document: document)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+        let metadata = try await web.evaluateJavaScript("""
+            (()=>({ready:document.readyState,viewport:[innerWidth,innerHeight],userAgent:navigator.userAgent,
+              sheets:Array.from(document.styleSheets).map(s=>({href:s.href,disabled:s.disabled})),
+              resources:performance.getEntriesByType('resource').filter(e=>e.initiatorType==='link').map(e=>({url:e.name,status:e.responseStatus,duration:e.duration})),
+              navs:Array.from(document.querySelectorAll('nav')).slice(0,12).map(e=>({text:e.innerText.slice(-160),rect:[e.getBoundingClientRect().x,e.getBoundingClientRect().y,e.getBoundingClientRect().width,e.getBoundingClientRect().height],
+                menus:Array.from(e.querySelectorAll('div')).slice(0,16).map(m=>({opacity:getComputedStyle(m).opacity,display:getComputedStyle(m).display,visibility:getComputedStyle(m).visibility}))}))}))()
+            """)
+        let report: [String: Any] = ["sourceURL": url.absoluteString, "metadata": metadata as Any,
+            "texts": page.page.texts.map(\.text), "links": page.page.links.count, "containers": page.page.containers.count,
+            "truncated": page.page.truncated, "omittedStructure": page.page.omittedStructure]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertEqual(web.url, url)
+    }
+
+    private func runMCPBrowserHostWithoutInstalledModelPackage(publicCase: String?) async throws {
+        var publicGoal: String?, expectedPatterns: [String] = [], expectedHost: String?
+        if let publicCase {
+            guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
+                throw XCTSkip("Opt-in: frozen real public task through the default host, without model packages")
+            }
+            let manifestPath = try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_PUBLIC_MANIFEST"])
+            let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: manifestPath))) as? [String: Any])
+            let task = try XCTUnwrap(manifest[publicCase] as? [String: Any])
+            publicGoal = try XCTUnwrap(task["goal"] as? String)
+            expectedPatterns = try XCTUnwrap(task["expectedPatterns"] as? [String])
+            expectedHost = try XCTUnwrap(task["expectedHost"] as? String)
+            XCTAssertFalse(expectedPatterns.isEmpty)
+        }
         guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
             throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
         }
@@ -158,6 +214,18 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
             visualExecutorLoader: loader,
             mcpPlanner: MobileInitiationObservedPlanner(trace: plannerTrace),
+            mcpBrowserStepPlanner: .init(inspectProposal: { plannerTrace.append($0) },
+                inspectCatalogue: { snapshot, source in
+                    let data: [String: Any] = ["id": snapshot.id, "sourceURL": source.absoluteString,
+                        "texts": snapshot.texts.map { ["id": $0.id, "containerID": $0.containerID, "text": $0.text, "tooltip": $0.tooltip as Any? ?? NSNull()] },
+                        "links": snapshot.links.map { ["id": $0.id, "containerID": $0.containerID as Any? ?? NSNull(), "label": $0.label,
+                            "destination": $0.destination, "textIDs": $0.textIDs] },
+                        "containers": snapshot.containers.map { ["id": $0.id, "parentID": $0.parentID as Any? ?? NSNull(), "kind": $0.kind] },
+                        "truncated": snapshot.truncated, "omittedStructure": snapshot.omittedStructure,
+                        "omittedEmbeddedContent": snapshot.omittedEmbeddedContent]
+                    try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                        .write(to: output.appendingPathComponent("catalogue-\(snapshot.id).json"), options: .atomic)
+                }),
             taskLedger: ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json")),
             browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
@@ -180,7 +248,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         manager.authorizePeer(senderID: "IOS-PEER")
         let prompt = ComputerUseEnvelope(id: "mcp-browser-no-package-" + UUID().uuidString,
             senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
-            body: "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform.")
+            body: publicGoal ?? "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform.")
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         var terminal: ComputerUseTaskUpdate?
         for _ in 0 ..< 600 {
@@ -204,10 +272,18 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
         XCTAssertEqual(terminal?.outcome, .taskCompleted)
-        XCTAssertTrue(terminal?.text.contains("21:45") == true || terminal?.text.range(of: #"(?i)9:45\s*p\.?m"#, options: .regularExpression) != nil)
-        XCTAssertNotNil(terminal?.text.replacingOccurrences(of: "*", with: "").range(of: #"(?i)platform\s*[:#-]?\s*6\b"#, options: .regularExpression))
-        XCTAssertEqual(finalURL, base.appendingPathComponent("details"))
-        XCTAssertEqual(server.count("/index"), 1); XCTAssertEqual(server.count("/details"), 1)
+        if publicGoal != nil {
+            for pattern in expectedPatterns {
+                XCTAssertNotNil(terminal?.text.range(of: pattern, options: .regularExpression), "Missing expected fact: \(pattern)")
+            }
+            XCTAssertEqual(finalURL?.host, expectedHost)
+            XCTAssertTrue(server.requestedPaths.isEmpty)
+        } else {
+            XCTAssertTrue(terminal?.text.contains("21:45") == true || terminal?.text.range(of: #"(?i)9:45\s*p\.?m"#, options: .regularExpression) != nil)
+            XCTAssertNotNil(terminal?.text.replacingOccurrences(of: "*", with: "").range(of: #"(?i)platform\s*[:#-]?\s*6\b"#, options: .regularExpression))
+            XCTAssertEqual(finalURL, base.appendingPathComponent("details"))
+            XCTAssertEqual(server.count("/index"), 1); XCTAssertEqual(server.count("/details"), 1)
+        }
         XCTAssertEqual(visualInstalls + nativeInstalls + launchAttempts, 0)
         XCTAssertGreaterThan(samples, 0); XCTAssertEqual(maximumWorkers, 0)
         XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
