@@ -6,6 +6,144 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_PUBLIC_RELEASE_READING_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: read-only public page capability probe; no inference")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["PUBLIC_RELEASE_READING_PROBE_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        var pool: MCPClientPool?
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector(), started = Date()
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        var report: [String: Any] = ["scope": "public-page-MCP-and-owned-browser-read-probe", "modelInference": false]
+        var failure: Error?
+        do {
+            let url = URL(string: "https://github.com/apple/swift-nio/releases/tag/2.102.0")!
+            report["stage"] = "navigation"
+            try browser.claim(taskID: "public-reading-probe")
+            let document = try await browser.navigate(taskID: "public-reading-probe", operationID: "open", to: url)
+            report["stage"] = "independent-metadata"
+            func webViews(_ view: NSView) -> [WKWebView] {
+                (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews)
+            }
+            let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+            // Independent diagnostic data. It is never passed to the executor
+            // or a planner; inspect only bounded date/time elements on this public page.
+            report["timeMetadata"] = try await web.evaluateJavaScript("""
+                Array.from(document.querySelectorAll('time,[datetime]')).slice(0,64).map(e=>({
+                    tag:e.localName,datetime:e.getAttribute('datetime'),title:e.getAttribute('title'),
+                    ariaLabel:e.getAttribute('aria-label'),text:e.textContent.slice(0,256),
+                    renderedText:e.innerText?.slice(0,256)??null,shadowText:e.shadowRoot?.textContent.slice(0,256)??null,
+                    rects:e.getClientRects().length,display:getComputedStyle(e).display,
+                    visibility:getComputedStyle(e).visibility
+                }))
+                """)
+            report["initialReadyState"] = try await web.evaluateJavaScript("document.readyState")
+            let readyDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while ContinuousClock.now < readyDeadline {
+                if try await web.evaluateJavaScript("document.readyState === 'complete'") as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            report["readyStateAtReading"] = try await web.evaluateJavaScript("document.readyState")
+            report["isolatedReadyState"] = try await web.callAsyncJavaScript("return document.readyState;", arguments: [:], in: nil,
+                contentWorld: ComputerUseBrowserDOM.world)
+            report["stage"] = "page-observation"
+            for agentInput in [false, true] {
+                do {
+                    let page = try await browser.observePage(document: document, forAgentInput: agentInput)
+                    report[agentInput ? "agentPage" : "page"] = ["texts": page.page.texts.map(\.text),
+                        "readingTexts": page.page.texts.map(\.pageReadingText), "truncated": page.page.truncated,
+                        "omittedEmbeddedContent": page.page.omittedEmbeddedContent]
+                } catch { report[agentInput ? "agentPageFailure" : "pageFailure"] = String(reflecting: error) }
+            }
+            // Read the same isolated-world snapshot before native validation,
+            // solely to diagnose why the product rejected its page evidence.
+            let raw = try await web.callAsyncJavaScript(ComputerUseBrowserDOM.invocation,
+                arguments: ["command": "pageSnapshot", "args": [:]], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            if let source = raw as? String {
+                try Data(source.utf8).write(to: output.appendingPathComponent("raw-page.json"), options: .withoutOverwriting)
+            }
+            report["stage"] = "mcp-read"
+            let receipt = await MacControlMCPInstaller().currentInstallation()
+            let currentPool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mutations.json")),
+                sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                    stateDirectory: output.appendingPathComponent("helper-state")) })
+            pool = currentPool
+            _ = try await currentPool.start(binaryURL: URL(fileURLWithPath: try XCTUnwrap(receipt).binaryPath))
+            let available = try await currentPool.allowedTools()
+            let tree = try XCTUnwrap(available.first { $0.toolName == "get_ui_tree" })
+            let result = try await currentPool.execute(tree.makeCall(taskID: "public-reading-probe", arguments: [
+                "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "max_depth": .integer(18)]))
+            report["mcpTree"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(result))
+            report["mcpSchema"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(tree.inputSchema))
+            let find = try XCTUnwrap(available.first { $0.toolName == "find_elements" })
+            report["mcpFindSchema"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(find.inputSchema))
+            let found = try await currentPool.execute(find.makeCall(taskID: "public-reading-probe", arguments: [
+                "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXStaticText")]))
+            report["mcpStaticText"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(found))
+            let limited = try await currentPool.execute(find.makeCall(taskID: "public-reading-probe", arguments: [
+                "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXStaticText"), "limit": .integer(12)]))
+            report["mcpLimitedStaticText"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(limited))
+            // Derive the query from this page's actual displayed caption,
+            // never from the independent expected publication date.
+            let caption = try await web.evaluateJavaScript("(()=>{const e=document.querySelector('time,[datetime]');return (e?.innerText || e?.shadowRoot?.textContent || e?.textContent || '').trim()})()") as? String ?? ""
+            report["currentTimeCaption"] = caption
+            report["currentTimeTitle"] = try await web.evaluateJavaScript("document.querySelector('time,[datetime]')?.title ?? ''")
+            let page = try XCTUnwrap(report["page"] as? [String: Any])
+            let readingText = try XCTUnwrap(page["readingTexts"] as? [String]).joined(separator: "\n")
+            let tooltip = try XCTUnwrap(report["currentTimeTitle"] as? String)
+            XCTAssertFalse(tooltip.isEmpty)
+            XCTAssertTrue(readingText.contains("Website tooltip: " + tooltip))
+            XCTAssertTrue(readingText.contains("2026")); XCTAssertTrue(readingText.contains("Sep 1"))
+            if !caption.isEmpty {
+                let matching = try await currentPool.execute(find.makeCall(taskID: "public-reading-probe", arguments: [
+                    "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXStaticText"),
+                    "value": .string(caption), "limit": .integer(4)]))
+                report["mcpTimeCaption"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(matching))
+                if case .object(let object)? = matching.structuredContent, case .array(let elements)? = object["elements"],
+                   let first = elements.first, case .object(let element) = first, case .string(let id)? = element["id"] {
+                    let attributes = try XCTUnwrap(available.first { $0.toolName == "get_element_attributes" })
+                    let value = try await currentPool.execute(attributes.makeCall(taskID: "public-reading-probe", arguments: [
+                        "element_id": .string(id), "names": .array(["AXValue", "AXHelp", "AXTitle", "AXDescription", "AXParent"].map(MCPJSONValue.string))]))
+                    report["mcpTimeAttributes"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+                }
+            }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: output.appendingPathComponent("browser")))
+            var proposals = 0, reading: ComputerUseFaraModel.PageReading?
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: output.appendingPathComponent("fara-reading"), propose: { _ in
+                proposals += 1; guard proposals <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                let response = proposals == 1
+                    ? #"<tool_call>{"name":"computer_use","arguments":{"action":"read_page_answer_question","question":"Read the release publication date."}}</tool_call>"#
+                    : #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"Read without input."}}</tool_call>"#
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }, readPage: { value in reading = value; return "Reading captured." })
+            let readResult = try await executor.execute(taskID: "public-reading-probe", prompt: "Read this public page without changing it.",
+                trustedUserPrompt: "Read this public page without changing it.", tools: tools, progress: { _ in })
+            report["faraPageReading"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(try XCTUnwrap(reading)))
+            XCTAssertEqual(readResult, .completed("Read without input.")); XCTAssertEqual(proposals, 2)
+            XCTAssertTrue(reading?.text.contains("Website tooltip: " + tooltip) == true)
+            XCTAssertFalse(result.isError)
+            report["stage"] = "complete"
+        } catch { failure = error }
+        await pool?.cancelAll()
+        report["elapsedSeconds"] = Date().timeIntervalSince(started)
+        report["failure"] = String(reflecting: failure)
+        report["mutationLedgerCreated"] = FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path)
+        report["workersAfterShutdown"] = try inspector.matchingProcesses(for: binary).count
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path))
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        if let failure { throw failure }
+    }
+
     func testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_PUBLIC_BROWSER"] == "1" else {

@@ -476,7 +476,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 // Preflight above validated the exact native page, source policy,
                 // owner and login state. This synchronous projection posts no input.
                 let page = observation.approvalPageEvidence.page
-                let fullText = page.texts.map(\.text).joined(separator: "\n")
+                let fullText = page.texts.map(\.pageReadingText).joined(separator: "\n")
                 var text = "", bytes = 0
                 for character in fullText {
                     let part = String(character), size = part.utf8.count

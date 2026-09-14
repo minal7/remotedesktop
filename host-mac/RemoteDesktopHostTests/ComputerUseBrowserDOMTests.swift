@@ -3,6 +3,66 @@ import XCTest
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata() throws {
+        func page(_ tooltips: [String?]) -> ComputerUseBrowserPageSnapshot {
+            .init(id: String(repeating: "a", count: 32), texts: tooltips.enumerated().map {
+                .init(id: "t\($0.offset + 1)", containerID: "g1", text: "Caption", tooltip: $0.element)
+            }, links: [], truncated: false, omittedEmbeddedContent: false)
+        }
+        XCTAssertTrue(page([nil, "Literal <script>markup</script> & 東京"]).isWellFormed)
+        for value in ["", " \n\t", String(repeating: "界", count: 683)] { XCTAssertFalse(page([value]).isWellFormed) }
+        XCTAssertFalse(page(Array(repeating: String(repeating: "x", count: 2048), count: 33)).isWellFormed)
+    }
+
+    func testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate() async throws {
+        let fixture = try await DOMFixture(body: """
+            <div title='Inherited detail'><span>Child caption</span><span title=''>Suppressed caption</span>
+            <a href='/details' title='Independent tooltip'>Official details</a></div>
+            <p style='display:none' title='Hidden tooltip'>Hidden caption</p>
+            <p contenteditable title='Private editor tooltip'>Private text</p>
+            """)
+        defer { fixture.close() }
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        let texts = evidence.page.texts
+        XCTAssertEqual(texts.first { $0.text == "Child caption" }?.tooltip, "Inherited detail")
+        XCTAssertNil(texts.first { $0.text == "Suppressed caption" }?.tooltip)
+        XCTAssertEqual(evidence.page.links.first?.label, "Official details")
+        XCTAssertEqual(texts.first { $0.text == "Official details" }?.tooltip, "Independent tooltip")
+        XCTAssertFalse(texts.map(\.pageReadingText).joined().contains("Hidden"))
+        XCTAssertFalse(texts.map(\.pageReadingText).joined().contains("Private"))
+        XCTAssertFalse(evidence.page.answerVerificationText.contains("Independent tooltip"), "Metadata is not promoted into the rendered-text verifier")
+    }
+
+    func testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize() async throws {
+        let fixture = try await DOMFixture(body: "<p title='" + String(repeating: "界", count: 683) + "'>Oversized</p>"
+            + (0..<90).map { "<p title='" + String(repeating: "界", count: 500) + "'>Caption \($0)</p>" }.joined())
+        defer { fixture.close() }
+        let page = try await fixture.browser.observePage(document: fixture.document).page
+        XCTAssertTrue(page.isWellFormed); XCTAssertTrue(page.truncated)
+        XCTAssertNil(page.texts.first { $0.text == "Oversized" }?.tooltip)
+        XCTAssertTrue(page.texts.contains { $0.tooltip != nil })
+        XCTAssertTrue(page.texts.allSatisfy { ($0.tooltip?.utf8.count ?? 0) <= 2048 })
+        XCTAssertLessThanOrEqual(page.texts.reduce(0) { $0 + $1.text.utf8.count + ($1.tooltip?.utf8.count ?? 0) }, 65_536)
+    }
+
+    func testChangingOnlyTooltipRetiresPageReadingEvidence() async throws {
+        let fixture = try await DOMFixture(body: """
+            <p id=caption title='Original tooltip'>Stable caption</p>
+            <script>fetch('/signal').then(()=>{caption.title='Changed tooltip';fetch('/changed')})</script>
+            """, heldSignal: true)
+        defer { fixture.close() }
+        let original = try await fixture.browser.observePage(document: fixture.document)
+        fixture.server.releaseHeldResponses()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while fixture.server.count("/changed") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(fixture.server.count("/changed"), 1)
+        do { try await fixture.browser.validatePageEvidence(original); XCTFail("A changed tooltip must invalidate the read") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        let fresh = try await fixture.browser.observePage(document: fixture.document)
+        XCTAssertEqual(fresh.page.texts.map(\.text), original.page.texts.map(\.text))
+        XCTAssertEqual(fresh.page.texts.first?.tooltip, "Changed tooltip")
+    }
+
     func testResearchNavigationRecoversFailedReplacementUsingOnlyTheVisibleKnownStage() async throws {
         for storage in ["replacement", "original", "missing"] {
             let prepared = try await changedPendingResearchLinkFixture()
@@ -1027,7 +1087,7 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
         do { _ = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["old structure"]),
             willBeginEffect: { XCTFail("Changed structure cannot dispatch through stale evidence") }); XCTFail("Fresh observation is required") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .linkNavigationUnavailable) }
         let fresh = try await fixture.browser.observePage(document: fixture.document)
         XCTAssertEqual(fresh.page.texts, evidence.page.texts)
         XCTAssertEqual(fresh.page.links, evidence.page.links)

@@ -1,0 +1,1228 @@
+{
+  "schemaVersion": 1,
+  "createdAt": "2026-09-14T14:18:07.667999+00:00",
+  "baseCommit": "f4950ff90ce9d33130d7dfbea2ee6232a2bd3992",
+  "scope": "Bounded HTML tooltip observation and Fara page-reading integration, following real MCP/browser capability probes",
+  "productionChanges": [
+    "Preserve an optional website-declared HTML tooltip separately on each rendered text record. Keep original captions, control labels and rendered-text answer verification unchanged.",
+    "Use composed ancestors to find the applicable title, stop inheritance at an explicit empty title, and exclude hidden/unrendered/control/editor text through the existing text admission rules.",
+    "Limit individual metadata to 2048 UTF-8 bytes, guard oversized raw attributes before encoding, include metadata in the total 65536-byte snapshot limit, and mark omitted data as truncated.",
+    "Include clearly labeled Website tooltip data in the existing 4096-byte Fara page-reading projection. Snapshot serialization and validation include the metadata, so a changed tooltip invalidates the old read."
+  ],
+  "findings": [
+    "The public page opens while document.readyState is interactive. Immediate snapshot reads return stale; a bounded test-only wait for complete obtains valid existing page evidence. No production readiness guard was weakened, and production readiness handling remains open.",
+    "The loaded page renders 2 weeks ago in an open shadow tree while its HTML title supplies the exact publication date. Native element innerText alone misses the shadow caption.",
+    "The pinned real MCP get_ui_tree and broad find_elements responses exceed the current structured-output budget and are omitted. A limit-12 query returns 12 records with limit_reached=true, so it is explicitly partial. A query using the actual observed time caption finds zero AXStaticText matches. These probes do not prove every possible MCP query is incapable of reading the date.",
+    "The failing native regression omitted tooltips for ordinary time/text and shadow content. The repaired workflow and metadata inheritance, exclusion, Unicode, per-item/aggregate bounds and changed-tooltip checks pass.",
+    "A broader existing test expected pageChanged for a stale prepared link. The unchanged pre-existing openObservedDestination validation maps an invalid link reply to linkNavigationUnavailable. Corrected only that expected error; stale evidence rejection, no effect callback and zero destination requests remain asserted. Baseline error mapping was verified by source inspection, not a separate baseline execution.",
+    "The real production reader now includes the correct observed publication tooltip in 2626 bytes in 4.32 seconds, with no inference or mutation ledger. This is a capability probe with scripted reader selection, not autonomous task acceptance.",
+    "The unchanged real natural-language task still fails after 98.99 seconds. Ten model replies are captured; the last is a syntactically valid visit_url request for view-source:https://github.com/apple/swift-nio/releases/tag/2.102.0. The current strict decoder rejects that scheme as invalidResponse before navigation. The model never invokes page reading.",
+    "All 13 selected methods pass on the final build with no skips. The real public run and final regression bundle retain the existing UI-unresponsiveness warning."
+  ],
+  "remainingWork": [
+    "Return bounded unsupported-navigation feedback to the actor without ever navigating a rejected scheme; prove that it can select the existing page reader and complete the unchanged task. Preserve strict malformed-response checks, ownership, cancellation and no-effect guarantees.",
+    "Qualify production initial-page readiness without relying on model startup latency.",
+    "General tool selection, real provider/phone controls, native/cross-app coverage, whole-Mac 12 GB/heat and full production acceptance remain open."
+  ],
+  "limitations": [
+    "MCP priority, browser model selection, worker limit, and installed application are unchanged.",
+    "The public capability probe uses a test-owned browser and explicit page readiness wait. Only the last full task uses actual model decisions.",
+    "The failed full task is diagnostic HostSession composition with a normal runtime/loader plus an explicit response observer and isolated browser/task journals.",
+    "Tooltip data is website content, not trusted instruction or proof of another requested result. Native input authorization remains separate.",
+    "Source hashes bind the final passing build and full-model trial. Earlier probe source varied; their original logs/results remain retained."
+  ],
+  "verifiedDistinctMethods": 13,
+  "qualifyingIdentifiers": [
+    "ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence",
+    "ComputerUseBrowserDOMTests/testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers",
+    "ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical",
+    "ComputerUseBrowserDOMTests/testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees",
+    "ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize",
+    "ComputerUseBrowserDOMTests/testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata",
+    "ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate",
+    "ComputerUseFaraActionTests/testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly",
+    "ComputerUseFaraActionTests/testFaraPageReadingWireRetainsSourceAndBoundsContext",
+    "ComputerUseFaraActionTests/testFaraRejectsUnextractedPageTextInActionConversation",
+    "ComputerUseFaraActionTests/testOptInFaraPageReadingBoundsAndRetirement",
+    "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent",
+    "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser"
+  ],
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "76b08ed1e0f59583238ee5ce4f46ac40e8a4fe5188f59c9746e775cf7bc9c57c",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "3e657d282d43cc4317ccc565578c0c2d0de3a75df7f630c95890f02247c2b926",
+    "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "1779db6606a0e50466973844dc3b9a132bdf3e6dcc59870e98cc6c69fb03f90a",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "142d5b42ebf0ba28dbc11f2818b8e2812b2825a60aa87253ab0c290f1aa2d91c",
+    "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "b60b016f9c6257282cb357665151e00275e610dba4e6fc0def5a58e57fe9243f"
+  },
+  "references": [
+    {
+      "title": "HTML title attribute",
+      "url": "https://html.spec.whatwg.org/multipage/dom.html#the-title-attribute"
+    },
+    {
+      "title": "GitHub relative-time component",
+      "url": "https://github.com/github/relative-time-element"
+    }
+  ],
+  "independentOracle": {
+    "observedAt": "2026-09-14T13:25:25.995165+00:00",
+    "source": "https://api.github.com/repos/apple/swift-nio/releases/latest",
+    "expected": {
+      "draft": false,
+      "html_url": "https://github.com/apple/swift-nio/releases/tag/2.102.0",
+      "prerelease": false,
+      "published_at": "2026-09-01T09:35:32Z",
+      "tag_name": "2.102.0"
+    },
+    "scope": "Independent oracle, not provided to the app"
+  },
+  "diagnosticExchanges": [
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-3905012E-2836-46C4-BECB-F1966E17C55B.json",
+      "sha256": "1c4a7eeebf4dab5185b6ab1358fbbdedc262ca0f8c9327d15b18a61971ba7f1a",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "visit_url",
+          "url": "https://github.com/apple/swift-nio/releases"
+        }
+      },
+      "usage": {
+        "completion_tokens": 103,
+        "prompt_tokens": 2582,
+        "total_tokens": 2685,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-6DCBD43E-F568-4483-89F3-8A3E7BD732AE.json",
+      "sha256": "f2d108d659c258a59907c9c6c1df5766683ca0751db11a0a2e8be6afd574e0ca",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "left_click",
+          "coordinate": [
+            318,
+            607
+          ]
+        }
+      },
+      "usage": {
+        "completion_tokens": 116,
+        "prompt_tokens": 3265,
+        "total_tokens": 3381,
+        "prompt_tokens_details": {
+          "cached_tokens": 2684
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-EFCFBC86-93C1-4169-A262-9710E4ED2F68.json",
+      "sha256": "cc5696f49658c3a93a4bbf134026bb95292380042139157b0190a1f35f83bf73",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "double_click",
+          "coordinate": [
+            316,
+            607
+          ]
+        }
+      },
+      "usage": {
+        "completion_tokens": 122,
+        "prompt_tokens": 3961,
+        "total_tokens": 4083,
+        "prompt_tokens_details": {
+          "cached_tokens": 3380
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-DD9D35B1-0FFD-4370-AB2E-443069694ADF.json",
+      "sha256": "06f9f9708c283cb25428e13d4f3deaf92ee40e36ca3177501bd9cc2bbc7f5e85",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "left_click",
+          "coordinate": [
+            274,
+            607
+          ]
+        }
+      },
+      "usage": {
+        "completion_tokens": 132,
+        "prompt_tokens": 3911,
+        "total_tokens": 4043,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-8D7C1D58-BD73-4ACB-B4AE-21BA64E5E2A7.json",
+      "sha256": "dd5eb39198e4c0dccf70426808938da9e7a7d4a46f2bbfcdb421ca5b0ed106a6",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "scroll",
+          "pixels": -723
+        }
+      },
+      "usage": {
+        "completion_tokens": 90,
+        "prompt_tokens": 4145,
+        "total_tokens": 4235,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-1799901A-6132-4104-A72B-C41AADAD23C7.json",
+      "sha256": "02e3c40bcd5b1181c4d8e6070bbb7d909c9ff143977b60554986c472b53d5534",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "scroll",
+          "pixels": -870
+        }
+      },
+      "usage": {
+        "completion_tokens": 85,
+        "prompt_tokens": 4282,
+        "total_tokens": 4367,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-70E23185-95E9-44FD-B3E8-0B470AD00345.json",
+      "sha256": "8d548b539189153c0575798356648b99c4a470f577bc2af93cf3cfff6c69cfaf",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "scroll",
+          "pixels": -547
+        }
+      },
+      "usage": {
+        "completion_tokens": 91,
+        "prompt_tokens": 4414,
+        "total_tokens": 4505,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-4BE19E89-273F-4050-87FD-B322DE1C09E9.json",
+      "sha256": "771b46ca3e36c21fcde252b6c3a2e1a412cb15c0b5244db997818618f964425e",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "key",
+          "keys": [
+            "Control",
+            "f"
+          ]
+        }
+      },
+      "usage": {
+        "completion_tokens": 110,
+        "prompt_tokens": 4552,
+        "total_tokens": 4662,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-12E733E8-F24E-4B23-8F1E-B02B7560D3F2.json",
+      "sha256": "8f6ecaf9754d3d1bdf356a54551e6c068dc4e4d8c654a5ca78253558fa21010b",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "type",
+          "text": "Published"
+        }
+      },
+      "usage": {
+        "completion_tokens": 86,
+        "prompt_tokens": 4709,
+        "total_tokens": 4795,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    },
+    {
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/exchange-02D16318-998C-4818-84FD-914BB2197719.json",
+      "sha256": "06b11a5d699bd571772cb2c027fe899b712088234d8884c0e32a8f3a4e3db4f1",
+      "finishReason": "stop",
+      "action": {
+        "name": "computer_use",
+        "arguments": {
+          "action": "visit_url",
+          "url": "view-source:https://github.com/apple/swift-nio/releases/tag/2.102.0"
+        }
+      },
+      "usage": {
+        "completion_tokens": 124,
+        "prompt_tokens": 4842,
+        "total_tokens": 4966,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  ],
+  "runs": [
+    {
+      "name": "public-release-reading-01",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-01.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789393888.96,
+        "passedTests": 0,
+        "result": "unknown",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789393877.653,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 0
+      },
+      "methods": [],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-01.xcresult",
+      "logSHA256": "83bd34dd3e48e0af4fd048824ec51f26000bda720fbca29b82bb0601f42f84c1"
+    },
+    {
+      "name": "public-release-reading-02",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-02' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-02.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789393960.594,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789393939.837,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed: caught error: \"InvalidTransition { \n  phase: idle\n  targetPhase: failed(deinit)\n}\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser",
+            "testName": "testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Failed",
+          "durationInSeconds": 1.2236560583114624
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-02.xcresult",
+      "logSHA256": "a83786722899d0525718040bc6a8834f0521a9cc4ceda83e1e535c911517c2a4",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-02/result.json",
+      "reportSHA256": "d25b2c84162206fc0ef2a1df6248d4361ad4b7ed2d2773e7374180b7352f461d",
+      "result": {
+        "elapsedSeconds": 1.1438490152359009,
+        "failure": "Optional(RemoteDesktopHost.ComputerUseBrowserError.pageEvidenceUnavailable)",
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "public-release-reading-03",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-03' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-03.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-03.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394061.411,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789394039.48,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 2.634137988090515
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-03.xcresult",
+      "logSHA256": "22ce6d0530ffd1541b9478f674a7e638a4fb6a3630cc2822cbba9101f42e2b8c",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-03/result.json",
+      "reportSHA256": "3a151e51f0a29360c9b6dd85f70da8a1fbb0b71cb815325a1df274f8cee89371",
+      "result": {
+        "agentPageFailure": "RemoteDesktopHost.ComputerUseBrowserError.pageEvidenceUnavailable",
+        "elapsedSeconds": 2.5648930072784424,
+        "failure": "nil",
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "pageFailure": "RemoteDesktopHost.ComputerUseBrowserError.pageEvidenceUnavailable",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "public-release-reading-04",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-04' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-04.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-04.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394190.503,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789394167.975,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 2.7271499633789062
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-04.xcresult",
+      "logSHA256": "71eece53a022b4d82f8ccae109aac505907bba6e0c7f87617265f5f087192762",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-04/result.json",
+      "reportSHA256": "f6e338a5ce2eb059013b7e704ef359a24dd504d0fc20d9349fe2ecc7bc7dcd63",
+      "result": {
+        "agentPageFailure": "RemoteDesktopHost.ComputerUseBrowserError.pageEvidenceUnavailable",
+        "elapsedSeconds": 2.6604490280151367,
+        "failure": "nil",
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "pageFailure": "RemoteDesktopHost.ComputerUseBrowserError.pageEvidenceUnavailable",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "public-release-reading-05",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-05' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-05.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-05.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394348.231,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789394324.041,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 3.538251042366028
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-05.xcresult",
+      "logSHA256": "32bad0e2d633475a46ca1aff3911c46a99813c7637cc6a5f4418802162418433",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-05/result.json",
+      "reportSHA256": "d2cbe037149448817d5b92b5048b8349aa48177dab83e72fc9c331b94a3572be",
+      "result": {
+        "elapsedSeconds": 3.4709370136260986,
+        "failure": "nil",
+        "initialReadyState": "interactive",
+        "isolatedReadyState": "complete",
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "readyStateAtReading": "complete",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "public-release-reading-06",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-06' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-06.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-06.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394467.609,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789394444.742,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 3.564079999923706
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-06.xcresult",
+      "logSHA256": "d18f5f61d88f9f6d115a64787c27faf1fcbe5b491b73d9be2c1bb7efe5d940aa",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-06/result.json",
+      "reportSHA256": "2c22572e9bc696f234c9e7647701fc98c9be3b5d4beb9ff90a3947e89fcaad06",
+      "result": {
+        "currentTimeCaption": "",
+        "currentTimeTitle": "Sep 1, 2026 at 2:35 AM PDT",
+        "elapsedSeconds": 3.4965919256210327,
+        "failure": "nil",
+        "initialReadyState": "interactive",
+        "isolatedReadyState": "complete",
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "readyStateAtReading": "complete",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "public-release-reading-07",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-07' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-07.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-07.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394588.942,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789394565.43,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 3.44668710231781
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-07.xcresult",
+      "logSHA256": "5eb84f5588e0f5b4017e28d4a5f09be02dbcb930f73f5aabf8b226c0f4808fe9",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-07/result.json",
+      "reportSHA256": "6d624365d8bf828b488862c78e921a98b5029b9dcd84c907718927e804939053",
+      "result": {
+        "currentTimeCaption": "2 weeks ago",
+        "currentTimeTitle": "Sep 1, 2026 at 2:35 AM PDT",
+        "elapsedSeconds": 3.3783860206604004,
+        "failure": "nil",
+        "initialReadyState": "complete",
+        "isolatedReadyState": "complete",
+        "mcpTimeCaption": {
+          "isError": false,
+          "resultDigest": "3946907bafc1b7a7d87ed3af21b10bc62a1b6486a620fb87d805ac53d7e005af",
+          "structuredContent": {
+            "count": 0,
+            "elements": [],
+            "limit_reached": false,
+            "ok": true,
+            "pid": 37054
+          },
+          "text": "Found 0 matching elements.",
+          "wasTruncated": false
+        },
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "readyStateAtReading": "complete",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      }
+    },
+    {
+      "name": "browser-tooltip-red-01",
+      "command": "env TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 20 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-red-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-red-01.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789394739.348,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789394707.908,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - October 3, 2027 at 09:30 UTC",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent",
+            "testName": "testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()",
+          "result": "Failed",
+          "durationInSeconds": 1.1332610845565796
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-red-01.xcresult",
+      "logSHA256": "bb1725347655cd4ab61fb84e70ebd5db759973dd9807b0de886969d97a2e7670"
+    },
+    {
+      "name": "browser-tooltip-green-01",
+      "command": "env TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 20 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-green-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-green-01.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 4,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789394935.306,
+        "passedTests": 4,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789394834.8,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 4
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.2921919822692871
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize()",
+          "result": "Passed",
+          "durationInSeconds": 0.12310504913330078
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate()",
+          "result": "Passed",
+          "durationInSeconds": 0.11938893795013428
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.25641894340515137
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-green-01.xcresult",
+      "logSHA256": "f8e089f12ff23a6cc23751375aff8297c986c0531deebd6da175bb348e9f36cb"
+    },
+    {
+      "name": "browser-tooltip-regression-01",
+      "command": "env TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraPageReadingWireRetainsSourceAndBoundsContext -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraRejectsUnextractedPageTextInActionConversation -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraPageReadingBoundsAndRetirement -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-01.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 11,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789395027.78,
+        "passedTests": 11,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789394996.979,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseBrowserError.linkNavigationUnavailable)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseBrowserError.pageChanged)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 3,
+            "testIdentifierString": "ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical",
+            "testName": "testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 12
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.28245389461517334
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers()",
+          "result": "Passed",
+          "durationInSeconds": 0.13106298446655273
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical()",
+          "result": "Failed",
+          "durationInSeconds": 0.7321549654006958
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees()",
+          "result": "Passed",
+          "durationInSeconds": 0.13442504405975342
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize()",
+          "result": "Passed",
+          "durationInSeconds": 0.12294507026672363
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate()",
+          "result": "Passed",
+          "durationInSeconds": 0.12507498264312744
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata()",
+          "result": "Passed",
+          "durationInSeconds": 0.0009599924087524414
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly()",
+          "result": "Passed",
+          "durationInSeconds": 0.0035920143127441406
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraPageReadingWireRetainsSourceAndBoundsContext()",
+          "result": "Passed",
+          "durationInSeconds": 0.011929035186767578
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraRejectsUnextractedPageTextInActionConversation()",
+          "result": "Passed",
+          "durationInSeconds": 0.000993967056274414
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraPageReadingBoundsAndRetirement()",
+          "result": "Passed",
+          "durationInSeconds": 0.691370964050293
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.1905139684677124
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-01.xcresult",
+      "logSHA256": "61534d0304a9d29181103189b0b481281d590fc4d877c6452b0bba4d6efe4b69"
+    },
+    {
+      "name": "browser-tooltip-regression-02",
+      "command": "env TEST_RUNNER_RUN_PUBLIC_RELEASE_READING_PROBE=1 TEST_RUNNER_PUBLIC_RELEASE_READING_PROBE_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-08' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 60 -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraPageReadingWireRetainsSourceAndBoundsContext -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testFaraRejectsUnextractedPageTextInActionConversation -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFaraPageReadingBoundsAndRetirement -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees -only-testing:RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-02.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-02.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 13,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789395178.599,
+        "passedTests": 13,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789395143.652,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Longest Test Runs",
+            "impact": "70% of duration",
+            "text": "1 longest test run with outlier durations exceeding 3.90s (three standard deviations)"
+          }
+        ],
+        "totalTestCount": 13
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testChangingOnlyTooltipRetiresPageReadingEvidence()",
+          "result": "Passed",
+          "durationInSeconds": 0.29295599460601807
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureAssociatesNestedCardTextLinksAndControlsWithoutCombiningOffers()",
+          "result": "Passed",
+          "durationInSeconds": 0.12753701210021973
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureRejectsWrapperReplacementEvenWhenChildrenAndProjectionAreIdentical()",
+          "result": "Passed",
+          "durationInSeconds": 0.13780200481414795
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageStructureTracksComposedSlotAncestorsAndBoundsIncompleteTrees()",
+          "result": "Passed",
+          "durationInSeconds": 0.1379779577255249
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipBoundsAccountForUTF8AndTotalSnapshotSize()",
+          "result": "Passed",
+          "durationInSeconds": 0.12233400344848633
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipsKeepCaptionLinkIdentityAndExplicitInheritanceSeparate()",
+          "result": "Passed",
+          "durationInSeconds": 0.11854708194732666
+        },
+        {
+          "nodeIdentifier": "ComputerUseBrowserDOMTests/testPageTooltipValidationRejectsMalformedAndAggregateOversizedMetadata()",
+          "result": "Passed",
+          "durationInSeconds": 0.0009909868240356445
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraExtractionRequestAndResponseRemainBoundedAndTextOnly()",
+          "result": "Passed",
+          "durationInSeconds": 0.0034819841384887695
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraPageReadingWireRetainsSourceAndBoundsContext()",
+          "result": "Passed",
+          "durationInSeconds": 0.012568950653076172
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testFaraRejectsUnextractedPageTextInActionConversation()",
+          "result": "Passed",
+          "durationInSeconds": 0.0009590387344360352
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFaraPageReadingBoundsAndRetirement()",
+          "result": "Passed",
+          "durationInSeconds": 0.707866907119751
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent()",
+          "result": "Passed",
+          "durationInSeconds": 0.1968669891357422
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser()",
+          "result": "Passed",
+          "durationInSeconds": 4.384950041770935
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/browser-tooltip-regression-02.xcresult",
+      "logSHA256": "d36027bc4cfda10e93f2826a87f711f28ae8d1f5a919245ba3c96b47f1031779",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/public-release-reading-08/result.json",
+      "reportSHA256": "8d69e12b41fc0fa354f68f4b962bdd4bcebfd09f717f5e3b681008bc8e123577",
+      "result": {
+        "currentTimeCaption": "2 weeks ago",
+        "currentTimeTitle": "Sep 1, 2026 at 2:35 AM PDT",
+        "elapsedSeconds": 4.318082094192505,
+        "failure": "nil",
+        "initialReadyState": "interactive",
+        "isolatedReadyState": "complete",
+        "mcpTimeCaption": {
+          "isError": false,
+          "resultDigest": "e48273cde790100b7157cbdb09ec6415329e022268c273a7ea38f1c3f950ed86",
+          "structuredContent": {
+            "count": 0,
+            "elements": [],
+            "limit_reached": false,
+            "ok": true,
+            "pid": 44276
+          },
+          "text": "Found 0 matching elements.",
+          "wasTruncated": false
+        },
+        "modelInference": false,
+        "mutationLedgerCreated": false,
+        "readyStateAtReading": "complete",
+        "scope": "public-page-MCP-and-owned-browser-read-probe",
+        "stage": "complete",
+        "workersAfterShutdown": 0
+      },
+      "pageReading": {
+        "bytes": 2626,
+        "truncated": false,
+        "omittedEmbeddedContent": true,
+        "containsExactObservedTooltip": true,
+        "usesProductionReadingProjection": true,
+        "modelDecisions": "scripted capability probe, no inference"
+      }
+    },
+    {
+      "name": "managed-github-release-tooltip-01",
+      "command": "env TEST_RUNNER_MANAGED_PUBLIC_BROWSER_TRACE=1 TEST_RUNNER_RUN_MANAGED_PUBLIC_BROWSER=1 TEST_RUNNER_MANAGED_PUBLIC_BROWSER_TRIAL_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test-without-building -xctestrun /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/RemoteDesktopHost_macosx27.0-arm64.xctestrun -destination 'platform=macOS,arch=arm64' -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 150 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01.xcresult' > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01.log' 2>&1",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789395330.887,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789395216.417,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub",
+            "testName": "testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "methods": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub()",
+          "result": "Failed",
+          "durationInSeconds": 99.9317489862442
+        }
+      ],
+      "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01.xcresult",
+      "logSHA256": "901a25d6e530debb9ccf51157acb82c0e64277b3452e5008b8ac7852b35d157c",
+      "reportPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/managed-github-release-tooltip-01/result.json",
+      "reportSHA256": "b6aa17ba985db14a7a491cc432385abf0a8fc7d93d8a04a88cf08f967e2bb261",
+      "result": {
+        "activityAtEnd": "idle",
+        "diagnosticTraceEnabled": true,
+        "elapsedSeconds": 98.99101507663727,
+        "failure": "nil",
+        "goal": "Open https://github.com/apple/swift-nio/releases. Find the latest stable release and report its version, publication date in YYYY-MM-DD format, and the official link for that release.",
+        "maximumObservedWorkerCount": 1,
+        "observedBrowserURLs": [
+          "https://github.com/apple/swift-nio/releases",
+          "https://github.com/apple/swift-nio/releases/tag/2.102.0"
+        ],
+        "scope": "real-GitHub-read-only-task-through-managed-HostSession",
+        "taskID": "managed-github-release-6751C427-3554-4662-B1FD-7933FAD40B4C",
+        "terminalOutcome": "unableToComplete",
+        "terminalText": "I couldn't complete that task: The local AI model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac.",
+        "workersAfterShutdown": 0,
+        "workerSamples": 819
+      }
+    }
+  ]
+}

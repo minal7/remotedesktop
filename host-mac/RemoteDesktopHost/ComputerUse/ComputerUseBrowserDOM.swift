@@ -110,6 +110,17 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
         /// DOM grouping only; it does not prove two facts describe one ticket.
         let containerID: String
         let text: String
+        /// Website-declared HTML tooltip associated with this rendered text.
+        /// Kept separate from the caption and from actionable control labels.
+        let tooltip: String?
+
+        init(id: String, containerID: String, text: String, tooltip: String? = nil) {
+            self.id = id; self.containerID = containerID; self.text = text; self.tooltip = tooltip
+        }
+
+        var pageReadingText: String {
+            text + (tooltip.map { "\nWebsite tooltip: " + $0 } ?? "")
+        }
     }
     struct Link: Decodable, Equatable, Sendable {
         let id: String
@@ -340,13 +351,14 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
                       && $0.action.utf8.count <= 8_192 && $0.target.utf8.count <= 256 && $0.encoding.utf8.count <= 128 } ?? true)
               }),
               texts.allSatisfy({ identifier($0.id, prefix: "t") && identifier($0.containerID, prefix: "g")
-                  && !$0.text.isEmpty && $0.text.utf8.count <= 2_048 }),
+                  && !$0.text.isEmpty && $0.text.utf8.count <= 2_048
+                  && ($0.tooltip.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 2_048 } ?? true) }),
               links.allSatisfy({ identifier($0.id, prefix: "l") && !$0.label.isEmpty && $0.label.utf8.count <= 2_048
                   && ($0.containerID.map { identifier($0, prefix: "g") } ?? true)
                   && URL(string: $0.destination).flatMap(ComputerUseOwnedBrowser.validatedURL) != nil
                   && Set($0.textIDs).count == $0.textIDs.count && $0.textIDs.count <= 256
                   && Set($0.textIDs).isSubset(of: Set(texts.map(\.id))) }) else { return false }
-        return texts.reduce(0) { $0 + $1.text.utf8.count }
+        return texts.reduce(0) { $0 + $1.text.utf8.count + ($1.tooltip?.utf8.count ?? 0) }
             + links.reduce(0) { $0 + $1.label.utf8.count + $1.destination.utf8.count }
             + controls.reduce(0) { $0 + $1.valueByteCount }
             + controlStates.reduce(0) { $0 + $1.byteCount }
@@ -1188,7 +1200,8 @@ enum ComputerUseBrowserDOM {
       }
       function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
         // The text pass reads rendered text nodes, never form values,
-        // innerHTML, scripts or frame documents. A separate opt-in pass below
+        // innerHTML, scripts or frame documents. Bounded HTML title metadata
+        // stays separate from each caption. A separate opt-in pass below
         // observes native properties or scoped declarations. Omitted surfaces remain explicit.
         const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"],[role="listbox"],[role="option"],[hidden],[inert],[aria-hidden="true"]';
         const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
@@ -1283,6 +1296,22 @@ enum ComputerUseBrowserDOM {
           if (!containerID || bytes + size > 65536) { truncated = true; continue; }
           bytes += size;
           const entry = {id: 't' + (texts.length + 1), containerID, text};
+          // HTML title inheritance applies through the composed ancestors.
+          // An explicit empty title suppresses an ancestor's tooltip. Never
+          // read tooltips from excluded controls or non-rendered text nodes.
+          for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
+            if (element.hasAttribute('title')) {
+              const tooltip = element.getAttribute('title');
+              if (tooltip.length > 8192) { truncated = true; break; }
+              const tooltipBytes = encoder.encode(tooltip).length;
+              if (tooltip.trim()) {
+                if (tooltipBytes <= 2048 && bytes + tooltipBytes <= 65536) { entry.tooltip = tooltip; bytes += tooltipBytes; }
+                else truncated = true;
+              }
+              break;
+            }
+            if (element === root) break;
+          }
           texts.push(entry);
           for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
             if (anchors.has(element)) { anchors.get(element).push(entry); break; }

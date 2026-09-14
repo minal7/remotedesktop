@@ -2332,6 +2332,46 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInPageReadingIncludesVisibleTextTooltipsAcrossOrdinaryAndShadowContent() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native tooltip reading without inference") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><meta charset=utf-8><h1>Public schedule</h1>
+            <time title="October 3, 2027 at 09:30 UTC">Soon</time>
+            <x-clock title="Closed on public holidays"></x-clock>
+            <p title="東京 — exact tooltip">Opening hours</p>
+            <div title="Do not inherit this"><span title="">No tooltip here</span></div>
+            <p hidden title="HiddenMetadata">Hidden caption</p>
+            <input title="PrivateInputMetadata" value="PrivateValue">
+            <script>document.querySelector('x-clock').attachShadow({mode:'open'}).innerHTML='<span>Calendar notes</span>';</script>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("TooltipReading-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: "tooltip-reading")
+        _ = try await browser.navigate(taskID: "tooltip-reading", operationID: "open", to: base.appendingPathComponent("page"))
+        var calls = 0, captured = ""
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1; guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let response = calls == 1
+                ? #"<tool_call>{"name":"computer_use","arguments":{"action":"read_page_answer_question","question":"Read the visible schedule and its tooltips."}}</tool_call>"#
+                : #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"Read without input."}}</tool_call>"#
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        }, readPage: { reading in captured = reading.text; return "Reading captured." })
+        let result = try await executor.execute(taskID: "tooltip-reading", prompt: "Read this page without changing it.",
+            trustedUserPrompt: "Read this page without changing it.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Read without input.")); XCTAssertEqual(calls, 2)
+        for text in ["Soon", "October 3, 2027 at 09:30 UTC", "Calendar notes", "Closed on public holidays", "東京 — exact tooltip", "Website tooltip"] {
+            XCTAssertTrue(captured.contains(text), text)
+        }
+        for text in ["Do not inherit this", "HiddenMetadata", "PrivateInputMetadata", "PrivateValue"] { XCTAssertFalse(captured.contains(text), text) }
+    }
+
+    @MainActor
     func testOptInLiveSFJazzPageReadingRetainsExactVenueAndTicketFacts() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: native public-page text reading without inference") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
