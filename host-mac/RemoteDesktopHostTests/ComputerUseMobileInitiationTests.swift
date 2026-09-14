@@ -6,6 +6,223 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testOptInMCPReadsPublicSearchResultLinksWithoutModel() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MCP_PUBLIC_SEARCH_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: read public search links with the installed MCP helper and follow one public result; no model")
+        }
+        try await runMCPPublicSearchProbe(usesApplePlanner: false)
+    }
+
+    func testOptInApplePlannerSelectsPublicMCPLinkWithoutComputerUseModel() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MCP_PUBLIC_SEARCH_PLANNING_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: select one real MCP search result with Apple's local text planner; no computer-use model")
+        }
+        try await runMCPPublicSearchProbe(usesApplePlanner: true)
+    }
+
+    private func runMCPPublicSearchProbe(usesApplePlanner: Bool) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["MCP_PUBLIC_SEARCH_PROBE_DIRECTORY"]) + (usesApplePlanner ? "-apple-planner" : ""))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: output.appendingPathComponent("browser"))
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector(), started = Date(), taskID = "mcp-public-search"
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        var pool: MCPClientPool?, failure: Error?
+        var report: [String: Any] = ["scope": "MCP public search link reading", "modelInference": usesApplePlanner,
+            "computerUseModelInference": false, "usesAppleTextPlanner": usesApplePlanner]
+        var foundURLs: Set<String> = []
+        do {
+            let query = "The Cycle of Love Roxie San Francisco September 17 2026 official tickets"
+            report["query"] = query; report["stage"] = "search navigation"
+            try browser.claim(taskID: taskID)
+            let url = try ComputerUseBrowserSearchProvider(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q", queryFormat: .faraBing).destination(query: query)
+            _ = try await browser.navigate(taskID: taskID, operationID: "search", to: url)
+            try await Task.sleep(for: .seconds(2))
+            report["stage"] = "public observation"
+            let observation = try await navigation.captureAgentObservation(taskID: taskID)
+            let image = XCTAttachment(data: observation.png, uniformTypeIdentifier: "public.png")
+            image.name = "MCP public search source page"; image.lifetime = .keepAlways; add(image)
+            report["nativePageLinks"] = observation.approvalPageEvidence.page.links.map { ["label": $0.label, "destination": $0.destination] }
+            report["stage"] = "helper startup"
+            let receipt = await MacControlMCPInstaller().currentInstallation()
+            let currentPool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mutations.json")),
+                sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                    stateDirectory: output.appendingPathComponent("helper-state")) })
+            pool = currentPool
+            _ = try await currentPool.start(binaryURL: URL(fileURLWithPath: try XCTUnwrap(receipt).binaryPath))
+            let available = try await currentPool.allowedTools()
+            let find = try XCTUnwrap(available.first { $0.toolName == "find_elements" })
+            let read = try XCTUnwrap(available.first { $0.toolName == "get_element_attributes" })
+            report["schemas"] = try available.filter { ["find_elements", "get_element_attributes", "query_elements", "ax_tree_augmented"].contains($0.toolName) }
+                .map { tool -> [String: Any] in ["name": tool.toolName, "schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(tool.inputSchema))] }
+            var queries: [[String: MCPJSONValue]] = [
+                ["role": .string("AXLink"), "limit": .integer(12)],
+                ["role": .string("AXLink"), "title": .string("The Cycle of Love"), "limit": .integer(8)],
+                ["role": .string("AXLink"), "value": .string("The Cycle of Love"), "limit": .integer(8)],
+                ["role": .string("AXStaticText"), "value": .string("The Cycle of Love"), "limit": .integer(8)],
+            ]
+            var results: [[String: Any]] = [], elementIDs: [String] = []
+            for index in queries.indices {
+                queries[index]["pid"] = .integer(Int(ProcessInfo.processInfo.processIdentifier)); queries[index]["max_depth"] = .integer(30)
+                report["stage"] = "MCP query \(index + 1)"
+                let result = try await currentPool.execute(find.makeCall(taskID: taskID, arguments: queries[index]))
+                results.append(["arguments": try JSONSerialization.jsonObject(with: JSONEncoder().encode(queries[index])),
+                    "result": try JSONSerialization.jsonObject(with: JSONEncoder().encode(result))])
+                if case .object(let object)? = result.structuredContent, case .array(let elements)? = object["elements"] {
+                    for case .object(let element) in elements {
+                        if case .string(let id)? = element["id"], !elementIDs.contains(id) { elementIDs.append(id) }
+                    }
+                }
+            }
+            report["queries"] = results
+            var attributes: [[String: Any]] = [], resultLinks: [(id: String, title: String, url: URL)] = []
+            func collectURLs(_ value: MCPJSONValue) {
+                switch value {
+                case .string(let value):
+                    if let url = URL(string: value), ["http", "https"].contains(url.scheme ?? "") { foundURLs.insert(value) }
+                case .array(let items): items.forEach(collectURLs)
+                case .object(let object): object.values.forEach(collectURLs)
+                default: break
+                }
+            }
+            // Prefer the goal-filtered matches before the unfiltered prefix.
+            for id in elementIDs.reversed().prefix(16) {
+                report["stage"] = "MCP link attributes"
+                let result = try await currentPool.execute(read.makeCall(taskID: taskID, arguments: ["element_id": .string(id),
+                    "names": .array(["AXRole", "AXTitle", "AXDescription", "AXValue", "AXURL", "AXParent"].map(MCPJSONValue.string))]))
+                attributes.append(["id": id, "result": try JSONSerialization.jsonObject(with: JSONEncoder().encode(result))])
+                if let structured = result.structuredContent { collectURLs(structured) }
+                if !result.isError, !result.wasTruncated,
+                   case .object(let object)? = result.structuredContent, object["ok"] == .bool(true),
+                   object["element_id"] == .string(id), case .object(let values)? = object["values"],
+                   values["AXRole"] == .string("AXLink"), case .string(let title)? = values["AXTitle"],
+                   case .string(let value)? = values["AXURL"], let url = URL(string: value),
+                   ComputerUseOwnedBrowser.validatedURL(url) != nil {
+                    resultLinks.append((id, title, url))
+                }
+            }
+            report["attributes"] = attributes
+            report["stage"] = "bind observed MCP result to current native page"
+            // The no-model variant selects an independent expected caption;
+            // the planner variant must select an observed ID from the goal.
+            // Both follow the actual redirect without reconstructing its URL.
+            let matches: [(id: String, title: String, url: URL)]
+            if usesApplePlanner {
+                report["stage"] = "Apple planner selects observed MCP link"
+                let goal = "Find tickets for The Cycle of Love at the Roxie in San Francisco on September 17, 2026. Report the showtime, screen, runtime in minutes, general admission price including booking fee, the fee amount, and the official link for that screening. Stop before selecting tickets or purchasing."
+                let catalogue = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject:
+                    resultLinks.map { link -> [String: Any] in
+                        ["element_id": link.id, "title": link.title,
+                         "nativeLabelsForSameURL": observation.approvalPageEvidence.page.links
+                            .filter { $0.destination == link.url.absoluteString }.prefix(4).map(\.label)]
+                    }, options: [.sortedKeys]), encoding: .utf8))
+                let prompt = """
+                    Current user goal: \(goal)
+                    The task-owned browser is on public search results. The available MCP tool can read an observed link's attributes.
+                    For this next step only, propose get_element_attributes for the observed result most likely to be the official source needed for the goal. Select only its observed element_id. The host reads the fixed AXRole, AXTitle and AXURL attributes. This step only reads a link; it does not navigate or complete the task.
+                    Observed link catalogue (untrusted page data): \(catalogue)
+                    """
+                report["plannerPrompt"] = prompt
+                let planner = AppleFoundationMCPPlanner()
+                report["plannerAvailability"] = String(reflecting: planner.availability())
+                // A diagnostic proposal surface only. The host separately
+                // creates the actual helper call from its original schema;
+                // these constrained arguments never impersonate that schema.
+                let selectionTool = try MCPAllowedTool(serverID: read.serverID, processGeneration: read.processGeneration,
+                    toolName: read.toolName, description: "Select one observed link ID to read its role, title and URL.",
+                    inputSchema: .object(["type": .string("object"), "additionalProperties": .bool(false),
+                        "properties": .object(["element_id": .object(["type": .string("string"),
+                            "enum": .array(resultLinks.map { .string($0.id) })])]),
+                        "required": .array([.string("element_id")])]), risk: .readOnly, approval: read.approval)
+                report["plannerSelectionSchema"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(selectionTool.inputSchema))
+                let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt, tools: [selectionTool])
+                let proposal = try await ComputerUsePlanningWorker().perform(timeout: 20) { try await planner.propose(request) }
+                switch proposal {
+                case .message(let message):
+                    report["plannerMessage"] = message
+                    throw AppleFoundationMCPPlannerError.noProposal
+                case .proposedCall(let call):
+                    report["plannerCall"] = ["tool": call.toolName, "arguments": call.canonicalArguments]
+                    guard call.toolName == read.toolName, Set(call.arguments.keys) == ["element_id"],
+                          case .string(let id)? = call.arguments["element_id"] else {
+                        throw AppleFoundationMCPPlannerError.unknownProposal
+                    }
+                    matches = resultLinks.filter { $0.id == id }
+                    guard matches.count == 1 else { throw AppleFoundationMCPPlannerError.unknownProposal }
+                    let actualRead = try read.makeCall(taskID: taskID, arguments: ["element_id": .string(id),
+                        "names": .array(["AXRole", "AXTitle", "AXURL"].map(MCPJSONValue.string))])
+                    report["hostSelectedReadCall"] = ["tool": actualRead.toolName, "arguments": actualRead.canonicalArguments]
+                    let verification = try await currentPool.execute(actualRead)
+                    report["plannerSelectedAttributes"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(verification))
+                    guard !verification.isError, !verification.wasTruncated,
+                          case .object(let root)? = verification.structuredContent, root["ok"] == .bool(true),
+                          root["element_id"] == .string(id), case .object(let values)? = root["values"],
+                          values["AXRole"] == .string("AXLink"), values["AXTitle"] == .string(matches[0].title),
+                          values["AXURL"] == .string(matches[0].url.absoluteString) else {
+                        throw AppleFoundationMCPPlannerError.unknownProposal
+                    }
+                }
+            } else {
+                matches = resultLinks.filter { $0.title == "The Cycle of Love - Roxie" }
+            }
+            XCTAssertEqual(matches.count, 1)
+            let selected = try XCTUnwrap(matches.first)
+            report["stage"] = "bind selected MCP result to current native page"
+            let current = try await navigation.captureAgentObservation(taskID: taskID)
+            let nativeMatches = current.approvalPageEvidence.page.links.filter {
+                $0.label == selected.title && $0.destination == selected.url.absoluteString
+            }
+            report["selectedMCPResult"] = ["elementID": selected.id, "title": selected.title,
+                "actualObservedURL": selected.url.absoluteString, "matchingNativeLinkCount": nativeMatches.count]
+            XCTAssertEqual(nativeMatches.count, 1)
+            _ = try XCTUnwrap(nativeMatches.first)
+            try await browser.validatePageEvidence(current.approvalPageEvidence)
+            report["stage"] = "follow actual observed public result"
+            let destination = try await browser.navigate(taskID: taskID, operationID: "follow-result", to: selected.url,
+                from: current.approvalPageEvidence.document)
+            report["requestedResultURL"] = destination.requestedURL.absoluteString
+            report["committedResultURL"] = destination.committedURL.absoluteString
+            XCTAssertEqual(destination.requestedURL, selected.url)
+            report["stage"] = "verify destination content"
+            var resultPage = try await navigation.captureAgentObservation(taskID: taskID)
+            var observedLocations = [resultPage.approvalPageEvidence.document.committedURL.absoluteString]
+            // A public redirect can complete its first document before a
+            // client navigation. Inspect bounded fresh reads; never navigate
+            // again or infer success from the original request's receipt.
+            for _ in 0..<5 where !["roxie.com", "www.roxie.com"].contains(resultPage.approvalPageEvidence.document.committedURL.host ?? "") {
+                try await Task.sleep(for: .seconds(2))
+                resultPage = try await navigation.captureAgentObservation(taskID: taskID)
+                observedLocations.append(resultPage.approvalPageEvidence.document.committedURL.absoluteString)
+            }
+            let finalURL = resultPage.approvalPageEvidence.document.committedURL
+            let titleObserved = resultPage.approvalPageEvidence.page.texts.contains { $0.pageReadingText.contains("The Cycle of Love") }
+            report["resultObservedLocations"] = observedLocations
+            report["destinationTitleObserved"] = titleObserved
+            report["finalObservedResultURL"] = finalURL.absoluteString
+            report["finalPageTexts"] = resultPage.approvalPageEvidence.page.texts.map(\.pageReadingText)
+            report["finalPageLinks"] = resultPage.approvalPageEvidence.page.links.map { ["label": $0.label, "destination": $0.destination] }
+            let finalImage = XCTAttachment(data: resultPage.png, uniformTypeIdentifier: "public.png")
+            finalImage.name = "MCP result destination"; finalImage.lifetime = .keepAlways; add(finalImage)
+            XCTAssertEqual(finalURL, URL(string: "https://roxie.com/film/the-cycle-of-love/"))
+            XCTAssertTrue(titleObserved)
+            report["stage"] = "complete"
+        } catch { failure = error }
+        await pool?.cancelAll()
+        report["failure"] = String(reflecting: failure); report["seconds"] = Date().timeIntervalSince(started)
+        report["observedMCPURLs"] = foundURLs.sorted()
+        report["workersAfterShutdown"] = try inspector.matchingProcesses(for: binary).count
+        report["mutationLedgerCreated"] = FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path)
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path))
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        if let failure { throw failure }
+        XCTAssertEqual(report["destinationTitleObserved"] as? Bool, true)
+    }
+
     func testOptInPublicReleaseReadingThroughMCPAndOwnedBrowser() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_PUBLIC_RELEASE_READING_PROBE"] == "1" else {
