@@ -6,6 +6,103 @@ import XCTest
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    func testMCPBrowserPartialRecordViewCannotFinishOrClaimToolIncapability() throws {
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let source = URL(string: "https://example.org/source")!
+        let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
+            userURLs: ["user-url-1": source], links: [:], navigation: ["records-next": 1],
+            answerTexts: ["Price: $15.50"], answerSources: [source.absoluteString], isPartialRecordView: true)
+        for kind in ["answer", "visualFallback"] {
+            XCTAssertThrowsError(try planner.decode(.object(["kind": .string(kind), "reference": .string(""),
+                "text": .string("Price: $15.50. Remaining requested facts are unavailable.")]), context: context))
+        }
+        for (kind, reference) in [("openLink", "user-url-1"), ("inspectRecords", "records-next")] {
+            XCTAssertEqual(try planner.decode(.object(["kind": .string(kind), "reference": .string(reference), "text": .string("")]), context: context).reference, reference)
+        }
+    }
+
+    func testMCPBrowserAnswerRejectsUnsupportedNumericClaimsAndSources() throws {
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]), userURLs: [:], links: [:],
+            answerTexts: ["Latest release 2.102.0", "2 weeks ago\nWebsite tooltip: Sep 1, 2026 at 2:35 AM PDT",
+                "Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.", "Other values: 2025, 05, 15, 21, 40"],
+            answerSources: ["https://example.org/releases/tag/2.102.0"])
+        for answer in [
+            "Latest stable release: 2.102.0. Publication date: 2025-05-15.",
+            "Departure: 21:40", "Platform: 16", "Price: €15.50", "Discount: 50%",
+            "Source: https://example.org/releases", "Source: https://example.org/releases/tag/2.102.0?unobserved=1",
+            "Source: https://unobserved.invalid/releases/tag/2.102.0"] {
+            XCTAssertThrowsError(try planner.decode(.object(["kind": .string("answer"), "reference": .string(""), "text": .string(answer)]), context: context), answer)
+        }
+    }
+
+    func testMCPBrowserAnswerAllowsObservedLiteralsAndExplicitCivilDateConversion() throws {
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]), userURLs: [:], links: [:],
+            answerTexts: ["Release 2.102.0", "Website tooltip: Sep 1, 2026 at 2:35 AM PDT",
+                "Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.", "29 February 2024"],
+            answerSources: ["https://example.org/releases/tag/2.102.0"])
+        for answer in ["Release 2.102.0, published 2026-09-01.", "Date: 2024-02-29.",
+                       "Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.",
+                       "Source: [Release](https://example.org/releases/tag/2.102.0)"] {
+            XCTAssertEqual(try planner.decode(.object(["kind": .string("answer"), "reference": .string(""), "text": .string(answer)]), context: context).text, answer)
+        }
+    }
+
+    func testMCPBrowserAnswerDoesNotPromoteURLsHistoryOrAmbiguousDatesIntoFacts() throws {
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let cases: [([String], String)] = [
+            (["https://example.org/items/731"], "Platform: 731"),
+            (["Sep 1", "2026"], "Date: 2026-09-01"),
+            (["09/01/2026"], "Date: 2026-09-01"),
+            (["2 weeks ago"], "Date: 2026-09-01"),
+            (["February 29, 2025"], "Date: 2025-02-29"),
+            (["Platform: 6"], "Platform: -6"),
+            (["Price: $15.50"], "Price: € 15.50"),
+            ([], "The task is complete")]
+        for (texts, answer) in cases {
+            let context = ComputerUseMCPBrowserStepPlanner.Context(json: #"{"history":[{"text":"Platform: 731. Date: 2026-09-01"}]}"#,
+                schema: .object([:]), userURLs: ["user-url-1": URL(string: "https://example.org/731")!], links: [:], answerTexts: texts)
+            XCTAssertThrowsError(try planner.decode(.object(["kind": .string("answer"), "reference": .string(""), "text": .string(answer)]), context: context), answer)
+        }
+    }
+
+    func testBrowserRecordWindowsKeepAllRecordsAndSourceGroupsWithinPlanningBounds() throws {
+        let groups: [ComputerUseBrowserPageSnapshot.Container] = [
+            .init(id: "g1", parentID: nil, kind: "body"),
+            .init(id: "g2", parentID: "g1", kind: "nav"),
+            .init(id: "g3", parentID: "g1", kind: "main")]
+        let texts: [ComputerUseBrowserPageSnapshot.Text] = (1 ... 140).map { index in
+            .init(id: "t\(index)", containerID: index <= 35 ? "g2" : "g3",
+                text: "Record \(index): café 東京 " + String(repeating: "content ", count: 8),
+                tooltip: index == 139 ? "Exact date from source" : nil)
+        }
+        var links: [ComputerUseBrowserPageSnapshot.Link] = (1 ... 75).map { index in
+            .init(id: "l\(index)", label: index % 2 == 0 ? "Details" : "Source \(index)",
+                destination: "https://example.org/item/\(index)", textIDs: ["t\(index)"],
+                containerID: index <= 35 ? "g2" : "g3")
+        }
+        links.append(.init(id: "l76", label: "Search", destination: "https://example.org/search", textIDs: [], containerID: "g3"))
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "a", count: 32), texts: texts, links: links,
+            truncated: true, omittedEmbeddedContent: true, containers: groups, omittedStructure: false)
+        XCTAssertTrue(page.isWellFormed)
+        let windows = try ComputerUseMCPBrowserStepPlanner.recordWindows(page)
+        XCTAssertGreaterThan(windows.count, 1)
+        XCTAssertEqual(windows.flatMap(\.texts), texts, "Every captured text remains reachable in native order")
+        XCTAssertEqual(Set(windows.flatMap(\.links).map(\.id)), Set(links.map(\.id)))
+        XCTAssertEqual(windows.flatMap(\.links).count, links.count, "No link is duplicated or lost at a window boundary")
+        for window in windows {
+            XCTAssertLessThanOrEqual(window.texts.count, 32)
+            XCTAssertLessThanOrEqual(window.links.count, 24)
+            XCTAssertLessThanOrEqual(try window.encodedByteCount, 6 * 1024)
+            let ids = Set(window.containers.map(\.id))
+            for text in window.texts { XCTAssertTrue(ids.contains(text.containerID)) }
+            for link in window.links { XCTAssertEqual(links.first { $0.id == link.id }, link) }
+            for group in window.containers { if let parent = group.parentID { XCTAssertTrue(ids.contains(parent)) } }
+        }
+        XCTAssertEqual(windows.flatMap(\.texts).last?.tooltip, texts.last?.tooltip)
+    }
+
     func testMCPBrowserLinkUsesOnlyObservedReferenceAndRejectsInventedAuthority() throws {
         let planner = ComputerUseMCPBrowserStepPlanner()
         let destination = URL(string: "https://example.org/original")!
@@ -21,10 +118,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         for invalid in [proposal("openLink", "invented"), proposal("openLink", ""),
                         proposal("search", "invented", "query"), proposal("execute", "", "code"),
+                        proposal("remember", "", "Unverified old memory"), proposal("answer", "", "Unobserved answer"),
                         proposal("openLink", "user-url-1", String(repeating: "é", count: 2049))] {
             XCTAssertThrowsError(try planner.decode(invalid, context: context))
         }
-        for kind in ["search", "remember", "answer", "askUser", "wait", "visualFallback"] {
+        for kind in ["search", "askUser", "wait", "visualFallback"] {
             let plan = try planner.decode(proposal(kind, "user-url-1", "bounded text"), context: context)
             XCTAssertEqual(plan.reference, "", "An unused reference is not an evidence claim or navigation authority")
             XCTAssertEqual(plan.text, "bounded text")
@@ -68,7 +166,17 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let trace = MCPBrowserLoopTrace()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
             visualFallback: browserExecutor, clientPool: pool,
-            browserStepPlanner: .init(inspectProposal: { trace.append($0) }))
+            browserStepPlanner: .init(inspectProposal: { trace.append($0) }, inspectCatalogue: { snapshot, source in
+                let catalogue: [String: Any] = ["id": snapshot.id, "sourceURL": source.absoluteString,
+                    "texts": snapshot.texts.map { ["id": $0.id, "containerID": $0.containerID, "text": $0.text, "tooltip": $0.tooltip as Any? ?? NSNull()] },
+                    "links": snapshot.links.map { ["id": $0.id, "containerID": $0.containerID as Any? ?? NSNull(), "label": $0.label,
+                        "destination": $0.destination, "textIDs": $0.textIDs] },
+                    "containers": snapshot.containers.map { ["id": $0.id, "parentID": $0.parentID as Any? ?? NSNull(), "kind": $0.kind] },
+                    "truncated": snapshot.truncated, "omittedStructure": snapshot.omittedStructure,
+                    "omittedEmbeddedContent": snapshot.omittedEmbeddedContent]
+                try JSONSerialization.data(withJSONObject: catalogue, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                    .write(to: output.appendingPathComponent("catalogue-\(snapshot.id).json"), options: .atomic)
+            }))
         let goal = publicRelease
             ? "Open https://github.com/apple/swift-nio/releases. Find the latest stable release and report its version, publication date in YYYY-MM-DD format, and the official link for that release."
             : "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform."

@@ -808,6 +808,7 @@ final class MCPFirstComputerUseExecutor:
         try checkExecutionCancellation()
         let arguments: [String: Any]
         switch plan.kind {
+        case .inspectRecords: throw AppleFoundationMCPPlannerError.unknownProposal
         case .visualFallback: return nil
         case .search:
             guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
@@ -821,9 +822,6 @@ final class MCPFirstComputerUseExecutor:
                 destination = verified
             }
             arguments = ["action": "visit_url", "url": destination.absoluteString]
-        case .remember:
-            guard case .page = observation, !plan.text.isEmpty else { throw AppleFoundationMCPPlannerError.unknownProposal }
-            arguments = ["action": "pause_and_memorize_fact", "fact": plan.text]
         case .answer:
             guard case .page = observation, !plan.text.isEmpty, !Self.requestsConsequentialMutation(input.goal) else { return nil }
             arguments = ["action": "terminate", "answer": plan.text]
@@ -838,7 +836,8 @@ final class MCPFirstComputerUseExecutor:
         let encoded = String(decoding: try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
             .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
         let response = "<tool_call>" + encoded + "</tool_call>"
-        return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        let proposal = try ComputerUseFaraModel.Proposal(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        return proposal
     }
 
     private func readBrowserLinkWithMCP(_ link: ComputerUseBrowserPageSnapshot.Link,
