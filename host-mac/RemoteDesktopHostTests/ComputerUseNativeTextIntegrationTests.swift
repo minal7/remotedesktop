@@ -103,13 +103,18 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             mcpReadPrompt: "Show me all the contents in the current document.", mcpReadSelection: NSRange(location: 0, length: 7))
     }
 
+    func testOptInRealTextEditMCPEditAndSaveCapability() async throws {
+        try await runRealTextEditTask(actualModel: false, mcpWriteProbe: true)
+    }
+
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
     }
 
     private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
-        mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil) async throws {
+        mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
+        mcpWriteProbe: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -162,6 +167,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         do {
             for _ in 0..<100 { if ownsDocument() { break }; try await Task.sleep(for: .milliseconds(50)) }
             guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
+            if mcpWriteProbe {
+                try await probeTextEditMCPWrite(tools: tools, app: app, original: original, expected: expected,
+                    document: document, output: output)
+                return
+            }
             if mcpReadOnly {
                 if let mcpReadSelection {
                     var focused: CFTypeRef?
@@ -322,6 +332,65 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         else { XCTAssertTrue((5...7).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1); XCTAssertEqual(approvedEditorClicks, 1) }
         XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
         XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
+    /// Real helper capability experiment. This owns all input and its target;
+    /// it does not claim natural-language planner or whole-product acceptance.
+    private func probeTextEditMCPWrite(tools: ComputerUseHostTools, app: NSRunningApplication,
+        original: String, expected: String, document: URL, output: URL) async throws {
+        let started = Date()
+        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
+        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mcp-mutations.json")),
+            sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                stateDirectory: output.appendingPathComponent("helper-state")) })
+        var results: [String: MCPToolResult] = [:], failure: Error?
+        var beforeSave = false, editorExact = false, savedExact = false
+        do {
+            _ = try await pool.start(binaryURL: helper)
+            let available = try await pool.allowedTools()
+            func tool(_ name: String) throws -> MCPAllowedTool { try XCTUnwrap(available.first { $0.toolName == name }) }
+            let before = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
+            XCTAssertTrue(before.text.value.utf8.elementsEqual(original.utf8))
+            let found = try await pool.execute(tool("find_elements").makeCall(taskID: "mcp-write-discovery", arguments: [
+                "pid": .integer(Int(app.processIdentifier)), "role": .string("AXTextArea")]))
+            results["discovery"] = found
+            let elementID = try XCTUnwrap(ComputerUseMCPFocusedTextRead.elementID(in: found, matching: before))
+            guard try tools.mcpFocusedTextSnapshot() == before else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed before the owned experiment") }
+            let edit = try tool("set_element_attribute").makeCall(taskID: "mcp-write-edit", arguments: [
+                "element_id": .string(elementID), "name": .string("AXValue"), "value": .string(expected)])
+            let approval = try await pool.prepareApproval(edit)
+            guard try tools.mcpFocusedTextSnapshot() == before else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed during preparation") }
+            let edited = try await pool.performApproved(edit, fingerprint: approval.fingerprint)
+            results["edit"] = edited
+            let after = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
+            editorExact = after.text.value.utf8.elementsEqual(expected.utf8)
+            beforeSave = try Data(contentsOf: document) == Data(original.utf8)
+            guard !edited.isError, editorExact else { throw NativeTextFixtureFailure.unexpectedOutcome("The actual helper did not set the complete TextEdit value") }
+            let save = try tool("press_key").makeCall(taskID: "mcp-write-save", arguments: [
+                "key": .string("s"), "modifiers": .array([.string("command")])])
+            let saveApproval = try await pool.prepareApproval(save)
+            guard try tools.mcpFocusedTextSnapshot() == after else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed before Save") }
+            results["save"] = try await pool.performApproved(save, fingerprint: saveApproval.fingerprint)
+            for _ in 0..<40 {
+                savedExact = try Data(contentsOf: document) == Data(expected.utf8)
+                if savedExact { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertTrue(try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(expected.utf8) == true)
+        } catch { failure = error }
+        await pool.cancelAll()
+        app.forceTerminate()
+        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
+        let jsonResults = try JSONSerialization.jsonObject(with: JSONEncoder().encode(results))
+        let report: [String: Any] = ["scope": "signed-MCP-component-experiment-in-real-TextEdit", "results": jsonResults,
+            "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
+            "fileUnchangedBeforeSave": beforeSave, "editorExactAfterEdit": editorExact, "savedFileExact": savedExact,
+            "ownedTextEditExited": app.isTerminated, "modelInference": false]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("mcp-write-result.json"), options: .withoutOverwriting)
+        XCTAssertTrue(app.isTerminated)
+        if let failure { throw failure }
+        XCTAssertTrue(beforeSave); XCTAssertTrue(editorExact); XCTAssertTrue(savedExact)
     }
 
     private func readTextEditUsingMacTools(tools: ComputerUseHostTools, app: NSRunningApplication,

@@ -763,6 +763,14 @@ final class ComputerUseTaskLedger {
         return record.approvedActionSteps ?? record.approvedAction.map { [$0] } ?? []
     }
 
+    func approvedActionPlan(taskID: String, senderID: String, sessionID: String) throws -> ApprovedActionPlan? {
+        try ensureAvailable()
+        guard let record = records[taskID], record.senderID == senderID, record.sessionID == sessionID else {
+            throw LedgerError.invalidIdentity
+        }
+        return record.approvedActionPlan
+    }
+
     func terminalClarification(taskID: String) -> ComputerUseClarificationReference? {
         guard initializationError == nil, let record = records[taskID], record.response != nil,
               record.outcome == .userInterventionRequired, record.control?.state != .cancelled,

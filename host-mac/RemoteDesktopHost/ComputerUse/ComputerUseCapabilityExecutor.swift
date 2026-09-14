@@ -325,6 +325,25 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         return result
     }
 
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {
+        guard route == .desktop, self.taskID == taskID else { return nil }
+        return try (desktop as? any MCPApprovalContinuing)?.approvedActionPlan(taskID: taskID, promptBody: promptBody)
+    }
+
+    func continueApprovedActionPlan(taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard route == .desktop, self.taskID == taskID,
+              let continuing = desktop as? any MCPApprovalContinuing else { throw RoutingError.missingContinuation }
+        let result = try await continuing.continueApprovedActionPlan(taskID: taskID, confirmedActions: confirmedActions,
+            tools: tools, progress: progress)
+        try Task.checkCancellation()
+        return result
+    }
+
     func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
         tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {

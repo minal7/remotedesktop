@@ -2985,6 +2985,142 @@ final class ComputerUseTests: XCTestCase {
         return (contract, plan, calls.map { .init(call: $0, fingerprint: MCPApprovalFingerprint(call: $0), display: $0.approvalDisplay) })
     }
 
+    func test_managerContinuesOrderedMCPActionsWithoutReplanningOrReplay() async throws {
+        try await assertOrderedMCPManager()
+    }
+
+    func test_managerOrderedMCPPlanSurvivesCapabilityWrapper() async throws {
+        try await assertOrderedMCPManager(mode: "wrapped")
+    }
+
+    func test_managerOrderedMCPPlanHandsControlBackAndResumesConfirmedPrefix() async throws {
+        try await assertOrderedMCPManager(mode: "handoff")
+    }
+
+    func test_managerOrderedMCPPlanStopPreventsTheNextApprovedEffect() async throws {
+        try await assertOrderedMCPManager(mode: "stop")
+    }
+
+    func test_managerOrderedMCPPlanPublishesConfirmedEvidenceBeforeSuspendingContinuation() async throws {
+        try await assertOrderedMCPManager(mode: "stopDuringContinuation")
+    }
+
+    func test_managerOrderedMCPPlanRejectsPrematureCompletionAndForeignNextStep() async throws {
+        for mode in ["earlyCompletion", "wrongNextStep", "changedPlan", "uncertain"] {
+            try await assertOrderedMCPManager(mode: mode)
+        }
+    }
+
+    private func assertOrderedMCPManager(mode: String = "normal") async throws {
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let prompt = makeEnvelope(id: "ordered", kind: .prompt, body: try ComputerUsePromptRequest(
+            prompt: "Create the same draft twice.", supportsApprovedActionEvidence: true).encodedBody())
+        let fixture = try approvedPlanFixture(promptBody: prompt.body)
+        let executor = OrderedMCPPlanTestExecutor(plan: fixture.plan, prepared: fixture.prepared)
+        executor.mode = mode
+        let continuationGate = mode == "stopDuringContinuation" ? ComputerUsePlanningTestGate<Bool>(
+            started: expectation(description: "plan continuation started"), returned: expectation(description: "plan continuation returned")) : nil
+        executor.continuationGate = continuationGate
+        defer { continuationGate?.finish(true) }
+        if mode == "changedPlan" { executor.replacementPlan = try approvedPlanFixture(promptBody: prompt.body, count: 3).plan }
+        let routed: any ComputerUseExecuting = mode == "wrapped"
+            ? ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in executor }) : executor
+        let ledger = ComputerUseTaskLedger(fileURL: url), channel = FakeHostComputerUseChannel()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed, taskLedger: ledger,
+            allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        for index in 0..<2 {
+            let messages = await channel.sentMessages()
+            let requests = messages.filter { $0.kind == .approvalRequest }
+            guard requests.count == index + 1 else { return XCTFail("The next action needs its own ordered approval") }
+            let request = try ComputerUseApprovalRequest.decodeBody(requests[index].body)
+            let response = makeEnvelope(kind: .approvalResponse,
+                body: try ComputerUseApprovalResponse(requestID: request.requestID, approved: true,
+                    taskID: request.taskID, appliedControlRevision: request.appliedControlRevision,
+                    hostControlEpoch: request.hostControlEpoch).encodedBody())
+            XCTAssertTrue(manager.handle(response, channel: channel))
+            if let continuationGate {
+                await fulfillment(of: [continuationGate.started], timeout: 1)
+                await waitUntil { await channel.sentMessages().contains {
+                    guard let update = try? ComputerUseTaskUpdate.decodeBody($0.body) else { return false }
+                    return update.isApprovedActionEvidenceOnly && update.approvedActionEvidence?.state == .confirmed
+                } }
+                XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: prompt.id, revision: 1), channel: channel))
+                continuationGate.finish(true)
+                await fulfillment(of: [continuationGate.returned], timeout: 1)
+                await waitUntil { manager.activity == .idle }
+                let messages = await channel.sentMessages()
+                XCTAssertEqual(messages.filter { $0.kind == .approvalRequest }.count, 1)
+                XCTAssertEqual(executor.effectDigests.count, 1)
+                XCTAssertNotNil(try ledger.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)?.response)
+                XCTAssertEqual(try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID,
+                    promptBody: prompt.body), .completed(ComputerUseTaskLedger.stoppedResponse))
+                return
+            }
+            await waitUntil {
+                let messages = await channel.sentMessages()
+                return messages.filter { $0.kind == .approvalRequest }.count > index + 1 || messages.contains { $0.kind == .assistant }
+                    || manager.activity == .paused
+            }
+            if index == 0, ["earlyCompletion", "wrongNextStep", "changedPlan", "uncertain"].contains(mode) {
+                let messages = await channel.sentMessages()
+                let terminal = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+                XCTAssertEqual(terminal.outcome, .unableToComplete)
+                XCTAssertEqual(executor.effectDigests.count, 1)
+                XCTAssertEqual(messages.filter { $0.kind == .approvalRequest }.count, 1)
+                let history = try ledger.approvedActionHistory(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)
+                XCTAssertEqual(history.count, 1)
+                XCTAssertEqual(history[0].response == nil, mode == "uncertain")
+                XCTAssertTrue(manager.handle(prompt, channel: channel))
+                XCTAssertEqual(executor.executeCount, 1); XCTAssertEqual(executor.effectDigests.count, 1)
+                return
+            }
+            if index == 0, mode == "handoff" {
+                XCTAssertEqual(manager.activity, .paused)
+                XCTAssertEqual(executor.effectDigests.count, 1)
+                XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1,
+                    hostEpoch: ledger.hostControlEpoch(taskID: prompt.id)), channel: channel))
+                await waitUntil { await channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
+            }
+            if index == 0, mode == "stop" {
+                XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: prompt.id, revision: 1), channel: channel))
+                await waitUntil { manager.activity == .idle }
+                let messages = await channel.sentMessages()
+                let next = try ComputerUseApprovalRequest.decodeBody(XCTUnwrap(messages.last { $0.kind == .approvalRequest }).body)
+                XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
+                    body: try ComputerUseApprovalResponse(requestID: next.requestID, approved: true).encodedBody()), channel: channel))
+                XCTAssertEqual(executor.effectDigests.count, 1)
+                XCTAssertEqual(try ledger.claim(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID,
+                    promptBody: prompt.body), .completed(ComputerUseTaskLedger.stoppedResponse))
+                return
+            }
+            let next = await channel.sentMessages()
+            if index == 0 {
+                guard !next.contains(where: { $0.kind == .assistant }) else { return XCTFail("One approved action must not terminalize a two-step task") }
+                XCTAssertTrue(manager.handle(response, channel: channel))
+                XCTAssertEqual(executor.effectDigests.count, 1, "A duplicate first approval cannot repeat or authorize the second action")
+            }
+        }
+        let messages = await channel.sentMessages()
+        let terminal = try ComputerUseTaskUpdate.decodeBody(XCTUnwrap(messages.first { $0.kind == .assistant }).body)
+        XCTAssertEqual(terminal.outcome, .taskCompleted)
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.effectDigests, fixture.prepared.map { $0.call.canonicalDigest })
+        XCTAssertEqual(executor.observedPrefixes, mode == "handoff" ? [1, 1, 2] : [1, 2])
+        let evidence = messages.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }.filter(\.isApprovedActionEvidenceOnly)
+        XCTAssertEqual(evidence.compactMap { $0.approvedActionEvidence?.state }, [.unconfirmed, .confirmed, .unconfirmed, .confirmed])
+        let history = try ledger.approvedActionHistory(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertTrue(history.allSatisfy { $0.response != nil && $0.completionPromptDigest == nil })
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.effectDigests.count, 2)
+    }
+
     func test_approvedPlanDistinguishesRepeatedEffectsAndRequiresAConfirmedPrefix() throws {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
@@ -12395,6 +12531,52 @@ private final class StopJoinProbeExecutor: ComputerUseExecuting {
         firstReleaseContinuation?.resume()
         firstReleaseContinuation = nil
     }
+}
+
+@MainActor
+private final class OrderedMCPPlanTestExecutor: ComputerUseExecuting, MCPApprovalContinuing {
+    let isReady = true
+    let runtimeName = "Ordered MCP fixture"
+    let plan: ComputerUseTaskLedger.ApprovedActionPlan
+    let prepared: [MCPPreparedApproval]
+    var executeCount = 0
+    var effectDigests: [String] = []
+    var observedPrefixes: [Int] = []
+    var mode = "normal"
+    var replacementPlan: ComputerUseTaskLedger.ApprovedActionPlan?
+    var continuationGate: ComputerUsePlanningTestGate<Bool>?
+
+    init(plan: ComputerUseTaskLedger.ApprovedActionPlan, prepared: [MCPPreparedApproval]) {
+        self.plan = plan; self.prepared = prepared
+    }
+    func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        executeCount += 1
+        return .mcpApprovalRequired(prepared[0])
+    }
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {
+        let digest = SHA256.hash(data: Data(promptBody.utf8)).map { String(format: "%02x", $0) }.joined()
+        guard taskID == plan.taskID, digest == plan.requestDigest else { throw MCPClientError.approvalMismatch }
+        return !effectDigests.isEmpty ? replacementPlan ?? plan : plan
+    }
+    func continueAfterApproval(_ approved: MCPPreparedApproval, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
+        guard prepared.contains(approved), !effectDigests.contains(approved.call.canonicalDigest) else { throw MCPClientError.approvalMismatch }
+        effectDigests.append(approved.call.canonicalDigest)
+        if mode == "uncertain" { throw MCPClientError.toolFailed("The effect may have happened") }
+        return .init(callDigest: approved.call.canonicalDigest, response: "Verified ordered action \(effectDigests.count)", completionPromptDigest: nil)
+    }
+    func continueApprovedActionPlan(taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard taskID == plan.taskID, confirmedActions.allSatisfy({ $0.response != nil }) else { throw MCPClientError.approvalMismatch }
+        observedPrefixes.append(confirmedActions.count)
+        if let continuationGate { _ = await continuationGate.wait() }
+        if mode == "earlyCompletion" { return .completed("Unverified premature completion") }
+        if mode == "wrongNextStep" { return .mcpApprovalRequired(prepared[0]) }
+        if mode == "handoff", observedPrefixes.count == 1 { return .userInterventionRequired("Sign into the test app, then Resume.") }
+        if confirmedActions.count < prepared.count { return .mcpApprovalRequired(prepared[confirmedActions.count]) }
+        return .completed("Both planned outcomes verified.")
+    }
+    func cancelMCPWork() {}
 }
 
 @MainActor

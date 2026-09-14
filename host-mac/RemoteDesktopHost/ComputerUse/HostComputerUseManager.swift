@@ -4211,6 +4211,10 @@ final class HostComputerUseManager: ObservableObject {
         /// Typed prior chat supplied by the signed prompt payload. Host-authored
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
+        /// Exact signed request body used to bind durable approval plans.
+        /// Conversation/Resume prose changes model input, never this identity.
+        let requestBody: String
+        let supportsApprovedActionEvidence: Bool
         let textClarification: TextClarificationContinuation?
         let browserClarification: ComputerUseBrowserClarificationTransport.Continuation?
         /// False only when a versioned Pause reached the durable ledger before
@@ -4224,6 +4228,7 @@ final class HostComputerUseManager: ObservableObject {
             channel: any HostComputerUseChannel,
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
+            requestBody: String? = nil,
             textClarification: TextClarificationContinuation? = nil,
             browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
             hasStarted: Bool = true,
@@ -4237,6 +4242,9 @@ final class HostComputerUseManager: ObservableObject {
             self.conversation = conversation
                 ?? ComputerUsePromptRequest.decodeCompatibleBody(
                     envelope.body).conversation
+            self.requestBody = requestBody ?? envelope.body
+            self.supportsApprovedActionEvidence = ComputerUsePromptRequest.decodeCompatibleBody(
+                requestBody ?? envelope.body).supportsApprovedActionEvidence
             self.hasStarted = hasStarted
             self.textClarification = textClarification
             self.browserClarification = browserClarification
@@ -4245,7 +4253,8 @@ final class HostComputerUseManager: ObservableObject {
 
         func retainingBrowserHandback(_ requirement: ComputerUseBrowserHandbackRequirement?) -> Self {
             .init(envelope: envelope, channel: channel, trustedUserPrompt: trustedUserPrompt,
-                conversation: conversation, textClarification: textClarification,
+                conversation: conversation, requestBody: requestBody,
+                textClarification: textClarification,
                 browserClarification: browserClarification,
                 hasStarted: hasStarted, browserHandbackRequirement: requirement)
         }
@@ -5662,6 +5671,7 @@ final class HostComputerUseManager: ObservableObject {
             for: resumed,
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
+            requestBody: pausedExecution.requestBody,
             textClarification: pausedExecution.textClarification,
             browserClarification: pausedExecution.browserClarification,
             browserHandbackRequirement: pausedExecution.browserHandbackRequirement,
@@ -6796,6 +6806,7 @@ final class HostComputerUseManager: ObservableObject {
             for: executionEnvelope,
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
+            requestBody: envelope.body,
             textClarification: continuation,
             browserClarification: browserContinuation,
             channel: channel, pendingAutomationID: pendingAutomationID)
@@ -6806,6 +6817,7 @@ final class HostComputerUseManager: ObservableObject {
         for envelope: ComputerUseEnvelope,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
+        requestBody: String? = nil,
         textClarification: TextClarificationContinuation? = nil,
         browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
         browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil,
@@ -6818,6 +6830,7 @@ final class HostComputerUseManager: ObservableObject {
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
+            requestBody: requestBody,
             textClarification: textClarification,
             browserClarification: browserClarification,
             browserHandbackRequirement: browserHandbackRequirement)
@@ -6866,7 +6879,8 @@ final class HostComputerUseManager: ObservableObject {
                     // Resume joins the previous execution first. Reconcile a
                     // claimed approved effect instead of asking any executor
                     // to reconstruct or repeat this consequential task.
-                    result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
+                    result = try await resultAfterApprovedAction(action, executor: executor,
+                        context: context, token: token, progress: progress)
                 } else {
                     if isResuming {
                         do {
@@ -7190,6 +7204,7 @@ final class HostComputerUseManager: ObservableObject {
             for: replanned,
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
+            requestBody: context.requestBody,
             textClarification: context.textClarification,
             browserClarification: context.browserClarification,
             channel: context.channel,
@@ -7232,10 +7247,24 @@ final class HostComputerUseManager: ObservableObject {
             }
             do {
                 let result: ComputerUseExecutionResult
-                switch try taskLedger.claimApprovedAction(taskID: context.envelope.id,
-                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, prepared: prepared) {
+                let claim: ComputerUseTaskLedger.ApprovedActionClaim
+                if let plan = try continuation.approvedActionPlan(taskID: context.envelope.id, promptBody: context.requestBody) {
+                    claim = try taskLedger.claimApprovedAction(taskID: context.envelope.id,
+                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
+                        prepared: prepared, plan: plan)
+                } else {
+                    claim = try taskLedger.claimApprovedAction(taskID: context.envelope.id,
+                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, prepared: prepared)
+                }
+                let progress: (String) -> Void = { [weak self] value in
+                    guard self?.currentExecutionToken == token else { return }
+                    self?.activity = .working(value)
+                    self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
+                }
+                switch claim {
                 case .existing(let action):
-                    result = Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
+                    result = try await resultAfterApprovedAction(action, executor: executor,
+                        context: context, token: token, progress: progress)
                 case .new:
                     sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
                         authorizationGeneration: evidenceAuthorizationGeneration)
@@ -7264,9 +7293,10 @@ final class HostComputerUseManager: ObservableObject {
                         senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, fingerprint: prepared.fingerprint) else {
                         throw MCPClientError.serverMismatch("The approved action confirmation could not be retained.")
                     }
-                    result = Self.resultForApprovedAction(recorded, trustedUserPrompt: context.trustedUserPrompt)
                     sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
                         authorizationGeneration: evidenceAuthorizationGeneration)
+                    result = try await resultAfterApprovedAction(recorded, executor: executor,
+                        context: context, token: token, progress: progress)
                 }
                 guard currentExecutionToken == token else { return }
                 try await acceptExecutionResult(
@@ -7290,6 +7320,52 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private static let unconfirmedApprovedActionResponse = "The approved action may already have been performed. I couldn't confirm its result, so I will not repeat it. Check the Mac before starting another request for this action."
+
+    private func resultAfterApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord,
+        executor: any ComputerUseExecuting, context: ExecutionContext, token: UUID,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard action.stepEffectID != nil, action.response != nil else {
+            return Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
+        }
+        try Task.checkCancellation()
+        guard currentExecutionToken == token, actionGate.allowsActions else { throw CancellationError() }
+        let envelope = context.envelope
+        guard let continuation = executor as? any MCPApprovalContinuing,
+              let plan = try taskLedger.approvedActionPlan(taskID: envelope.id,
+                  senderID: envelope.senderID, sessionID: envelope.sessionID),
+              try continuation.approvedActionPlan(taskID: envelope.id, promptBody: context.requestBody) == plan else { throw MCPClientError.approvalMismatch }
+        let history = try taskLedger.approvedActionHistory(taskID: envelope.id,
+            senderID: envelope.senderID, sessionID: envelope.sessionID)
+        guard !history.isEmpty, history.count <= plan.steps.count,
+              history.last == action,
+              zip(history, plan.steps).allSatisfy({ record, step in
+                  record.stepEffectID == step.effectID && record.fingerprint.canonicalDigest == step.callDigest
+                    && record.response != nil && record.completionPromptDigest == nil
+              }) else { throw MCPClientError.approvalMismatch }
+        // The confirmed prefix is durable before continuing. An executor may
+        // verify outcomes, ask for the next exact approval, or hand control
+        // back; it must never reconstruct earlier effects from the prompt.
+        let result = try await continuation.continueApprovedActionPlan(taskID: envelope.id,
+            confirmedActions: history, tools: tools, progress: progress)
+        try Task.checkCancellation()
+        guard currentExecutionToken == token, actionGate.allowsActions else { throw CancellationError() }
+        switch result {
+        case .completed:
+            guard history.count == plan.steps.count else { throw MCPClientError.approvalMismatch }
+        case .mcpApprovalRequired(let prepared):
+            guard history.count < plan.steps.count, prepared.call.taskID == envelope.id,
+                  prepared.call.stepEffectID == plan.steps[history.count].effectID,
+                  prepared.call.canonicalDigest == plan.steps[history.count].callDigest,
+                  prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else { throw MCPClientError.approvalMismatch }
+        case .unableToComplete, .userInterventionRequired:
+            break
+        default:
+            // A clarification or a different action capability needs an
+            // explicit transfer of this retained plan before it can continue.
+            throw MCPClientError.approvalMismatch
+        }
+        return result
+    }
 
     private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord,
                                                trustedUserPrompt: String) -> ComputerUseExecutionResult {
@@ -7323,7 +7399,7 @@ final class HostComputerUseManager: ObservableObject {
         authorizationGeneration: UInt64) {
         // A late result may annotate its original task while a newer task is
         // active. Check again after queued delivery to fence a later revocation.
-        guard ComputerUsePromptRequest.decodeCompatibleBody(context.envelope.body).supportsApprovedActionEvidence,
+        guard context.supportsApprovedActionEvidence,
               self.transportGeneration == transportGeneration,
               actionEvidenceAuthorizationGeneration == authorizationGeneration,
               authorizedPeerID == context.envelope.senderID else { return }

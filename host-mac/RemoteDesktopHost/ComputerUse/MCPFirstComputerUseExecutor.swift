@@ -36,10 +36,26 @@ protocol MCPApprovalContinuing: AnyObject {
         progress: @escaping (String) -> Void
     ) async throws -> MCPApprovedActionResult
 
+    /// Only host-bound plans may opt into ordered, independently approved
+    /// effects. Legacy one-action executors leave this nil.
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan?
+    func continueApprovedActionPlan(
+        taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult
+
     /// Invalidates the current run synchronously. The helper shutdown itself
     /// is asynchronous, but is bound to the captured process generation so a
     /// delayed cleanup can never stop a newer resumed run.
     func cancelMCPWork()
+}
+
+extension MCPApprovalContinuing {
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? { nil }
+    func continueApprovedActionPlan(
+        taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult { throw MCPClientError.approvalMismatch }
 }
 
 private final class MCPGenerationCancellationJoin: @unchecked Sendable {
