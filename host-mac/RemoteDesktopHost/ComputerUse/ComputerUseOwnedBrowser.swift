@@ -1385,6 +1385,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     private let presentsWindow: Bool
     private let navigationTimeout: Duration
     private let domTimeout: Duration
+    private let agentSnapshotTimeout: Duration
     private let domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)?
     private let nativeNavigationDidDispatch: ((WKWebView, WKNavigation?) -> Void)?
     private var browser: WKWebView?
@@ -1515,11 +1516,13 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     init(presentsWindow: Bool = true, navigationTimeout: Duration = .seconds(30), domTimeout: Duration = .seconds(5),
+         agentSnapshotTimeout: Duration = .seconds(10),
          domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil,
          nativeNavigationDidDispatch: ((WKWebView, WKNavigation?) -> Void)? = nil, mayAct: @escaping () -> Bool) {
         self.presentsWindow = presentsWindow
         self.navigationTimeout = navigationTimeout
         self.domTimeout = domTimeout
+        self.agentSnapshotTimeout = agentSnapshotTimeout
         self.domScriptDidDispatch = domScriptDidDispatch
         self.nativeNavigationDidDispatch = nativeNavigationDidDispatch
         self.mayAct = mayAct
@@ -2351,14 +2354,18 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard pendingDOM == nil else { throw ComputerUseBrowserError.busy }
         if let retained = try capture?.retainedReply(command: command, arguments: arguments, document: document) { return retained }
         let id = UUID()
+        // Preparing a screenshot's retained hit map is read-only and can
+        // outlast a normal DOM command on a dense page. It has a separate,
+        // finite deadline; input and target checks retain the shorter budget.
+        let timeout = command == .pageSnapshot && arguments["agentInput"] as? Bool == true ? agentSnapshotTimeout : domTimeout
         let source = try await withTaskCancellationHandler {
             do {
                 let source: String = try await withCheckedThrowingContinuation { continuation in
                     do { try capture?.begin(command: command, arguments: arguments, document: document) }
                     catch { continuation.resume(throwing: error); return }
                     pendingDOM = PendingDOM(id: id, document: document, capture: capture, continuation: continuation)
-                    pendingDOM?.timeout = Task { [weak self, domTimeout] in
-                        do { try await Task.sleep(for: domTimeout) } catch { return }
+                    pendingDOM?.timeout = Task { [weak self, timeout] in
+                        do { try await Task.sleep(for: timeout) } catch { return }
                         self?.interruptDOM(id: id, error: ComputerUseBrowserError.documentUnresponsive)
                     }
                     browser.callAsyncJavaScript(ComputerUseBrowserDOM.invocation,

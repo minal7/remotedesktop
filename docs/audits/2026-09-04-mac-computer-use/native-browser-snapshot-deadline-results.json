@@ -1,0 +1,334 @@
+{
+  "baseCommit": "be5a9d1",
+  "boundaries": [
+    "Read-only capture may finish after ordinary command deadline",
+    "Target check retains ordinary deadline",
+    "Snapshot deadline remains finite",
+    "Cancellation interrupts caller and native callback remains joined"
+  ],
+  "date": "2026-09-13",
+  "greenMetrics": {
+    "failure": "none",
+    "lastCaptureStage": "complete",
+    "lastTargetStatus": "agent-scroll-dispatched",
+    "phases": [
+      {
+        "hitTests": "{\"calls\":50588,\"milliseconds\":3039,\"elements\":3163,\"scrollY\":0}",
+        "phase": "initial-capture",
+        "seconds": 3.142106056213379
+      },
+      {
+        "hitTests": "{\"calls\":158835,\"milliseconds\":9051,\"elements\":3163,\"scrollY\":360}",
+        "phase": "scroll-and-capture",
+        "seconds": 6.117169976234436
+      }
+    ]
+  },
+  "historicalFocusedMinimum": {
+    "iOS": 10,
+    "macOS": 292
+  },
+  "instrumentationFailure": "First public attempt reproduced the timeout but selected the callback overload of callAsyncJavaScript, returning Void and no usable metrics. Corrected to the async contentWorld overload before the second attempt. Both failed test bundles are retained.",
+  "limitations": [
+    "Full per-pixel hit-map cost remains; this is a bounded timeout repair, not a CPU or 12 GB memory qualification.",
+    "Public timings include instrumentation overhead; the original uninstrumented Q6 movie07 had the same timeout.",
+    "The public case proves capture and one scroll, not model task completion. No inference ran at this checkpoint.",
+    "Native cancellation, Stop, takeover and scripted Unicode/login/Resume pass. The existing native workflow QoS priority-inversion warning recurs.",
+    "Production source contains no venue/domain/selector-specific workaround. Fixtures and public regression cases remain tests.",
+    "Selected Fara currently drives the owned WebKit browser; separate native AX/MCP successes do not establish trained-model desktop capability.",
+    "General native desktop model execution, full live movie/travel tasks, provider login, physical phone, whole-app resources and production acceptance remain open."
+  ],
+  "redMetrics": {
+    "failure": "RemoteDesktopHost.ComputerUseBrowserError.documentUnresponsive",
+    "lastCaptureStage": "observe-page",
+    "lastTargetStatus": "agent-scroll-dispatched",
+    "phases": [
+      {
+        "hitTests": "{\"calls\":50588,\"milliseconds\":3026,\"elements\":3163,\"scrollY\":0}",
+        "phase": "initial-capture",
+        "seconds": 3.1372580528259277
+      },
+      {
+        "hitTests": "{\"calls\":158835,\"milliseconds\":9030,\"elements\":3163,\"scrollY\":360}",
+        "phase": "scroll-and-capture-failed",
+        "seconds": 6.065966010093689
+      }
+    ]
+  },
+  "results": [
+    {
+      "bundle": ".build/repair-verification/native-calendar-hit-cost-01.xcresult",
+      "label": "native-calendar-hit-cost-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789343887.497,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789343845.197,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertNil failed: \"documentUnresponsive\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInCalendarObservationAfterScrollRecordsHitTestCost()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInCalendarObservationAfterScrollRecordsHitTestCost",
+            "testName": "testOptInCalendarObservationAfterScrollRecordsHitTestCost()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-calendar-hit-cost-02.xcresult",
+      "label": "native-calendar-hit-cost-02",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789344073.007,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789344030.714,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertNil failed: \"documentUnresponsive\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseFaraActionTests/testOptInCalendarObservationAfterScrollRecordsHitTestCost()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInCalendarObservationAfterScrollRecordsHitTestCost",
+            "testName": "testOptInCalendarObservationAfterScrollRecordsHitTestCost()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-snapshot-deadline-boundaries-01.xcresult",
+      "label": "native-snapshot-deadline-boundaries-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789344601.252,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789344475.174,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-calendar-hit-cost-green-01.xcresult",
+      "label": "native-calendar-hit-cost-green-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789344924.376,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789344909.918,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-snapshot-deadline-regressions-01.xcresult",
+      "label": "native-snapshot-deadline-regressions-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789344976.213,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789344973.036,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-snapshot-deadline-workflow-01.xcresult",
+      "label": "native-snapshot-deadline-workflow-01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost \u00b7 Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789345020.964,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "[Internal] Thread running at User-interactive quality-of-service class waiting on a lower QoS thread running at Default quality-of-service class. Investigate ways to avoid priority inversions"
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789345010.695,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "scope": "Separate finite deadline for read-only agent screenshot hit-map preparation across all websites. Ordinary DOM commands and input target checks retain their existing deadline.",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "addafd86a51a06afd8c7dc9a2caffc7944a3e1e01070ce283589c0c520ebde66",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "c6983f372a99ceb8fbea7b691a84b336df0148789cdf08cea9a97f4aab235007"
+  }
+}

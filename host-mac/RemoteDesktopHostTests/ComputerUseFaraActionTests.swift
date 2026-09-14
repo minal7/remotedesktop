@@ -577,6 +577,112 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInCalendarObservationAfterScrollRecordsHitTestCost() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_LIVE_SITE_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in: one public calendar capture/scroll experiment, no inference") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "calendar-read-cost")
+        let url = try XCTUnwrap(URL(string: "https://roxie.com/calendar/"))
+        let document = try await browser.navigate(taskID: "calendar-read-cost", operationID: "fixture", to: url)
+        let window = try XCTUnwrap(NSApp.keyWindow)
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+        _ = try await web.callAsyncJavaScript("""
+            globalThis.calendarHitProbe = {calls:0,milliseconds:0};
+            for (const prototype of [Document.prototype,ShadowRoot.prototype]) {
+              const original = prototype.elementFromPoint;
+              if (typeof original !== 'function') continue;
+              prototype.elementFromPoint = function(x,y) {
+                const started=performance.now();
+                try { return original.call(this,x,y); }
+                finally { calendarHitProbe.calls++; calendarHitProbe.milliseconds+=performance.now()-started; }
+              };
+            }
+            return true;
+            """, arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+        try await Task.sleep(for: .seconds(3))
+        var phases: [[String: Any]] = [], failure: Error?
+        func metrics(_ phase: String, started: Date) async throws {
+            let statistics = try await web.callAsyncJavaScript("return JSON.stringify({ ...calendarHitProbe, elements:document.querySelectorAll('*').length, scrollY });", arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            phases.append(["phase":phase,"seconds":Date().timeIntervalSince(started),"hitTests":statistics as? String ?? "missing"])
+        }
+        var phase = "initial-capture", started = Date()
+        do {
+            let first = try await browser.captureAgentObservation(document: document)
+            try await metrics(phase, started: started)
+            phase = "scroll-and-capture"; started = Date()
+            try await browser.performAgentInput(.scroll(horizontal: false, pixels: -633), observation: first)
+            let after = try await browser.captureAgentObservation(document: document)
+            try await metrics(phase, started: started)
+            XCTAssertGreaterThan(try XCTUnwrap(after.approvalPageEvidence.page.viewport?.y), try XCTUnwrap(first.approvalPageEvidence.page.viewport?.y))
+            let image = XCTAttachment(data: after.png, uniformTypeIdentifier: "public.png")
+            image.name = "Calendar after scroll"; image.lifetime = .keepAlways; add(image)
+        } catch {
+            failure = error
+            try await metrics(phase + "-failed", started: started)
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["phases":phases,"failure":failure.map { String(reflecting: $0) } ?? "none",
+            "lastCaptureStage":browser.lastAgentCaptureStage ?? "none","lastTargetStatus":browser.lastAgentTargetStatus ?? "none"], options: [.prettyPrinted,.sortedKeys])
+        let report = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        report.name = "Calendar native hit-test cost"; report.lifetime = .keepAlways; add(report)
+        XCTAssertNil(failure)
+        XCTAssertTrue(NSApp.keyWindow === window)
+    }
+
+    @MainActor
+    func testOptInSnapshotDeadlineDoesNotExtendTargetChecksOrCancellation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: independent screenshot preparation deadline") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><button style="position:fixed;left:10vw;top:10vh;width:20vw;height:10vh" onclick="fetch('/clicked')">Search</button>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(domTimeout: .milliseconds(100), agentSnapshotTimeout: .milliseconds(600), mayAct: { true })
+        defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["capture", "target", "capture-timeout", "cancel"] {
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+            _ = try await web.callAsyncJavaScript("""
+                globalThis.nextHitDelay = 0;
+                const original=Document.prototype.elementFromPoint;
+                Document.prototype.elementFromPoint=function(x,y) {
+                  const delay=nextHitDelay; nextHitDelay=0;
+                  const end=performance.now()+delay; while(performance.now()<end) {}
+                  return original.call(this,x,y);
+                };
+                return true;
+                """, arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            let original = try await browser.captureAgentObservation(document: document)
+            let delay = mode == "capture" || mode == "target" ? 250 : 800
+            _ = try await web.callAsyncJavaScript("nextHitDelay=delay; return true;", arguments: ["delay":delay], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            let work = Task { @MainActor in
+                if mode == "target" {
+                    _ = try await browser.inspectAgentTarget(.pointer(.leftClick, .init(x: 200,y: 150)), observation: original)
+                } else { _ = try await browser.captureAgentObservation(document: document) }
+            }
+            if mode == "cancel" { try await Task.sleep(for: .milliseconds(50)); work.cancel() }
+            do {
+                try await work.value
+                if mode != "capture" { XCTFail("\(mode) ignored its original deadline or cancellation") }
+            } catch {
+                if mode == "capture" { XCTFail("Read-only preparation could not use its own deadline: \(error)") }
+                else if mode == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .documentUnresponsive, mode) }
+            }
+            await browser.joinDOMCompletion(document: document)
+            XCTAssertTrue(browser.validate(document))
+            XCTAssertEqual(server.count("/clicked"), 0)
+        }
+        XCTAssertEqual(server.count("/page"), 4)
+    }
+
+    @MainActor
     func testOptInNativeVeeziScrollRevealsPricesWhileCountdownChanges() async throws {
         try await runNativeVeeziCountdown(scroll: true)
     }
