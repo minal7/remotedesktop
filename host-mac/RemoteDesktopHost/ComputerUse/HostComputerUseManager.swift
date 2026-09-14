@@ -2414,6 +2414,29 @@ final class ComputerUseHostTools {
         return frame
     }
 
+    func nativeFocusedEditorDescription() throws -> String? {
+        guard mayAct() else { throw ToolError.paused }
+        let description: String
+        if let accessibilityContextProvider {
+            let context = accessibilityContextProvider(.typeText(""))
+            guard Self.providedContextDescribesEditableTypingTarget(context) else { return nil }
+            description = context
+        } else {
+            guard screenProvider == nil, let before = try currentTextSnapshot(),
+                  let focused = focusedElementSnapshot(), try currentTextSnapshot() == before else { return nil }
+            description = focused.summary
+        }
+        // Snapshot summaries contain role/label/identifier attributes, never
+        // AXValue or selected text. Preserve whole characters within the cap.
+        var result = ""
+        for character in description {
+            let next = String(character)
+            guard result.utf8.count + next.utf8.count <= 1_024 else { break }
+            result += next
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : result
+    }
+
     func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
                             willBeginEffect: () throws -> Void) async throws {
         try await performApproved(action, fingerprint: fingerprint, browserPageEvidence: nil, willBeginEffect: willBeginEffect)

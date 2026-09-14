@@ -29,6 +29,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let image: ComputerUseDesktopImage
         let fingerprint: ComputerUsePlanningStateFingerprint
         let focusedTextFrame: CGRect?
+        let focusedEditor: String?
     }
     private final class Approval {
         let continuation: ComputerUseVisualApprovalContinuation
@@ -115,7 +116,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         return try Observation(image: ComputerUseDesktopImage(observation: screen),
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
-            focusedTextFrame: tools.nativeFocusedTextFrame())
+            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: tools.nativeFocusedEditorDescription())
     }
 
     private func revalidate(_ expected: Observation, action: ComputerUsePredictedAction?, tools: ComputerUseHostTools) throws {
@@ -127,15 +128,22 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 matches = expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint)
             } else { matches = expected.fingerprint == fresh.fingerprint }
         case .click(let x, let y, _, _)?:
-            if let action, let window = expected.fingerprint.frontmostWindowBounds,
-               let target = try tools.nativePointerTargetFrame(for: action), !target.isEmpty,
+            let target = try action.flatMap { try tools.nativePointerTargetFrame(for: $0) }
+            if let window = expected.fingerprint.frontmostWindowBounds,
+               let target, !target.isEmpty,
                window.contains(target), target.contains(CGPoint(x: x, y: y)) {
-                matches = try expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
-                    && expected.image.matchesPixels(of: fresh.image, in: target.insetBy(dx: -40, dy: -40))
+                let authorityMatches = expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
+                let pixelsMatch = try expected.image.matchesPixels(of: fresh.image, in: target.insetBy(dx: -40, dy: -40))
+                matches = authorityMatches && pixelsMatch
+                if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
+                    "pointerPoint": "\(x),\(y)", "pointerAuthorityMatches": String(authorityMatches),
+                    "pointerTargetPixelsMatch": String(pixelsMatch)] }
             } else {
                 // A point outside the focused window was grounded in the full
                 // desktop. Changes elsewhere cannot inherit window-only proof.
                 matches = expected.fingerprint == fresh.fingerprint && expected.image.png == fresh.image.png
+                if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
+                    "pointerPoint": "\(x),\(y)", "pointerRequiresFullDisplayMatch": "true"] }
             }
         case nil:
             if let field = expected.focusedTextFrame, field == fresh.focusedTextFrame,
@@ -182,7 +190,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private func record(_ proposal: ComputerUseDesktopProposal, observation: Observation, session: Session) {
         session.turns += 1
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
-            actionError: session.actionError, action: proposal.action))
+            actionError: session.actionError, action: proposal.action, focusedEditor: observation.focusedEditor))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 
@@ -218,7 +226,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership()
             let observation = try observe(tools)
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
-                surface: .desktop, history: session.history, actionError: session.actionError)
+                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()

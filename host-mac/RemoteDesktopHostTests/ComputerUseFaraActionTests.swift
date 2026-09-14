@@ -5866,16 +5866,22 @@ enum FaraQ6TestProposalRunner {
         let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
         return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment)).compatibleBrowserProposal()
     }
+    static func proposeNativeQ4(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String]) async throws -> ComputerUseFaraModel.Proposal {
+        guard input.surface == .desktop else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false,
+            environment: environment, modelProfile: "fara-q4", environmentPrefix: "FARA_NATIVE"))
+    }
     static func readPage(_ reading: ComputerUseFaraModel.PageReading, directory: URL, index: Int, environment: [String:String]) async throws -> String {
         let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
         return try ComputerUseFaraModel.decodePageAnswer(await run(request, directory: directory, name: "reading-\(index)", reading: true, environment: environment))
     }
-    private static func run(_ request: URLRequest, directory: URL, name: String, reading: Bool, environment: [String:String]) async throws -> Data {
+    private static func run(_ request: URLRequest, directory: URL, name: String, reading: Bool, environment: [String:String], modelProfile: String = "fara-q6", environmentPrefix: String = "FARA_Q6") async throws -> Data {
         let file = directory.appendingPathComponent("request-\(name).json")
         guard !FileManager.default.fileExists(atPath: file.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         try XCTUnwrap(request.httpBody).write(to: file)
         let output = directory.appendingPathComponent("proposal-\(name)"), probe = HoloProbeProcess()
-        try probe.start(python: try XCTUnwrap(environment["FARA_Q6_PYTHON"]), script: try XCTUnwrap(environment["FARA_Q6_PROBE_SCRIPT"]), arguments: [file.path,output.path,try XCTUnwrap(environment["FARA_Q6_ASSETS"]),try XCTUnwrap(environment["FARA_Q6_BINARY"]),"5",reading ? "fara-q6-reading" : "fara-q6"])
+        try probe.start(python: try XCTUnwrap(environment[environmentPrefix + "_PYTHON"]), script: try XCTUnwrap(environment[environmentPrefix + "_PROBE_SCRIPT"]), arguments: [file.path,output.path,try XCTUnwrap(environment[environmentPrefix + "_ASSETS"]),try XCTUnwrap(environment[environmentPrefix + "_BINARY"]),"5",reading ? "fara-q6-reading" : modelProfile])
         let status = try await probe.finish()
         let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String:Any])
         XCTAssertEqual(report["ownedProcessExited"] as? Bool,true); XCTAssertEqual(report["credentialRemoved"] as? Bool,true)

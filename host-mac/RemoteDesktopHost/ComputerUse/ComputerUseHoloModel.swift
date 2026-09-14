@@ -24,12 +24,13 @@ enum ComputerUseHoloModel {
             guard ComputerUseOwnedBrowser.validatedURL(url) == url else { throw invalid }
             return try checkedText(url.absoluteString, maximum: 8_192)
         }
-        var observations: [(url: String?, error: String?, reply: String?)] = []
+        var observations: [(url: String?, error: String?, reply: String?, editor: String?)] = []
         for index in 0...input.history.count {
             let old = index < input.history.count ? input.history[index] : nil
             observations.append(try (source(old?.currentURL ?? (old == nil ? input.currentURL : nil)),
                 checkedText(old?.actionError ?? (old == nil ? input.actionError : nil), maximum: 16_384),
-                checkedText(old?.userResponse ?? (old == nil ? input.userResponse : nil), maximum: 8_192)))
+                checkedText(old?.userResponse ?? (old == nil ? input.userResponse : nil), maximum: 8_192),
+                checkedText(old?.focusedEditor ?? (old == nil ? input.focusedEditor : nil), maximum: 1_024)))
         }
         for index in 0...input.history.count {
             let observation = observations[index]
@@ -40,6 +41,7 @@ enum ComputerUseHoloModel {
                 content.append(["type": "image_url", "image_url": ["url": "data:image/png;base64," + png.base64EncodedString()]])
             } else { content.append(["type": "text", "text": "[screenshot evicted]"]) }
             var text = observation.url.map { "\nCurrent URL: " + $0 } ?? ""
+            if input.surface == .desktop { text += "\n" + (try ComputerUseFaraModel.nativeFocusJSON(observation.editor)) }
             if index == 0 {
                 if let error = observation.error { text += "\nError: " + error }
                 if let reply = observation.reply { text += "\nUser response: " + reply }
@@ -61,9 +63,10 @@ enum ComputerUseHoloModel {
                     var next = observations[index + 1]
                     if let captured = input.history[index].resultObservation {
                         next = try (source(captured.currentURL), checkedText(captured.actionError, maximum: 16_384),
-                            checkedText(captured.userResponse, maximum: 8_192))
+                            checkedText(captured.userResponse, maximum: 8_192), checkedText(captured.focusedEditor, maximum: 1_024))
                     }
-                    var result: [String: String] = [:]
+                    var result: [String: Any] = [:]
+                    if input.surface == .desktop { result["focused_editor"] = next.editor as Any? ?? NSNull() }
                     if let url = next.url { result["observed_url"] = url }
                     if let error = next.error { result["error"] = error }
                     if let reply = next.reply { result["user_response"] = reply }
@@ -99,7 +102,7 @@ enum ComputerUseHoloModel {
                 "x": ["type": "integer", "description": "X coordinate as integer in [0, 1000]"],
                 "y": ["type": "integer", "description": "Y coordinate as integer in [0, 1000]"]]),
             tool("answer", "Provide a final answer", ["content": ["type": "string", "description": "The answer content"]]),
-            tool("type", surface == .desktop ? "Insert exact text into the focused native editable field using its current selection. Preserve whitespace and Unicode. This does not add Enter or select-all." : "Insert the supplied text into the currently focused editor using its existing selection. In the Find bar, typing updates the page search. This does not add Enter or select-all.", ["text": string]),
+            tool("type", surface == .desktop ? "Insert exact text into the focused native editable field using its current selection. Preserve whitespace and Unicode. This does not add Enter or select-all. " + ComputerUseFaraModel.desktopFocusDescription : "Insert the supplied text into the currently focused editor using its existing selection. In the Find bar, typing updates the page search. This does not add Enter or select-all.", ["text": string]),
             tool("key", surface == .desktop ? ComputerUseFaraModel.desktopKeyDescription : "Perform the explicitly supplied key or key chord through the browser adapter. Control+f opens the native Find bar. Do not add other keys.", ["keys": ["type": "array", "items": string, "minItems": 1]]),
             tool("scroll", "Scroll in the explicit direction by an unsigned distance. A distance of 1000 is one viewport height for up/down or one viewport width for left/right.", [
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],

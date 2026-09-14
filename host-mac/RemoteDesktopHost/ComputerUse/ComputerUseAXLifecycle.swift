@@ -12,6 +12,7 @@ struct ComputerUseAXLifecycleEvent {
     enum Kind: Equatable { case scopeChanged, elementChanged, valueChanged, destroyed, coverageLost }
     let kind: Kind
     let element: AXUIElement?
+    var notification: String? = nil
 }
 
 /// Callback state owns no adapter or observer. It never calls an AX API,
@@ -80,7 +81,7 @@ final class ComputerUseAXLifecycleCallbacks: @unchecked Sendable {
         lock.lock()
         let inbox = entries[ObjectIdentifier(source)]?.inbox
         lock.unlock()
-        inbox?.record(.init(kind: kind, element: element))
+        inbox?.record(.init(kind: kind, element: element, notification: notification))
     }
 }
 
@@ -123,8 +124,8 @@ final class ComputerUseAXLifecycleMonitor: ComputerUseAXLifecycleMonitoring {
         let center = NSWorkspace.shared.notificationCenter
         workspaceCenter = center
         for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didDeactivateApplicationNotification] {
-            workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: nil) { [inbox] _ in
-                inbox.record(.init(kind: .scopeChanged, element: nil))
+            workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: nil) { [inbox] notification in
+                inbox.record(.init(kind: .scopeChanged, element: nil, notification: notification.name.rawValue))
             })
         }
         let observedProcessID = processID
@@ -132,7 +133,7 @@ final class ComputerUseAXLifecycleMonitor: ComputerUseAXLifecycleMonitoring {
             workspaceTokens.append(center.addObserver(forName: name, object: nil, queue: nil) { [inbox] notification in
                 guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                       application.processIdentifier == observedProcessID else { return }
-                inbox.record(.init(kind: .scopeChanged, element: nil))
+                inbox.record(.init(kind: .scopeChanged, element: nil, notification: notification.name.rawValue))
             })
         }
         var created: AXObserver?

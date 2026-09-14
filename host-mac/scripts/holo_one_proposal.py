@@ -1,5 +1,5 @@
 """Opt-in trained-model diagnostic: one proposal, no execution, joined cleanup.
-Arguments: request.json output-directory assets-directory signed-llama-server [4|5 GiB] [fara-q6|fara-q6-reading].
+Arguments: request.json output-directory assets-directory signed-llama-server [4|5 GiB] [fara-q4|fara-q6|fara-q6-reading].
 The 5 GiB option is diagnostic only and does not change the production profile.
 """
 import base64
@@ -43,24 +43,32 @@ elif alias == 'gui-owl-desktop-v1':
     model_name, projector_name = 'GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf', 'GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf'
     model_label = 'GUI-Owl-desktop'
 elif alias == 'fara-browser-v1':
-    assert len(sys.argv) == 7 and sys.argv[6] in ('fara-q6', 'fara-q6-reading')
+    assert len(sys.argv) == 7 and sys.argv[6] in ('fara-q4', 'fara-q6', 'fara-q6-reading')
     assert memory_limit_gib == 5
     assert 'tools' not in request_body and 'tool_choice' not in request_body
     assert request_body['reasoning_format'] == 'none'
-    if sys.argv[6] == 'fara-q6':
+    if sys.argv[6] in ('fara-q4', 'fara-q6'):
         assert request_body['temperature'] == 0
     else:
         assert 'temperature' not in request_body
         assert len(request_body['messages']) == 2
         assert request_body['messages'][0] == {'role':'system', 'content':"You are given the markdown content of a web page. Answer the user's question based solely on this content. Be concise and extract only the relevant information."}
-    model_name, projector_name = 'Fara1.5-4B-Q6_K.gguf', 'mmproj-Fara1.5-4B-f16.gguf'
-    model_label = 'Fara-Q6-reading' if sys.argv[6].endswith('-reading') else 'Fara-Q6'
+    model_name = 'Fara1.5-4B-Q4_K_M.gguf' if sys.argv[6] == 'fara-q4' else 'Fara1.5-4B-Q6_K.gguf'
+    projector_name = 'mmproj-Fara1.5-4B-f16.gguf'
+    model_label = {'fara-q4': 'Fara-Q4', 'fara-q6': 'Fara-Q6', 'fara-q6-reading': 'Fara-Q6-reading'}[sys.argv[6]]
 else:
     raise AssertionError('Unsupported diagnostic model alias')
 processes = subprocess.check_output(['/bin/ps', '-axo', 'comm='], text=True)
 assert not any(Path(line.strip()).name == 'llama-server' for line in processes.splitlines()), 'Another inference worker is active'
 subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(binary)], check=True)
 manifest = json.loads((assets / 'verified-assets.json').read_text())
+if model_label == 'Fara-Q4':
+    # The original pinned Q4 staging manifest uses absolute paths. Accept only
+    # those two files in this exact supplied asset directory.
+    for item in manifest['files']:
+        path = Path(item['path']).resolve()
+        assert path.parent == assets
+        item['name'] = path.name
 assert {item['name'] for item in manifest['files']} == {model_name, projector_name}
 for item in manifest['files']:
     path = assets / item['name']

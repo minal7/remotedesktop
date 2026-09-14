@@ -77,9 +77,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, nativeModelLoop: true, nativeClickFraction: 0.083, nativeClickDelay: .seconds(3))
     }
 
-    func testOptInDelayedNativeFieldClickPreservesAnEmptySibling() async throws {
+    func testOptInInitialNativeFieldClickPreservesAnEmptySibling() async throws {
         try await runFixture(browser: false, nativeModelLoop: true, nativeClickFraction: 0.083,
             nativeClickDelay: .seconds(6), nativeOriginText: "")
+    }
+
+    func testOptInNativeTypingAfterPlanningDelayRetainsTheSelectedField() async throws {
+        try await runFixture(browser: false, nativeModelLoop: true, nativeClickFraction: 0.49,
+            nativeOriginText: "", nativeClickBottomOffset: 112, nativeTypeDelay: .seconds(15))
     }
 
     func testOptInFaraModelEditsANativeDesktopForm() async throws {
@@ -87,6 +92,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             throw XCTSkip("Opt-in: bounded local Fara Q4 inference and disposable native input")
         }
         try await runFixture(browser: false, actualDesktopModel: .fara)
+    }
+
+    func testOptInDiagnosticFaraQ4EditsANativeDesktopForm() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_DESKTOP_DIAGNOSTIC_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: Fara Q4 native task with an explicit diagnostic 5 GiB worker cap")
+        }
+        try await runFixture(browser: false, actualDesktopModel: .faraDiagnostic)
     }
 
     func testOptInGUIOwlModelEditsANativeDesktopForm() async throws {
@@ -234,6 +246,54 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertNil(properties["answer"]); XCTAssertNil(properties["fact"])
         let status = try XCTUnwrap(properties["status"] as? [String: Any])
         XCTAssertEqual(Set(try XCTUnwrap(status["enum"] as? [String])), Set(["success", "failure"]))
+    }
+
+    func testNativeProvidersRetainObservedEditorWithItsScreenshot() throws {
+        let image = try ComputerUseDesktopImage(observation: .init(
+            image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+            displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let previousEditor = "Archive – 東京", currentEditor = "Search – e\u{301}"
+        let fara = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"wait\",\"time\":0}}</tool_call>"
+        let holo = "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"focus-1\",\"type\":\"function\",\"function\":{\"name\":\"wait\",\"arguments\":\"{\\\"time\\\":0}\"}}]}"
+        let variants: [(String, String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
+            ("Fara", fara, ComputerUseFaraModel.makeRequest),
+            ("GUI-Owl", "Action: Wait for the interface.\n" + fara, ComputerUseGUIOwlModel.makeRequest),
+            ("Holo", holo, ComputerUseHoloModel.makeRequest)]
+        for (name, response, build) in variants {
+            var input = ComputerUseFaraModel.Input(goal: "Edit the requested field.", screenshotPNG: image.png,
+                surface: .desktop, history: [.init(screenshotPNG: image.png, response: response, focusedEditor: previousEditor)],
+                actionError: "The previous click was not performed.", focusedEditor: currentEditor)
+            let body = try XCTUnwrap(build(endpoint, input).httpBody)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+            let observations = messages.filter { $0["role"] as? String == "user" }.map { message in
+                (message["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            }
+            XCTAssertTrue(try XCTUnwrap(observations.first).contains(previousEditor), name)
+            XCTAssertTrue(try XCTUnwrap(observations.last).contains(currentEditor), name)
+            XCTAssertTrue(try XCTUnwrap(observations.last).contains("focused_editor"), name)
+            input.focusedEditor = String(repeating: "x", count: 1_025)
+            XCTAssertThrowsError(try build(endpoint, input), name)
+            input.focusedEditor = currentEditor; input.surface = .browser
+            XCTAssertThrowsError(try build(endpoint, input), name)
+        }
+    }
+
+    func testNativeFocusDescriptionRequiresAnEditableTargetAndBoundsUnicode() throws {
+        var context = "AXTextArea Notes – 東京", permitted = true
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { permitted },
+            accessibilityContextProvider: { _ in context })
+        XCTAssertEqual(try tools.nativeFocusedEditorDescription(), context)
+        for rejected in ["AXButton Continue", "AXSecureTextField Password", "AXTextField enabled=false", "AXTextArea editable=false"] {
+            context = rejected; XCTAssertNil(try tools.nativeFocusedEditorDescription(), rejected)
+        }
+        context = "AXComboBox " + String(repeating: "👩🏽‍💻", count: 100)
+        let bounded = try XCTUnwrap(tools.nativeFocusedEditorDescription())
+        XCTAssertLessThanOrEqual(bounded.utf8.count, 1_024)
+        XCTAssertTrue(bounded.hasSuffix("👩🏽‍💻")); XCTAssertTrue(context.hasPrefix(bounded))
+        permitted = false; XCTAssertThrowsError(try tools.nativeFocusedEditorDescription())
     }
 
     func testNativeDesktopApprovalIsSingleUseAndCannotReviveAfterTargetRejection() async throws {
@@ -510,9 +570,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private enum NativeModel: String { case fara, guiOwl, holo }
+    private enum NativeModel: String { case fara, faraDiagnostic, guiOwl, holo }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle") async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -562,8 +622,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         } : nil)
         if let actualDesktopModel {
             let environment = ProcessInfo.processInfo.environment
+            let workerLimitGiB = actualDesktopModel == .faraDiagnostic ? 5 :
+                (actualDesktopModel == .holo ? Int(environment["NATIVE_HOLO_WORKER_LIMIT_GIB"] ?? "4") ?? 0 : 4)
+            guard [4, 5].contains(workerLimitGiB) else { return XCTFail("Only 4 GiB or explicit diagnostic 5 GiB is supported") }
             let inputs = actualDesktopModel == .fara ? try await FaraTestAssets.inputs(environment: environment) : nil
-            let workerURL = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment[actualDesktopModel == .guiOwl ? "GUI_OWL_BINARY" : "HOLO_BINARY"]))
+            let binaryKey = actualDesktopModel == .guiOwl ? "GUI_OWL_BINARY" : (actualDesktopModel == .faraDiagnostic ? "FARA_NATIVE_BINARY" : "HOLO_BINARY")
+            let workerURL = try inputs?.llamaServerURL ?? URL(fileURLWithPath: XCTUnwrap(environment[binaryKey]))
             XCTAssertTrue(try DarwinOSAtlasProcessInspector().matchingProcesses(for: workerURL).isEmpty)
             let proposalDirectory = actualDesktopModel == .fara ? directory : URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_MODEL_TRIAL_DIRECTORY"]))
             if actualDesktopModel != .fara { try FileManager.default.createDirectory(at: proposalDirectory, withIntermediateDirectories: false) }
@@ -611,9 +675,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 case .guiOwl:
                     proposal = try await GUIOwlTestProposalRunner.propose(input: input, directory: proposalDirectory,
                         index: responses.count, environment: environment).compatibleDesktopProposal()
+                case .faraDiagnostic:
+                    proposal = try await .init(FaraQ6TestProposalRunner.proposeNativeQ4(input: input, directory: proposalDirectory,
+                        index: responses.count, environment: environment))
                 case .holo:
                     proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
-                        index: responses.count, environment: environment, memoryLimitGiB: 4))
+                        index: responses.count, environment: environment, memoryLimitGiB: workerLimitGiB))
                 }
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
@@ -633,7 +700,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let fieldState = try JSONSerialization.jsonObject(with: Data(contentsOf: state))
             var report: [String: Any] = ["scope": "actual-\(actualDesktopModel.rawValue)-Q4-native-desktop-form", "goal": goal,
                 "responses": responses, "result": result.map { String(describing: $0) } ?? "",
-                "workerLimitBytes": UInt64(4) * 1024 * 1024 * 1024,
+                "workerLimitBytes": UInt64(workerLimitGiB) * 1024 * 1024 * 1024, "diagnosticMemoryLimitOnly": workerLimitGiB != 4,
+                "fixtureProcessRunning": process.isRunning,
+                "fixtureFrontmostAtReturn": NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier,
                 "workerResidency": actualDesktopModel == .fara ? "retained within task" : "fresh worker per proposal",
                 "failure": failure.map { String(reflecting: $0) } ?? "", "elapsedSeconds": Date().timeIntervalSince(started),
                 "peakSampledWorkerBytes": measured.0, "memorySamples": measured.1, "ownedWorkerExited": gone,
@@ -647,6 +716,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             XCTAssertTrue(gone)
             if let failure { return XCTFail("Native \(actualDesktopModel.rawValue) task failed: \(failure)") }
             guard case .completed = result else { return XCTFail("Native \(actualDesktopModel.rawValue) task did not complete: \(String(describing: result))") }
+            XCTAssertTrue(process.isRunning)
+            XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
             try await verify(state, field: "origin", equals: "")
             try await verify(state, field: "destination", equals: "Tokyo")
             let count = responses.count
@@ -655,6 +726,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             return
         }
         if nativeModelLoop {
+            let lifecycleProbe = nativeTypeDelay > .zero ? ComputerUseAXLifecycleMonitor(application: AXUIElementCreateApplication(process.processIdentifier)) : nil
+            defer { lifecycleProbe?.cancel() }
             let exact = "  東京 e\u{301} 👩🏽‍💻  "
             let goal = "Set Origin to \(nativeOriginText.isEmpty ? "an empty value" : nativeOriginText) and replace Destination with \(exact). Leave the form open."
             var proposals = 0
@@ -663,23 +736,40 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 trace.append("proposal=\(proposals) error=\(input.actionError ?? "none") signed=\(tools.frontmostApplicationSnapshot().identity?.codeIdentity != nil) editable=\(try tools.focusedTypingTargetIsEditable(providerAction: .typeText("probe")))")
                 XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.surface, .desktop)
                 XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
+                let focusedLabel = proposals == 0 || (proposals == 1 && !nativeOriginText.isEmpty) ? "Origin" : "Destination"
+                XCTAssertTrue(input.focusedEditor?.contains(focusedLabel) == true, "The native model must see the actual focused editor: \(String(describing: input.focusedEditor))")
+                XCTAssertFalse(input.focusedEditor?.contains("Replace this") == true)
+                XCTAssertFalse(input.focusedEditor?.contains(exact) == true)
                 guard proposals < 7 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 let index = proposals; proposals += 1
                 XCTAssertEqual(input.history.count, min(index, 5))
-                let arguments: [String: Any]
-                switch index {
-                case 0: arguments = nativeOriginText.isEmpty ? ["action": "wait", "time": 0] : ["action": "type", "text": nativeOriginText]
-                case 1:
+                @MainActor func clickArguments() async throws -> [String: Any] {
                     try await self.verify(state, field: "origin", equals: nativeOriginText)
                     let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
-                    let x = window.minX + 24 + 580 * nativeClickFraction, y = window.maxY - 125
+                    let x = window.minX + 24 + 580 * nativeClickFraction, y = window.maxY - nativeClickBottomOffset
                     let target = try tools.nativePointerTargetFrame(for: .click(x: Int(x), y: Int(y), button: 1, count: 1))
                     trace.append("clickPoint=\(x),\(y) targetFrame=\(String(describing: target))")
                     try await Task.sleep(for: nativeClickDelay)
-                    arguments = ["action": "left_click", "coordinate": [
+                    let after = try tools.nativePointerTargetFrame(for: .click(x: Int(x), y: Int(y), button: 1, count: 1))
+                    trace.append("afterDelayTargetFrame=\(String(describing: after))")
+                    return ["action": "left_click", "coordinate": [
                         (x - screen.displayBounds.minX) / screen.displayBounds.width * 1000,
                         (y - screen.displayBounds.minY) / screen.displayBounds.height * 1000]]
-                case 2: arguments = ["action": "type", "text": "Replace this"]
+                }
+                let arguments: [String: Any]
+                switch index {
+                case 0: arguments = nativeOriginText.isEmpty ? try await clickArguments() : ["action": "type", "text": nativeOriginText]
+                case 1: arguments = nativeOriginText.isEmpty ? ["action": "wait", "time": 0] : try await clickArguments()
+                case 2:
+                    if nativeTypeDelay > .zero {
+                        _ = lifecycleProbe?.drain()
+                        let before = readiness.snapshot()
+                        try await Task.sleep(for: nativeTypeDelay)
+                        let after = readiness.snapshot()
+                        let events = lifecycleProbe?.drain().map { $0.notification ?? String(describing: $0.kind) } ?? []
+                        trace.append("typingDelay: beforeID=\(before?.targetID ?? "nil") afterID=\(after?.targetID ?? "nil") sameValue=\(before?.value == after?.value) sameSelection=\(before?.selection == after?.selection) events=\(events)")
+                    }
+                    arguments = ["action": "type", "text": "Replace this"]
                 case 3:
                     try await self.verify(state, field: "destination", equals: "Replace this")
                     arguments = ["action": "key", "keys": ["Command", "a"]]
