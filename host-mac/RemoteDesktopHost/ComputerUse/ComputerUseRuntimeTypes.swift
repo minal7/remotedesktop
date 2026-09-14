@@ -231,9 +231,9 @@ struct ComputerUseDesktopImage: Sendable {
     }
 
     /// Compare the complete visible target plus surrounding label context.
-    func matchesPixels(of other: Self, in displayRect: CGRect) throws -> Bool {
+    func matchesPixels(of other: Self, in displayRect: CGRect, wholePixelsOnly: Bool = false) throws -> Bool {
         guard displayBounds == other.displayBounds, pixelWidth == other.pixelWidth, pixelHeight == other.pixelHeight,
-              let rect = imageRect(for: displayRect) else { return false }
+              let rect = imageRect(for: displayRect, wholePixelsOnly: wholePixelsOnly) else { return false }
         return try Self.pixels(png, in: rect) == Self.pixels(other.png, in: rect)
     }
 

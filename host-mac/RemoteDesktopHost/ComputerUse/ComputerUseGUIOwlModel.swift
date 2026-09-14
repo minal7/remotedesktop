@@ -75,6 +75,7 @@ enum ComputerUseGUIOwlModel {
             return .terminalStatus(success:status == "success")
         case "interact":try keys("text");return try .handoff(text("text"))
         case "scroll","hscroll":
+            if args["coordinate"] != nil { return try .browser(ComputerUseFaraAction.decode(call)) }
             try keys("pixels");let amount=try number(args["pixels"])
             guard abs(amount)<=10_000 else { throw invalid }
             return .wheel(horizontal:name == "hscroll",amount:amount)
@@ -171,7 +172,7 @@ enum ComputerUseGUIOwlModel {
               var parameters = function["parameters"] as? [String: Any],
               var properties = parameters["properties"] as? [String: Any] else { throw invalid }
         properties["action"] = ["type": "string",
-            "enum": ["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "answer", "terminate", "interact"],
+            "enum": ["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll", "wait", "answer", "terminate", "interact"],
             "description": "Choose one native Mac action. Clicking uses coordinate; type inserts exact text at the current selection without implicit keys; key sends the literal chord. wait takes seconds. answer uses text for the final answer. terminate uses status success or failure and supplies no answer text. interact uses text to request manual user control, then resumes with a fresh screenshot after the user chooses Resume."]
         properties.removeValue(forKey: "answer"); properties.removeValue(forKey: "fact")
         properties["status"] = ["type": "string", "enum": ["success", "failure"], "description": "Required by terminate: whether the task succeeded or could not be completed."]

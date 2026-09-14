@@ -65,6 +65,129 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, captureOnly: true)
     }
 
+    func testOptInNativeScrollUsesBothAxesAndStopsAtDocumentBoundaries() async throws {
+        try await runNativeScrollFixture(useHolo: false)
+    }
+
+    func testOptInHoloScrollsANativeDocumentAndReportsRevealedText() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_DESKTOP_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in bounded Holo native inference") }
+        try await runNativeScrollFixture(useHolo: true)
+    }
+
+    private func runNativeScrollFixture(useHolo: Bool) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_COMPUTER_USE_NATIVE_SCROLL_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in disposable AppKit scroll fixture") }
+        guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
+        let executable = try XCTUnwrap(environment["COMPUTER_USE_TEXT_FIXTURE_EXECUTABLE"])
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let state = directory.appendingPathComponent("state.json"), previousApp = NSWorkspace.shared.frontmostApplication
+        let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = [state.path, "--scroll"]
+        try process.run()
+        defer {
+            if process.isRunning { process.terminate() }
+            previousApp?.activate(options: []); try? FileManager.default.removeItem(at: directory)
+        }
+        for _ in 0..<100 {
+            if process.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier, FileManager.default.fileExists(atPath: state.path) { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        func read() throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: state)) as? [String: Any]) }
+        func scalar(_ value: [String: Any], _ key: String) throws -> Double { try XCTUnwrap(value[key] as? Double) }
+        var previous = try read()
+        guard previous["mode"] as? String == "scroll" else { return XCTFail("A scroll-enabled fixture is required") }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier })
+        let steps: [(Bool, Int)] = [(false, -300), (false, 120), (true, 250), (true, -100), (false, -10_000), (false, -10_000), (true, 10_000), (true, 10_000)]
+        let goal = useHolo ? "Find and report the lower section code in this document by scrolling vertically. Keep the horizontal position at the left edge and leave the window open." : "Scroll the native document down, up, right and left, then verify its boundaries. Leave the window open."
+        let proposalDirectory = useHolo ? URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_MODEL_TRIAL_DIRECTORY"])) : directory.appendingPathComponent("proposals")
+        try FileManager.default.createDirectory(at: proposalDirectory, withIntermediateDirectories: false)
+        var responses: [[String: Any]] = [], diagnosticProbe: HoloProbeProcess?
+        let started = Date()
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("journals"), propose: { input in
+            if !useHolo, input.actionError != nil { throw ComputerUseDesktopExecutor.Failure.changedScreen }
+            guard responses.count < (useHolo ? 6 : 9) else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
+            if !useHolo, !responses.isEmpty {
+                var current = try read()
+                for _ in 0..<40 {
+                    if (current["events"] as? [[String: Any]] ?? []).count >= responses.count { break }
+                    try await Task.sleep(for: .milliseconds(25)); current = try read()
+                }
+                let events = try XCTUnwrap(current["events"] as? [[String: Any]])
+                guard events.count == responses.count, events.allSatisfy({ $0["type"] as? String == "scroll" }) else {
+                    throw NativeTextFixtureFailure.unexpectedOutcome("Expected exactly one native wheel event per dispatch and no other input: \(events)")
+                }
+                let step = steps[responses.count - 1], key = step.0 ? "x" : "y", other = step.0 ? "y" : "x"
+                let before = try scalar(previous, key), after = try scalar(current, key)
+                let increasing = step.0 ? step.1 > 0 : step.1 < 0
+                let atLimit = step.1.magnitude == 10_000
+                let expectedMax = try scalar(current, step.0 ? "maxX" : "maxY")
+                let event = try XCTUnwrap(events.last)
+                guard event["precise"] as? Bool == true,
+                      try scalar(event, "dx") == Double(step.0 ? -step.1 : 0),
+                      try scalar(event, "dy") == Double(step.0 ? 0 : step.1),
+                      abs(try scalar(current, other) - scalar(previous, other)) < 0.01,
+                      (atLimit ? abs(after - expectedMax) < 1 : (increasing ? after > before : after < before)) else {
+                    throw NativeTextFixtureFailure.unexpectedOutcome("Wrong scroll direction, axis or boundary: before=\(previous), after=\(current)")
+                }
+                previous = current
+            }
+            let proposal: ComputerUseDesktopProposal
+            if useHolo {
+                let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: input.screenshotPNG)), image = try XCTUnwrap(bitmap.cgImage)
+                let crop = CGRect(x: (window.minX - screen.displayBounds.minX) / screen.displayBounds.width * CGFloat(image.width),
+                    y: (window.minY - screen.displayBounds.minY) / screen.displayBounds.height * CGFloat(image.height),
+                    width: window.width / screen.displayBounds.width * CGFloat(image.width), height: window.height / screen.displayBounds.height * CGFloat(image.height)).integral
+                let attachment = XCTAttachment(image: NSImage(cgImage: try XCTUnwrap(image.cropping(to: crop)), size: .zero))
+                attachment.name = "Native scroll observation \(responses.count)"; attachment.lifetime = .keepAlways; self.add(attachment)
+                proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
+                    index: responses.count, environment: environment, memoryLimitGiB: 5, registerProbe: { diagnosticProbe = $0 }))
+            } else if responses.count == steps.count {
+                proposal = .init(response: "done", action: .reportCompletion("Verified native scrolling."))
+            } else {
+                let pane = try XCTUnwrap(input.nativeControls?.items.first { $0.description.hasPrefix("AXScrollArea") })
+                let step = steps[responses.count], point = pane.bounds1000
+                let arguments: [String: Any] = ["action": step.0 ? "hscroll" : "scroll", "pixels": step.1,
+                    "coordinate": [point[0] + point[2] / 2, point[1] + point[3] / 2]]
+                let wire = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": arguments]), as: UTF8.self) + "</tool_call>"
+                proposal = .init(response: wire, action: try ComputerUseFaraAction.decode(wire))
+            }
+            responses.append(["response": proposal.response, "actionError": input.actionError ?? "", "nativeControls": input.nativeControls?.jsonObject ?? [:]])
+            return proposal
+        }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil })
+        let run = Task { try await executor.execute(taskID: "native-scroll", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+        let deadline = Task { try await Task.sleep(for: .seconds(useHolo ? 90 : 40)); run.cancel() }
+        var result: ComputerUseExecutionResult?, failure: Error?
+        do { result = try await run.value } catch { failure = error }
+        deadline.cancel()
+        let final = try read(), journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("journals"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        let dispatches = journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count
+        let workersGone = useHolo ? try DarwinOSAtlasProcessInspector().matchingProcesses(for: URL(fileURLWithPath: XCTUnwrap(environment["HOLO_BINARY"]))).isEmpty : true
+        let report: [String: Any] = ["scope": useHolo ? "actual-Holo-native-scroll" : "scripted-native-scroll", "goal": goal,
+            "responses": responses, "fixtureState": final, "dispatchJournalCount": dispatches, "elapsedSeconds": Date().timeIntervalSince(started),
+            "result": result.map { String(describing: $0) } ?? "", "failure": failure.map { String(reflecting: $0) } ?? "",
+            "revalidation": executor.lastRevalidationDiagnostic, "ownedWorkerExited": workersGone, "diagnosticWorkerLimitGiB": useHolo ? 5 : 0,
+            "wholeApp12GBQualified": false, "fixtureFrontmostAtReturn": NSWorkspace.shared.frontmostApplication?.processIdentifier == process.processIdentifier]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Native scroll workflow"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertTrue(workersGone)
+        if let failure { return XCTFail("Native scroll failed: \(failure); \(executor.lastRevalidationDiagnostic)") }
+        guard case .completed(let answer) = result else { return XCTFail("Native scroll did not complete: \(String(describing: result))") }
+        XCTAssertTrue(process.isRunning); XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
+        let events = try XCTUnwrap(final["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, dispatches); XCTAssertTrue(events.allSatisfy { $0["type"] as? String == "scroll" })
+        if useHolo {
+            XCTAssertTrue(answer.contains("FJ-482")); XCTAssertEqual(final["lowerCodeVisible"] as? Bool, true)
+            XCTAssertEqual(try scalar(final, "x"), 0, accuracy: 0.01); XCTAssertGreaterThan(dispatches, 0)
+        } else { XCTAssertEqual(dispatches, steps.count) }
+        let calls = responses.count
+        let replay = try await executor.execute(taskID: "native-scroll", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(replay, result)
+        XCTAssertEqual(responses.count, calls)
+        XCTAssertEqual((try read()["events"] as? [[String: Any]])?.count, events.count)
+    }
+
     func testOptInNativeDesktopImageBuildsAllModelRequests() async throws {
         try await runFixture(browser: false, modelRequestOnly: true)
     }
@@ -148,6 +271,125 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testNativeTargetedScrollPreservesPointsAndDirectionAcrossProviders() throws {
+        let image = try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 1280, height: 800)),
+            displayBounds: CGRect(x: -640, y: -200, width: 1280, height: 800)))
+        for (horizontal, pixels, direction) in [(false, 240, "up"), (false, -240, "down"), (true, 240, "right"), (true, -240, "left")] {
+            let name = horizontal ? "hscroll" : "scroll"
+            let call = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"\(name)\",\"coordinate\":[250,500],\"pixels\":\(pixels)}}</tool_call>"
+            let fara = try ComputerUseFaraAction.decode(call)
+            let owlData = try JSONSerialization.data(withJSONObject: ["model": ComputerUseGUIOwlModel.modelAlias,
+                "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": "Action: Scroll the observed pane.\n" + call]]]])
+            let owl = try XCTUnwrap(ComputerUseGUIOwlModel.decode(owlData).compatibleDesktopProposal().action)
+            let arguments = String(decoding: try JSONSerialization.data(withJSONObject: ["direction": direction, "distance": abs(pixels), "x": 250, "y": 500]), as: UTF8.self)
+            let holoData = try JSONSerialization.data(withJSONObject: ["model": ComputerUseHoloModel.modelAlias,
+                "choices": [["finish_reason": "tool_calls", "message": ["role": "assistant", "content": "", "tool_calls": [["id": "scroll-case", "type": "function", "function": ["name": "scroll", "arguments": arguments]]]]]]])
+            let holo = try ComputerUseHoloModel.decode(holoData).action
+            for action in [fara, owl, holo] {
+                XCTAssertEqual(try ComputerUseDesktopExecutor.nativeAction(action, image: image),
+                    .scroll(x: -320, y: 200, dx: horizontal ? -pixels : 0, dy: horizontal ? 0 : pixels))
+            }
+            let legacy = try ComputerUseFaraAction.decode("<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"\(name)\",\"pixels\":\(pixels)}}</tool_call>")
+            XCTAssertEqual(legacy, .scroll(horizontal: horizontal, pixels: Double(pixels)))
+            XCTAssertThrowsError(try ComputerUseDesktopExecutor.nativeAction(legacy, image: image), "Native scrolling cannot guess a target")
+        }
+    }
+
+    func testNativeScrollRejectsMalformedAmountsAndPartialOrInvalidPoints() throws {
+        func fara(_ arguments: String) -> String { "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + arguments + "}</tool_call>" }
+        func holo(_ arguments: String) throws -> ComputerUseFaraModel.Proposal {
+            try ComputerUseHoloModel.decode(JSONSerialization.data(withJSONObject: ["choices": [["finish_reason": "tool_calls", "message": [
+                "role": "assistant", "content": "", "tool_calls": [["id": "edge", "type": "function", "function": ["name": "scroll", "arguments": arguments]]]]]]]))
+        }
+        let invalidAmounts = ["0", "0.5", "10001", "true", "\"240\"", "null", "1e309"]
+        for amount in invalidAmounts {
+            let call = fara("{\"action\":\"scroll\",\"pixels\":\(amount),\"coordinate\":[250,500]}")
+            XCTAssertThrowsError(try ComputerUseFaraAction.decode(call), amount)
+            XCTAssertThrowsError(try ComputerUseGUIOwlModel.decode(JSONSerialization.data(withJSONObject: ["choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": "Action: Scroll.\n" + call]]]])), amount)
+            XCTAssertThrowsError(try holo("{\"direction\":\"down\",\"distance\":\(amount),\"x\":250,\"y\":500}"), amount)
+        }
+        for coordinate in ["null", "[]", "[250]", "[250,500,1]", "[true,500]", "[250,\"500\"]", "[-1,500]", "[250,1001]", "[250,1e309]"] {
+            XCTAssertThrowsError(try ComputerUseFaraAction.decode(fara("{\"action\":\"hscroll\",\"pixels\":240,\"coordinate\":\(coordinate)}")), coordinate)
+        }
+        for point in ["\"x\":250", "\"y\":500", "\"x\":true,\"y\":500", "\"x\":250.5,\"y\":500", "\"x\":-1,\"y\":500", "\"x\":250,\"y\":1001", "\"x\":250,\"y\":null"] {
+            XCTAssertThrowsError(try holo("{\"direction\":\"down\",\"distance\":240,\(point)}"), point)
+        }
+        let image = try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)), displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        for amount in [0, 0.5, -0.5, 10_001, -.infinity, .nan] as [Double] {
+            XCTAssertThrowsError(try ComputerUseDesktopExecutor.nativeAction(.scrollAt(horizontal: false, pixels: amount, point: .init(x: 500, y: 500)), image: image))
+        }
+        for point in [ComputerUseFaraAction.Point(x: -1, y: 500), .init(x: 500, y: 1001), .init(x: .nan, y: 500)] {
+            XCTAssertThrowsError(try ComputerUseDesktopExecutor.nativeAction(.scrollAt(horizontal: false, pixels: -240, point: point), image: image))
+        }
+    }
+
+    func testNativeScrollRejectsOutsideWindowAndChangedObservationBeforeInput() async throws {
+        for scenario in ["outside", "window moved", "authority changed", "missing point"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var frame = CGRect(x: 100, y: 50, width: 200, height: 200), focus = "pane", calls = 0, effects = 0
+            let tools = desktopTestTools(focus: { focus }, window: { frame }, perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                calls += 1
+                if calls == 1 {
+                    if scenario == "window moved" { frame.origin.x += 20 }
+                    if scenario == "authority changed" { focus = "different pane" }
+                    let action: ComputerUseFaraAction = scenario == "missing point" ? .scroll(horizontal: false, pixels: -240) :
+                        .scrollAt(horizontal: false, pixels: -240, point: scenario == "outside" ? .init(x: 900, y: 900) : .init(x: 300, y: 300))
+                    return .init(response: "scroll", action: action)
+                }
+                XCTAssertEqual(calls, 2); XCTAssertNotNil(input.actionError, scenario)
+                if scenario == "missing point" { XCTAssertTrue(input.actionError?.contains("explicit coordinate") == true) }
+                return .init(response: "stop", action: .reportCompletion("No scroll was sent"))
+            })
+            let result = try await executor.execute(taskID: "scroll-boundary", prompt: "Scroll the observed pane", trustedUserPrompt: "Scroll the observed pane", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("No scroll was sent")); XCTAssertEqual(effects, 0, scenario)
+            let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+                .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] }, scenario)
+        }
+    }
+
+    private final class ScrollInterruptionEvents: @unchecked Sendable {
+        private let lock = NSLock()
+        private var events: [CGEventType] = []
+        private var restored = false
+        let stopAfter: Int
+        init(stopAfter: Int) { self.stopAfter = stopAfter }
+        func record(_ event: CGEvent) { lock.lock(); defer { lock.unlock() }; events.append(event.type) }
+        var allowed: Bool { lock.lock(); defer { lock.unlock() }; return restored || events.count < stopAfter }
+        var types: [CGEventType] { lock.lock(); defer { lock.unlock() }; return events }
+        func restore() { lock.lock(); defer { lock.unlock() }; restored = true }
+    }
+
+    func testNativeScrollWithdrawalBetweenPointerAndWheelCannotReplay() async throws {
+        for stopAfter in [1, 2] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let events = ScrollInterruptionEvents(stopAfter: stopAfter)
+            let tools = desktopTestTools(injector: InputInjector(eventPoster: { events.record($0) }), mayAct: { events.allowed })
+            var proposals = 0
+            let propose: ComputerUseDesktopExecutor.Propose = { _ in
+                proposals += 1
+                return .init(response: "scroll", action: .scrollAt(horizontal: false, pixels: -240, point: .init(x: 500, y: 500)))
+            }
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: propose)
+            do { _ = try await executor.execute(taskID: "scroll-interrupted", prompt: "Scroll down", trustedUserPrompt: "Scroll down", tools: tools, progress: { _ in }); XCTFail("Partial native dispatch must not complete") } catch { }
+            XCTAssertEqual(events.types.first, .mouseMoved)
+            XCTAssertEqual(events.types.count, stopAfter)
+            XCTAssertEqual(events.types.filter { $0 == .scrollWheel }.count, stopAfter - 1)
+            events.restore()
+            let resumed = try await executor.execute(taskID: "scroll-interrupted", prompt: "Scroll down", trustedUserPrompt: "Scroll down", tools: tools, progress: { _ in })
+            guard case .unableToComplete = resumed else { return XCTFail("Uncertain wheel dispatch became successful") }
+            let restarted = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: propose)
+            do { _ = try await restarted.execute(taskID: "scroll-interrupted", prompt: "Scroll down", trustedUserPrompt: "Scroll down", tools: tools, progress: { _ in }); XCTFail("Restart replayed uncertain wheel dispatch") } catch { }
+            XCTAssertEqual(proposals, 1); XCTAssertEqual(events.types.count, stopAfter)
+            let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+                .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertEqual(journals.filter { $0.statuses == [.uncertain] }.count, 1)
+        }
+    }
+
     func testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities() throws {
         let image = try ComputerUseDesktopImage(observation: .init(
             image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
@@ -171,7 +413,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
         let actions = try XCTUnwrap(properties["action"] as? [String: Any])
         XCTAssertEqual(Set(try XCTUnwrap(actions["enum"] as? [String])),
-            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "pause_and_memorize_fact", "terminate"]))
+            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll", "wait", "pause_and_memorize_fact", "terminate"]))
         XCTAssertEqual(function["name"] as? String, "computer_use")
         XCTAssertTrue(prompt.contains("macOS")); XCTAssertTrue(prompt.contains("Command"))
         XCTAssertTrue(prompt.contains("<tool_call>"))
@@ -186,12 +428,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
         textEditor: ComputerUseTextEditor? = nil,
-        perform: @escaping (ComputerUsePredictedAction) throws -> Void) -> ComputerUseHostTools {
-        ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+        injector: InputInjector = InputInjector(), mayAct: @escaping () -> Bool = { true },
+        window: @escaping () -> CGRect = { CGRect(x: 0, y: 0, width: 640, height: 400) },
+        perform: ((ComputerUsePredictedAction) throws -> Void)? = nil) -> ComputerUseHostTools {
+        ComputerUseHostTools(injector: injector, mayAct: mayAct,
             approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
             actionPerformer: perform, textEditor: textEditor,
             screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
-                displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 400)) },
+                displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: window()) },
             transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
             authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
             planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })
@@ -249,7 +493,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
         let holo = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input).httpBody)) as? [String: Any])
         let holoTools = try XCTUnwrap(holo["tools"] as? [[String: Any]]).compactMap { $0["function"] as? [String: Any] }
-        XCTAssertEqual(Set(holoTools.compactMap { $0["name"] as? String }), Set(["click", "type", "key", "wait", "answer"]))
+        XCTAssertEqual(Set(holoTools.compactMap { $0["name"] as? String }), Set(["click", "type", "key", "scroll", "wait", "answer"]))
         let key = try XCTUnwrap(holoTools.first { $0["name"] as? String == "key" }?["description"] as? String)
         XCTAssertTrue(key.contains("Command")); XCTAssertTrue(key.contains("Control")); XCTAssertFalse(key.contains("browser"))
         let owl = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: input).httpBody)) as? [String: Any])
@@ -265,7 +509,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
         let action = try XCTUnwrap(properties["action"] as? [String: Any])
         XCTAssertEqual(Set(try XCTUnwrap(action["enum"] as? [String])),
-            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "answer", "terminate", "interact"]))
+            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll", "wait", "answer", "terminate", "interact"]))
         XCTAssertNil(properties["answer"]); XCTAssertNil(properties["fact"])
         let status = try XCTUnwrap(properties["status"] as? [String: Any])
         XCTAssertEqual(Set(try XCTUnwrap(status["enum"] as? [String])), Set(["success", "failure"]))

@@ -37,7 +37,7 @@ enum ComputerUseNativeControlReader {
         access.timeout(window, 0.1)
         guard try frame(window) == windowBounds else { return nil }
         let roles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
-            "AXComboBox", "AXTextField", "AXTextArea", "AXMenuItem", "AXSlider", "AXIncrementor"]
+            "AXComboBox", "AXTextField", "AXTextArea", "AXMenuItem", "AXSlider", "AXIncrementor", "AXScrollArea"]
         var queue: [(AXUIElement, Bool)] = [(window, false)], visited: [AXUIElement] = []
         var items: [ComputerUseNativeControls.Item] = [], truncated = false
         while !queue.isEmpty {

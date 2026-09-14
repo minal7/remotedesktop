@@ -20,6 +20,9 @@ enum ComputerUseFaraAction: Equatable, Sendable {
     case typeText(String)
     case key([String])
     case scroll(horizontal: Bool, pixels: Double)
+    /// Native wheel input has an explicit screen point and logical-pixel delta.
+    /// The unlocated variant above retains the browser's viewport semantics.
+    case scrollAt(horizontal: Bool, pixels: Double, point: Point)
     case visitURL(URL)
     case historyBack
     case webSearch(String)
@@ -92,9 +95,17 @@ enum ComputerUseFaraAction: Equatable, Sendable {
                 guard Set(names).count == names.count else { throw Failure.invalidResponse }
                 return .key(names)
             case "scroll", "hscroll":
-                try keys("pixels")
                 let pixels = try number(args["pixels"])
                 guard abs(pixels) <= 10_000 else { throw Failure.invalidResponse }
+                if args["coordinate"] != nil {
+                    try keys("pixels", "coordinate")
+                    guard abs(pixels) >= 1, pixels.rounded() == pixels,
+                          case .array(let coordinate)? = args["coordinate"], coordinate.count == 2 else { throw Failure.invalidResponse }
+                    let point = try Point(x: number(coordinate[0]), y: number(coordinate[1]))
+                    guard (0...1000).contains(point.x), (0...1000).contains(point.y) else { throw Failure.invalidResponse }
+                    return .scrollAt(horizontal: action == "hscroll", pixels: pixels, point: point)
+                }
+                try keys("pixels")
                 return .scroll(horizontal: action == "hscroll", pixels: pixels)
             case "visit_url":
                 try keys("url")

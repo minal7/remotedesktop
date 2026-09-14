@@ -1,6 +1,11 @@
 import AppKit
 import WebKit
 
+final class ScrollFixtureDocument: NSView {
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+}
+
 // Deliberately separate from the host: integration tests must cross the real
 // Accessibility/event boundary and independently read this app's final state.
 final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate {
@@ -13,6 +18,9 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     var webView: WKWebView?
     var lastCommand: String?
     var generation = 0
+    var scrollView: NSScrollView?
+    var scrollEvents: [[String: Any]] = []
+    var eventMonitor: Any?
 
     init(stateURL: URL) { self.stateURL = stateURL }
 
@@ -29,7 +37,35 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
         NSApp.mainMenu = menu
         window.title = "Remote Desktop text verification fixture"
         let view = window.contentView!
-        if CommandLine.arguments.contains("--browser") {
+        if CommandLine.arguments.contains("--scroll") {
+            window.title = "Remote Desktop native scroll fixture"
+            let scroll = NSScrollView(frame: view.bounds.insetBy(dx: 24, dy: 20))
+            scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
+            scroll.autohidesScrollers = false; scroll.scrollerStyle = .legacy
+            scroll.drawsBackground = true; scroll.backgroundColor = .white
+            scroll.setAccessibilityLabel("Scrollable document")
+            let document = ScrollFixtureDocument(frame: NSRect(x: 0, y: 0, width: 1400, height: 1100))
+            document.wantsLayer = true; document.layer?.backgroundColor = NSColor.white.cgColor
+            for (text, x, y) in [("Beginning of the native document", 20.0, 20.0),
+                                  ("Scroll vertically to inspect the lower section.", 20.0, 65.0),
+                                  ("Lower section code: FJ-482", 20.0, 930.0),
+                                  ("Right edge of the document", 1060.0, 30.0)] {
+                let label = NSTextField(labelWithString: text)
+                label.frame = NSRect(x: x, y: y, width: 500, height: 28)
+                label.font = .systemFont(ofSize: 18); label.textColor = .black
+                document.addSubview(label)
+            }
+            scroll.documentView = document; view.addSubview(scroll); scrollView = scroll
+            scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView)
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+                if let self, self.scrollEvents.count < 64 {
+                    self.scrollEvents.append(event.type == .scrollWheel
+                        ? ["type": "scroll", "dx": event.scrollingDeltaX, "dy": event.scrollingDeltaY, "precise": event.hasPreciseScrollingDeltas]
+                        : ["type": "other"])
+                }
+                return event
+            }
+        } else if CommandLine.arguments.contains("--browser") {
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = .nonPersistent()
             let browser = WKWebView(frame: view.bounds, configuration: configuration)
@@ -67,7 +103,8 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
         }
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil)
-        if webView == nil { window.makeFirstResponder(origin) }
+        if let scrollView { window.makeFirstResponder(scrollView.documentView) }
+        else if webView == nil { window.makeFirstResponder(origin) }
         NSApp.activate(ignoringOtherApps: true)
         timer = Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { [weak self] _ in
             self?.consumeCommand()
@@ -84,6 +121,15 @@ final class FixtureDelegate: NSObject, NSApplicationDelegate, WKNavigationDelega
     }
 
     func writeState() {
+        if let scrollView, let document = scrollView.documentView {
+            let visible = scrollView.documentVisibleRect
+            let state: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "mode": "scroll",
+                "x": visible.minX, "y": visible.minY, "maxX": max(0, document.bounds.width - visible.width),
+                "maxY": max(0, document.bounds.height - visible.height), "events": scrollEvents,
+                "lowerCodeVisible": visible.contains(NSRect(x: 20, y: 930, width: 290, height: 28))]
+            if let data = try? JSONSerialization.data(withJSONObject: state) { try? data.write(to: stateURL, options: .atomic) }
+            return
+        }
         if let webView {
             webView.evaluateJavaScript("({...window.formState,rawOrigin:document.getElementById('origin').value,rawDestination:document.getElementById('destination').value})") { [weak self] result, _ in
                 guard let self, var state = result as? [String: Any] else { return }

@@ -152,6 +152,16 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
                     "pointerPoint": "\(x),\(y)", "pointerRequiresFullDisplayMatch": "true"] }
             }
+        case .scroll(let x, let y, _, _)?:
+            guard let window = expected.fingerprint.frontmostWindowBounds,
+                  window.contains(CGPoint(x: x, y: y)) else { throw Failure.changedScreen }
+            let scopeMatches = expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
+            if let field = expected.focusedTextFrame, field == fresh.focusedTextFrame, window.contains(field),
+               expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint) {
+                matches = try scopeMatches && expected.image.matchesInsertionPointPixels(of: fresh.image, window: window, field: field)
+            } else {
+                matches = try scopeMatches && expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
+            }
         case nil:
             if let field = expected.focusedTextFrame, field == fresh.focusedTextFrame,
                let window = expected.fingerprint.frontmostWindowBounds, window.contains(field),
@@ -189,6 +199,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             return .click(x: point.x, y: point.y, button: button, count: count)
         case .typeText(let text): return .typeText(text)
         case .key(let keys): return try ComputerUseNativeKeyChord.action(keys)
+        case .scrollAt(let horizontal, let pixels, let point):
+            guard pixels.isFinite, abs(pixels) >= 1, abs(pixels) <= 10_000, pixels.rounded() == pixels else { throw Failure.unsupportedAction }
+            let target = try image.displayPoint(normalizedX: point.x, normalizedY: point.y)
+            let delta = Int(pixels)
+            // Quartz wheel 1 is positive up; wheel 2 is positive left.
+            return .scroll(x: target.x, y: target.y, dx: horizontal ? -delta : 0, dy: horizontal ? 0 : delta)
         case .wait, .remember, .reportCompletion: return nil
         default: throw Failure.unsupportedAction
         }
@@ -284,7 +300,11 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 session.rejected += 1
             } catch Failure.unsupportedAction {
                 record(proposal, observation: observation, session: session)
-                session.actionError = "That action is not supported by the native desktop adapter. No input was sent. Choose a supported native action."
+                if case .scroll? = proposal.action {
+                    session.actionError = "Native scrolling requires an explicit coordinate inside the intended pane in the foreground window. No input was sent. Inspect the current screenshot and provide that coordinate."
+                } else {
+                    session.actionError = "That action is not supported by the native desktop adapter. No input was sent. Choose a supported native action."
+                }
                 session.rejected += 1
             }
             if session.rejected >= 3 { return .userInterventionRequired("I couldn't verify the next desktop action. Complete this step, then choose Resume.") }

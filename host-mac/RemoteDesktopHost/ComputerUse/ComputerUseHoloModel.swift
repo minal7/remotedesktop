@@ -124,7 +124,14 @@ enum ComputerUseHoloModel {
         guard surface == .desktop else { return declared }
         return declared.filter { tool in
             guard let function = tool["function"] as? [String: Any], let name = function["name"] as? String else { return false }
-            return ["click", "type", "key", "wait", "answer"].contains(name)
+            return ["click", "type", "key", "scroll", "wait", "answer"].contains(name)
+        }.map { declaration in
+            guard let function = declaration["function"] as? [String: Any], function["name"] as? String == "scroll" else { return declaration }
+            return tool("scroll", "Scroll the pane under (x,y) in the foreground window without clicking it. Coordinates use the full screenshot's top-left 0...1000 scale. Distance is a positive whole number of logical screen pixels in the explicit direction.", [
+                "direction": ["type": "string", "enum": ["up", "down", "left", "right"]],
+                "distance": ["type": "integer", "minimum": 1, "maximum": 10_000],
+                "x": ["type": "integer", "minimum": 0, "maximum": 1000],
+                "y": ["type": "integer", "minimum": 0, "maximum": 1000]])
         }
     }
 
@@ -216,11 +223,20 @@ enum ComputerUseHoloModel {
             try keys("time"); let seconds = try number("time")
             guard (0...30).contains(seconds) else { throw invalid }; action = .wait(seconds)
         case "scroll":
-            try keys("direction", "distance")
             let direction = try text("direction"), distance = try number("distance")
             guard ["up", "down", "left", "right"].contains(direction), (0...10_000).contains(distance) else { throw invalid }
-            action = .scroll(horizontal: direction == "left" || direction == "right",
-                pixels: (direction == "down" || direction == "left") ? -distance : distance)
+            let horizontal = direction == "left" || direction == "right"
+            let pixels = (direction == "down" || direction == "left") ? -distance : distance
+            if args["x"] != nil || args["y"] != nil {
+                try keys("direction", "distance", "x", "y")
+                guard distance >= 1, distance.rounded() == distance,
+                      let x = args["x"]?.exactInteger, let y = args["y"]?.exactInteger,
+                      (0...1000).contains(x), (0...1000).contains(y) else { throw invalid }
+                action = .scrollAt(horizontal: horizontal, pixels: pixels, point: .init(x: Double(x), y: Double(y)))
+            } else {
+                try keys("direction", "distance")
+                action = .scroll(horizontal: horizontal, pixels: pixels)
+            }
         case "key":
             try keys("keys")
             guard case .array(let values)? = args["keys"], (1...8).contains(values.count) else { throw invalid }
