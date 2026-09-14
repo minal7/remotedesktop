@@ -42,6 +42,14 @@ elif alias == 'gui-owl-desktop-v1':
     assert memory_limit_gib == 4
     model_name, projector_name = 'GUI-Owl-1.5-2B-Instruct.Q4_K_M.gguf', 'GUI-Owl-1.5-2B-Instruct.mmproj-f16.gguf'
     model_label = 'GUI-Owl-desktop'
+elif alias == 'ui-tars-desktop-diagnostic-v1':
+    # Frozen low-bit candidate probe only. UI-TARS uses its own plain-text
+    # action protocol; this runner never decodes or executes those actions.
+    assert memory_limit_gib == 5
+    assert 'tools' not in request_body and 'tool_choice' not in request_body
+    assert request_body['temperature'] == 0
+    model_name, projector_name = 'UI-TARS-1.5-7B.i1-IQ3_XXS.gguf', 'UI-TARS-1.5-7B.mmproj-Q8_0.gguf'
+    model_label = 'UI-TARS-IQ3-XXS'
 elif alias == 'fara-browser-v1':
     assert len(sys.argv) == 7 and sys.argv[6] in ('fara-q4', 'fara-q6', 'fara-q6-reading')
     assert memory_limit_gib == 5

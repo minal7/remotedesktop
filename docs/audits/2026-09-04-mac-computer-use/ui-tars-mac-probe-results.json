@@ -1,0 +1,176 @@
+{
+  "date": "2026-09-14",
+  "scope": "One frozen real-TextEdit screenshot proposal from UI-TARS-1.5-7B IQ3_XXS with Q8 projector; no input execution",
+  "parentCommit": "2bc9f6897a98a04e5af0f6f093fac325dc95a8c9",
+  "runner": {
+    "path": "host-mac/scripts/holo_one_proposal.py",
+    "sha256": "d4d3ce783f581d1e3e71230b049766c12efd0a0f56d3fe8e2c23e9bc0adf655a"
+  },
+  "inputProvenance": {
+    "promptSource": "https://raw.githubusercontent.com/bytedance/UI-TARS/582f3a7ea5d285ee8ed9e2e84048d1ab01453c49/data/test_messages_single_image.json",
+    "upstreamPromptSHA256": "70c019970972d165db386967b81d329cf675341bbcdbf7f60fe0c28187f6c80c",
+    "substitutions": [
+      "Only original sample task replaced by TextEdit goal; Chinese thoughts retained"
+    ],
+    "screenshot": ".build/repair-verification/real-textedit-holo-01-attachments/F0AF9702-371C-45DA-B597-33D42E8E9EFB.png",
+    "screenshotSHA256": "e0cd264d357d4a8fa0c83f8f4eae3d5b09fcd6f01e8372fb6747be03fab4e6cd",
+    "originalDimensions": [
+      2048,
+      1323
+    ],
+    "expectedProcessedDimensions": [
+      1344,
+      868
+    ],
+    "expectedVisualTokens": 1488,
+    "resizeVerifiedInRuntime": false,
+    "frozenScreenshot": true,
+    "sourceTaskHadNoInputDispatch": true,
+    "goal": "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open.",
+    "decodesOrExecutesActions": false,
+    "productionDefaultChanged": false
+  },
+  "report": {
+    "scope": "one-native-UI-TARS-IQ3-XXS-protocol-proposal-no-tool-execution",
+    "requestSHA256": "89155736184f6eef9d71496d1685237d6f8f30255f7bbd012e973453e4840c27",
+    "modelAssets": {
+      "files": [
+        {
+          "name": "UI-TARS-1.5-7B.i1-IQ3_XXS.gguf",
+          "bytes": 3114514976,
+          "sha256": "ed615e8616c464e7fcc4bc351c38c431f0033c2a44cdb803d44fd67b5c074c16",
+          "repo": "mradermacher/UI-TARS-1.5-7B-i1-GGUF",
+          "revision": "3c672f1bb1d0d6dc571e9a88d8174868487c21dc"
+        },
+        {
+          "name": "UI-TARS-1.5-7B.mmproj-Q8_0.gguf",
+          "bytes": 856130240,
+          "sha256": "31492401b0da4d2fc68e353c66bdcf3837818c68abb5265207ec1923abf738d3",
+          "repo": "mradermacher/UI-TARS-1.5-7B-GGUF",
+          "revision": "47441b8080b9848dac66f8a068f5e8d75c42739b"
+        }
+      ]
+    },
+    "binarySHA256": "8a45dc0108d53b04514b0fc767c0f083b04621be76403acf28dbbcb535cb7e8d",
+    "targetMacRAMGB": 12,
+    "wholeApp12GBQualified": false,
+    "selectedProductionModelChanged": false,
+    "memoryMetric": "sampled max of resident size and physical footprint",
+    "memoryStopLimitBytes": 5368709120,
+    "diagnosticMemoryLimitOnly": true,
+    "productionMemoryLimitChanged": false,
+    "peakSampledProcessMemoryBytes": 5137711104,
+    "memorySamples": 47,
+    "startupDeadlineSeconds": 45,
+    "generationDeadlineSeconds": 45,
+    "totalDeadlineSeconds": 100,
+    "runnerExecutesNoActions": true,
+    "minimumImageTokensEnvironment": null,
+    "pid": 74105,
+    "startupSeconds": 1.7998691250104457,
+    "generationSeconds": 10.3939402080141,
+    "responseReceived": true,
+    "usage": {
+      "completion_tokens": 70,
+      "prompt_tokens": 1809,
+      "total_tokens": 1879,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "finishReason": "stop",
+    "exitCode": 0,
+    "ownedProcessExited": true,
+    "credentialRemoved": true,
+    "totalSeconds": 12.324283582973294
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "Thought: 我看到屏幕上显示的是一个名为\"Travel notes.txt\"的文档，里面有一些关于会议和地点的记录。为了完成替换任务，我需要先打开这个文档。让我点击一下文档区域，这样就能开始编辑了。\nAction: click(start_box='(231,107)')"
+        }
+      }
+    ],
+    "created": 1789372535,
+    "model": "ui-tars-desktop-diagnostic-v1",
+    "system_fingerprint": "b9992-6eddde06a",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 70,
+      "prompt_tokens": 1809,
+      "total_tokens": 1879,
+      "prompt_tokens_details": {
+        "cached_tokens": 0
+      }
+    },
+    "id": "chatcmpl-xGV234Dm2ND0t0QRI7uvhPJeM1Rc9Rpy",
+    "timings": {
+      "cache_n": 0,
+      "prompt_n": 1809,
+      "prompt_ms": 8488.091,
+      "prompt_per_token_ms": 4.692145384190161,
+      "prompt_per_second": 213.12212604695213,
+      "predicted_n": 70,
+      "predicted_ms": 1843.673,
+      "predicted_per_token_ms": 26.338185714285714,
+      "predicted_per_second": 37.96768732850131
+    }
+  },
+  "artifacts": [
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/request.json",
+      "sha256": "89155736184f6eef9d71496d1685237d6f8f30255f7bbd012e973453e4840c27"
+    },
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/upstream-prompt.txt",
+      "sha256": "70c019970972d165db386967b81d329cf675341bbcdbf7f60fe0c28187f6c80c"
+    },
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/input-provenance.json",
+      "sha256": "73004f0c9905a93b60410b342c3524af5e2355a70fe1b106edd039e56b1de597"
+    },
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/proposal/report.json",
+      "sha256": "984c0c220af63fcf0ec0f7774206cd25fab5d82597f3c3fed22be3572a223986"
+    },
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/proposal/response.json",
+      "sha256": "fd08b7e04e071216c10eab6f5f1e1e33f16370a51cf62797dbd69a2819cd9d0a"
+    },
+    {
+      "path": ".build/repair-verification/uitars-native-probe-01/run.log",
+      "sha256": "f42e3760153030157575892f2df4730ca5c2d737515355d480f8205a6b875569"
+    }
+  ],
+  "interpretation": {
+    "modelLoadsAndResponds": true,
+    "responseTruncated": false,
+    "action": "click(start_box='(231,107)')",
+    "derivedOriginalPixelPoint": [
+      352.0,
+      163.08870967741936
+    ],
+    "derivedLogicalDisplayPoint": [
+      297.0,
+      137.6947004608295
+    ],
+    "mappingMeasuredAtRuntime": false,
+    "plausibleDocumentFocusClick": true,
+    "actualClickExecuted": false,
+    "taskCompleted": false,
+    "betterThanHoloEstablished": false,
+    "peakWorkerGiB": 4.7848663330078125
+  },
+  "limits": [
+    "No task, recovery, typing, approval, handoff, scrolling, retained-history or native driver qualification.",
+    "1344×868 preprocessing dimensions are derived from pinned Qwen2.5-VL resize code under 1536 tokens, not printed by this quiet worker. Verify actual geometry before enabling actions.",
+    "Uses the authors saved 1.5 user prompt; only the sample task is replaced. Chinese thoughts are retained. The later COMPUTER_USE_DOUBAO template is not used.",
+    "IQ3_XXS and Q8 projector can lose accuracy versus original weights. Published MacArena results do not establish this package accuracy.",
+    "4.785 GiB sampled peak fits the diagnostic 5 GiB limit but exceeds current production 4 GiB. It does not qualify a 12 GB Mac or heat."
+  ],
+  "decision": "Retain UI-TARS as a plausible experimental native competitor; do not change model defaults or build an additional browser route. Resolve shared native pointer validation and compare complete fixed native tasks before selecting a replacement."
+}

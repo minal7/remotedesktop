@@ -2062,7 +2062,7 @@ final class ComputerUseHostTools {
         return actionableElementSnapshot(at: point)?.attestationLabel
     }
 
-    private func actionableElementSnapshot(at point: CGPoint) -> AccessibilitySnapshot? {
+    private func actionableElementSnapshot(at point: CGPoint, requiringLabel: Bool = true) -> AccessibilitySnapshot? {
         let systemWide = AXUIElementCreateSystemWide()
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -2075,7 +2075,7 @@ final class ComputerUseHostTools {
         for _ in 0 ..< 8 {
             let snapshot = accessibilitySnapshot(for: current)
             if snapshot.isActionable,
-               snapshot.attestationLabel != nil,
+               (!requiringLabel || snapshot.attestationLabel != nil),
                snapshot.frame?.contains(point) == true {
                 return snapshot
             }
@@ -2403,7 +2403,10 @@ final class ComputerUseHostTools {
         guard case .click(let x, let y, _, _) = action else { return nil }
         if let approvalTargetProvider { return try approvalTargetProvider(action).frame }
         guard screenProvider == nil else { return nil }
-        return actionableElementSnapshot(at: CGPoint(x: x, y: y))?.frame
+        // Geometry is useful even when an editor or icon has no semantic
+        // label. Label attestation keeps its stricter, separate requirement;
+        // the executor still validates target authority and current pixels.
+        return actionableElementSnapshot(at: CGPoint(x: x, y: y), requiringLabel: false)?.frame
     }
 
     func nativeFocusedTextFrame() throws -> CGRect? {

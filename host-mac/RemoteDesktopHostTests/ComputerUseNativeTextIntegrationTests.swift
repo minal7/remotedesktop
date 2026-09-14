@@ -84,6 +84,202 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runNativeScrollFixture(useHolo: true, managedHolo: true, loadedHolo: true)
     }
 
+    func testOptInRealTextEditEditsAndSavesUnicodeWithoutReplay() async throws {
+        try await runRealTextEditTask(actualModel: false)
+    }
+
+    func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
+        try await runRealTextEditTask(actualModel: true)
+    }
+
+    private func runRealTextEditTask(actualModel: Bool) async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
+        guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
+        let inputs = actualModel ? try await Self.managedHoloInputs(environment) : nil
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_TEXTEDIT_TRIAL_DIRECTORY"]))
+        guard !FileManager.default.fileExists(atPath: output.path) else { throw OSAtlasLlamaRuntimeError.invalidLocalInstallation }
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativeTextEdit-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let document = directory.appendingPathComponent("Travel notes.txt")
+        let original = "Meeting notes\nRoute: Seattle\nStatus: draft\n"
+        let expected = "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
+        let goal = "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
+        try Data(original.utf8).write(to: document, options: .withoutOverwriting)
+        let previousApp = NSWorkspace.shared.frontmostApplication
+        let previousInstances = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").map(\.processIdentifier))
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true; configuration.activates = true
+        configuration.addsToRecentItems = false; configuration.arguments = ["-ApplePersistenceIgnoreState", "YES"]
+        let app = try await NSWorkspace.shared.open([document], withApplicationAt: URL(fileURLWithPath: "/System/Applications/TextEdit.app"), configuration: configuration)
+        guard !previousInstances.contains(app.processIdentifier) else { return XCTFail("TextEdit did not create an isolated application instance") }
+        // Cleanup is restricted to the new instance and our own document.
+        defer {
+            if !app.isTerminated { app.forceTerminate() }
+            previousApp?.activate(options: [])
+            if app.isTerminated { try? FileManager.default.removeItem(at: directory) }
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.1)
+        func ownsDocument() -> Bool {
+            guard !app.isTerminated, NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString, &value) == .success,
+                  let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return false }
+            let window = unsafeBitCast(value, to: AXUIElement.self)
+            AXUIElementSetMessagingTimeout(window, 0.1)
+            var identity: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXDocumentAttribute as CFString, &identity) == .success,
+                  let raw = identity as? String, let url = URL(string: raw) else { return false }
+            return url.standardizedFileURL.resolvingSymlinksInPath() == document.standardizedFileURL.resolvingSymlinksInPath()
+        }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: ownsDocument)
+        let launcher = ManagedHoloTestLauncher(), runtime = OSAtlasLlamaRuntime(launcher: launcher)
+        var result: ComputerUseExecutionResult?, failure: Error?, executor: ComputerUseDesktopExecutor?
+        var scriptCalls = 0, activationSeconds: TimeInterval = 0
+        var approvedSaves = 0, approvedEditorClicks = 0, saveEffects = 0, editorClickEffects = 0, rejectedApprovalReplays = 0
+        let started = Date()
+        var memory: Task<(UInt64, Int), Never>?
+        do {
+            for _ in 0..<100 { if ownsDocument() { break }; try await Task.sleep(for: .milliseconds(50)) }
+            guard ownsDocument() else { throw NativeTextFixtureFailure.unexpectedOutcome("The new TextEdit instance did not expose the disposable document") }
+            let initialEditor = try XCTUnwrap(tools.nativeFocusedEditorObservation())
+            XCTAssertEqual(initialEditor.textState?.valuePrefix, original, "TextEdit must observe the complete independent starting document")
+            let initialFrame = try XCTUnwrap(tools.nativeFocusedTextFrame())
+            let editorPoint = ComputerUsePredictedAction.click(x: Int(initialFrame.midX), y: Int(initialFrame.midY), button: 0, count: 1)
+            XCTAssertEqual(try tools.nativePointerTargetFrame(for: editorPoint), initialFrame,
+                "An editor's unlabeled AX geometry must remain available for native pointer validation")
+            if let inputs {
+                let manifest = ComputerUseArtifactManifest.holo31
+                let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: manifest), runtime: runtime,
+                    nativeJournalDirectory: output.appendingPathComponent("journals"))
+                let activation = Date()
+                executor = try await loader.load(receipt: .init(installationVersion: manifest.installationVersion,
+                    modelVariant: manifest.modelVariant, modelDirectory: inputs.modelURL.deletingLastPathComponent().path, installedAt: Date()), progress: { _ in }) as? ComputerUseDesktopExecutor
+                activationSeconds = Date().timeIntervalSince(activation)
+                memory = Task.detached {
+                    var peak: UInt64 = 0, samples = 0
+                    while !Task.isCancelled {
+                        for process in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL)) ?? [] {
+                            if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) { peak = max(peak, bytes); samples += 1 }
+                        }
+                        try? await Task.sleep(for: .milliseconds(100))
+                    }
+                    return (peak, samples)
+                }
+            } else {
+                executor = try ComputerUseDesktopExecutor(journalDirectory: output.appendingPathComponent("journals"), propose: { input in
+                    // A Save may repaint its title/text while completion is
+                    // being checked. Reconsider only completion on fresh
+                    // evidence; never replay an input to handle that repaint.
+                    guard input.actionError == nil || scriptCalls >= 4 else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
+                    defer { scriptCalls += 1 }
+                    let action: ComputerUseFaraAction
+                    switch scriptCalls {
+                    case 0: action = .key(["Command", "a"])
+                    case 1: action = .typeText(expected)
+                    case 2: action = .key(["Command", "s"])
+                    case 3...5:
+                        guard input.focusedTextState?.valuePrefix == expected else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
+                        action = .reportCompletion("Updated the route and saved the document.")
+                    default: throw ComputerUseDesktopExecutor.Failure.stepLimit
+                    }
+                    return .init(response: "scripted native operation \(scriptCalls)", action: action)
+                })
+            }
+            let executor = try XCTUnwrap(executor)
+            let run = Task {
+                var outcome = try await executor.execute(taskID: "real-textedit", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                while case .approvalRequired(_, let action, let continuation) = outcome {
+                    // This task authorizes editing/saving only our disposable document.
+                    // Exercise the real approval continuation without relaxing
+                    // the policy or admitting unrelated desktop effects.
+                    guard ownsDocument() else { throw ComputerUseDesktopExecutor.Failure.changedScreen }
+                    let isSave = action == (try ComputerUseNativeKeyChord.action(["Command", "s"]))
+                    if isSave {
+                        guard approvedSaves == 0 else { throw NativeTextFixtureFailure.unexpectedOutcome("The test permits one approved Save") }
+                    } else {
+                        guard approvedEditorClicks < 3,
+                              case .click(let x, let y, 0, 1) = action,
+                              let frame = try tools.nativeFocusedTextFrame(), frame.contains(CGPoint(x: x, y: y)) else {
+                            throw NativeTextFixtureFailure.unexpectedOutcome("The test authorizes only Save or bounded single clicks inside its own current editor")
+                        }
+                    }
+                    let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+                    try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+                        tools: tools, willBeginEffect: { if isSave { saveEffects += 1 } else { editorClickEffects += 1 } })
+                    if isSave { approvedSaves += 1 } else { approvedEditorClicks += 1 }
+                    do {
+                        try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+                            tools: tools, willBeginEffect: { if isSave { saveEffects += 1 } else { editorClickEffects += 1 } })
+                    } catch ComputerUseDesktopExecutor.Failure.invalidApproval { rejectedApprovalReplays += 1 }
+                    guard rejectedApprovalReplays == approvedSaves + approvedEditorClicks,
+                          saveEffects == approvedSaves, editorClickEffects == approvedEditorClicks else {
+                        throw NativeTextFixtureFailure.unexpectedOutcome("The approved action replay was not rejected before effects")
+                    }
+                    outcome = try await executor.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: { _ in })
+                }
+                return outcome
+            }
+            let deadline = Task { try await Task.sleep(for: .seconds(actualModel ? 120 : 30)); run.cancel() }
+            do { result = try await run.value } catch { failure = error }
+            deadline.cancel()
+            if case .completed = result {
+                let count = executor.diagnosticHistory.count, beforeReplay = try Data(contentsOf: document)
+                let replay = try await executor.execute(taskID: "real-textedit", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(replay, result); XCTAssertEqual(executor.diagnosticHistory.count, count)
+                XCTAssertEqual(try Data(contentsOf: document), beforeReplay)
+            }
+        } catch { failure = error }
+        await runtime.shutdown(); memory?.cancel()
+        let measured = await memory?.value
+        let saved = try Data(contentsOf: document)
+        try saved.write(to: output.appendingPathComponent("saved-document.txt"), options: .withoutOverwriting)
+        let openAtReturn = ownsDocument()
+        let stop = await runtime.lastWorkerStop
+        let exited = try inputs.map { try DarwinOSAtlasProcessInspector().matchingProcesses(for: $0.llamaServerURL).isEmpty } ?? true
+        var report: [String: Any] = ["scope": actualModel ? "Holo-package-loader-real-TextEdit" : "scripted-real-TextEdit", "goal": goal,
+            "original": original, "expected": expected, "savedUTF8": String(data: saved, encoding: .utf8) as Any? ?? NSNull(),
+            "savedBytesMatch": saved == Data(expected.utf8), "result": result.map { String(describing: $0) } ?? "",
+            "failure": failure.map { String(reflecting: $0) } ?? "", "elapsedSeconds": Date().timeIntervalSince(started),
+            "loaderActivationSeconds": activationSeconds, "documentOpenAndFrontmostAtReturn": openAtReturn,
+            "scriptCalls": scriptCalls, "approvedSaves": approvedSaves, "saveEffects": saveEffects,
+            "approvedEditorClicks": approvedEditorClicks, "editorClickEffects": editorClickEffects,
+            "rejectedApprovalReplays": rejectedApprovalReplays, "supportedApproval": "One Command-S and at most three single clicks inside the disposable document's current editor",
+            "revalidation": executor?.lastRevalidationDiagnostic ?? [:],
+            "responses": executor?.diagnosticHistory.map { ["response": $0.response, "actionError": $0.actionError ?? "",
+                "screenshotSHA256": SHA256.hash(data: $0.screenshotPNG).map { String(format: "%02x", $0) }.joined()] } ?? [],
+            "managedLaunchCount": launcher.credentialDirectories.count, "ownedWorkersExited": exited,
+            "credentialsRemoved": launcher.credentialDirectories.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+            "peakWorkerMemoryBytes": measured?.0 ?? 0, "memorySamples": measured?.1 ?? 0,
+            "memorySamplingStartsAfterLoaderActivation": true, "diagnosticWorkerLimitGiB": actualModel ? 5 : 0,
+            "wholeApp12GBQualified": false]
+        if let stop { report["workerStop"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(stop)) }
+        if openAtReturn, let screen = try? tools.currentScreen() {
+            let prepared = try ComputerUseDesktopImage(observation: screen)
+            let shot = XCTAttachment(data: prepared.png, uniformTypeIdentifier: "public.png")
+            shot.name = "Real TextEdit final screen"; shot.lifetime = .keepAlways; add(shot)
+            if let bounds = screen.frontmostWindowBounds { report["finalNativeWindow"] = try tools.nativeControlObservation(displayBounds: screen.displayBounds, windowBounds: bounds)?.window?.jsonObject as Any? ?? NSNull() }
+        }
+        app.forceTerminate()
+        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
+        report["ownedTextEditExited"] = app.isTerminated
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: output.appendingPathComponent("workflow.json"), options: .withoutOverwriting)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Real TextEdit workflow"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertTrue(app.isTerminated); XCTAssertTrue(exited); XCTAssertTrue(openAtReturn)
+        if let failure { return XCTFail("Real TextEdit task failed: \(failure)") }
+        guard case .completed = result else { return XCTFail("Real TextEdit task did not complete: \(String(describing: result))") }
+        XCTAssertEqual(saved, Data(expected.utf8), "The saved file is the independent completion oracle")
+        if actualModel { XCTAssertEqual(launcher.credentialDirectories.count, 2 + approvedSaves + approvedEditorClicks); XCTAssertEqual(stop?.cleanupSucceeded, true) }
+        else { XCTAssertTrue((4...6).contains(scriptCalls)); XCTAssertEqual(approvedSaves, 1) }
+        XCTAssertEqual(saveEffects, approvedSaves); XCTAssertEqual(editorClickEffects, approvedEditorClicks)
+        XCTAssertEqual(rejectedApprovalReplays, approvedSaves + approvedEditorClicks)
+    }
+
     private static func managedHoloInputs(_ environment: [String: String]) async throws -> ComputerUseHoloRuntimeInputs {
         let directory = URL(fileURLWithPath: try XCTUnwrap(environment["HOLO_ASSETS"]))
         for (name, expected) in [(ComputerUseHoloRuntimeInputs.modelFileName, "cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9"),
