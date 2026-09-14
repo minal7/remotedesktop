@@ -2415,17 +2415,34 @@ final class ComputerUseHostTools {
     }
 
     func nativeFocusedEditorDescription() throws -> String? {
+        try nativeFocusedEditorObservation()?.description
+    }
+
+    func nativeFocusedEditorObservation() throws -> (description: String, textState: ComputerUseNativeTextState?)? {
         guard mayAct() else { throw ToolError.paused }
         let description: String
+        let observed: ComputerUseTextSnapshot?
         if let accessibilityContextProvider {
             let context = accessibilityContextProvider(.typeText(""))
             guard Self.providedContextDescribesEditableTypingTarget(context) else { return nil }
             description = context
+            // Synthetic context must never acquire the person's live AX text.
+            observed = textEditorOverride != nil ? try currentTextSnapshot() : nil
+            if textEditorOverride != nil, observed == nil { return nil }
         } else {
             guard screenProvider == nil, let before = try currentTextSnapshot(),
-                  let focused = focusedElementSnapshot(), try currentTextSnapshot() == before else { return nil }
+                  let focused = focusedElementSnapshot() else { return nil }
             description = focused.summary
+            observed = before
         }
+        let state: ComputerUseNativeTextState?
+        if let observed {
+            guard let projected = ComputerUseNativeTextState(snapshot: observed),
+                  try currentTextSnapshot() == observed else { return nil }
+            state = projected
+        } else { state = nil }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
         // Snapshot summaries contain role/label/identifier attributes, never
         // AXValue or selected text. Preserve whole characters within the cap.
         var result = ""
@@ -2434,7 +2451,7 @@ final class ComputerUseHostTools {
             guard result.utf8.count + next.utf8.count <= 1_024 else { break }
             result += next
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : result
+        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : (result, state)
     }
 
     func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,

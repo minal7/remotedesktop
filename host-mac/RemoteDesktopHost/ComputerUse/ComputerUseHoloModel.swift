@@ -24,13 +24,14 @@ enum ComputerUseHoloModel {
             guard ComputerUseOwnedBrowser.validatedURL(url) == url else { throw invalid }
             return try checkedText(url.absoluteString, maximum: 8_192)
         }
-        var observations: [(url: String?, error: String?, reply: String?, editor: String?)] = []
+        var observations: [(url: String?, error: String?, reply: String?, editor: String?, state: ComputerUseNativeTextState?)] = []
         for index in 0...input.history.count {
             let old = index < input.history.count ? input.history[index] : nil
             observations.append(try (source(old?.currentURL ?? (old == nil ? input.currentURL : nil)),
                 checkedText(old?.actionError ?? (old == nil ? input.actionError : nil), maximum: 16_384),
                 checkedText(old?.userResponse ?? (old == nil ? input.userResponse : nil), maximum: 8_192),
-                checkedText(old?.focusedEditor ?? (old == nil ? input.focusedEditor : nil), maximum: 1_024)))
+                checkedText(old?.focusedEditor ?? (old == nil ? input.focusedEditor : nil), maximum: 1_024),
+                old?.focusedTextState ?? (old == nil ? input.focusedTextState : nil)))
         }
         for index in 0...input.history.count {
             let observation = observations[index]
@@ -41,7 +42,10 @@ enum ComputerUseHoloModel {
                 content.append(["type": "image_url", "image_url": ["url": "data:image/png;base64," + png.base64EncodedString()]])
             } else { content.append(["type": "text", "text": "[screenshot evicted]"]) }
             var text = observation.url.map { "\nCurrent URL: " + $0 } ?? ""
-            if input.surface == .desktop { text += "\n" + (try ComputerUseFaraModel.nativeFocusJSON(observation.editor)) }
+            if input.surface == .desktop {
+                let focus = try ComputerUseFaraModel.nativeFocusJSON(observation.editor, state: observation.state)
+                bytes += focus.utf8.count; text += "\n" + focus
+            }
             if index == 0 {
                 if let error = observation.error { text += "\nError: " + error }
                 if let reply = observation.reply { text += "\nUser response: " + reply }
@@ -63,14 +67,15 @@ enum ComputerUseHoloModel {
                     var next = observations[index + 1]
                     if let captured = input.history[index].resultObservation {
                         next = try (source(captured.currentURL), checkedText(captured.actionError, maximum: 16_384),
-                            checkedText(captured.userResponse, maximum: 8_192), checkedText(captured.focusedEditor, maximum: 1_024))
+                            checkedText(captured.userResponse, maximum: 8_192), checkedText(captured.focusedEditor, maximum: 1_024), captured.focusedTextState)
                     }
                     var result: [String: Any] = [:]
-                    if input.surface == .desktop { result["focused_editor"] = next.editor as Any? ?? NSNull() }
+                    if input.surface == .desktop { result = ComputerUseFaraModel.nativeFocusObject(next.editor, state: next.state) }
                     if let url = next.url { result["observed_url"] = url }
                     if let error = next.error { result["error"] = error }
                     if let reply = next.reply { result["user_response"] = reply }
                     let data = try JSONSerialization.data(withJSONObject: result, options: [.sortedKeys, .withoutEscapingSlashes])
+                    if input.surface == .desktop { bytes += data.count }
                     messages.append(["role": "tool", "tool_call_id": id, "content": String(decoding: data, as: UTF8.self)])
                 }
             }

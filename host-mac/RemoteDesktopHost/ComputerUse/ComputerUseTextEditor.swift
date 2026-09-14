@@ -1,8 +1,9 @@
 import Foundation
 import CryptoKit
 
-/// These values stay inside the host. Field contents never become model
-/// observations, approval copy, or telemetry merely to verify an edit.
+/// Full verification snapshots stay local. Model-facing text is a separate,
+/// explicit bounded NativeTextState projection of nonprotected UI, never an
+/// incidental disclosure through edit verification, approval copy or telemetry.
 struct ComputerUseTextSnapshot: Equatable, Sendable {
     let targetID: String
     let value: String

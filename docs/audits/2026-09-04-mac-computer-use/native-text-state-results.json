@@ -1,0 +1,820 @@
+{
+  "date": "2026-09-13",
+  "parentCommit": "39ce4fc675825a85a0963a19558acbc3de5a3c4d",
+  "scope": "Shared bounded native editable-text observations and independent native model generalization checks",
+  "sourceFiles": [
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift",
+      "sha256": "bb3416e25e4a099181be424d9d1fa6beffb4e6aeba19fc2d4173c64536095c43"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+      "sha256": "f5ebc12807c884b16fe530f1d1d9506fed401b827d8ae45b8f1b817b0b0032c0"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseGUIOwlModel.swift",
+      "sha256": "f10a3c2244d1e569b89689d62328875153a006364de8c5cfa31cbe1be6f54762"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseHoloModel.swift",
+      "sha256": "83c1fac7e0fa91f0a6083cf0a91d9ab07bba112c057835624c55978020cfa0dd"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseRuntimeTypes.swift",
+      "sha256": "771a9e2b0df033a811846f1575c6392c8d98cc592af30583f4c8adb8e8e388ea"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextEditor.swift",
+      "sha256": "acf3f9e23cfc7a32ddad9e126a71214ecd4c02a534b4cf0a625ecb1fe40fa7ca"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift",
+      "sha256": "9c2fa811c58102e80f63628749246ae0dcbba0c36f0021a325b247ccc0facf25"
+    },
+    {
+      "path": "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift",
+      "sha256": "b87b019b8d5b00ad5df58aff78687a84f6a1b546c9aee542b3c5b910bdb25aee"
+    }
+  ],
+  "repair": [
+    "The native executor supplies exact nonprotected field prefix, total UTF-8 and UTF-16 lengths, selection and explicit truncation to Fara, Holo and GUI-Owl with the matching current or historical editor caption.",
+    "Projection is limited to 512 UTF-8 bytes without splitting a Character. The full verification snapshot remains local. Secure, disabled, missing, changed or invalid fields cannot produce a value projection; action ownership is checked again after reading.",
+    "Native Tab remains literal. Provider descriptions explain that a multiline editor may insert a tab and tell models to inspect the resulting focus/text observation.",
+    "Fara now retains the original captured native outcome after intermediate history eviction. Every adapter rejects orphaned native text, mixed browser/native context and oversized serialized state/history.",
+    "The test-only actual-model workflow now accepts a prompt and independent expected field values; neither expected state nor fixture coordinates are added to model input. The new two-field Unicode case is a failing regression sentinel."
+  ],
+  "attempts": [
+    {
+      "bundle": ".build/repair-verification/native-text-observation-red-01.xcresult",
+      "log": ".build/repair-verification/native-text-observation-red-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789361382.289,
+        "finishTime": 1789361406.483,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - Fara must observe native text state",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeModelsObserveInvisibleTextAndSelectionAfterAKeyEffect()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeModelsObserveInvisibleTextAndSelectionAfterAKeyEffect",
+            "testName": "testNativeModelsObserveInvisibleTextAndSelectionAfterAKeyEffect()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-observation-green-01.xcresult",
+      "log": ".build/repair-verification/native-text-observation-green-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Passed",
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789361620.775,
+        "finishTime": 1789361768.531,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-boundaries-01.xcresult",
+      "log": ".build/repair-verification/native-text-boundaries-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Failed",
+        "passedTests": 2,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789361901.132,
+        "finishTime": 1789361924.25,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - Fara lost a native observation: \"original-next\\n\\t\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeTextHistoryKeepsOriginalOutcomesAndRejectsOrphanedOrOversizedState()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeTextHistoryKeepsOriginalOutcomesAndRejectsOrphanedOrOversizedState",
+            "testName": "testNativeTextHistoryKeepsOriginalOutcomesAndRejectsOrphanedOrOversizedState()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-boundaries-02.xcresult",
+      "log": ".build/repair-verification/native-text-boundaries-02.log",
+      "compilerOnlyFailure": true,
+      "summary": {
+        "result": "unknown",
+        "passedTests": 0,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789362069.325,
+        "finishTime": 1789362084.554,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-boundaries-03.xcresult",
+      "log": ".build/repair-verification/native-text-boundaries-03.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Passed",
+        "passedTests": 6,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789362148.723,
+        "finishTime": 1789362166.154,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-workflow-01.xcresult",
+      "log": ".build/repair-verification/native-text-workflow-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Passed",
+        "passedTests": 2,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789362259.617,
+        "finishTime": 1789362269.718,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-fara-model-05.xcresult",
+      "log": ".build/repair-verification/native-desktop-fara-model-05.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789362342.164,
+        "finishTime": 1789362403.332,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native faraDiagnostic task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\"))",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInDiagnosticFaraQ4EditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInDiagnosticFaraQ4EditsANativeDesktopForm",
+            "testName": "testOptInDiagnosticFaraQ4EditsANativeDesktopForm()"
+          }
+        ]
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-holo-model-05.xcresult",
+      "log": ".build/repair-verification/native-desktop-holo-model-05.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Passed",
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789362547.609,
+        "finishTime": 1789362616.305,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-text-generalization-build-01.xcresult",
+      "log": ".build/repair-verification/native-text-generalization-build-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Passed",
+        "passedTests": 1,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "startTime": 1789363024.183,
+        "finishTime": 1789363042.248,
+        "runtimeWarnings": [],
+        "testFailures": []
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-holo-unicode-01.xcresult",
+      "log": ".build/repair-verification/native-desktop-holo-unicode-01.log",
+      "compilerOnlyFailure": false,
+      "summary": {
+        "result": "Failed",
+        "passedTests": 0,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "startTime": 1789363062.467,
+        "finishTime": 1789363145.129,
+        "runtimeWarnings": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native holo task did not complete: Optional(RemoteDesktopHost.ComputerUseExecutionResult.userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\"))",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInHoloModelFillsBothNativeFieldsWithUnicode()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInHoloModelFillsBothNativeFieldsWithUnicode",
+            "testName": "testOptInHoloModelFillsBothNativeFieldsWithUnicode()"
+          }
+        ]
+      }
+    }
+  ],
+  "scriptedNativeWorkflow": {
+    "path": ".build/repair-verification/native-text-workflow-01-attachments/73B45A15-2850-4461-B045-1FDAE58BB14A.json",
+    "report": {
+      "completedWithoutReplay": true,
+      "independentFieldVerification": true,
+      "inference": false,
+      "nativeInput": true,
+      "proposals": 7,
+      "simulatedLogin": true,
+      "trace": [
+        "proposal=0 error=none signed=true editable=true",
+        "proposal=1 error=none signed=true editable=true",
+        "clickPoint=534.0,732.0 targetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+        "afterDelayTargetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+        "proposal=2 error=none signed=true editable=true",
+        "proposal=3 error=none signed=true editable=true",
+        "proposal=4 error=none signed=true editable=true",
+        "proposal=5 error=none signed=true editable=true",
+        "proposal=6 error=none signed=true editable=true"
+      ],
+      "verifiedDispatches": 5
+    }
+  },
+  "modelTrials": [
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-05-attachments/FFB6385F-543C-4742-A8C5-B4D17D87B376.json",
+      "scopedTaskAccepted": false,
+      "report": {
+        "diagnosticMemoryLimitOnly": true,
+        "dispatchJournalCount": 0,
+        "elapsedSeconds": 46.21453607082367,
+        "failure": "",
+        "fixtureFrontmostAtReturn": true,
+        "fixtureProcessRunning": true,
+        "fixtureState": {
+          "destination": "",
+          "generation": 0,
+          "origin": "",
+          "pid": 33713
+        },
+        "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+        "memorySamples": 134,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 4324671488,
+        "responses": [
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nI can see the remote desktop text verification fixture with two text inputs: the top one labeled 'Origin' and the lower one labeled 'Destination'. The user asked me to type 'Tokyo' in the Destination field while leaving Origin empty. The Origin field is currently empty and appears focused already, so I should click into the Destination field—the lower input—before typing. This is a reversible text-entry action and does not submit anything.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [235, 622]}}\n</tool_call>",
+            "seconds": 10.999294996261597,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe previous click did not move focus; the screenshot now shows the Origin field highlighted with a green focus border, indicating Origin is focused instead of Destination. To correct this, I should click inside the lower 'Destination' input area, roughly in its left-middle region where text entry should activate. Once Destination is focused, I can type 'Tokyo' and leave both fields untouched otherwise.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [228, 622]}}\n</tool_call>",
+            "seconds": 14.13458502292633,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe previous two clicks appear to have landed too far to the right, likely due to a coordinate scaling mismatch. The screenshot still shows Origin focused, with Destination just below it. I will compensate by clicking farther left and slightly lower, aiming at the left side of the Destination input so that focus moves into Destination before typing. This avoids changing any text yet.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [169, 534]}}\n</tool_call>",
+            "seconds": 17.990902066230774,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          }
+        ],
+        "result": "userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\")",
+        "revalidation": {
+          "editableAuthorityMatches": "true",
+          "focusMatches": "true",
+          "pointerPoint": "292,596",
+          "pointerRequiresFullDisplayMatch": "true",
+          "pointerTargetFrame": "nil",
+          "screenMatches": "false",
+          "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+        },
+        "scope": "actual-faraDiagnostic-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 5368709120,
+        "workerResidency": "fresh worker per proposal"
+      },
+      "workerReports": [
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-proposals/proposal-0/report.json",
+          "pid": 33721,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4212703232,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 8.750380915938877
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-proposals/proposal-1/report.json",
+          "pid": 33727,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4268834816,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 12.119024500017986
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-proposals/proposal-2/report.json",
+          "pid": 33731,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4324671488,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 15.922991500003263
+        }
+      ],
+      "fixtureCrops": [
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-attachments/4C9BD7EC-0EA3-47D0-866F-D017E26CF505.png",
+          "sha256": "3ff4caf23299b0ed0b69921ca3aa55122e9f162fad358d4f6bc15e884325f346"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-attachments/B2EAD31E-1D0F-4148-8E52-B9355DEA9188.png",
+          "sha256": "3ff4caf23299b0ed0b69921ca3aa55122e9f162fad358d4f6bc15e884325f346"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-fara-model-05-attachments/BE966077-E226-4273-998F-5E65A217BD88.png",
+          "sha256": "dcef619d3f374620af3759212a4af2deaaf082558824ef496b1312671c698131"
+        }
+      ]
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-holo-model-05-attachments/2689E7A4-5BF8-4079-B90D-18D959558E9F.json",
+      "scopedTaskAccepted": true,
+      "report": {
+        "diagnosticMemoryLimitOnly": true,
+        "dispatchJournalCount": 2,
+        "elapsedSeconds": 67.30013501644135,
+        "failure": "",
+        "fixtureFrontmostAtReturn": true,
+        "fixtureProcessRunning": true,
+        "fixtureState": {
+          "destination": "Tokyo",
+          "generation": 0,
+          "origin": "",
+          "pid": 35310
+        },
+        "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+        "memorySamples": 190,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 4547985408,
+        "responses": [
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Destination text input field in the form\\\",\\\"x\\\":300,\\\"y\\\":660}\",\"name\":\"click\"},\"id\":\"QXr71jAubSZ365Ojjzzx4eeED4z961pC\",\"type\":\"function\"}]}",
+            "seconds": 11.686710953712463,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Destination • destination",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"text\\\":\\\"Tokyo\\\"}\",\"name\":\"type\"},\"id\":\"adhT4zqVZwWcfQluBagKfaIH5R1RrP6U\",\"type\":\"function\"}]}",
+            "seconds": 12.856680989265442,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Destination • destination",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 5
+              },
+              "value_prefix": "Tokyo",
+              "value_truncated": false,
+              "value_utf8_bytes": 5,
+              "value_utf16_units": 5
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"I have successfully typed \\\"Tokyo\\\" into the Destination field. The Origin field remains empty as requested, and the form is still open. The task is complete.\\n\\n\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"content\\\":\\\"Tokyo has been typed into the Destination field. The Origin field is empty as requested, and the form remains open.\\\"}\",\"name\":\"answer\"},\"id\":\"waHQCgRIRGJwylJZ7kRUdnFXEZ56MGIv\",\"type\":\"function\"}]}",
+            "seconds": 17.776630997657776,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Destination • destination",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 5
+              },
+              "value_prefix": "Tokyo",
+              "value_truncated": false,
+              "value_utf8_bytes": 5,
+              "value_utf16_units": 5
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"The task has been completed successfully. The Destination field now contains \\\"Tokyo\\\", the Origin field remains empty, and the form is still open as requested.\\n\\n\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"content\\\":\\\"Task completed successfully. \\\\\\\"Tokyo\\\\\\\" has been entered in the Destination field, the Origin field is left empty, and the form remains open.\\\"}\",\"name\":\"answer\"},\"id\":\"HSE3moE9GyN3Yg7Di5sXC7onEH9ccHHF\",\"type\":\"function\"}]}",
+            "seconds": 19.262590050697327,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          }
+        ],
+        "result": "completed(\"Task completed successfully. \\\"Tokyo\\\" has been entered in the Destination field, the Origin field is left empty, and the form remains open.\")",
+        "revalidation": {
+          "changedDisplayBounds": "(290.25, 728.6250944822374, 3.375, 19.41874527588813)",
+          "changedPixelBounds": "(344.0, 863.0, 4.0, 23.0)",
+          "fieldPixelBounds": "(289.0, 863.0, 688.0, 22.0)"
+        },
+        "scope": "actual-holo-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 5368709120,
+        "workerResidency": "fresh worker per proposal"
+      },
+      "workerReports": [
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-proposals/proposal-0/report.json",
+          "pid": 35318,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4416978944,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 9.224872958962806
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-proposals/proposal-1/report.json",
+          "pid": 35322,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4451287040,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 10.697465292061679
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-proposals/proposal-2/report.json",
+          "pid": 35328,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4547985408,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 15.570092833950184
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-proposals/proposal-3/report.json",
+          "pid": 35334,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4506435584,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 17.08014420804102
+        }
+      ],
+      "fixtureCrops": [
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-attachments/388CFBB2-3B0E-4A11-A105-B76D1ACBF649.png",
+          "sha256": "25f856cb2b112a0c54c043535307d9fc787a478a00b324ca6201ef796c74338a"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-attachments/B486E790-4666-49E2-8841-826B3B75B077.png",
+          "sha256": "5018857e8e9df6f0f365bceaef6493e7eebfa1de999ad3311e42061ef5745635"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-attachments/B5174D09-1596-46D4-B4AE-1E81347C923F.png",
+          "sha256": "d63a3df3795915f5f6ce1a414fb21192c53bc33b53d49dbaacf80865c17d9edd"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-model-05-attachments/F9BE02F4-378A-42BD-8404-226587D420D6.png",
+          "sha256": "c44036f755dd75a00f728b116e1cc5af75aa14b7a73ce8244f67851e3d369047"
+        }
+      ]
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-holo-unicode-01-attachments/E540C83A-135D-490F-8F29-BCD659681B96.json",
+      "scopedTaskAccepted": false,
+      "report": {
+        "diagnosticMemoryLimitOnly": true,
+        "dispatchJournalCount": 1,
+        "elapsedSeconds": 66.56318998336792,
+        "expectedFixtureState": {
+          "destination": "東京",
+          "origin": "Zürich"
+        },
+        "failure": "",
+        "fixtureFrontmostAtReturn": true,
+        "fixtureProcessRunning": true,
+        "fixtureState": {
+          "destination": "",
+          "generation": 0,
+          "origin": "Zürich",
+          "pid": 42365
+        },
+        "goal": "Set Origin to exactly Zürich and Destination to exactly 東京. Leave the form open.",
+        "memorySamples": 194,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 4509433856,
+        "responses": [
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 0
+              },
+              "value_prefix": "",
+              "value_truncated": false,
+              "value_utf8_bytes": 0,
+              "value_utf16_units": 0
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"text\\\":\\\"Zürich\\\"}\",\"name\":\"type\"},\"id\":\"CVPJnDaooR1cM9QkQxi2hv6HyDWQvhPI\",\"type\":\"function\"}]}",
+            "seconds": 11.495680093765259,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 6
+              },
+              "value_prefix": "Zürich",
+              "value_truncated": false,
+              "value_utf8_bytes": 7,
+              "value_utf16_units": 6
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Destination input field in the Remote Desktop text verification fixture form\\\",\\\"x\\\":150,\\\"y\\\":650}\",\"name\":\"click\"},\"id\":\"zFN3trd1EvG7IjwAliBXXeMuaZE3BH6j\",\"type\":\"function\"}]}",
+            "seconds": 13.910388946533203,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 6
+              },
+              "value_prefix": "Zürich",
+              "value_truncated": false,
+              "value_utf8_bytes": 7,
+              "value_utf16_units": 6
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Destination input field, the empty text box below the Origin field containing Zürich\\\",\\\"x\\\":180,\\\"y\\\":640}\",\"name\":\"click\"},\"id\":\"btzr9qfxleyzKlRZhcESTOrezNXz8DVZ\",\"type\":\"function\"}]}",
+            "seconds": 18.014010906219482,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "focusedEditor": "AXTextArea • Origin • origin",
+            "focusedText": {
+              "selection_utf16": {
+                "length": 0,
+                "location": 6
+              },
+              "value_prefix": "Zürich",
+              "value_truncated": false,
+              "value_utf8_bytes": 7,
+              "value_utf16_units": 6
+            },
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "{\"content\":\"\",\"role\":\"assistant\",\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"element\\\":\\\"Empty Destination text input field below the Origin field in the Remote Desktop text verification fixture form\\\",\\\"x\\\":200,\\\"y\\\":635}\",\"name\":\"click\"},\"id\":\"HwlKRTxEL443cqUqd2GdQZRCtv7v9T4X\",\"type\":\"function\"}]}",
+            "seconds": 18.52282202243805,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          }
+        ],
+        "result": "userInterventionRequired(\"I couldn\\'t verify the next desktop action. Complete this step, then choose Resume.\")",
+        "revalidation": {
+          "editableAuthorityMatches": "true",
+          "focusMatches": "true",
+          "pointerPoint": "345,709",
+          "pointerRequiresFullDisplayMatch": "true",
+          "pointerTargetFrame": "nil",
+          "screenMatches": "true",
+          "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+        },
+        "scope": "actual-holo-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 5368709120,
+        "workerResidency": "fresh worker per proposal"
+      },
+      "workerReports": [
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-proposals/proposal-0/report.json",
+          "pid": 42374,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4394795008,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 9.40727862494532
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-proposals/proposal-1/report.json",
+          "pid": 42584,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4451483648,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 11.742142834002152
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-proposals/proposal-2/report.json",
+          "pid": 43145,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4508991488,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 15.849520749994554
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-proposals/proposal-3/report.json",
+          "pid": 43645,
+          "ownedProcessExited": true,
+          "credentialRemoved": true,
+          "error": null,
+          "exitCode": 0,
+          "peakSampledProcessMemoryBytes": 4509433856,
+          "memoryStopLimitBytes": 5368709120,
+          "totalSeconds": 16.354267750051804
+        }
+      ],
+      "fixtureCrops": [
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-attachments/12FE2C8F-451F-4E3F-BEF9-59BE879A3D0D.png",
+          "sha256": "af6650006823f39f9a598011f6e906e6f27ad17098318f196396e6ced3541fb7"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-attachments/A8E459C2-46E8-4B9C-9B75-41260F83F9D5.png",
+          "sha256": "676eb2b1cf50ca3cea8b150f787672c1af66e8b71dca01b7935068f6c979328f"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-attachments/C9C5956A-B151-4216-9263-B23D2DFC0F9D.png",
+          "sha256": "af6650006823f39f9a598011f6e906e6f27ad17098318f196396e6ced3541fb7"
+        },
+        {
+          "path": ".build/repair-verification/native-desktop-holo-unicode-01-attachments/E97B8D40-A6A5-47EA-869D-BBA4586838FE.png",
+          "sha256": "ca3b428b431e0f531c6c7f6a249158a918847e99f6ea3aafe3a247570f74b2ed"
+        }
+      ]
+    }
+  ],
+  "validation": [
+    "The first regression reproduced absent empty-versus-tab and caret observations in actual executor inputs across all three provider request builders. It passes after the shared projection.",
+    "History regression caught Fara dropping the original next observation. A subsequent compiler-only attempt failed because the test mutated a let field and shadowed the fixture URL; both test issues were corrected before six focused methods passed.",
+    "Unicode cases cover blank values, tabs/newlines/CR, decomposed accents, composed emoji, JSON escapes, an oversized first grapheme, exact truncation, overflow selections, secure/disabled fields, identity/value/selection changes, revoked permission and JSON expansion budgets.",
+    "The real native scripted workflow passes exact value/selection assertions through typing, replacement, Select All, simulated login, Resume and completion: five verified dispatches and no replay.",
+    "The final harness rebuild passed one bounded projection test without inference. Actual model diagnostics then used test-without-building, one worker/task at a time and a 5 GiB diagnostic cap."
+  ],
+  "findings": [
+    "Holo single-field trial05 completes in 67.300135 seconds with two dispatches and independently verified Destination=Tokyo, Origin empty and the form open/frontmost. One completion proposal rejects a changed caret-region observation; the next completes. All four workers exit and remove credentials. This is a scoped task success, not general desktop acceptance.",
+    "Fara trial05 still fails after three rejected label/non-editor clicks. Both fields remain empty and no input dispatch is recorded. Its observed current text is correctly empty throughout. All three workers exit and remove credentials.",
+    "The held-out Holo two-field Unicode task fails: Origin is exactly Zürich, Destination remains empty, and only one dispatch occurred. Its three subsequent clicks progressively move above the destination editor. All observations continue to identify Origin and its exact 7 UTF-8 bytes / 6 UTF-16 units. The executor hands control back rather than typing into the wrong field. All four workers exit and remove credentials.",
+    "One success does not establish that the added text observation caused a model accuracy improvement, nor that grounding or generalization is solved. No production fixture labels, answer values, task-specific coordinates or domains were added."
+  ],
+  "limits": {
+    "generalDesktopAccepted": false,
+    "wholeApp12GBQualified": false,
+    "productionModelChanged": false,
+    "productionWorkerLimitBytes": 4294967296,
+    "diagnosticWorkerLimitBytes": 5368709120,
+    "fullSuiteRun": false,
+    "nativeProductionRoutingSelected": false,
+    "successfulHistoricalFocusedMinimum": {
+      "macOS": 330,
+      "iOS": 10
+    },
+    "buildWarnings": "Existing unavailable-Sendable conformance warnings remain; test result bundles report no runtime warnings."
+  },
+  "next": [
+    "Use the failing two-field Unicode task as a frozen regression. Investigate general read-only native control/geometry observations and target-specific rejection evidence before changing model prompts or input admission. Do not adjust points toward fixture editors.",
+    "Keep Fara eligible and compare candidates on the same shared path and fixed task set. No additional identical full task retries without a new hypothesis.",
+    "Complete generic native actions and production composition, then cross-app/browser tasks, provider login, physical-phone handoff and whole-app 12 GB/thermal acceptance."
+  ]
+}

@@ -99,9 +99,9 @@ enum ComputerUseGUIOwlModel {
               input.pageReading == nil, input.history.allSatisfy({$0.pageReading == nil}) else { throw invalid }
         try ComputerUseFaraModel.validatePNG(input.screenshotPNG)
         var bytes = input.goal.utf8.count
-        func observation(url:URL?,error:String?,reply:String?,editor:String?) throws -> String {
+        func observation(url:URL?,error:String?,reply:String?,editor:String?,state:ComputerUseNativeTextState?) throws -> String {
             var fields:[String:Any]=[:]
-            if input.surface == .desktop { fields["focused_editor"] = editor as Any? ?? NSNull() }
+            if input.surface == .desktop { fields = ComputerUseFaraModel.nativeFocusObject(editor, state: state) }
             if let url {
                 guard ComputerUseOwnedBrowser.validatedURL(url)==url,url.absoluteString.utf8.count<=8192 else { throw invalid }
                 fields["observed_url"]=url.absoluteString
@@ -117,8 +117,8 @@ enum ComputerUseGUIOwlModel {
             return String(decoding:data,as:UTF8.self)
         }
         var observations:[String]=[]
-        for step in input.history { observations.append(try observation(url:step.currentURL,error:step.actionError,reply:step.userResponse,editor:step.focusedEditor)) }
-        observations.append(try observation(url:input.currentURL,error:input.actionError,reply:input.userResponse,editor:input.focusedEditor))
+        for step in input.history { observations.append(try observation(url:step.currentURL,error:step.actionError,reply:step.userResponse,editor:step.focusedEditor,state:step.focusedTextState)) }
+        observations.append(try observation(url:input.currentURL,error:input.actionError,reply:input.userResponse,editor:input.focusedEditor,state:input.focusedTextState))
         var outcomes:[String]=[]
         for (i,step) in input.history.enumerated() {
             _ = try decodeMessage(step.response)
@@ -126,7 +126,7 @@ enum ComputerUseGUIOwlModel {
             bytes+=step.response.utf8.count
             var result=observations[i+1]
             if let original=step.resultObservation {
-                result=try observation(url:original.currentURL,error:original.actionError,reply:original.userResponse,editor:original.focusedEditor)
+                result=try observation(url:original.currentURL,error:original.actionError,reply:original.userResponse,editor:original.focusedEditor,state:original.focusedTextState)
             }
             outcomes.append(result)
         }

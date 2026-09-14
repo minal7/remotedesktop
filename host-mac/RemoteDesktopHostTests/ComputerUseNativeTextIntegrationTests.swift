@@ -119,6 +119,15 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, actualDesktopModel: .holo)
     }
 
+    func testOptInHoloModelFillsBothNativeFieldsWithUnicode() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_HOLO_DESKTOP_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: bounded Holo Q4 inference and disposable native input")
+        }
+        try await runFixture(browser: false, actualDesktopModel: .holo, nativeModelTask: .init(
+            prompt: "Set Origin to exactly Zürich and Destination to exactly 東京. Leave the form open.",
+            origin: "Zürich", destination: "東京"))
+    }
+
     func testOptInOneHoloProposalPreservesNativeFieldBinding() async throws {
         guard ProcessInfo.processInfo.environment["RUN_NATIVE_MODEL_BINDING_PROBE"] == "1" else {
             throw XCTSkip("Opt-in: one model proposal with AX diagnostics and no generated input")
@@ -176,10 +185,11 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     }
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
+        textEditor: ComputerUseTextEditor? = nil,
         perform: @escaping (ComputerUsePredictedAction) throws -> Void) -> ComputerUseHostTools {
         ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
             approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
-            actionPerformer: perform,
+            actionPerformer: perform, textEditor: textEditor,
             screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
                 displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 400)) },
             transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
@@ -291,6 +301,131 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             XCTAssertThrowsError(try build(endpoint, input), name)
             input.focusedEditor = currentEditor; input.surface = .browser
             XCTAssertThrowsError(try build(endpoint, input), name)
+        }
+    }
+
+    func testNativeModelsObserveInvisibleTextAndSelectionAfterAKeyEffect() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var value = "", selection = NSRange(location: 0, length: 0), calls = 0
+        let editor = ComputerUseTextEditor(read: {
+            .init(targetID: "same-editor", value: value, selection: selection, isEditable: true, isSecure: false)
+        }, select: { _, _ in XCTFail("No selection setter expected"); return false },
+            replaceSelectedText: { _, _ in XCTFail("No text setter expected"); return nil },
+            postUnicode: { _, _ in XCTFail("No Unicode posting expected") }, mayAct: { true })
+        let tools = desktopTestTools(textEditor: editor, perform: { action in
+            XCTAssertEqual(action, .key(usage: 0x2B, modifiers: 0))
+            value = "\t"; selection = NSRange(location: 1, length: 0)
+        })
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let providers: [(String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
+            ("Fara", ComputerUseFaraModel.makeRequest), ("GUI-Owl", ComputerUseGUIOwlModel.makeRequest), ("Holo", ComputerUseHoloModel.makeRequest)]
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            defer { calls += 1 }
+            var current = input; current.history = []
+            for (name, build) in providers {
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(build(endpoint, current).httpBody)) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                let texts = messages.filter { $0["role"] as? String == "user" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                XCTAssertTrue(texts.contains("\"focused_text\""), name + " must observe native text state")
+                XCTAssertTrue(texts.contains(calls == 0 ? "\"value_prefix\":\"\"" : "\"value_prefix\":\"\\t\""), name + " must distinguish an empty field from a tab")
+                XCTAssertTrue(texts.contains("\"selection_utf16\":{\"length\":0,\"location\":\(calls)}"), name + " must retain the exact caret")
+            }
+            if calls == 0 {
+                return .init(response: "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"key\",\"keys\":[\"Tab\"]}}</tool_call>", action: .key(["Tab"]))
+            }
+            return .init(response: "done", action: .reportCompletion("Observed the native key result."))
+        })
+        let result = try await executor.execute(taskID: "observe-tab", prompt: "Observe Tab in this editor", trustedUserPrompt: "Observe Tab in this editor", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Observed the native key result.")); XCTAssertEqual(calls, 2)
+        XCTAssertEqual(value, "\t")
+    }
+
+    func testNativeTextStateBoundsUnicodeAndRejectsInvalidOrProtectedSnapshots() throws {
+        for value in ["", "\t", " \n\r ", "e\u{301} 👩🏽‍💻", "\"\\\u{0}</observation>"] {
+            let range = NSRange(location: value.utf16.count, length: 0)
+            let state = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "field", value: value, selection: range, isEditable: true, isSecure: false)))
+            XCTAssertTrue(state.valuePrefix.utf8.elementsEqual(value.utf8)); XCTAssertFalse(state.truncated)
+            XCTAssertEqual(state.valueUTF8Bytes, value.utf8.count); XCTAssertEqual(state.valueUTF16Units, value.utf16.count)
+            XCTAssertEqual(state.selection, range)
+            let wire = try JSONSerialization.data(withJSONObject: state.jsonObject)
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: wire) as? [String: Any])
+            XCTAssertTrue(try XCTUnwrap(decoded["value_prefix"] as? String).utf8.elementsEqual(value.utf8))
+        }
+        let long = String(repeating: "👩🏽‍💻", count: 35)
+        let bounded = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "field", value: long, selection: NSRange(location: 240, length: 5), isEditable: true, isSecure: false)))
+        XCTAssertEqual(bounded.valuePrefix, String(repeating: "👩🏽‍💻", count: 34)); XCTAssertTrue(bounded.truncated)
+        XCTAssertEqual(bounded.valueUTF8Bytes, 525); XCTAssertEqual(bounded.valueUTF16Units, 245)
+        let hugeCharacter = "a" + String(repeating: "\u{301}", count: 512)
+        let omitted = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "field", value: hugeCharacter, selection: .init(location: 0, length: 0), isEditable: true, isSecure: false)))
+        XCTAssertEqual(omitted.valuePrefix, ""); XCTAssertTrue(omitted.truncated); XCTAssertEqual(omitted.valueUTF8Bytes, 1025)
+        for (editable, secure, range, value) in [
+            (true, true, NSRange(location: 0, length: 0), "private"), (false, false, NSRange(location: 0, length: 0), "disabled"),
+            (true, false, NSRange(location: -1, length: 0), "x"), (true, false, NSRange(location: 0, length: -1), "x"),
+            (true, false, NSRange(location: Int.max, length: Int.max), "x"), (true, false, NSRange(location: 1, length: 1), "x"),
+            (true, false, NSRange(location: 0, length: 0), String(repeating: "x", count: 1_048_577))] {
+            XCTAssertNil(ComputerUseNativeTextState(snapshot: .init(targetID: "field", value: value, selection: range, isEditable: editable, isSecure: secure)))
+        }
+    }
+
+    func testNativeTextObservationRejectsProtectedChangedOrWithdrawnState() throws {
+        for mode in ["secure", "became-secure", "disabled", "missing", "identity", "value", "selection", "pause", "password-context"] {
+            var reads = 0, allowed = true
+            let editor = ComputerUseTextEditor(read: {
+                reads += 1
+                if mode == "missing" { return nil }
+                if mode == "pause", reads == 2 { allowed = false }
+                return .init(targetID: mode == "identity" && reads == 2 ? "new-field" : "field",
+                    value: mode == "value" && reads == 2 ? "changed" : "private-value",
+                    selection: NSRange(location: mode == "selection" && reads == 2 ? 1 : 0, length: 0),
+                    isEditable: mode != "disabled", isSecure: mode == "secure" || (mode == "became-secure" && reads == 2))
+            }, select: { _, _ in XCTFail("No effect"); return false }, replaceSelectedText: { _, _ in XCTFail("No effect"); return nil },
+                postUnicode: { _, _ in XCTFail("No effect") }, mayAct: { allowed })
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { allowed }, textEditor: editor,
+                accessibilityContextProvider: { _ in mode == "password-context" ? "AXSecureTextField Password" : "AXTextArea Notes" })
+            if mode == "pause" { XCTAssertThrowsError(try tools.nativeFocusedEditorObservation()) }
+            else { XCTAssertNil(try tools.nativeFocusedEditorObservation(), mode) }
+            if mode == "password-context" { XCTAssertEqual(reads, 0, "Reject a protected context before reading values") }
+        }
+    }
+
+    func testNativeTextHistoryKeepsOriginalOutcomesAndRejectsOrphanedOrOversizedState() throws {
+        let image = try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)), displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        func state(_ value: String) throws -> ComputerUseNativeTextState {
+            try XCTUnwrap(.init(snapshot: .init(targetID: "field", value: value, selection: .init(location: value.utf16.count, length: 0), isEditable: true, isSecure: false)))
+        }
+        let providers: [(String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
+            ("Fara", ComputerUseFaraModel.makeRequest), ("GUI-Owl", ComputerUseGUIOwlModel.makeRequest), ("Holo", ComputerUseHoloModel.makeRequest)]
+        for (name, build) in providers {
+            func wire(_ index: Int) throws -> String {
+                let fara = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"wait\",\"time\":0}}</tool_call>"
+                if name == "Fara" { return fara }
+                if name == "GUI-Owl" { return "Action: Inspect current state.\n" + fara }
+                return String(decoding: try JSONSerialization.data(withJSONObject: ["role": "assistant", "content": "", "tool_calls": [["id": "state-\(index)", "type": "function", "function": ["name": "wait", "arguments": "{\"time\":0}"]]]]), as: UTF8.self)
+            }
+            var history: [ComputerUseFaraModel.Step] = try (0..<3).map { .init(screenshotPNG: image.png, response: try wire($0), focusedEditor: "Earlier editor \($0)", focusedTextState: try state($0 == 0 ? "\t" : "earlier-\($0)")) }
+            history[0].resultObservation = .init(currentURL: nil, userResponse: nil, actionError: "Original feedback", focusedEditor: "Original next editor", focusedTextState: try state("original-next\n\t"))
+            var input = ComputerUseFaraModel.Input(goal: "Inspect the editor state.", screenshotPNG: image.png, surface: .desktop,
+                history: history, focusedEditor: "Current editor", focusedTextState: try state("current-e\u{301}"))
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(build(endpoint, input).httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let text = messages.flatMap { message -> [String] in
+                if let value = message["content"] as? String { return [value] }
+                return (message["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }
+            }.joined(separator: "\n")
+            for value in ["\t", "original-next\n\t", "current-e\u{301}"] {
+                let expected = String(decoding: try JSONSerialization.data(withJSONObject: ["value_prefix": value], options: .withoutEscapingSlashes), as: UTF8.self).dropFirst().dropLast()
+                XCTAssertTrue(text.contains(expected), name + " lost a native observation: \(value.debugDescription)")
+            }
+            input.focusedEditor = nil; XCTAssertThrowsError(try build(endpoint, input), "State without its editor is ambiguous")
+            input.focusedEditor = "Current editor"; input.surface = .browser; XCTAssertThrowsError(try build(endpoint, input))
+            input.surface = .desktop; input.history[0].resultObservation?.focusedEditor = nil; XCTAssertThrowsError(try build(endpoint, input))
+            input.history[0].resultObservation = .init(currentURL: nil, userResponse: nil, actionError: String(repeating: "x", count: 16_385),
+                focusedEditor: "Original next editor", focusedTextState: try state("original-next\n\t"))
+            XCTAssertThrowsError(try build(endpoint, input), name + " must bound the captured outcome error")
+            input.history = try (0..<20).map { .init(screenshotPNG: image.png, response: try wire($0), focusedEditor: String(repeating: "x", count: 1024), focusedTextState: try state(String(repeating: "\u{0}", count: 512))) }
+            XCTAssertThrowsError(try build(endpoint, input), name + " must bound serialized text including JSON escaping")
         }
     }
 
@@ -665,7 +800,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private enum NativeModel: String { case fara, faraDiagnostic, guiOwl, holo }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero, nativeBindingProbe: Bool = false, nativeCompletionDelay: Duration = .zero) async throws {
+    private struct NativeModelTask {
+        let prompt: String
+        let origin: String
+        let destination: String
+        static let singleField = Self(prompt: "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.", origin: "", destination: "Tokyo")
+    }
+
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero, nativeBindingProbe: Bool = false, nativeCompletionDelay: Duration = .zero, nativeModelTask: NativeModelTask = .singleField) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -743,7 +885,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             var bindingObservation: [String: Any] = [:]
             var diagnosticProbe: HoloProbeProcess?
             let started = Date()
-            let goal = "In the Destination field, type Tokyo. Leave Origin empty and leave the form open."
+            let goal = nativeModelTask.prompt
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("actual-native"), propose: { input in
                 guard responses.count < 6 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
                 XCTAssertEqual(input.surface, .desktop)
@@ -788,6 +930,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                         index: responses.count, environment: environment, memoryLimitGiB: workerLimitGiB, registerProbe: { diagnosticProbe = $0 }))
                 }
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
+                    "focusedEditor": input.focusedEditor ?? "", "focusedText": input.focusedTextState?.jsonObject ?? [:],
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
                     "fixtureCropInModelImage": NSStringFromRect(crop), "modelImageWidth": source.width, "modelImageHeight": source.height])
                 if nativeBindingProbe {
@@ -814,6 +957,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
             let fieldState = try JSONSerialization.jsonObject(with: Data(contentsOf: state))
             var report: [String: Any] = ["scope": "actual-\(actualDesktopModel.rawValue)-Q4-native-desktop-form", "goal": goal,
+                "expectedFixtureState": ["origin": nativeModelTask.origin, "destination": nativeModelTask.destination],
                 "responses": responses, "result": result.map { String(describing: $0) } ?? "",
                 "workerLimitBytes": UInt64(workerLimitGiB) * 1024 * 1024 * 1024, "diagnosticMemoryLimitOnly": workerLimitGiB != 4,
                 "fixtureProcessRunning": process.isRunning,
@@ -847,8 +991,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             guard case .completed = result else { return XCTFail("Native \(actualDesktopModel.rawValue) task did not complete: \(String(describing: result))") }
             XCTAssertTrue(process.isRunning)
             XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, process.processIdentifier)
-            try await verify(state, field: "origin", equals: "")
-            try await verify(state, field: "destination", equals: "Tokyo")
+            try await verify(state, field: "origin", equals: nativeModelTask.origin)
+            try await verify(state, field: "destination", equals: nativeModelTask.destination)
             let count = responses.count
             let replay = try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
             XCTAssertEqual(replay, result); XCTAssertEqual(responses.count, count)
@@ -869,6 +1013,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 XCTAssertTrue(input.focusedEditor?.contains(focusedLabel) == true, "The native model must see the actual focused editor: \(String(describing: input.focusedEditor))")
                 XCTAssertFalse(input.focusedEditor?.contains("Replace this") == true)
                 XCTAssertFalse(input.focusedEditor?.contains(exact) == true)
+                let expectedValue = proposals == 0 ? "" : (proposals == 1 ? nativeOriginText : (proposals == 2 ? "" : (proposals <= 4 ? "Replace this" : exact)))
+                let projectedState = try XCTUnwrap(input.focusedTextState)
+                XCTAssertTrue(projectedState.valuePrefix.utf8.elementsEqual(expectedValue.utf8))
+                XCTAssertEqual(projectedState.valueUTF8Bytes, expectedValue.utf8.count); XCTAssertFalse(projectedState.truncated)
+                XCTAssertEqual(projectedState.selection, NSRange(location: proposals == 4 ? 0 : expectedValue.utf16.count,
+                    length: proposals == 4 ? expectedValue.utf16.count : 0))
                 guard proposals < 7 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 let index = proposals; proposals += 1
                 XCTAssertEqual(input.history.count, min(index, 5))

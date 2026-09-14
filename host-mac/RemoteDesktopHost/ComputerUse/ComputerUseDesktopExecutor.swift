@@ -30,6 +30,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let fingerprint: ComputerUsePlanningStateFingerprint
         let focusedTextFrame: CGRect?
         let focusedEditor: String?
+        let focusedTextState: ComputerUseNativeTextState?
     }
     private final class Approval {
         let continuation: ComputerUseVisualApprovalContinuation
@@ -113,10 +114,11 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
               screen.frontmostWindowBounds != nil else { throw Failure.changedScreen }
         try checkAuthentication(tools)
         if try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: screen.image) { throw Failure.authentication }
+        let editor = try tools.nativeFocusedEditorObservation()
         return try Observation(image: ComputerUseDesktopImage(observation: screen),
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
-            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: tools.nativeFocusedEditorDescription())
+            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState)
     }
 
     private func revalidate(_ expected: Observation, action: ComputerUsePredictedAction?, tools: ComputerUseHostTools) throws {
@@ -190,7 +192,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private func record(_ proposal: ComputerUseDesktopProposal, observation: Observation, session: Session) {
         session.turns += 1
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
-            actionError: session.actionError, action: proposal.action, focusedEditor: observation.focusedEditor))
+            actionError: session.actionError, action: proposal.action, focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 
@@ -226,7 +228,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership()
             let observation = try observe(tools)
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
-                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor)
+                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
