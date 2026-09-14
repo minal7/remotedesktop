@@ -73,6 +73,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runFixture(browser: false, nativeModelLoop: true)
     }
 
+    func testOptInFaraModelEditsANativeDesktopForm() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_DESKTOP_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Opt-in: bounded local Fara Q4 inference and disposable native input")
+        }
+        try await runFixture(browser: false, actualDesktopModel: true)
+    }
+
     func testNativeKeyChordsRemainLiteralAndRejectAmbiguousSequences() throws {
         for (keys, usage, modifiers) in [(["Alt", "Left"], 0x50, UInt16(4)), (["Left", "Option"], 0x50, 4),
             (["Control", "a"], 0x04, 2), (["Command", "a"], 0x04, 8), (["Shift", "ArrowRight"], 0x4F, 1),
@@ -82,6 +89,44 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         for keys in [[], ["Command"], ["a", "b"], ["Cmd", "Command", "a"], ["Alt", "Option", "Left"], [""], ["😀"]] {
             XCTAssertThrowsError(try ComputerUseNativeKeyChord.action(keys))
         }
+    }
+
+    func testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities() throws {
+        let image = try ComputerUseDesktopImage(observation: .init(
+            image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+            displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let goal = "Edit the current document."
+        let native = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: image.png, surface: .desktop)
+        func system(_ input: ComputerUseFaraModel.Input) throws -> String {
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            return try XCTUnwrap(messages.first?["content"] as? String)
+        }
+        let prompt = try system(native)
+        let start = try XCTUnwrap(prompt.range(of: "<tools>\n"))
+        let end = try XCTUnwrap(prompt.range(of: "</tools>", range: start.upperBound..<prompt.endIndex))
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        let function = try XCTUnwrap(schema["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let actions = try XCTUnwrap(properties["action"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(actions["enum"] as? [String])),
+            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "wait", "pause_and_memorize_fact", "terminate"]))
+        XCTAssertEqual(function["name"] as? String, "computer_use")
+        XCTAssertTrue(prompt.contains("macOS")); XCTAssertTrue(prompt.contains("Command"))
+        XCTAssertTrue(prompt.contains("<tool_call>"))
+        XCTAssertEqual(try system(.init(goal: goal, screenshotPNG: image.png)), ComputerUseFaraModel.officialSystemPrompt)
+        var mixed = native; mixed.currentURL = URL(string: "https://example.com")
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
+        mixed = native; mixed.userResponse = "An answer from another surface"
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
+        // These adapters do not yet expose native Mac capability profiles.
+        // A shared Input must not silently select their browser declarations.
+        XCTAssertThrowsError(try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: native))
+        XCTAssertThrowsError(try ComputerUseGUIOwlModel.makeRequest(endpoint: endpoint, input: native))
     }
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
@@ -340,7 +385,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: Bool = false) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -388,6 +433,62 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }, authenticationContextProvider: nativeModelLoop ? {
             simulatedLogin ? .init(focusedElement: "AXTextField AXSecureTextField Password", boundedWindowContext: "Sign in\nPassword\nContinue") : nil
         } : nil)
+        if actualDesktopModel {
+            let inputs = try await FaraTestAssets.inputs(environment: ProcessInfo.processInfo.environment)
+            let runtime = OSAtlasLlamaRuntime()
+            let memory = Task.detached { () -> (UInt64, Int) in
+                var peak: UInt64 = 0, samples = 0
+                while !Task.isCancelled {
+                    for child in (try? DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL)) ?? [] {
+                        if let bytes = OSAtlasProcessMemoryGuard.residentBytes(processID: child.processIdentifier) {
+                            peak = max(peak, bytes); samples += 1
+                        }
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                }
+                return (peak, samples)
+            }
+            var responses: [[String: Any]] = []
+            let started = Date()
+            let goal = "In the Destination field, type Tokyo. Leave Origin empty and leave the form open."
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("actual-native"), propose: { input in
+                guard responses.count < 6 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
+                XCTAssertEqual(input.surface, .desktop)
+                let began = Date()
+                let endpoint = try await runtime.activateFara(inputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? ""])
+                return proposal
+            }, finishRun: { await runtime.shutdown() })
+            let run = Task { try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
+            let deadline = Task { try await Task.sleep(for: .seconds(90)); run.cancel() }
+            var result: ComputerUseExecutionResult?, failure: Error?
+            do { result = try await run.value } catch { failure = error }
+            deadline.cancel()
+            await runtime.shutdown(); memory.cancel()
+            let measured = await memory.value
+            let gone = try DarwinOSAtlasProcessInspector().matchingProcesses(for: inputs.llamaServerURL).isEmpty
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("actual-native"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            let fieldState = try JSONSerialization.jsonObject(with: Data(contentsOf: state))
+            let report: [String: Any] = ["scope": "actual-Fara-Q4-native-desktop-form", "goal": goal,
+                "responses": responses, "result": result.map { String(describing: $0) } ?? "",
+                "failure": failure.map { String(reflecting: $0) } ?? "", "elapsedSeconds": Date().timeIntervalSince(started),
+                "peakSampledWorkerBytes": measured.0, "memorySamples": measured.1, "ownedWorkerExited": gone,
+                "fixtureState": fieldState, "dispatchJournalCount": journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count,
+                "targetMacRAMGB": 12, "wholeApp12GBQualified": false, "revalidation": executor.lastRevalidationDiagnostic]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+            attachment.name = "Actual Fara native desktop workflow"; attachment.lifetime = .keepAlways; add(attachment)
+            XCTAssertTrue(gone)
+            if let failure { return XCTFail("Native Fara task failed: \(failure)") }
+            guard case .completed = result else { return XCTFail("Native Fara task did not complete: \(String(describing: result))") }
+            try await verify(state, field: "origin", equals: "")
+            try await verify(state, field: "destination", equals: "Tokyo")
+            let count = responses.count
+            let replay = try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result); XCTAssertEqual(responses.count, count)
+            return
+        }
         if nativeModelLoop {
             let exact = "  東京 e\u{301} 👩🏽‍💻  "
             let goal = "Set Origin to Seattle and replace Destination with \(exact). Leave the form open."
@@ -395,7 +496,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             var trace: [String] = []
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("native-loop"), propose: { input in
                 trace.append("proposal=\(proposals) error=\(input.actionError ?? "none") signed=\(tools.frontmostApplicationSnapshot().identity?.codeIdentity != nil) editable=\(try tools.focusedTypingTargetIsEditable(providerAction: .typeText("probe")))")
-                XCTAssertEqual(input.goal, goal); XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
+                XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.surface, .desktop)
+                XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
                 guard proposals < 7 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                 let index = proposals; proposals += 1
                 XCTAssertEqual(input.history.count, min(index, 5))

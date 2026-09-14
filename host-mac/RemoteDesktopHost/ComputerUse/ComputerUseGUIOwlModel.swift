@@ -84,7 +84,7 @@ enum ComputerUseGUIOwlModel {
     /// remain visible; older actions retain their original outcomes as summaries.
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
-        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
+        guard input.surface == .browser, endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
               !input.goal.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,
               input.goal.utf8.count <= 8192, input.history.count <= 20,
               input.pageReading == nil, input.history.allSatisfy({$0.pageReading == nil}) else { throw invalid }

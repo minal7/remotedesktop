@@ -1,0 +1,481 @@
+{
+  "date": "2026-09-13",
+  "baseCommit": "c629703",
+  "historicalFocusedMinimum": {
+    "macOS": 308,
+    "iOS": 10
+  },
+  "repair": "Explicit native vs browser model input surface. Fara native requests preserve its instruction hierarchy and XML action protocol while advertising only implemented native Mac actions, exact insertion, full-display coordinates and literal Mac shortcuts. Default browser prompt stays byte-identical. Native requests cannot inherit browser URL/page/answer context. Holo and GUI-Owl reject native input until their compatible profiles exist, rather than silently advertising browser capabilities.",
+  "redEvidence": [
+    "The first test parsed the explanatory inline <tools></tools> instead of the actual schema. This test bug was corrected before interpreting the red.",
+    "The corrected native profile red advertises unimplemented browser, movement and drag actions and lacks the native Mac declaration.",
+    "A later provider red demonstrates Holo and GUI-Owl accepting desktop input through their browser declarations."
+  ],
+  "actualModelTrial": {
+    "elapsedSeconds": 15.441829085350037,
+    "failure": "Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\" UserInfo={_kCFStreamErrorCodeKey=-4, NSUnderlyingError=0x77728f8000 {Error Domain=kCFErrorDomainCFNetwork Code=-1005 \"(null)\" UserInfo={NSErrorPeerAddressKey=<CFData 0x7771342990 [0x1fd05abf0]>{length = 16, capacity = 16, bytes = 0x1002ffd77f0000010000000000000000}, _kCFStreamErrorCodeKey=-4, _kCFStreamErrorDomainKey=4}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <B09C49A4-2944-43C9-86C4-F2F914CE7369>.<11>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\n    \"LocalDataTask <B09C49A4-2944-43C9-86C4-F2F914CE7369>.<11>\"\n), NSLocalizedDescription=The network connection was lost., NSErrorFailingURLStringKey=http://127.0.0.1:65495/v1/chat/completions, NSErrorFailingURLKey=http://127.0.0.1:65495/v1/chat/completions, _kCFStreamErrorDomainKey=4}",
+    "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+    "memorySamples": 53,
+    "ownedWorkerExited": true,
+    "peakSampledWorkerBytes": 4287021056,
+    "responses": [
+      {
+        "actionError": "",
+        "response": "<think>\nI can see the form overlay with two fields: “Origin” on top and “Destination” below it. The user wants only the Destination field filled with “Tokyo,” while leaving Origin empty and keeping the form open. I will first click inside the Destination input area to focus it before typing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\":\"left_click\", \"coordinate\": [299, 623]}}\n</tool_call>",
+        "seconds": 7.706210970878601
+      },
+      {
+        "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+        "response": "<think>\nThe previous click did not visibly focus the Destination field; the screen still shows the form without a clear text cursor. I will click more precisely inside the Destination input area, near its left side where text entry normally begins, to ensure the field is focused before typing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\":\"left_click\", \"coordinate\": [169, 622]}}\n</tool_call>",
+        "seconds": 5.087491989135742
+      }
+    ],
+    "result": "",
+    "revalidation": {
+      "editableAuthorityMatches": "true",
+      "focusMatches": "true",
+      "screenMatches": "false",
+      "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+      "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+      "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+    },
+    "scope": "actual-Fara-Q4-native-desktop-form",
+    "targetMacRAMGB": 12,
+    "wholeApp12GBQualified": false
+  },
+  "actualModelInterpretation": [
+    "Failed actual-model native form trial; no final field-state acceptance.",
+    "Two Fara proposals returned; the second received rejected-target feedback for the first. The next completion request lost its loopback connection.",
+    "The test reports 15.44 seconds for the task/cleanup span and 32.79 seconds including setup. The worker exited.",
+    "Peak sampled worker memory was 4,287,021,056 bytes (about 3.99 GiB), below but close to the 4 GiB cap. The exact exit cause is not established by these samples.",
+    "Grounding vs coordinate/target-validation behavior must be distinguished before changing input admission. Do not classify the connection loss as a model accuracy failure."
+  ],
+  "limitations": [
+    "No production native routing or model promotion. Fara Q4 remains selected for the existing browser route with the 4 GiB cap.",
+    "Native Holo/GUI-Owl profiles and terminal/handoff semantics remain to implement; neither candidate is rejected by this Fara trial.",
+    "Actual-model form/document/cross-app, provider login, physical phone and whole-app 12 GB/heat acceptance remain open.",
+    "The failed trial did not retain final fixture values or dispatch-journal counts. The test now emits both for future trials; that additional diagnostic code is compiled but no second inference trial ran.",
+    "Rejected-action feedback is passed to the next proposal; retaining that feedback in older native history needs a focused regression.",
+    "Current local worker stdout/stderr are discarded and resource-monitor termination has no specific result in this report. Diagnose its termination reason before changing the resource budget."
+  ],
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "89d0df75849a717816856ef9842af103828b20730caca65b940ad5da590b9028",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "f34dbb7d85e78b112ddc3b053a542056b488ecda7dec7a631042ce97880f1e53",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseHoloModel.swift": "b7db101848ba8d9c90bdea47f1c6af98fe9f2e5b1250d1ce26b0e679c4fe24de",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseGUIOwlModel.swift": "3b3b14cdd323c02676b7749aee2efacf3169da6b800db74e98805bd2f5a4dc93",
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "962120c81c2d78c876ae5b48ff3eb87e26113405315328598880ca0402e93c88"
+  },
+  "results": [
+    {
+      "label": "native-desktop-fara-model-01",
+      "bundle": ".build/repair-verification/native-desktop-fara-model-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789353173.128,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353140.334,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native Fara task failed: Error Domain=NSURLErrorDomain Code=-1005 \"The network connection was lost.\" UserInfo={_kCFStreamErrorCodeKey=-4, NSUnderlyingError=0x77728f8000 {Error Domain=kCFErrorDomainCFNetwork Code=-1005 \"(null)\" UserInfo={NSErrorPeerAddressKey=<CFData 0x7771342990 [0x1fd05abf0]>{length = 16, capacity = 16, bytes = 0x1002ffd77f0000010000000000000000}, _kCFStreamErrorCodeKey=-4, _kCFStreamErrorDomainKey=4}}, _NSURLErrorFailingURLSessionTaskErrorKey=LocalDataTask <B09C49A4-2944-43C9-86C4-F2F914CE7369>.<11>, _NSURLErrorRelatedURLSessionTaskErrorKey=(\n    \"LocalDataTask <B09C49A4-2944-43C9-86C4-F2F914CE7369>.<11>\"\n), NSLocalizedDescription=The network connection was lost., NSErrorFailingURLStringKey=http://127.0.0.1:65495/v1/chat/completions, NSErrorFailingURLKey=http://127.0.0.1:65495/v1/chat/completions, _kCFStreamErrorDomainKey=4}",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInFaraModelEditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInFaraModelEditsANativeDesktopForm",
+            "testName": "testOptInFaraModelEditsANativeDesktopForm()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-model-build-01",
+      "bundle": ".build/repair-verification/native-desktop-model-build-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789353122.491,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353104.509,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-green-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-green-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789352846.044,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789352812.431,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-gui-owl-regression-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-gui-owl-regression-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789353449.808,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353448.792,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-provider-green-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-provider-green-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 2,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789353429.622,
+        "passedTests": 2,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353417.531,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 2
+      }
+    },
+    {
+      "label": "native-desktop-profile-provider-red-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-provider-red-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789353381.307,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789353358.938,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertThrowsError failed: did not throw an error",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities",
+            "testName": "testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertThrowsError failed: did not throw an error"
+          }
+        ],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-red-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-red-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789352625.427,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789352553.523,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTUnwrap failed: threw error \"Error Domain=NSCocoaErrorDomain Code=3840 \"Unable to parse empty data.\" UserInfo={NSDebugDescription=Unable to parse empty data.}\"",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities",
+            "testName": "testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-red-02",
+      "bundle": ".build/repair-verification/native-desktop-profile-red-02.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789352714.617,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789352693.047,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"[\"triple_click\", \"visit_url\", \"scroll\", \"mouse_move\", \"read_page_answer_question\", \"wait\", \"terminate\", \"left_click_drag\", \"history_back\", \"ask_user_question\", \"hscroll\", \"key\", \"left_click\", \"web_search\", \"pause_and_memorize_fact\", \"type\", \"right_click\", \"double_click\"]\") is not equal to (\"[\"right_click\", \"key\", \"wait\", \"type\", \"triple_click\", \"pause_and_memorize_fact\", \"terminate\", \"double_click\", \"left_click\"]\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities",
+            "testName": "testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "label": "native-desktop-profile-regressions-01",
+      "bundle": ".build/repair-verification/native-desktop-profile-regressions-01.xcresult",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789352952.366,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789352942.275,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    }
+  ]
+}

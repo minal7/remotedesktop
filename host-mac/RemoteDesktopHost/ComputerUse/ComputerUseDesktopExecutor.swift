@@ -193,7 +193,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership()
             let observation = try observe(tools)
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
-                history: session.history, actionError: session.actionError)
+                surface: .desktop, history: session.history, actionError: session.actionError)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()

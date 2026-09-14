@@ -47,8 +47,10 @@ enum ComputerUseFaraModel {
         var resultObservation: ResultObservation? = nil
     }
     struct Input: Equatable, Sendable {
+        enum Surface: Sendable { case browser, desktop }
         let goal: String
         let screenshotPNG: Data
+        var surface: Surface = .browser
         var history: [Step] = []
         var currentURL: URL? = nil
         var pageReading: PageReading? = nil
@@ -79,7 +81,15 @@ enum ComputerUseFaraModel {
                 { $0 + $1.response.utf8.count + ($1.currentURL?.absoluteString.utf8.count ?? 0) }) <= 65_536 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        var messages: [[String: Any]] = [["role": "system", "content": officialSystemPrompt]]
+        if input.surface == .desktop {
+            guard input.currentURL == nil, input.pageReading == nil, input.userResponse == nil,
+                  input.history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
+                    && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
+                throw OSAtlasLlamaRuntimeError.invalidResponse
+            }
+        }
+        var messages: [[String: Any]] = [["role": "system", "content":
+            try input.surface == .desktop ? desktopSystemPrompt() : officialSystemPrompt]]
         let earliestImage = max(0, input.history.count - 2)
         var readingBytes = 0
         for index in 0...input.history.count {
@@ -155,6 +165,35 @@ enum ComputerUseFaraModel {
         ], options: [.sortedKeys, .withoutEscapingSlashes])
         guard request.httpBody!.count <= 9 * 1_024 * 1_024 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
         return request
+    }
+
+    /// Keep Fara's instruction hierarchy and XML conversation protocol, while
+    /// declaring only the capabilities implemented by the native Mac adapter.
+    /// Browser requests retain the pinned upstream prompt byte for byte.
+    private static func desktopSystemPrompt() throws -> String {
+        let actions = ["key", "type", "left_click", "right_click", "double_click", "triple_click",
+            "wait", "pause_and_memorize_fact", "terminate"]
+        let properties: [String: Any] = [
+            "action": ["type": "string", "enum": actions,
+                "description": "Choose one supported native desktop action. Clicking uses the supplied coordinate. Typing inserts exact text into the focused editable field using its current selection; it does not add Enter or select-all. Key sends only the supplied chord. Wait takes seconds; pause_and_memorize_fact retains a fact; terminate reports the final answer after inspecting the result."],
+            "coordinate": ["type": "array", "items": ["type": "number", "minimum": 0, "maximum": 1000], "minItems": 2, "maxItems": 2,
+                "description": "Required for clicks: [x, y] normalized over the entire screenshot, with the origin at its top left."],
+            "keys": ["type": "array", "items": ["type": "string"], "minItems": 1, "maxItems": 5,
+                "description": "Required for key: one base key and optional Shift, Control, Option/Alt, Command/Meta modifiers. This is macOS: Command+a selects all in an editor. Control and Command are distinct; Option+Left is a literal Mac chord. Base keys include letters, digits, arrows, Return, Tab, Escape, Space, Backspace, Delete, Home, End, PageUp and PageDown."],
+            "text": ["type": "string", "description": "Exact text required by type, including its whitespace and Unicode."],
+            "time": ["type": "number", "minimum": 0, "maximum": 30, "description": "Seconds required by wait."],
+            "fact": ["type": "string", "description": "Fact required by pause_and_memorize_fact."],
+            "answer": ["type": "string", "description": "Final answer required by terminate."]]
+        let tool: [String: Any] = ["type": "function", "function": ["name": "computer_use",
+            "description": "Interact with the visible macOS desktop using one action per screenshot. Coordinates cover the full display from 0 to 1000 on each axis. Locate targets in the latest screenshot. The host handles sign-in and permission handoff to the user; never type credentials. Only the listed native actions are available.",
+            "parameters": ["type": "object", "properties": properties, "required": ["action"], "additionalProperties": false]]]
+        let schema = try JSONSerialization.data(withJSONObject: tool, options: [.sortedKeys, .withoutEscapingSlashes])
+        guard let start = officialSystemPrompt.range(of: "<tools>\n"),
+              let end = officialSystemPrompt.range(of: "</tools>", range: start.upperBound..<officialSystemPrompt.endIndex) else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        return officialSystemPrompt.replacingCharacters(in: start.upperBound..<end.lowerBound,
+            with: String(decoding: schema, as: UTF8.self) + "\n")
     }
     static func validatePageReading(_ reading: PageReading) throws {
         guard ComputerUseOwnedBrowser.validatedURL(reading.sourceURL) == reading.sourceURL,
