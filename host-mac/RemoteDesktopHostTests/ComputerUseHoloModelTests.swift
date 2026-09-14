@@ -70,18 +70,19 @@ final class ComputerUseHoloModelTests: XCTestCase {
         let exact = actualModel ? "Tokyo" : "  東京 e\u{301} 😀\n  "
         let goal = "In the Destination field, type \(exact). Leave Origin as Seattle."
         var calls = 0
+        var diagnosticProbe: HoloProbeProcess?
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("actor"), propose: { input in
             guard calls < 8 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
             defer { calls += 1 }
             XCTAssertEqual(input.goal, goal)
             if faraQ6 {
-                return try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment)
+                return try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment, registerProbe: { diagnosticProbe = $0 })
             }
             let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
             _ = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
             let response: Data
             if actualModel {
-                return try await HoloTestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment)
+                return try await HoloTestProposalRunner.propose(input: input, directory: directory, index: calls, environment: environment, registerProbe: { diagnosticProbe = $0 })
             } else if calls == 0 {
                 response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseHoloModel.modelAlias, "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": "I will inspect the form."]]]])
             } else {
@@ -91,7 +92,7 @@ final class ComputerUseHoloModelTests: XCTestCase {
                 response = try self.packet(name, arguments: String(decoding: JSONSerialization.data(withJSONObject: arguments), as: UTF8.self), id: "local-\(calls)")
             }
             return try ComputerUseHoloModel.decode(response)
-        })
+        }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil })
         func run() async throws -> ComputerUseExecutionResult {
             try await executor.execute(taskID: "holo-local", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
         }
@@ -332,7 +333,8 @@ final class ComputerUseHoloModelTests: XCTestCase {
 @MainActor
 enum HoloTestProposalRunner {
     static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int,
-                        environment: [String: String], memoryLimitGiB: Int = 5) async throws -> ComputerUseFaraModel.Proposal {
+                        environment: [String: String], memoryLimitGiB: Int = 5,
+                        registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> ComputerUseFaraModel.Proposal {
         guard [4, 5].contains(memoryLimitGiB) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
         let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
@@ -341,6 +343,7 @@ enum HoloTestProposalRunner {
         try XCTUnwrap(request.httpBody).write(to: requestFile)
         let output = directory.appendingPathComponent("proposal-\(index)")
         let probe = HoloProbeProcess()
+        registerProbe(probe)
         try probe.start(python: try XCTUnwrap(environment["HOLO_PYTHON"]), script: try XCTUnwrap(environment["HOLO_PROBE_SCRIPT"]),
             arguments: [requestFile.path, output.path, try XCTUnwrap(environment["HOLO_ASSETS"]), try XCTUnwrap(environment["HOLO_BINARY"]), String(memoryLimitGiB)])
         let status = try await probe.finish()
@@ -369,6 +372,12 @@ final class HoloProbeProcess: @unchecked Sendable {
         guard !cancellationSent, process.isRunning else { return }
         cancellationSent = true; process.terminate()
     }
+    /// The executor's finish hook owns this join even if its proposal deadline
+    /// has already returned. A cancelled planner can otherwise outlive a task.
+    func cancelAndWait() async {
+        cancel()
+        await Task.detached { if self.process.isRunning { self.process.waitUntilExit() } }.value
+    }
     func finish() async throws -> Int32 {
         try await withTaskCancellationHandler {
             do {
@@ -381,8 +390,7 @@ final class HoloProbeProcess: @unchecked Sendable {
                 try Task.checkCancellation()
                 return process.terminationStatus
             } catch {
-                cancel()
-                await Task.detached { self.process.waitUntilExit() }.value
+                await cancelAndWait()
                 throw error
             }
         } onCancel: { self.cancel() }

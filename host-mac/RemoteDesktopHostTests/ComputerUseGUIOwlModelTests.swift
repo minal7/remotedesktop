@@ -289,6 +289,7 @@ final class ComputerUseGUIOwlModelTests: XCTestCase {
         func query(_ url:URL) -> String? {
             URLComponents(string:url.absoluteString.replacingOccurrences(of:"+",with:"%20"))?.queryItems?.first {$0.name=="q"}?.value
         }
+        var diagnosticProbe: HoloProbeProcess?
         let executor=try ComputerUseFaraBrowserExecutor(journalDirectory:directory.appendingPathComponent("actor"),propose:{ input in
             XCTAssertEqual(input.goal,goal)
             let snapshot=XCTAttachment(data:input.screenshotPNG,uniformTypeIdentifier:"public.png");snapshot.name="GUI-Owl search observation \(responses.count)";snapshot.lifetime = .keepAlways;self.add(snapshot)
@@ -298,7 +299,7 @@ final class ComputerUseGUIOwlModelTests: XCTestCase {
             guard responses.count<8 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
             let native:ComputerUseGUIOwlModel.Proposal
             if actualModel {
-                native=try await GUIOwlTestProposalRunner.propose(input:input,directory:directory,index:responses.count,environment:environment)
+                native=try await GUIOwlTestProposalRunner.propose(input:input,directory:directory,index:responses.count,environment:environment,registerProbe:{ diagnosticProbe = $0 })
             } else {
                 let args:[String:Any]
                 switch responses.count {
@@ -314,7 +315,7 @@ final class ComputerUseGUIOwlModelTests: XCTestCase {
             let proposal=try native.compatibleBrowserProposal()
             if case .typeText(let text)=proposal.action { typed.append(text) }
             return proposal
-        })
+        },finishRun:{ await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil })
         let started=Date()
         let task=Task { try await executor.execute(taskID:taskID,prompt:goal,trustedUserPrompt:goal,tools:tools,progress:{_ in}) }
         let timer=Task { try await Task.sleep(for:.seconds(actualModel ? 90 : 12));task.cancel() }
@@ -524,13 +525,15 @@ final class ComputerUseGUIOwlModelTests: XCTestCase {
 
 @MainActor
 enum GUIOwlTestProposalRunner {
-    static func propose(input:ComputerUseFaraModel.Input,directory:URL,index:Int,environment:[String:String]) async throws -> ComputerUseGUIOwlModel.Proposal {
+    static func propose(input:ComputerUseFaraModel.Input,directory:URL,index:Int,environment:[String:String],
+                        registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> ComputerUseGUIOwlModel.Proposal {
         let endpoint=OSAtlasLlamaEndpoint(generation:1,variant:nil,baseURL:URL(string:"http://127.0.0.1:43123")!,bearerToken:"unused-diagnostic-request")
         let request=try ComputerUseGUIOwlModel.makeRequest(endpoint:endpoint,input:input)
         let requestFile=directory.appendingPathComponent("request-\(index).json")
         guard !FileManager.default.fileExists(atPath:requestFile.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         try XCTUnwrap(request.httpBody).write(to:requestFile)
         let output=directory.appendingPathComponent("proposal-\(index)"),probe=HoloProbeProcess()
+        registerProbe(probe)
         try probe.start(python:try XCTUnwrap(environment["GUI_OWL_PYTHON"]),script:try XCTUnwrap(environment["GUI_OWL_PROBE_SCRIPT"]),arguments:[requestFile.path,output.path,try XCTUnwrap(environment["GUI_OWL_ASSETS"]),try XCTUnwrap(environment["GUI_OWL_BINARY"]),"4"])
         let status=try await probe.finish()
         let report=try XCTUnwrap(JSONSerialization.jsonObject(with:Data(contentsOf:output.appendingPathComponent("report.json"))) as? [String:Any])

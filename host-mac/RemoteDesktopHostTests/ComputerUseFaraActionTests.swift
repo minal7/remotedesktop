@@ -3623,6 +3623,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let policy = try ComputerUseBrowserSourcePolicy(goal: .init(taskID: taskID, prompt: goal, referenceDate: Date(), timeZoneIdentifier: "America/Los_Angeles"), allowedOrigins: origins)
         try browser.installSourcePolicy(policy, replacing: nil, session: session)
         let runtime = OSAtlasLlamaRuntime()
+        var diagnosticProbe: HoloProbeProcess?
         var responses: [[String: Any]] = [], progress: [String] = []
         let proposalLimit = 24
         let timeoutSeconds = 300
@@ -3634,9 +3635,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let began = Date()
             let proposal: ComputerUseFaraModel.Proposal
             if faraQ6 {
-                proposal = try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
+                proposal = try await FaraQ6TestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment, registerProbe: { diagnosticProbe = $0 })
             } else if holo {
-                proposal = try await HoloTestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment)
+                proposal = try await HoloTestProposalRunner.propose(input: input, directory: directory, index: responses.count, environment: environment, registerProbe: { diagnosticProbe = $0 })
             } else {
                 let endpoint = try await runtime.activateFara(XCTUnwrap(inputs))
                 proposal = try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
@@ -3660,12 +3661,12 @@ final class ComputerUseFaraActionTests: XCTestCase {
             return proposal
         }, readPage: { reading in
                 if faraQ6 {
-                    return try await FaraQ6TestProposalRunner.readPage(reading, directory: directory, index: responses.count, environment: environment)
+                    return try await FaraQ6TestProposalRunner.readPage(reading, directory: directory, index: responses.count, environment: environment, registerProbe: { diagnosticProbe = $0 })
                 }
                 guard let inputs else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
                 let endpoint = try await runtime.activateFara(inputs)
                 return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
-            }, finishRun: { await runtime.shutdown() })
+            }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil; await runtime.shutdown() })
         let run = Task { try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { progress.append($0) }) }
         let timeout = Task { try await Task.sleep(for: .seconds(timeoutSeconds)); run.cancel() }
         var result: ComputerUseExecutionResult?, failure: Error?
@@ -5862,25 +5863,26 @@ enum FaraQ6TestProposalRunner {
     private static var endpoint: OSAtlasLlamaEndpoint {
         .init(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unused-diagnostic-request")
     }
-    static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String]) async throws -> ComputerUseFaraModel.Proposal {
+    static func propose(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String], registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> ComputerUseFaraModel.Proposal {
         let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment)).compatibleBrowserProposal()
+        return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false, environment: environment, registerProbe: registerProbe)).compatibleBrowserProposal()
     }
-    static func proposeNativeQ4(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String]) async throws -> ComputerUseFaraModel.Proposal {
+    static func proposeNativeQ4(input: ComputerUseFaraModel.Input, directory: URL, index: Int, environment: [String:String], registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> ComputerUseFaraModel.Proposal {
         guard input.surface == .desktop else { throw ComputerUseFaraAction.Failure.invalidResponse }
         let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
         return try ComputerUseFaraModel.decode(await run(request, directory: directory, name: String(index), reading: false,
-            environment: environment, modelProfile: "fara-q4", environmentPrefix: "FARA_NATIVE"))
+            environment: environment, modelProfile: "fara-q4", environmentPrefix: "FARA_NATIVE", registerProbe: registerProbe))
     }
-    static func readPage(_ reading: ComputerUseFaraModel.PageReading, directory: URL, index: Int, environment: [String:String]) async throws -> String {
+    static func readPage(_ reading: ComputerUseFaraModel.PageReading, directory: URL, index: Int, environment: [String:String], registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> String {
         let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
-        return try ComputerUseFaraModel.decodePageAnswer(await run(request, directory: directory, name: "reading-\(index)", reading: true, environment: environment))
+        return try ComputerUseFaraModel.decodePageAnswer(await run(request, directory: directory, name: "reading-\(index)", reading: true, environment: environment, registerProbe: registerProbe))
     }
-    private static func run(_ request: URLRequest, directory: URL, name: String, reading: Bool, environment: [String:String], modelProfile: String = "fara-q6", environmentPrefix: String = "FARA_Q6") async throws -> Data {
+    private static func run(_ request: URLRequest, directory: URL, name: String, reading: Bool, environment: [String:String], modelProfile: String = "fara-q6", environmentPrefix: String = "FARA_Q6", registerProbe: (HoloProbeProcess) -> Void = { _ in }) async throws -> Data {
         let file = directory.appendingPathComponent("request-\(name).json")
         guard !FileManager.default.fileExists(atPath: file.path) else { throw ComputerUseFaraAction.Failure.invalidResponse }
         try XCTUnwrap(request.httpBody).write(to: file)
         let output = directory.appendingPathComponent("proposal-\(name)"), probe = HoloProbeProcess()
+        registerProbe(probe)
         try probe.start(python: try XCTUnwrap(environment[environmentPrefix + "_PYTHON"]), script: try XCTUnwrap(environment[environmentPrefix + "_PROBE_SCRIPT"]), arguments: [file.path,output.path,try XCTUnwrap(environment[environmentPrefix + "_ASSETS"]),try XCTUnwrap(environment[environmentPrefix + "_BINARY"]),"5",reading ? "fara-q6-reading" : modelProfile])
         let status = try await probe.finish()
         let report = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("report.json"))) as? [String:Any])

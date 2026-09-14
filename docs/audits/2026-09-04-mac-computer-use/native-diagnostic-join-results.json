@@ -1,0 +1,506 @@
+{
+  "date": "2026-09-13",
+  "scope": "Joined diagnostic model cancellation, no-inference delayed native completion, and actual Fara native comparison",
+  "baseCommit": "65e3898e5a77ae20e1b84f863625e8a7459687d9",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "30fc051c74213673857485b0b43b1bdc1ddafb09876048fce34480ed520a5c68",
+    "host-mac/RemoteDesktopHostTests/ComputerUseHoloModelTests.swift": "c1cb219b079a7b0d9b074ba9b7e0fad8ec249f8273fef4049a0095f8a228ba00",
+    "host-mac/RemoteDesktopHostTests/ComputerUseGUIOwlModelTests.swift": "07c90f48d933ca8b716461c62af6ccb9ce9624ebfde63973bc6d513bf8b64a7e",
+    "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "dfa9a2e9494f8c2eb2ecf95a09d74f94e279b6cb72dfdeff343542886c9e2700"
+  },
+  "attempts": [
+    {
+      "bundle": ".build/repair-verification/native-probe-join-red-01.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789360331.53,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360307.875,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - The executor must join its diagnostic process before returning",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning",
+            "testName": "testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-probe-join-green-01.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": true,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 2,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789360496.539,
+        "passedTests": 2,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360458.915,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - The executor must join its diagnostic process before returning",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 3,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning",
+            "testName": "testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-probe-join-red-02.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789360572.99,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360550.691,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - The executor must join its diagnostic process before returning",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning",
+            "testName": "testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-probe-join-green-02.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 3,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789360636.424,
+        "passedTests": 3,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360619.465,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 3
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-completion-delay-01.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 1,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789360766.395,
+        "passedTests": 1,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360720.867,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    },
+    {
+      "bundle": ".build/repair-verification/native-desktop-fara-model-04.xcresult",
+      "fixtureDefectMakesJoinConclusionAmbiguous": false,
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789360931.927,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1789360823.915,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "failed - Native faraDiagnostic task failed: CancellationError()",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseNativeTextIntegrationTests/testOptInDiagnosticFaraQ4EditsANativeDesktopForm()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests/testOptInDiagnosticFaraQ4EditsANativeDesktopForm",
+            "testName": "testOptInDiagnosticFaraQ4EditsANativeDesktopForm()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      }
+    }
+  ],
+  "reports": [
+    {
+      "attachment": ".build/repair-verification/native-completion-delay-01-attachments/5709B8C5-099D-45BD-8F03-D407DCED1DB6.json",
+      "report": {
+        "completedWithoutReplay": true,
+        "independentFieldVerification": true,
+        "inference": false,
+        "nativeInput": true,
+        "proposals": 7,
+        "simulatedLogin": true,
+        "trace": [
+          "proposal=0 error=none signed=true editable=true",
+          "proposal=1 error=none signed=true editable=true",
+          "clickPoint=534.0,732.0 targetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+          "afterDelayTargetFrame=Optional((244.0, 729.0, 580.0, 18.0))",
+          "proposal=2 error=none signed=true editable=true",
+          "proposal=3 error=none signed=true editable=true",
+          "proposal=4 error=none signed=true editable=true",
+          "proposal=5 error=none signed=true editable=true",
+          "proposal=6 error=none signed=true editable=true",
+          "completionDelay: beforeID=897EF29F-79ED-455C-9B75-98A09C46E23F afterID=897EF29F-79ED-455C-9B75-98A09C46E23F sameValue=true sameSelection=true events=[\"AXUIElementDestroyed\", \"AXUIElementDestroyed\"]"
+        ],
+        "verifiedDispatches": 5
+      }
+    },
+    {
+      "attachment": ".build/repair-verification/native-desktop-fara-model-04-attachments/E1745349-CC82-4434-B21D-840F3E687EF4.json",
+      "report": {
+        "diagnosticMemoryLimitOnly": true,
+        "dispatchJournalCount": 1,
+        "elapsedSeconds": 93.15194499492645,
+        "failure": "Swift.CancellationError()",
+        "fixtureFrontmostAtReturn": true,
+        "fixtureProcessRunning": true,
+        "fixtureState": {
+          "destination": "",
+          "generation": 0,
+          "origin": "\t",
+          "pid": 21318
+        },
+        "goal": "In the Destination field, type Tokyo. Leave Origin empty and leave the form open.",
+        "memorySamples": 269,
+        "ownedWorkerExited": true,
+        "peakSampledWorkerBytes": 4333469696,
+        "responses": [
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nI can see the form with two text areas: 'Origin' on top and 'Destination' below. The user wants 'Destination' filled with 'Tokyo' while leaving 'Origin' untouched. The current focus appears to be on the Origin area, so I will click directly inside the Destination text area to move focus there before typing.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [297, 622]}}\n</tool_call>",
+            "seconds": 10.515338897705078,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe previous click did not move focus; the status still shows the Origin text area focused. I need to place the caret in the Destination field before typing. I will click well inside the empty Destination text area, away from the Origin field and away from the small status icon on the left, to ensure focus moves to Destination.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [309, 622]}}\n</tool_call>",
+            "seconds": 13.696362018585205,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe status still indicates the Origin field is focused, so the previous clicks did not move the caret. A reliable alternative is to use keyboard navigation. Since Origin is currently focused, pressing Tab should advance focus to the next field, which is Destination. After that I can type the requested text.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"key\", \"keys\": [\"Tab\"]}}\n</tool_call>",
+            "seconds": 17.35753893852234,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe Tab key did not visibly move focus; the status still shows Origin focused. To avoid the Origin field entirely, I will click near the right side of the empty Destination text area, away from the field label and away from the left focus indicator region. This should place the caret inside Destination so I can type without affecting Origin.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [401, 622]}}\n</tool_call>",
+            "seconds": 17.87045109272003,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          },
+          {
+            "actionError": "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action.",
+            "displayBounds": "{{0, 0}, {1728, 1117}}",
+            "fixtureCropInModelImage": "{{260, 621}, {760, 395}}",
+            "modelImageHeight": 1323,
+            "modelImageWidth": 2048,
+            "response": "<think>\nThe previous click landed too far to the right, likely near the small status icon rather than inside the editable text area. The Destination field itself occupies the left-center of the box, so I will click near the middle-left of the Destination box, well away from the Origin field above and away from the status icon on the right, to place the caret inside Destination.\n<tool_call>\n{\"name\": \"computer_use\", \"arguments\": {\"action\": \"left_click\", \"coordinate\": [253, 622]}}\n</tool_call>",
+            "seconds": 18.21441888809204,
+            "windowBounds": "{{220, 525}, {640, 332}}"
+          }
+        ],
+        "result": "",
+        "revalidation": {
+          "editableAuthorityMatches": "true",
+          "focusMatches": "true",
+          "pointerPoint": "437,694",
+          "pointerRequiresFullDisplayMatch": "true",
+          "pointerTargetFrame": "nil",
+          "screenMatches": "false",
+          "textFrameAfter": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "textFrameBefore": "Optional((244.0, 649.0, 580.0, 18.0))",
+          "window": "Optional((220.0, 525.0, 640.0, 332.0))"
+        },
+        "scope": "actual-faraDiagnostic-Q4-native-desktop-form",
+        "targetMacRAMGB": 12,
+        "wholeApp12GBQualified": false,
+        "workerLimitBytes": 5368709120,
+        "workerResidency": "fresh worker per proposal"
+      }
+    }
+  ],
+  "workerReports": [
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-0/report.json",
+      "pid": 21326,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": null,
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4214980608,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 8.241966416942887
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-1/report.json",
+      "pid": 21332,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": null,
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4271128576,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 11.67364029190503
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-2/report.json",
+      "pid": 21651,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": null,
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4330749952,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 15.292474542045966
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-3/report.json",
+      "pid": 21655,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": null,
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4325998592,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 15.748673958005384
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-4/report.json",
+      "pid": 21661,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": null,
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4333469696,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 16.14084766700398
+    },
+    {
+      "path": ".build/repair-verification/native-desktop-fara-model-04-proposals/proposal-5/report.json",
+      "pid": 21672,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "error": "InterruptedError: diagnostic cancelled",
+      "exitCode": 0,
+      "peakSampledProcessMemoryBytes": 4286464000,
+      "memoryStopLimitBytes": 5368709120,
+      "totalSeconds": 7.298329917015508
+    }
+  ],
+  "repair": "All three diagnostic model runners register their current process with the invoking native/browser workflow. The executor finish hook cancels and joins that process even when the bounded planner has already delivered cancellation. Production planner early-cancellation and late-proposal rejection semantics are unchanged.",
+  "validation": [
+    "The first shell fixture incorrectly used positional arguments inside its cleanup function; its first red/green attempts cannot isolate process-join timing. Both failures remain recorded.",
+    "After correcting the marker path, the original no-finish-hook boundary fails the immediate cleanup assertion while eventual cleanup passes. Joining in finishRun passes, together with two existing native cancellation regressions.",
+    "The native form workflow passes a 20-second no-inference delay before completion, with exact Unicode, same field UUID/value/selection, simulated login/Resume, five verified dispatches and no replay. Only two unrelated destruction notifications were observed.",
+    "The actual Fara Q4 task reaches its 90-second cancellation deadline. The task report now records ownedWorkerExited=true at return. All six individual probe reports confirm process exit and credential removal; the last is a cancelled diagnostic."
+  ],
+  "findings": [
+    "Fara repeatedly proposes y=622, which points to the Destination label rather than the native editable row. It performs one Tab key action; the native multiline Origin editor inserts a literal tab, retains focus, and the final independent state is Origin=\\t and Destination empty. This is a failed natural-language task.",
+    "Native key delivery is literal; do not globally block Tab or rewrite it to focus traversal. The model needs bounded exact editable-state observations, including whitespace/selection and explicit truncation, to understand these effects. Preserve secure-field exclusion and avoid guessing target coordinates.",
+    "Offline comparison of retained Holo trial04 fixture crops shows one connected changed region: 838 pixels at crop bounds [0,144,30,175], with maximum channel difference 216, around the Grammarly overlay near Origin. The completion revalidation also observed a caret-region difference. This does not justify ignoring arbitrary visible content.",
+    "The no-inference delay control passes and therefore does not establish inference latency alone as the cause of the remaining Holo completion mismatch."
+  ],
+  "limits": {
+    "productionSourceChanged": false,
+    "modelTaskAccepted": false,
+    "wholeApp12GBQualified": false,
+    "productionWorkerLimitBytes": 4294967296,
+    "diagnosticWorkerLimitBytes": 5368709120,
+    "productionModelChanged": false,
+    "fullSuiteRun": false
+  },
+  "next": [
+    "Expose truthful bounded native editable-state observations (exact whitespace/selection with truncation and secure-text exclusions) through the shared model/history path; use TDD against the observed Tab outcome.",
+    "Evaluate read-only native control geometry as a general accessibility capability instead of adjusting model coordinates to the fixture. Preserve model action choice and independent final-state checks.",
+    "Retain all candidate eligibility; re-evaluate fixed native and browser tasks on the same improved observations. Native production composition, missing generic input actions, provider login, phone and whole-app resource acceptance remain open."
+  ]
+}

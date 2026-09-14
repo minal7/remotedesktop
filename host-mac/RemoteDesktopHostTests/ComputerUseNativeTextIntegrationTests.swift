@@ -87,6 +87,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             nativeOriginText: "", nativeClickBottomOffset: 112, nativeTypeDelay: .seconds(15))
     }
 
+    func testOptInDelayedNativeCompletionPreservesAnExactFormResult() async throws {
+        try await runFixture(browser: false, nativeModelLoop: true, nativeCompletionDelay: .seconds(20))
+    }
+
     func testOptInFaraModelEditsANativeDesktopForm() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_DESKTOP_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Opt-in: bounded local Fara Q4 inference and disposable native input")
@@ -380,6 +384,55 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] })
     }
 
+    func testNativeDiagnosticCancellationJoinsItsProcessBeforeReturning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("probe.sh")
+        let started = directory.appendingPathComponent("started"), cleaned = directory.appendingPathComponent("cleaned")
+        try """
+        started_path=$1
+        cleaned_path=$2
+        cleanup() {
+            trap '' TERM
+            kill "$child" 2>/dev/null
+            wait "$child" 2>/dev/null
+            sleep 0.3
+            printf joined > "$cleaned_path"
+            exit 0
+        }
+        trap cleanup TERM
+        sleep 30 &
+        child=$!
+        printf started > "$started_path"
+        wait "$child"
+        cleanup
+        """.write(to: script, atomically: true, encoding: .utf8)
+        let probe = HoloProbeProcess()
+        let returned = expectation(description: "Diagnostic process joined")
+        var effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("journal"), propose: { _ in
+            defer { returned.fulfill() }
+            try probe.start(python: "/bin/sh", script: script.path, arguments: [started.path, cleaned.path])
+            _ = try await probe.finish()
+            return .init(response: "late", action: .typeText("Must not appear"))
+        }, finishRun: { await probe.cancelAndWait() })
+        let run = Task { try await executor.execute(taskID: "probe-cancel", prompt: "Type text", trustedUserPrompt: "Type text", tools: tools, progress: { _ in }) }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !FileManager.default.fileExists(atPath: started.path), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: started.path))
+        run.cancel()
+        do { _ = try await run.value; XCTFail("Cancelled diagnostic returned success") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cleaned.path), "The executor must join its diagnostic process before returning")
+        await fulfillment(of: [returned], timeout: 3)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cleaned.path))
+        XCTAssertEqual(effects, 0)
+    }
+
     func testNativeDesktopCancellationAfterDispatchRetainsHistoryOnResume() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -612,7 +665,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
     private enum NativeModel: String { case fara, faraDiagnostic, guiOwl, holo }
 
-    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero, nativeBindingProbe: Bool = false) async throws {
+    private func runFixture(browser: Bool, localGoalsOnly: Bool = false, signedPackage: Bool = false, captureOnly: Bool = false, modelRequestOnly: Bool = false, nativeModelLoop: Bool = false, actualDesktopModel: NativeModel? = nil, nativeClickFraction: CGFloat = 0.5, nativeClickDelay: Duration = .zero, nativeOriginText: String = "Seattle", nativeClickBottomOffset: CGFloat = 125, nativeTypeDelay: Duration = .zero, nativeBindingProbe: Bool = false, nativeCompletionDelay: Duration = .zero) async throws {
         if signedPackage, ProcessInfo.processInfo.environment["RUN_SIGNED_NATIVE_PACKAGE_ACCEPTANCE"] != "1" {
             throw XCTSkip("Use run_text_edit_acceptance.sh --signed-package-only with the pinned model staged")
         }
@@ -688,6 +741,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }
             var responses: [[String: Any]] = []
             var bindingObservation: [String: Any] = [:]
+            var diagnosticProbe: HoloProbeProcess?
             let started = Date()
             let goal = "In the Destination field, type Tokyo. Leave Origin empty and leave the form open."
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("actual-native"), propose: { input in
@@ -725,13 +779,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     proposal = try await .init(runtime.proposeFara(endpoint: endpoint, input: input))
                 case .guiOwl:
                     proposal = try await GUIOwlTestProposalRunner.propose(input: input, directory: proposalDirectory,
-                        index: responses.count, environment: environment).compatibleDesktopProposal()
+                        index: responses.count, environment: environment, registerProbe: { diagnosticProbe = $0 }).compatibleDesktopProposal()
                 case .faraDiagnostic:
                     proposal = try await .init(FaraQ6TestProposalRunner.proposeNativeQ4(input: input, directory: proposalDirectory,
-                        index: responses.count, environment: environment))
+                        index: responses.count, environment: environment, registerProbe: { diagnosticProbe = $0 }))
                 case .holo:
                     proposal = try await .init(HoloTestProposalRunner.propose(input: input, directory: proposalDirectory,
-                        index: responses.count, environment: environment, memoryLimitGiB: workerLimitGiB))
+                        index: responses.count, environment: environment, memoryLimitGiB: workerLimitGiB, registerProbe: { diagnosticProbe = $0 }))
                 }
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
@@ -747,7 +801,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     throw BindingProbeStop.observed
                 }
                 return proposal
-            }, finishRun: { await runtime.shutdown() })
+            }, finishRun: { await diagnosticProbe?.cancelAndWait(); diagnosticProbe = nil; await runtime.shutdown() })
             let run = Task { try await executor.execute(taskID: "actual-native-form", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in }) }
             let deadline = Task { try await Task.sleep(for: .seconds(90)); run.cancel() }
             var result: ComputerUseExecutionResult?, failure: Error?
@@ -801,7 +855,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             return
         }
         if nativeModelLoop {
-            let lifecycleProbe = nativeTypeDelay > .zero ? ComputerUseAXLifecycleMonitor(application: AXUIElementCreateApplication(process.processIdentifier)) : nil
+            let lifecycleProbe = nativeTypeDelay > .zero || nativeCompletionDelay > .zero ? ComputerUseAXLifecycleMonitor(application: AXUIElementCreateApplication(process.processIdentifier)) : nil
             defer { lifecycleProbe?.cancel() }
             let exact = "  東京 e\u{301} 👩🏽‍💻  "
             let goal = "Set Origin to \(nativeOriginText.isEmpty ? "an empty value" : nativeOriginText) and replace Destination with \(exact). Leave the form open."
@@ -853,7 +907,29 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     try await self.verify(state, field: "destination", equals: exact)
                     simulatedLogin = true
                     arguments = ["action": "wait", "time": 0]
-                default: arguments = ["action": "terminate", "answer": "The two fields are filled."]
+                default:
+                    if nativeCompletionDelay > .zero {
+                        _ = lifecycleProbe?.drain()
+                        let before = readiness.snapshot()
+                        try await Task.sleep(for: nativeCompletionDelay)
+                        let after = readiness.snapshot()
+                        let events = lifecycleProbe?.drain().map { $0.notification ?? String(describing: $0.kind) } ?? []
+                        trace.append("completionDelay: beforeID=\(before?.targetID ?? "nil") afterID=\(after?.targetID ?? "nil") sameValue=\(before?.value == after?.value) sameSelection=\(before?.selection == after?.selection) events=\(events)")
+                        let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+                        let freshImage = try ComputerUseDesktopImage(observation: screen)
+                        for (name, png) in [("before", input.screenshotPNG), ("after", freshImage.png)] {
+                            let source = try XCTUnwrap(CGImageSourceCreateWithData(png as CFData, nil))
+                            let full = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+                            let crop = CGRect(x: (window.minX - screen.displayBounds.minX) * CGFloat(full.width) / screen.displayBounds.width,
+                                y: (window.minY - screen.displayBounds.minY) * CGFloat(full.height) / screen.displayBounds.height,
+                                width: window.width * CGFloat(full.width) / screen.displayBounds.width,
+                                height: window.height * CGFloat(full.height) / screen.displayBounds.height).integral
+                            let image = try XCTUnwrap(full.cropping(to: crop))
+                            let attachment = XCTAttachment(image: NSImage(cgImage: image, size: crop.size))
+                            attachment.name = "Delayed native completion " + name; attachment.lifetime = .keepAlways; self.add(attachment)
+                        }
+                    }
+                    arguments = ["action": "terminate", "answer": "The two fields are filled."]
                 }
                 let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": arguments])
                 let response = "<tool_call>" + String(decoding: data, as: UTF8.self) + "</tool_call>"
