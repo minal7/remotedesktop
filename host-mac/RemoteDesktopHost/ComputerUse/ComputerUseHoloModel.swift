@@ -45,6 +45,10 @@ enum ComputerUseHoloModel {
             if input.surface == .desktop {
                 let focus = try ComputerUseFaraModel.nativeFocusJSON(observation.editor, state: observation.state)
                 bytes += focus.utf8.count; text += "\n" + focus
+                if index == input.history.count {
+                    let controls = try ComputerUseFaraModel.nativeControlsJSON(input.nativeControls)
+                    bytes += controls.utf8.count; text += "\n" + controls
+                }
             }
             if index == 0 {
                 if let error = observation.error { text += "\nError: " + error }

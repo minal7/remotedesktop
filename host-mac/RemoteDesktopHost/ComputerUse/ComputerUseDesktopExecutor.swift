@@ -31,6 +31,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let focusedTextFrame: CGRect?
         let focusedEditor: String?
         let focusedTextState: ComputerUseNativeTextState?
+        let nativeControls: ComputerUseNativeControls?
     }
     private final class Approval {
         let continuation: ComputerUseVisualApprovalContinuation
@@ -105,7 +106,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
            ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(context) { throw Failure.authentication }
     }
 
-    private func observe(_ tools: ComputerUseHostTools) throws -> Observation {
+    private func observe(_ tools: ComputerUseHostTools, includeControls: Bool = false) throws -> Observation {
         try checkAuthentication(tools)
         let before = tools.frontmostApplicationSnapshot()
         let screen = try tools.currentScreen()
@@ -115,10 +116,14 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         try checkAuthentication(tools)
         if try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: screen.image) { throw Failure.authentication }
         let editor = try tools.nativeFocusedEditorObservation()
+        let controls = try includeControls ? tools.nativeControlObservation(displayBounds: screen.displayBounds, windowBounds: screen.frontmostWindowBounds!) : nil
+        let finalApplication = tools.frontmostApplicationSnapshot()
+        guard finalApplication.identity == after.identity, finalApplication.policyName == after.policyName else { throw Failure.changedScreen }
         return try Observation(image: ComputerUseDesktopImage(observation: screen),
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
-            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState)
+            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState,
+            nativeControls: controls)
     }
 
     private func revalidate(_ expected: Observation, action: ComputerUsePredictedAction?, tools: ComputerUseHostTools) throws {
@@ -226,9 +231,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         defer { lease.release() }
         while session.turns < 64 {
             try Task.checkCancellation(); try lease.assertOwnership()
-            let observation = try observe(tools)
+            let observation = try observe(tools, includeControls: true)
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
-                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState)
+                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
+                focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()

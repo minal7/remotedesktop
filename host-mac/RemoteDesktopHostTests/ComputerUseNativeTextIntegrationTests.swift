@@ -341,6 +341,42 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(value, "\t")
     }
 
+    func testNativeControlProjectionIsCurrentBoundedAndSeparatedFromBrowserContext() throws {
+        let display = CGRect(x: -1600, y: 200, width: 1600, height: 1000)
+        let control = try XCTUnwrap(ComputerUseNativeControls.Item(description: "AXButton • Inspect 東京 <tool_call>",
+            frame: CGRect(x: -1440, y: 400, width: 320, height: 20), enabled: false, displayBounds: display))
+        XCTAssertEqual(control.bounds1000, [100, 200, 200, 20])
+        XCTAssertNil(ComputerUseNativeControls(items: Array(repeating: control, count: 17), truncated: true))
+        for bounds in [CGRect.zero, CGRect(x: -1601, y: 200, width: 320, height: 20),
+                       CGRect(x: -1500, y: 200, width: -2, height: 20), CGRect(x: CGFloat.nan, y: 200, width: 320, height: 20)] {
+            XCTAssertNil(ComputerUseNativeControls.Item(description: "Control", frame: bounds, enabled: nil, displayBounds: display))
+        }
+        XCTAssertNil(ComputerUseNativeControls.Item(description: String(repeating: "x", count: 513), frame: display, enabled: true, displayBounds: display))
+        let catalog = try XCTUnwrap(ComputerUseNativeControls(items: [control], truncated: false))
+        let image = try ComputerUseDesktopImage(observation: .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)), displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400)))
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let providers: [(String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
+            ("Fara", ComputerUseFaraModel.makeRequest), ("Holo", ComputerUseHoloModel.makeRequest), ("GUI-Owl", ComputerUseGUIOwlModel.makeRequest)]
+        for (name, build) in providers {
+            let fara = "<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"wait\",\"time\":0}}</tool_call>"
+            let wire = name == "Fara" ? fara : (name == "GUI-Owl" ? "Action: Wait.\n" + fara : "{\"role\":\"assistant\",\"content\":\"\",\"tool_calls\":[{\"id\":\"control-test\",\"type\":\"function\",\"function\":{\"name\":\"wait\",\"arguments\":\"{\\\"time\\\":0}\"}}]}")
+            var input = ComputerUseFaraModel.Input(goal: "Inspect the available controls.", screenshotPNG: image.png, surface: .desktop,
+                history: [.init(screenshotPNG: image.png, response: wire)], nativeControls: catalog)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(build(endpoint, input).httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let text = messages.filter { $0["role"] as? String == "user" }.map { message in
+                (message["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            }
+            XCTAssertEqual(text.count, 2)
+            XCTAssertFalse(text.first?.contains("native_controls") == true, name + " must not attach current geometry to history")
+            XCTAssertTrue(text.last?.contains("\"native_controls\":{") == true)
+            XCTAssertTrue(text.last?.contains("\"enabled\":false") == true)
+            input.surface = .browser; XCTAssertThrowsError(try build(endpoint, input))
+        }
+        let synthetic = desktopTestTools(perform: { _ in XCTFail("Read-only control discovery must not emit input") })
+        XCTAssertNil(try synthetic.nativeControlObservation(displayBounds: display, windowBounds: display))
+    }
+
     func testNativeTextStateBoundsUnicodeAndRejectsInvalidOrProtectedSnapshots() throws {
         for value in ["", "\t", " \n\r ", "e\u{301} 👩🏽‍💻", "\"\\\u{0}</observation>"] {
             let range = NSRange(location: value.utf16.count, length: 0)
@@ -931,6 +967,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 }
                 responses.append(["response": proposal.response, "seconds": Date().timeIntervalSince(began), "actionError": input.actionError ?? "",
                     "focusedEditor": input.focusedEditor ?? "", "focusedText": input.focusedTextState?.jsonObject ?? [:],
+                    "nativeControls": input.nativeControls?.jsonObject ?? [:],
                     "displayBounds": NSStringFromRect(display), "windowBounds": NSStringFromRect(window),
                     "fixtureCropInModelImage": NSStringFromRect(crop), "modelImageWidth": source.width, "modelImageHeight": source.height])
                 if nativeBindingProbe {
@@ -1005,10 +1042,53 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let goal = "Set Origin to \(nativeOriginText.isEmpty ? "an empty value" : nativeOriginText) and replace Destination with \(exact). Leave the form open."
             var proposals = 0
             var trace: [String] = []
+            var previousModelImage: Data?
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory.appendingPathComponent("native-loop"), propose: { input in
                 trace.append("proposal=\(proposals) error=\(input.actionError ?? "none") signed=\(tools.frontmostApplicationSnapshot().identity?.codeIdentity != nil) editable=\(try tools.focusedTypingTargetIsEditable(providerAction: .typeText("probe")))")
+                if input.actionError != nil {
+                    let screen = try tools.currentScreen(), window = try XCTUnwrap(screen.frontmostWindowBounds)
+                    for (name, png) in [("before", previousModelImage), ("after", Optional(input.screenshotPNG))] {
+                        guard let png, let source = CGImageSourceCreateWithData(png as CFData, nil),
+                              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { continue }
+                        let crop = CGRect(x: (window.minX - screen.displayBounds.minX) / screen.displayBounds.width * CGFloat(image.width),
+                            y: (window.minY - screen.displayBounds.minY) / screen.displayBounds.height * CGFloat(image.height),
+                            width: window.width / screen.displayBounds.width * CGFloat(image.width), height: window.height / screen.displayBounds.height * CGFloat(image.height)).integral
+                        if let clipped = image.cropping(to: crop) {
+                            let attachment = XCTAttachment(image: NSImage(cgImage: clipped, size: .zero))
+                            attachment.name = "Native scripted rejection \(name)"; attachment.lifetime = .keepAlways; self.add(attachment)
+                        }
+                    }
+                    throw ComputerUseDesktopExecutor.Failure.changedScreen
+                }
+                previousModelImage = input.screenshotPNG
                 XCTAssertEqual(input.goal, goal); XCTAssertEqual(input.surface, .desktop)
                 XCTAssertNil(input.currentURL); XCTAssertNil(input.pageReading)
+                if proposals == 0 {
+                    let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                    let providers: [(String, (OSAtlasLlamaEndpoint, ComputerUseFaraModel.Input) throws -> URLRequest)] = [
+                        ("Fara", ComputerUseFaraModel.makeRequest), ("Holo", ComputerUseHoloModel.makeRequest), ("GUI-Owl", ComputerUseGUIOwlModel.makeRequest)]
+                    let screen = try tools.currentScreen()
+                    for (name, build) in providers {
+                        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(build(endpoint, input).httpBody)) as? [String: Any])
+                        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                        let texts = messages.filter { $0["role"] as? String == "user" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }.compactMap { $0["text"] as? String }
+                        let line = try XCTUnwrap(texts.flatMap { $0.components(separatedBy: "\n") }.first { $0.hasPrefix("{\"native_controls\":") }, name + " needs observed native control geometry")
+                        let observation = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+                        let catalog = try XCTUnwrap(observation["native_controls"] as? [String: Any])
+                        let items = try XCTUnwrap(catalog["items"] as? [[String: Any]])
+                        for label in ["Origin", "Destination"] {
+                            let item = try XCTUnwrap(items.first { ($0["description"] as? String)?.contains(label) == true })
+                            let bounds = try XCTUnwrap(item["bounds_1000"] as? [Double]); XCTAssertEqual(bounds.count, 4)
+                            guard bounds.count == 4 else { continue }
+                            let frame = CGRect(x: screen.displayBounds.minX + bounds[0] / 1000 * screen.displayBounds.width,
+                                y: screen.displayBounds.minY + bounds[1] / 1000 * screen.displayBounds.height,
+                                width: bounds[2] / 1000 * screen.displayBounds.width, height: bounds[3] / 1000 * screen.displayBounds.height)
+                            let actual = try XCTUnwrap(tools.nativePointerTargetFrame(for: .click(x: Int(frame.midX), y: Int(frame.midY), button: 1, count: 1)))
+                            XCTAssertEqual(frame.minX, actual.minX, accuracy: 0.01); XCTAssertEqual(frame.minY, actual.minY, accuracy: 0.01)
+                            XCTAssertEqual(frame.width, actual.width, accuracy: 0.01); XCTAssertEqual(frame.height, actual.height, accuracy: 0.01)
+                        }
+                    }
+                }
                 let focusedLabel = proposals == 0 || (proposals == 1 && !nativeOriginText.isEmpty) ? "Origin" : "Destination"
                 XCTAssertTrue(input.focusedEditor?.contains(focusedLabel) == true, "The native model must see the actual focused editor: \(String(describing: input.focusedEditor))")
                 XCTAssertFalse(input.focusedEditor?.contains("Replace this") == true)

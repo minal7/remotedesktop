@@ -2418,6 +2418,14 @@ final class ComputerUseHostTools {
         try nativeFocusedEditorObservation()?.description
     }
 
+    func nativeControlObservation(displayBounds: CGRect, windowBounds: CGRect) throws -> ComputerUseNativeControls? {
+        guard mayAct() else { throw ToolError.paused }
+        // Synthetic screenshots/context have no relationship to live AX.
+        guard screenProvider == nil, accessibilityContextProvider == nil else { return nil }
+        return try ComputerUseNativeControlReader.observe(displayBounds: displayBounds, windowBounds: windowBounds,
+            access: .live, mayAct: mayAct)
+    }
+
     func nativeFocusedEditorObservation() throws -> (description: String, textState: ComputerUseNativeTextState?)? {
         guard mayAct() else { throw ToolError.paused }
         let description: String

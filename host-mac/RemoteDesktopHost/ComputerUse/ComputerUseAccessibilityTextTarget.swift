@@ -1,6 +1,96 @@
 import AppKit
 import ApplicationServices
 
+/// A bounded read of the foreground window using the same injectable AX IPC
+/// boundary as native text. No AXValue, setters, focus changes or input events.
+@MainActor
+enum ComputerUseNativeControlReader {
+    static func observe(displayBounds: CGRect, windowBounds: CGRect,
+        access: ComputerUseAccessibilityTextTarget.Access, mayAct: () -> Bool,
+        now: () -> Date = Date.init) throws -> ComputerUseNativeControls? {
+        let deadline = now().addingTimeInterval(0.75)
+        var expired = false
+        func read(_ name: String, _ element: AXUIElement) throws -> CFTypeRef? {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+            guard now() < deadline else { expired = true; return nil }
+            return access.read(name, element)
+        }
+        func element(_ name: String, _ source: AXUIElement) throws -> AXUIElement? {
+            guard let value = try read(name, source), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+            return unsafeBitCast(value, to: AXUIElement.self)
+        }
+        func frame(_ source: AXUIElement) throws -> CGRect? {
+            guard let p = try read(kAXPositionAttribute, source), CFGetTypeID(p) == AXValueGetTypeID(),
+                  let s = try read(kAXSizeAttribute, source), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+            var point = CGPoint.zero, size = CGSize.zero
+            guard AXValueGetValue(p as! AXValue, .cgPoint, &point), AXValueGetValue(s as! AXValue, .cgSize, &size),
+                  point.x.isFinite, point.y.isFinite, size.width.isFinite, size.height.isFinite,
+                  size.width > 0, size.height > 0 else { return nil }
+            return CGRect(origin: point, size: size)
+        }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+        guard let app = access.frontmost() else { return nil }
+        access.timeout(app.root, 0.1)
+        guard let window = try element(kAXFocusedWindowAttribute, app.root) else { return nil }
+        access.timeout(window, 0.1)
+        guard try frame(window) == windowBounds else { return nil }
+        let roles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
+            "AXComboBox", "AXTextField", "AXTextArea", "AXMenuItem", "AXSlider", "AXIncrementor"]
+        var queue: [(AXUIElement, Bool)] = [(window, false)], visited: [AXUIElement] = []
+        var items: [ComputerUseNativeControls.Item] = [], truncated = false
+        while !queue.isEmpty {
+            if visited.count >= 96 || items.count >= ComputerUseNativeControls.maximumItems { truncated = true; break }
+            let (node, inheritedDisabled) = queue.removeFirst()
+            if visited.contains(where: { CFEqual($0, node) }) { continue }
+            visited.append(node); access.timeout(node, 0.1)
+            let role = try read(kAXRoleAttribute, node) as? String ?? ""
+            let subrole = try read(kAXSubroleAttribute, node) as? String ?? ""
+            if role == "AXSecureTextField" || subrole == kAXSecureTextFieldSubrole as String { continue }
+            if (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true { continue }
+            if (try read("AXHidden", node) as? NSNumber)?.boolValue == true { continue }
+            let explicitEnabled = (try read(kAXEnabledAttribute, node) as? NSNumber)?.boolValue
+            let enabled = inheritedDisabled ? false : explicitEnabled
+            if roles.contains(role), let bounds = try frame(node), windowBounds.contains(bounds) {
+                var label: String?
+                for name in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXPlaceholderValueAttribute as String,
+                             kAXHelpAttribute as String, kAXIdentifierAttribute as String] {
+                    if let value = try read(name, node) as? String,
+                       !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        var prefix = "", bytes = 0
+                        for character in value {
+                            let next = String(character)
+                            guard bytes + next.utf8.count <= 384 else { break }
+                            prefix += next; bytes += next.utf8.count
+                        }
+                        if bytes < value.utf8.count { truncated = true }
+                        if !prefix.isEmpty { label = prefix; break }
+                    }
+                }
+                let description = role + (label.map { " • " + $0 } ?? "")
+                if let item = ComputerUseNativeControls.Item(description: description, frame: bounds, enabled: enabled, displayBounds: displayBounds) {
+                    items.append(item)
+                }
+            }
+            if let children = try read(kAXChildrenAttribute, node) as? [AXUIElement] {
+                let remaining = max(0, 96 - visited.count - queue.count)
+                if children.count > remaining { truncated = true }
+                queue.append(contentsOf: children.prefix(remaining).map { ($0, enabled == false) })
+            }
+            if expired { return nil }
+        }
+        // Geometry is planning data, but still must belong to the screenshot's
+        // foreground window. A changed scope cannot publish a mixed catalogue.
+        guard let current = access.frontmost(), current.identity.utf8.elementsEqual(app.identity.utf8), CFEqual(current.root, app.root),
+              let currentWindow = try element(kAXFocusedWindowAttribute, app.root), CFEqual(currentWindow, window),
+              try frame(window) == windowBounds, !expired else { return nil }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+        return ComputerUseNativeControls(items: items, truncated: truncated)
+    }
+}
+
 /// Reads cannot choose the destination of a later mutation. Every mutation
 /// takes its own expected reference/state; stale state throws before input.
 /// A nil text-setter result means unsupported with no setter invocation.

@@ -130,6 +130,8 @@ enum ComputerUseGUIOwlModel {
             }
             outcomes.append(result)
         }
+        let controls = try input.surface == .desktop ? ComputerUseFaraModel.nativeControlsJSON(input.nativeControls) : nil
+        bytes += controls?.utf8.count ?? 0
         guard bytes<=65_536 else { throw invalid }
         let firstImage = max(0,input.history.count-2)
         let previous = (0..<firstImage).map { i in
@@ -147,6 +149,7 @@ enum ComputerUseGUIOwlModel {
                 text = "Previous action outcome: " + outcomes[i-1] + "\n\n"
             }
             text += "Current observation: " + observations[i]
+            if i == input.history.count, let controls { text += "\n" + controls }
             let screenshot = i < input.history.count ? input.history[i].screenshotPNG : input.screenshotPNG
             messages.append(["role":"user","content":[["type":"text","text":text],["type":"image_url","image_url":["url":"data:image/png;base64,"+screenshot.base64EncodedString()]]]])
             if i < input.history.count {

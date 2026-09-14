@@ -5,6 +5,98 @@ import XCTest
 
 @MainActor
 final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
+    func testNativeControlCatalogueUsesBoundsAndNeverReadsEditableValues() throws {
+        let graph = AXTextGraph()
+        let display = CGRect(x: -1280, y: -200, width: 1280, height: 800)
+        let window = CGRect(x: -1100, y: -100, width: 900, height: 600)
+        graph.setFrame("window", window)
+        graph.setFrame("destination", CGRect(x: -1000, y: 50, width: 500, height: 18))
+        graph.setFrame("source", CGRect(x: -1000, y: 100, width: 500, height: 24))
+        let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: display, windowBounds: window, access: graph.access, mayAct: { true }))
+        XCTAssertEqual(catalog.items.count, 2); XCTAssertFalse(catalog.truncated)
+        XCTAssertEqual(catalog.items[0].description, "AXTextField • café")
+        XCTAssertEqual(catalog.items[0].bounds1000, [218.75, 312.5, 390.625, 22.5])
+        XCTAssertNil(catalog.items[0].enabled, "Missing AXEnabled is unknown, not disabled")
+        for name in ["source", "destination"] {
+            XCTAssertEqual(graph.readCount(name, kAXValueAttribute), 0)
+            XCTAssertEqual(graph.readCount(name, kAXSelectedTextRangeAttribute), 0)
+        }
+        XCTAssertTrue(graph.writes.isEmpty)
+        graph.set("destination", kAXTitleAttribute, String(repeating: "👩🏽‍💻", count: 80) as NSString)
+        let clipped = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: display, windowBounds: window, access: graph.access, mayAct: { true }))
+        XCTAssertTrue(clipped.truncated, "A clipped label must not look like a complete observation")
+        XCTAssertEqual(clipped.items[0].description, "AXTextField • " + String(repeating: "👩🏽‍💻", count: 25))
+    }
+
+    func testNativeControlCatalogueExcludesProtectedHiddenAndOffWindowControls() throws {
+        for mode in ["secure", "protected", "hidden", "outside", "nonfinite", "disabled-parent"] {
+            let graph = AXTextGraph(), window = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", window); graph.setFrame("source", CGRect(x: 20, y: 30, width: 200, height: 20))
+            graph.setFrame("destination", CGRect(x: 20, y: 70, width: 200, height: 20))
+            switch mode {
+            case "secure": graph.set("group", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
+            case "protected": graph.set("destination", "AXProtectedContent", kCFBooleanTrue)
+            case "hidden": graph.set("destination", "AXHidden", kCFBooleanTrue)
+            case "outside": graph.setFrame("destination", CGRect(x: 780, y: 50, width: 100, height: 20))
+            case "nonfinite": graph.setFrame("destination", CGRect(x: CGFloat.infinity, y: 50, width: 100, height: 20))
+            default: graph.set("group", kAXEnabledAttribute, kCFBooleanFalse)
+            }
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window, windowBounds: window, access: graph.access, mayAct: { true }))
+            XCTAssertEqual(catalog.items.count, mode == "secure" ? 0 : (mode == "disabled-parent" ? 2 : 1), mode)
+            if mode == "disabled-parent" { XCTAssertTrue(catalog.items.allSatisfy { $0.enabled == false }) }
+            if ["secure", "protected", "hidden"].contains(mode) { XCTAssertEqual(graph.readCount("destination", kAXTitleAttribute), 0) }
+            XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0); XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeControlCatalogueRejectsChangedScopeAndWithdrawnPermission() throws {
+        for mode in ["application", "window", "bounds", "permission", "deadline"] {
+            let graph = AXTextGraph(), window = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", window); graph.setFrame("destination", CGRect(x: 20, y: 70, width: 200, height: 20))
+            var allowed = true, expired = false
+            graph.afterRead = { node, attribute in
+                guard node == "destination", attribute == kAXTitleAttribute else { return }
+                switch mode {
+                case "application": graph.applicationIdentity = "different-launch"
+                case "window": graph.set("application", kAXFocusedWindowAttribute, graph.element("other-window"))
+                case "bounds": graph.setFrame("window", window.offsetBy(dx: 20, dy: 0))
+                case "permission": allowed = false
+                default: expired = true
+                }
+            }
+            let observe = { try ComputerUseNativeControlReader.observe(displayBounds: window, windowBounds: window, access: graph.access,
+                mayAct: { allowed }, now: { Date(timeIntervalSinceReferenceDate: expired ? 1 : 0) }) }
+            if mode == "permission" { XCTAssertThrowsError(try observe()) }
+            else { XCTAssertNil(try observe(), mode) }
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeControlCatalogueBoundsCyclesItemsAndCancellation() async throws {
+        for buttons in [true, false] {
+            let graph = AXTextGraph(), window = CGRect(x: 0, y: 0, width: 800, height: 600)
+            graph.setFrame("window", window)
+            var children: [AXUIElement] = [graph.element("window")]
+            for index in 0..<140 {
+                let name = "item-\(index)"; children.append(graph.addNode(name))
+                graph.set(name, kAXRoleAttribute, (buttons ? "AXButton" : "AXGroup") as NSString)
+                graph.set(name, kAXTitleAttribute, (String(repeating: "👩🏽‍💻", count: 80) + " instruction text") as NSString)
+                graph.setFrame(name, CGRect(x: 20, y: 30, width: 100, height: 20))
+            }
+            graph.set("window", kAXChildrenAttribute, children as CFArray)
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window, windowBounds: window, access: graph.access, mayAct: { true }))
+            XCTAssertTrue(catalog.truncated); XCTAssertEqual(catalog.items.count, buttons ? 16 : 0)
+            XCTAssertTrue(catalog.items.allSatisfy { $0.description.utf8.count <= 512 })
+            XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 98)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+        let graph = AXTextGraph(), window = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let task = Task { @MainActor in try ComputerUseNativeControlReader.observe(displayBounds: window, windowBounds: window, access: graph.access, mayAct: { true }) }
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Expected cancellation") } catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertTrue(graph.calls.isEmpty)
+    }
+
     func testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues() throws {
         for change in ["label", "unicode-label", "label-object", "role", "subrole", "identifier", "parent"] {
             let graph = AXTextGraph()
@@ -808,7 +900,7 @@ private final class AXGraphPlanner: ComputerUseTextGoalPlanning {
 private final class AXTextGraph {
     struct Write { let element: String; let attribute: String }
     struct Call { let element: String; let operation: String }
-    private let names = ["application", "window", "other-window", "group", "other-group", "destination", "source", "label", "other-label", "replacement"]
+    private var names = ["application", "window", "other-window", "group", "other-group", "destination", "source", "label", "other-label", "replacement"]
     private var elements: [String: AXUIElement] = [:]
     private var attributes: [String: [String: CFTypeRef]] = [:]
     private var reads: [(String, String)] = []
@@ -879,6 +971,15 @@ private final class AXTextGraph {
               makeLifecycleMonitor: lifecycleFactory)
     }
     func element(_ name: String) -> AXUIElement { elements[name]! }
+    func addNode(_ name: String) -> AXUIElement {
+        names.append(name); elements[name] = AXUIElementCreateApplication(pid_t(50_000 + names.count))
+        return elements[name]!
+    }
+    func setFrame(_ name: String, _ frame: CGRect) {
+        var point = frame.origin, size = frame.size
+        set(name, kAXPositionAttribute, AXValueCreate(.cgPoint, &point))
+        set(name, kAXSizeAttribute, AXValueCreate(.cgSize, &size))
+    }
     func set(_ name: String, _ attribute: String, _ value: CFTypeRef?) { attributes[name, default: [:]][attribute] = value }
     func value(_ name: String) -> String? { attributes[name]?[kAXValueAttribute] as? String }
     func setSelection(_ name: String, _ selection: NSRange) {

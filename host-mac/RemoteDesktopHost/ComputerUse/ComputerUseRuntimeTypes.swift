@@ -127,6 +127,44 @@ struct ComputerUseNativeTextState: Equatable, Sendable {
     }
 }
 
+/// Read-only hints for the current screenshot. They do not identify an input
+/// recipient or authorize effects, and the list need not cover every control.
+struct ComputerUseNativeControls: Equatable, Sendable {
+    static let maximumItems = 16
+    struct Item: Equatable, Sendable {
+        let description: String
+        let bounds1000: [Double]
+        let enabled: Bool?
+
+        init?(description: String, frame: CGRect, enabled: Bool?, displayBounds: CGRect) {
+            guard !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  description.utf8.count <= 512, Self.valid(frame), Self.valid(displayBounds),
+                  displayBounds.contains(frame) else { return nil }
+            self.description = description; self.enabled = enabled
+            bounds1000 = [(frame.minX - displayBounds.minX) / displayBounds.width * 1000,
+                          (frame.minY - displayBounds.minY) / displayBounds.height * 1000,
+                          frame.width / displayBounds.width * 1000, frame.height / displayBounds.height * 1000]
+        }
+        private static func valid(_ frame: CGRect) -> Bool {
+            [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height].allSatisfy { $0.isFinite && abs($0) <= 1_000_000 }
+                && frame.size.width > 0 && frame.size.height > 0
+        }
+        var jsonObject: [String: Any] {
+            ["description": description, "bounds_1000": bounds1000, "enabled": enabled as Any? ?? NSNull()]
+        }
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.description.utf8.elementsEqual(rhs.description.utf8) && lhs.bounds1000 == rhs.bounds1000 && lhs.enabled == rhs.enabled
+        }
+    }
+    let items: [Item]
+    let truncated: Bool
+    init?(items: [Item], truncated: Bool) {
+        guard items.count <= Self.maximumItems else { return nil }
+        self.items = items; self.truncated = truncated
+    }
+    var jsonObject: [String: Any] { ["items": items.map(\.jsonObject), "truncated": truncated] }
+}
+
 /// A bounded full-display image. This is geometry and model input only, never
 /// authority to dispatch: native admission must still revalidate the screen,
 /// frontmost application, focus, authentication and task ownership.
