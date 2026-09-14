@@ -404,7 +404,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
             progress("Reading the browser…")
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png,
-                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading, userResponse: session.userResponse, actionError: session.actionError)
+                history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading,
+                userResponse: session.userResponse, actionError: session.actionError,
+                observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL))
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             try Task.checkCancellation(); try lease.assertOwnership()
@@ -421,7 +423,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     break
                 case .remember:
                     try tools.validateOwnedBrowserAgentMemoryObservation(observation)
-                case .reportCompletion where session.pageReading == nil:
+                case .reportCompletion where session.pageReading == nil && input.observedPage == nil:
+                    // The visual-only exception cannot validate an answer
+                    // informed by native text or tooltips outside the pixels.
                     try await tools.validateOwnedBrowserAgentObservation(observation, allowingIdenticalScreenshot: true)
                 default:
                     try await tools.validateOwnedBrowserAgentObservation(observation)
@@ -492,16 +496,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                       question.utf8.count <= 1024 else { throw Failure.unsupportedAction }
                 // Preflight above validated the exact native page, source policy,
                 // owner and login state. This synchronous projection posts no input.
-                let page = observation.approvalPageEvidence.page
-                let fullText = page.texts.map(\.pageReadingText).joined(separator: "\n")
-                var text = "", bytes = 0
-                for character in fullText {
-                    let part = String(character), size = part.utf8.count
-                    guard bytes + size <= 4096 else { break }
-                    text += part; bytes += size
-                }
-                var reading = ComputerUseFaraModel.PageReading(sourceURL: observation.currentURL, question: question, text: text,
-                    truncated: page.truncated || text != fullText, omittedEmbeddedContent: page.omittedEmbeddedContent)
+                let page = ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL)
+                var reading = ComputerUseFaraModel.PageReading(sourceURL: page.sourceURL, question: question, text: page.text,
+                    truncated: page.truncated, omittedEmbeddedContent: page.omittedEmbeddedContent)
                 let source = reading, readPage = self.readPage
                 reading.answer = try await planning.perform(timeout: 45) { try await readPage(source) }
                 try Task.checkCancellation(); try lease.assertOwnership()

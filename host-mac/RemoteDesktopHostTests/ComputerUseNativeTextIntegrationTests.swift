@@ -1492,7 +1492,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(function["name"] as? String, "computer_use")
         XCTAssertTrue(prompt.contains("macOS")); XCTAssertTrue(prompt.contains("Command"))
         XCTAssertTrue(prompt.contains("<tool_call>"))
-        XCTAssertEqual(try system(.init(goal: goal, screenshotPNG: image.png)), ComputerUseFaraModel.officialSystemPrompt)
+        XCTAssertEqual(try system(.init(goal: goal, screenshotPNG: image.png)), try ComputerUseFaraModel.browserSystemPrompt())
         var mixed = native; mixed.currentURL = URL(string: "https://example.com")
         XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: mixed))
         mixed = native; mixed.userResponse = "An answer from another surface"

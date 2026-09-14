@@ -1369,6 +1369,174 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertThrowsError(try messages(oversized), "All retained failure text must count toward the aggregate context budget")
     }
 
+    @MainActor
+    func testOptInAgentObservationWaitsForDocumentReadinessWithoutLosingControlGates() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded native document readiness") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><html><body><p>Readiness fixture</p></body></html>")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var retainedWindow: NSWindow?
+        for mode in ["settles", "cancel", "replaced", "login", "never"] {
+            try browser.claim(taskID: mode)
+            let document = try await browser.navigate(taskID: mode, operationID: "fixture", to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+            // Exercise the exact read-only DOM readiness gate without waiting
+            // on an unreliable external resource or posting any browser input.
+            _ = try await web.callAsyncJavaScript("globalThis.fixtureReady=false; Object.defineProperty(document,'readyState',{configurable:true,get:()=>fixtureReady?'complete':'interactive'}); return true;",
+                arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            let work = Task { @MainActor in try await browser.captureAgentObservation(document: document) }
+            let began = ContinuousClock.now
+            try await Task.sleep(for: .milliseconds(150))
+            if mode == "cancel" { work.cancel() }
+            if mode == "replaced" { try browser.claim(taskID: "successor") }
+            if mode == "login" { _ = try await web.evaluateJavaScript("document.body.innerHTML='<input type=password value=private-fixture-secret>'") }
+            if mode == "settles" || mode == "login" {
+                _ = try await web.callAsyncJavaScript("fixtureReady=true; return true;", arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            }
+            do {
+                let observation = try await work.value
+                XCTAssertEqual(mode, "settles"); XCTAssertEqual(observation.currentURL, document.committedURL)
+                XCTAssertEqual(browser.lastAgentCaptureStage, "complete")
+            } catch {
+                if mode == "settles" { XCTFail("A bounded loading state should become a fresh observation: \(error)") }
+                else if mode == "cancel" { XCTAssertTrue(error is CancellationError) }
+                else if mode == "login" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else if mode == "never" { XCTAssertEqual(error as? ComputerUseBrowserError, .deadlineExceeded) }
+                else { XCTAssertNotNil(error as? ComputerUseBrowserError) }
+            }
+            XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+            if mode != "settles" { XCTAssertTrue(browser.lastAgentCaptureStage?.hasPrefix("observe-page") == true) }
+        }
+    }
+
+    @MainActor
+    func testOptInBrowserActorReceivesCurrentNativePageTextWithoutAReaderCall() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native text observation for browser actor") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/facts": .init(body: """
+            <!doctype html><html><body><p title="The exact observed fact">Visible fact caption</p>
+            <span hidden>Hidden private content</span><textarea>Private editor content</textarea></body></html>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraNativePageText-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let url = base.appendingPathComponent("facts"), taskID = "native-page-text"
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: url)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1; guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let observations = messages.filter { $0["role"] as? String == "user" }.map { message in
+                (message["content"] as? [[String: Any]] ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n")
+            }
+            let current = try XCTUnwrap(observations.last)
+            XCTAssertTrue(current.contains("observed_page")); XCTAssertTrue(current.contains("Visible fact caption"))
+            XCTAssertTrue(current.contains("Website tooltip: The exact observed fact")); XCTAssertTrue(current.contains(url.absoluteString))
+            XCTAssertFalse(current.contains("Hidden private content")); XCTAssertFalse(current.contains("Private editor content"))
+            XCTAssertFalse(observations.dropLast().contains { $0.contains("observed_page") }, "Only the current page's native text belongs in this observation")
+            let response = self.call(calls == 1 ? #"{"action":"wait","time":0}"# : #"{"action":"terminate","answer":"Observed the fact."}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let result = try await executor.execute(taskID: taskID, prompt: "Read the information.", trustedUserPrompt: "Read the information.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Observed the fact."))
+        XCTAssertEqual(calls, 2)
+    }
+
+    @MainActor
+    func testOptInActorCannotCompleteFromChangedTooltipEvenWhenPixelsAreIdentical() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: actor text evidence freshness") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/fact": .init(body: "<!doctype html><html><body><p id='fact' title='Original exact fact'>Unchanged caption</p></body></html>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraChangedTooltip-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "changed-tooltip", url = base.appendingPathComponent("fact")
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: url)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var calls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+            calls += 1; guard calls <= 2 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+            if calls == 1 { _ = try await web.evaluateJavaScript("document.getElementById('fact').title='Updated exact fact'") }
+            else { XCTAssertTrue(input.observedPage?.text.contains("Updated exact fact") == true); XCTAssertNotNil(input.actionError) }
+            let response = self.call(calls == 1 ? #"{"action":"terminate","answer":"Original exact fact"}"# : #"{"action":"terminate","answer":"Updated exact fact"}"#)
+            return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        })
+        let result = try await executor.execute(taskID: taskID, prompt: "Read this page's fact.", trustedUserPrompt: "Read this page's fact.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Updated exact fact")); XCTAssertEqual(calls, 2)
+    }
+
+    func testNativePageObservationRejectsWrongSourceOversizedTextAndDesktopContext() throws {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let source = URL(string: "https://example.com/source")!, png = try smallPNG()
+        let page = ComputerUseFaraModel.PageObservation(sourceURL: source, text: String(repeating: "é", count: 2048), truncated: true, omittedEmbeddedContent: true)
+        let input = ComputerUseFaraModel.Input(goal: "Read this page.", screenshotPNG: png, currentURL: source, observedPage: page)
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self).contains("text_truncated"))
+        var invalid = input; invalid.currentURL = nil
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalid))
+        invalid = input; invalid.currentURL = URL(string: "https://example.com/replaced")!
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalid))
+        invalid = input; invalid.observedPage = .init(sourceURL: source, text: page.text + "é", truncated: false, omittedEmbeddedContent: false)
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalid))
+        invalid = input; invalid.currentURL = nil; invalid.surface = .desktop
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalid))
+        invalid = input; invalid.currentURL = URL(string: "file:///private/page")!
+        invalid.observedPage = .init(sourceURL: invalid.currentURL!, text: "private", truncated: false, omittedEmbeddedContent: false)
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalid))
+        // Page bytes count toward the same total conversation limit as history.
+        var boundary = input
+        let payload = String(repeating: "x", count: 12_300)
+        boundary.history = (0..<5).map { _ in .init(screenshotPNG: png, response: call("{\"action\":\"pause_and_memorize_fact\",\"fact\":\"\(payload)\"}")) }
+        boundary.observedPage = nil
+        _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: boundary)
+        boundary.observedPage = page
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: boundary))
+    }
+
+    func testFaraBrowserRequestAdvertisesImplementedToolsAndBoundedReading() throws {
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: .init(goal: "Read the current page.", screenshotPNG: try smallPNG()))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let prompt = try XCTUnwrap(messages.first?["content"] as? String)
+        let start = try XCTUnwrap(prompt.range(of: "<tools>\n"))
+        let end = try XCTUnwrap(prompt.range(of: "</tools>", range: start.upperBound..<prompt.endIndex))
+        let schema = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[start.upperBound..<end.lowerBound].utf8)) as? [String: Any])
+        let function = try XCTUnwrap(schema["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let action = try XCTUnwrap(properties["action"] as? [String: Any])
+        XCTAssertEqual(Set(try XCTUnwrap(action["enum"] as? [String])), Set(["key", "type", "left_click", "double_click", "scroll", "hscroll", "visit_url", "history_back", "web_search", "read_page_answer_question", "pause_and_memorize_fact", "ask_user_question", "wait", "terminate"]))
+        let description = try XCTUnwrap(action["description"] as? String)
+        XCTAssertTrue(description.contains("tooltip")); XCTAssertTrue(description.contains("4096"))
+        XCTAssertTrue(description.contains("read_page_answer_question")); XCTAssertTrue(description.contains("truncated"))
+        let url = try XCTUnwrap(properties["url"] as? [String: Any])
+        XCTAssertTrue((url["description"] as? String)?.contains("HTTP and HTTPS") == true)
+        XCTAssertEqual((properties["question"] as? [String: Any])?["maxLength"] as? Int, 1024)
+        XCTAssertEqual(function["name"] as? String, "computer_use")
+        XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+        // Keep the trained identity, critical-point rules and response format.
+        let original = ComputerUseFaraModel.officialSystemPrompt
+        XCTAssertEqual(prompt.components(separatedBy: "<tools>\n").first, original.components(separatedBy: "<tools>\n").first)
+        XCTAssertEqual(prompt.components(separatedBy: "</tools>").last, original.components(separatedBy: "</tools>").last)
+    }
+
     func testUnsupportedNavigationIsNonExecutableButRetainedInModelHistory() throws {
         let urls = ["view-source:https://example.com/releases", "javascript:alert(1)", "file:///tmp/private.txt",
                     "data:text/html,hello", "mailto:person@example.com", "ftp://example.com/file", "custom-app:open"]

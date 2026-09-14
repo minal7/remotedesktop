@@ -858,7 +858,8 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.pageEvidenceUnavailable
         }
         // Existing page admission detects credentials before screenshotting.
-        // The host retains DOM evidence; the model receives the image and current URL.
+        // The host retains DOM evidence; the model receives the image, current URL
+        // and a bounded projection of the same admitted page text.
         lastAgentCaptureStage = "observe-page"
         let evidence = try await observePage(document: expected, forAgentInput: true)
         let configuration = WKSnapshotConfiguration()
@@ -2034,7 +2035,19 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 "columns": ceil(frame.maxX)-ceil(frame.minX), "rows": ceil(top+frame.height)-ceil(top),
                 "offsetX": ceil(frame.minX)-frame.minX, "offsetY": ceil(top)-top]
         }
-        let result = try await callDOM(.pageSnapshot, arguments: arguments, document: expected)
+        // WebKit navigation completion can precede the document's complete
+        // state. Wait only for this explicit read-only condition; every poll
+        // retains the same document/source/owner and repeats the login gate.
+        let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var result = try await callDOM(.pageSnapshot, arguments: arguments, document: expected)
+        while result.status == "page-loading" {
+            if forAgentInput { lastAgentCaptureStage = "observe-page-loading" }
+            guard ContinuousClock.now < readinessDeadline else { throw ComputerUseBrowserError.deadlineExceeded }
+            try await Task.sleep(for: .milliseconds(50))
+            guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
+            result = try await callDOM(.pageSnapshot, arguments: arguments, document: expected)
+        }
+        if forAgentInput { lastAgentCaptureStage = "observe-page-" + result.status }
         guard hasRequiredPresentation else { throw ComputerUseBrowserError.windowNotActive }
         guard result.status == "page-snapshot", result.fields == nil,
               let page = result.page, page.isWellFormed, page.controlStateObserved == includingControlState,

@@ -1895,7 +1895,7 @@ enum ComputerUseBrowserDOM {
         if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
-          if (doc.readyState !== 'complete') return reply('stale');
+          if (doc.readyState !== 'complete') return reply(command === 'pageSnapshot' ? 'page-loading' : 'stale');
           const links = new Map(), controls = new Map(), containers = new Map();
           if (command === 'pageSnapshot' && args.includeControlState !== undefined && typeof args.includeControlState !== 'boolean') return reply('unsupported');
           const includeControlState = command === 'pageSnapshot' ? args.includeControlState === true : lastPageSnapshot?.includeControlState === true;

@@ -144,6 +144,135 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         if let failure { throw failure }
     }
 
+    func testOptInFaraPublicPageReaderSelectionAndRecovery() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FARA_PUBLIC_READER_SELECTION"] == "1" else {
+            throw XCTSkip("Opt-in: two managed model proposals on one real public-page observation; no generated input")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["FARA_PUBLIC_READER_SELECTION_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let specification = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+            URL(fileURLWithPath: try XCTUnwrap(environment["FARA_PUBLIC_READER_SELECTION_CASE"])))) as? [String: Any])
+        let url = try XCTUnwrap(URL(string: try XCTUnwrap(specification["url"] as? String)))
+        let goal = try XCTUnwrap(specification["goal"] as? String)
+        let expected = try XCTUnwrap(specification["expectedAnswerFragments"] as? [String])
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let runtime = OSAtlasLlamaRuntime(), planning = ComputerUsePlanningWorker()
+        let inspector = DarwinOSAtlasProcessInspector(), started = Date()
+        let monitor = Task.detached { () -> (Int, UInt64, Int) in
+            var maximumWorkers = 0, peakBytes: UInt64 = 0, samples = 0
+            while !Task.isCancelled {
+                let processes = (try? inspector.matchingProcesses(for: inputs.llamaServerURL)) ?? []
+                maximumWorkers = max(maximumWorkers, processes.count); samples += 1
+                for process in processes {
+                    peakBytes = max(peakBytes, OSAtlasProcessMemoryGuard.residentBytes(processID: process.processIdentifier) ?? 0)
+                }
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { break }
+            }
+            return (maximumWorkers, peakBytes, samples)
+        }
+        var report: [String: Any] = ["scope": "real-public-page-frozen-observation-tool-selection-diagnostic",
+            "url": url.absoluteString, "goal": goal, "generatedActionsDispatched": 0,
+            "setup": "Scripted unsupported navigation and read_page proposals capture production failure feedback and page text before inference. Both model proposals use the same screenshot. This is not an autonomous task."]
+        var failure: Error?
+        do {
+            let taskID = "public-reader-selection"
+            try browser.claim(taskID: taskID)
+            let document = try await browser.navigate(taskID: taskID, operationID: "open", to: url)
+            func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+            let readyDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while ContinuousClock.now < readyDeadline {
+                if try await web.evaluateJavaScript("document.readyState === 'complete'") as? Bool == true { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: output.appendingPathComponent("browser")))
+            var calls = 0, capturedInput: ComputerUseFaraModel.Input?, capturedReading: ComputerUseFaraModel.PageReading?
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: output.appendingPathComponent("fara"), propose: { input in
+                guard calls < 3 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                if calls == 1 { capturedInput = input }
+                let arguments: [String: String] = calls == 0 ? ["action": "visit_url", "url": "view-source:" + url.absoluteString]
+                    : calls == 1 ? ["action": "read_page_answer_question", "question": goal]
+                    : ["action": "terminate", "answer": "Captured diagnostic input."]
+                calls += 1
+                let data = try JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes])
+                let response = "<tool_call>{\"name\":\"computer_use\",\"arguments\":" + String(decoding: data, as: UTF8.self) + "}</tool_call>"
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }, readPage: { reading in capturedReading = reading; return "Diagnostic page text captured." })
+            let setup = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(setup, .completed("Captured diagnostic input.")); XCTAssertEqual(calls, 3)
+            var recoveredInput = try XCTUnwrap(capturedInput), source = try XCTUnwrap(capturedReading)
+            if let replayPath = environment["FARA_PUBLIC_READER_SELECTION_REPLAY"] {
+                // Generated actions never dispatch in this diagnostic. Replay
+                // the exact saved public image/text, not a freshly changed page.
+                let replay = URL(fileURLWithPath: replayPath)
+                let prior = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: replay.appendingPathComponent("result.json"))) as? [String: Any])
+                let responses = try XCTUnwrap(prior["recoveryHistory"] as? [String])
+                XCTAssertEqual(prior["goal"] as? String, goal); XCTAssertEqual(prior["url"] as? String, url.absoluteString)
+                XCTAssertEqual(prior["recoveryFeedback"] as? String, recoveredInput.actionError)
+                XCTAssertEqual(responses, recoveredInput.history.map(\.response))
+                let png = try Data(contentsOf: replay.appendingPathComponent("browser.png"))
+                recoveredInput = .init(goal: goal, screenshotPNG: png,
+                    history: try responses.map { .init(screenshotPNG: png, response: $0, currentURL: url,
+                        action: try ComputerUseFaraAction.decodeNativeMessage($0)) },
+                    currentURL: url, actionError: try XCTUnwrap(prior["recoveryFeedback"] as? String))
+                source = try JSONDecoder().decode(ComputerUseFaraModel.PageReading.self, from: Data(contentsOf: replay.appendingPathComponent("page-reading.json")))
+                report["replaySource"] = replayPath
+            }
+            XCTAssertEqual(recoveredInput.history.count, 1); XCTAssertNotNil(recoveredInput.actionError)
+            XCTAssertEqual(source.sourceURL, url)
+            try recoveredInput.screenshotPNG.write(to: output.appendingPathComponent("browser.png"), options: .withoutOverwriting)
+            try JSONEncoder().encode(source).write(to: output.appendingPathComponent("page-reading.json"), options: .withoutOverwriting)
+            recoveredInput.observedPage = .init(sourceURL: source.sourceURL, text: source.text,
+                truncated: source.truncated, omittedEmbeddedContent: source.omittedEmbeddedContent)
+            report["nativePageTextSupplied"] = true
+            report["recoveryHistory"] = recoveredInput.history.map(\.response)
+            report["recoveryFeedback"] = recoveredInput.actionError
+            let endpoint = try await planning.perform(timeout: 30) { try await runtime.activateFara(inputs) }
+            var baseline = recoveredInput; baseline.history = []; baseline.actionError = nil
+            let baselineInput = baseline, baselineStarted = Date()
+            let baselineProposal = try await planning.perform(timeout: 30) { try await runtime.proposeFaraBrowser(endpoint: endpoint, input: baselineInput) }
+            report["baseline"] = ["response": baselineProposal.response, "action": String(describing: baselineProposal.action),
+                "seconds": Date().timeIntervalSince(baselineStarted)]
+            let recoveryStarted = Date(), recoveryInput = recoveredInput
+            let recoveryProposal = try await planning.perform(timeout: 30) { try await runtime.proposeFaraBrowser(endpoint: endpoint, input: recoveryInput) }
+            report["recovery"] = ["response": recoveryProposal.response, "action": String(describing: recoveryProposal.action),
+                "seconds": Date().timeIntervalSince(recoveryStarted)]
+            if case .reportCompletion(let answer) = baselineProposal.action {
+                report["baselineMatchedExpectedFragments"] = (expected + [url.absoluteString]).map { answer.contains($0) }
+                XCTAssertTrue((expected + [url.absoluteString]).allSatisfy { answer.contains($0) })
+            }
+            if case .reportCompletion(let answer) = recoveryProposal.action {
+                report["recoveryMatchedExpectedFragments"] = (expected + [url.absoluteString]).map { answer.contains($0) }
+                XCTAssertTrue((expected + [url.absoluteString]).allSatisfy { answer.contains($0) })
+            } else if case .readPageQuestion(let question) = recoveryProposal.action {
+                let reading = ComputerUseFaraModel.PageReading(sourceURL: source.sourceURL, question: question, text: source.text,
+                    truncated: source.truncated, omittedEmbeddedContent: source.omittedEmbeddedContent)
+                let answer = try await planning.perform(timeout: 30) { try await runtime.readFaraPage(endpoint: endpoint, reading: reading) }
+                report["extraction"] = ["question": question, "answer": answer,
+                    "matchedExpectedFragments": expected.map { answer.contains($0) }]
+                XCTAssertTrue(expected.allSatisfy { answer.contains($0) }, "The recovered reader must extract the independent expected facts")
+            } else { XCTFail("The bounded recovery neither answered from the observed page nor selected its reader") }
+            XCTAssertTrue(browser.validate(document))
+            let records = try FileManager.default.contentsOfDirectory(at: output.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            XCTAssertFalse(records.contains { $0.stepIDs == ["native-dispatch-returned"] })
+        } catch { failure = error }
+        await runtime.shutdown(); monitor.cancel()
+        let measured = await monitor.value
+        report["maximumObservedWorkerCount"] = measured.0; report["peakSampledProcessMemoryBytes"] = measured.1
+        report["workerSamples"] = measured.2; report["workersAfterShutdown"] = try inspector.matchingProcesses(for: inputs.llamaServerURL).count
+        report["elapsedSeconds"] = Date().timeIntervalSince(started); report["failure"] = String(reflecting: failure)
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertLessThanOrEqual(measured.0, 1); XCTAssertEqual(try inspector.matchingProcesses(for: inputs.llamaServerURL).count, 0)
+        if let failure { throw failure }
+    }
+
     func testOptInManagedHostSessionFindsLatestReleaseOnRealGitHub() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_PUBLIC_BROWSER"] == "1" else {
@@ -156,9 +285,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
         let inspector = DarwinOSAtlasProcessInspector()
         XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        var diagnosticBrowser: ComputerUseOwnedBrowser?
         let browserFactory: (@escaping () -> Bool) -> ComputerUseBrowserNavigationTask = { mayAct in
-                ComputerUseBrowserNavigationTask(browser: ComputerUseOwnedBrowser(mayAct: mayAct),
-                    journalDirectory: output.appendingPathComponent("browser"))
+                let browser = ComputerUseOwnedBrowser(mayAct: mayAct)
+                diagnosticBrowser = browser
+                return ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: output.appendingPathComponent("browser"))
             }
         let diagnostic = environment["MANAGED_PUBLIC_BROWSER_TRACE"] == "1"
         let trace: (@Sendable (Data, Data) -> Void)?
@@ -232,11 +363,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
         } catch { failure = error }
         let activityAtEnd = String(describing: manager.activity)
+        let browserCaptureStage = diagnosticBrowser?.lastAgentCaptureStage
         await session.shutdown()
         monitor.cancel(); try await monitor.value
         let report: [String: Any] = ["scope": "real-GitHub-read-only-task-through-managed-HostSession", "diagnosticTraceEnabled": diagnostic,
             "goal": goal, "taskID": taskID, "failure": String(reflecting: failure), "activityAtEnd": activityAtEnd,
-            "elapsedSeconds": Date().timeIntervalSince(started), "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(),
+            "browserCaptureStage": browserCaptureStage as Any? ?? NSNull(), "elapsedSeconds": Date().timeIntervalSince(started), "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(),
             "terminalText": terminal?.text as Any? ?? NSNull(), "observedBrowserURLs": observedURLs,
             "maximumObservedWorkerCount": maximumWorkers, "workerSamples": samples,
             "workersAfterShutdown": try inspector.matchingProcesses(for: binary).count,
