@@ -71,8 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard HostRuntimeContext.shouldInstallVisibleChrome else {
             // XCTest still needs the application process as its bundle host,
             // but it must not create a status item, popover, setup window, or
-            // activate on the user's desktop.
-            NSApp.setActivationPolicy(.prohibited)
+            // activate on the user's desktop. Explicit native UI tests may
+            // create their own isolated windows under one stable policy.
+            NSApp.setActivationPolicy(HostRuntimeContext.allowsNativeTestWindows ? .accessory : .prohibited)
             return
         }
         didEnterProductionLaunchPath = true

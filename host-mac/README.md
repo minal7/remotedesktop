@@ -38,6 +38,21 @@ pair with TestFlight/App Store clients and the specially configured iOS
 Simulator build. A Debug host and a Production client cannot discover each
 other even when they use the same Apple Account.
 
+## Native UI tests
+
+The XCTest host suppresses production services, the menu bar item, setup
+windows and automatic activation. By default it also prohibits test windows
+from becoming active. For an explicitly selected batch that opens native
+windows, prefix the `xcodebuild test` command with
+`TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1`. Keep each test's own opt-in flags
+as well, and run with `-jobs 1 -parallel-testing-enabled NO`.
+
+This flag sets one accessory activation policy for the UI-test process.
+Repeated prohibited/accessory transitions between methods can complete late
+and prevent the next test's browser from becoming active. The flag only
+applies inside XCTest and does not enable host services or automatic windows.
+Tests still own and close any windows they create. Omit it for ordinary tests.
+
 ## GitHub release package
 
 The GitHub `Release` workflow builds the macOS target as a signed,

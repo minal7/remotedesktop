@@ -185,13 +185,30 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
     func testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: all Fara question executor layers") }
-        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        let previousPolicy = NSApp.activationPolicy()
+        let changedPolicy = NSApp.setActivationPolicy(.accessory)
+        let policyAfterSetup = NSApp.activationPolicy()
         defer { NSApp.setActivationPolicy(previousPolicy) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraMCPQuestion-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
         var calls = 0, admissions = 0, loads = 0
+        var progress: [String] = []
+        func observed<T>(_ stage: String, operation: () async throws -> T) async throws -> T {
+            do { return try await operation() }
+            catch {
+                let frontmost = NSWorkspace.shared.frontmostApplication
+                let windows = NSApp.windows.map { "\($0.windowNumber):\($0.title), visible=\($0.isVisible), key=\($0.isKeyWindow), miniaturized=\($0.isMiniaturized)" }
+                let detail = "Stage: \(stage)\nError: \(String(reflecting: error))\nModel calls: \(calls); admissions: \(admissions); loads: \(loads)\nProgress: \(progress)\nPolicy setup: previous=\(previousPolicy.rawValue), setterResult=\(changedPolicy), after=\(policyAfterSetup.rawValue)\nNative presentation: active=\(NSApp.isActive), policy=\(NSApp.activationPolicy().rawValue), pid=\(ProcessInfo.processInfo.processIdentifier), frontmost=\(frontmost?.processIdentifier ?? -1), bundle=\(frontmost?.bundleIdentifier ?? "nil"), keyWindow=\(NSApp.keyWindow?.windowNumber ?? -1), required=\(browser.hasRequiredPresentation), windows=\(windows)"
+                let attachment = XCTAttachment(string: detail)
+                attachment.name = "Fara clarification continuation failure"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                XCTFail(detail)
+                throw error
+            }
+        }
         let original = "Find concert tickets."
         let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
             XCTAssertEqual(input.goal, original); XCTAssertEqual(input.history.count, calls)
@@ -207,7 +224,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let capability = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in admissions += 1; return nil }, desktopFactory: { _ in deferred })
         let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: capability, planner: planner, clientPool: pool)
-        let first = try await mcp.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { _ in })
+        let first = try await observed("initial execution") {
+            try await mcp.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { progress.append($0) })
+        }
         XCTAssertEqual(first, .clarificationRequired("Which city?"))
         let pending = try XCTUnwrap(mcp.clarification(taskID: "root"))
         let goal = try pending.goal.answering(pending.question, with: "Kyoto")
@@ -217,7 +236,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             XCTFail("An unrelated answer must not replace the retained route")
         } catch {}
         XCTAssertEqual(try mcp.clarification(taskID: "root")?.goal, pending.goal)
-        let second = try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
+        let second = try await observed("answer continuation") {
+            try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { progress.append($0) })
+        }
         XCTAssertEqual(second, .clarificationRequired("Which date?"))
         XCTAssertEqual(try mcp.clarification(taskID: "answer")?.goal, goal)
         do {
@@ -229,7 +250,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         } catch {
             XCTFail("The outer MCP route must reject the changed task: \(error)")
         }
-        let resumed = try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { _ in })
+        let resumed = try await observed("completed answer replay") {
+            try await mcp.continueClarification(taskID: "answer", originatingTaskID: "root", goal: goal, progress: { progress.append($0) })
+        }
         XCTAssertEqual(resumed, second)
         XCTAssertEqual(try mcp.clarification(taskID: "answer")?.goal, goal)
         XCTAssertEqual(planner.proposedToolNames.count, 1); XCTAssertEqual(admissions, 1); XCTAssertEqual(loads, 1); XCTAssertEqual(calls, 2)

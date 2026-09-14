@@ -22,6 +22,18 @@ enum HostRuntimeContext {
         !isRunningUnitTests
     }
 
+    /// Opt-in native UI tests share one process-wide activation policy.
+    /// Repeated per-test prohibited/accessory transitions can complete after
+    /// the next test starts. This grants no production chrome or services.
+    static var allowsNativeTestWindows: Bool {
+        permitsNativeTestWindows(environment: ProcessInfo.processInfo.environment,
+            isRunningUnitTests: isRunningUnitTests)
+    }
+
+    static func permitsNativeTestWindows(environment: [String: String], isRunningUnitTests: Bool) -> Bool {
+        isRunningUnitTests && environment["RUN_COMPUTER_USE_UI_TESTS"] == "1"
+    }
+
     static func detectsUnitTests(
         environment: [String: String],
         arguments: [String],

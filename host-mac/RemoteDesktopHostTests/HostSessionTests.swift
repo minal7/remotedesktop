@@ -1262,13 +1262,23 @@ final class HostSessionTests: XCTestCase {
             name: NSApplication.didFinishLaunchingNotification,
             object: NSApp))
 
-        XCTAssertEqual(NSApp.activationPolicy(), .prohibited)
+        XCTAssertEqual(NSApp.activationPolicy(), HostRuntimeContext.allowsNativeTestWindows ? .accessory : .prohibited)
         XCTAssertFalse(
             delegate.didEnterProductionLaunchPath,
             "XCTest must return before termination handlers or host services are configured")
         XCTAssertFalse(
             delegate.didInstallStatusItem,
             "XCTest must not allocate the Control Center-hosted status item")
+    }
+
+    func test_hostRuntimeAllowsNativeWindowsOnlyForExplicitUITestProcess() {
+        for enabled in [false, true] {
+            for value in [nil, "", "0", "true", "1"] as [String?] {
+                let environment = value.map { ["RUN_COMPUTER_USE_UI_TESTS": $0] } ?? [:]
+                XCTAssertEqual(HostRuntimeContext.permitsNativeTestWindows(environment: environment,
+                    isRunningUnitTests: enabled), enabled && value == "1")
+            }
+        }
     }
 
     func test_startAtLogin_defaultsToTrue() {
