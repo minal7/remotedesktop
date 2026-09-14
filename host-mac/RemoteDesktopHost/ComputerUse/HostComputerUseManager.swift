@@ -4425,6 +4425,7 @@ final class HostComputerUseManager: ObservableObject {
         nativeTextPreparer: ComputerUseNativeTextLoader? = nil,
         macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
+        mcpPlanner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
         executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
         textClarifications: ComputerUseTextClarificationStore? = nil,
@@ -4460,7 +4461,8 @@ final class HostComputerUseManager: ObservableObject {
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
-        self.installer = installer ?? ComputerUseInstaller()
+        let modelInstaller = installer ?? ComputerUseInstaller()
+        self.installer = modelInstaller
         self.nativeTextInstaller = nativeTextInstaller
         self.nativeTextLoader = nativeTextLoader ?? { receipt, tools, progress in
             try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, progress: progress)
@@ -4469,13 +4471,18 @@ final class HostComputerUseManager: ObservableObject {
             try await ComputerUseNativeTextExecutorLoader.prepare(receipt: receipt, tools: tools, progress: progress)
         }
         self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
-        self.visualExecutorLoader = visualExecutorLoader
-            ?? OSAtlasVisualExecutorLoader()
+        let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
+        self.visualExecutorLoader = modelLoader
         self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
             try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
                 visualFallback: visualFallback,
-                clientPool: MCPClientPool())
+                planner: mcpPlanner,
+                clientPool: MCPClientPool(), browserExecutorFactory: {
+                    let receipt = await modelInstaller.currentInstallation()
+                    try Task.checkCancellation()
+                    return try modelLoader.prepareBrowser(receipt: receipt)
+                })
         }
         self.taskLedger = taskLedger
         self.textClarifications = textClarifications ?? ComputerUseTextClarificationStore()

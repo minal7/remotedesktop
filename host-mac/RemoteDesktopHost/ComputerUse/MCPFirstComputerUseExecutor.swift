@@ -296,6 +296,12 @@ final class MCPFirstComputerUseExecutor:
     private let clientPool: any MCPClientPooling
     private let binaryURL: URL
     private let visualFallback: any ComputerUseExecuting
+    typealias BrowserExecutorFactory = @MainActor () async throws -> any ComputerUseExecuting
+    private enum RoutingSignal: Error { case browserTools }
+    private let browserExecutorFactory: BrowserExecutorFactory
+    private var retainedBrowserExecutor: (any ComputerUseExecuting)?
+    private var retainedUsesBrowser = false
+    private var retainedExecutor: any ComputerUseExecuting { retainedBrowserExecutor ?? visualFallback }
     private var helperReady = false
     private var activeProcessGeneration: UInt64?
     private var activeCancellationJoin: MCPGenerationCancellationJoin?
@@ -333,7 +339,8 @@ final class MCPFirstComputerUseExecutor:
         planningWorker: ComputerUsePlanningWorker,
         planningTimeout: TimeInterval,
         documentPlanner: ComputerUseMCPDocumentPlanner,
-        browserStepPlanner: ComputerUseMCPBrowserStepPlanner
+        browserStepPlanner: ComputerUseMCPBrowserStepPlanner,
+        browserExecutorFactory: @escaping BrowserExecutorFactory
     ) {
         self.planner = planner
         self.clientPool = clientPool
@@ -343,6 +350,7 @@ final class MCPFirstComputerUseExecutor:
         self.planningTimeout = planningTimeout
         self.documentPlanner = documentPlanner
         self.browserStepPlanner = browserStepPlanner
+        self.browserExecutorFactory = browserExecutorFactory
     }
 
     static func load(
@@ -353,7 +361,10 @@ final class MCPFirstComputerUseExecutor:
         planningWorker: ComputerUsePlanningWorker = .shared,
         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
         documentPlanner: ComputerUseMCPDocumentPlanner = .init(),
-        browserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init()
+        browserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init(),
+        browserExecutorFactory: @escaping BrowserExecutorFactory = {
+            try OSAtlasVisualExecutorLoader().prepareBrowser(receipt: nil)
+        }
     ) async throws -> MCPFirstComputerUseExecutor {
         let executor = MCPFirstComputerUseExecutor(
             planner: planner,
@@ -363,7 +374,8 @@ final class MCPFirstComputerUseExecutor:
             planningWorker: planningWorker,
             planningTimeout: planningTimeout,
             documentPlanner: documentPlanner,
-            browserStepPlanner: browserStepPlanner)
+            browserStepPlanner: browserStepPlanner,
+            browserExecutorFactory: browserExecutorFactory)
         try Task.checkCancellation()
         let identity = try await clientPool.start(binaryURL: binaryURL)
         do {
@@ -482,14 +494,22 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         let promptDigest = ComputerUseTextTaskContract.digest(trustedUserPrompt)
-        func executeVisualFallback() async throws
+        func executeVisualFallback(usingBrowser: Bool = false) async throws
             -> ComputerUseExecutionResult {
             // Commit before fallback can produce an effect or suspend. Resume
             // cannot replay the original goal through newly available MCP.
             retainedFallback = (taskID, promptDigest)
+            if usingBrowser { retainedUsesBrowser = true }
+            if retainedUsesBrowser, retainedBrowserExecutor == nil {
+                try checkExecutionCancellation()
+                let candidate = try await browserExecutorFactory()
+                try checkExecutionCancellation()
+                retainedBrowserExecutor = candidate
+            }
+            let fallback = retainedExecutor
             return try await withBrowserToolProposals(taskID: taskID, tools: tools) {
                 if let conversation {
-                    return try await visualFallback.execute(
+                    return try await fallback.execute(
                         taskID: taskID,
                         modelPrompt: prompt,
                         currentUserPrompt: trustedUserPrompt,
@@ -497,7 +517,7 @@ final class MCPFirstComputerUseExecutor:
                         tools: tools,
                         progress: progress)
                 }
-                return try await visualFallback.execute(
+                return try await fallback.execute(
                     taskID: taskID,
                     prompt: prompt,
                     trustedUserPrompt: trustedUserPrompt,
@@ -511,6 +531,8 @@ final class MCPFirstComputerUseExecutor:
             return try await executeVisualFallback()
         }
         retainedFallback = nil
+        retainedBrowserExecutor = nil
+        retainedUsesBrowser = false
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -611,6 +633,10 @@ final class MCPFirstComputerUseExecutor:
 
         do {
             return try await runStructured(state: state, progress: progress)
+        } catch RoutingSignal.browserTools {
+            try checkExecutionCancellation()
+            progress("Continuing with browser tools…")
+            return try await executeVisualFallback(usingBrowser: true)
         } catch is CancellationError {
             throw CancellationError()
         } catch AppleFoundationMCPPlannerError.cancelled {
@@ -703,11 +729,11 @@ final class MCPFirstComputerUseExecutor:
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
-        try (visualFallback as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID)
+        try (retainedExecutor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID)
     }
 
     func invalidateClarification(taskID: String?) {
-        (visualFallback as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
+        (retainedExecutor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
     }
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
@@ -715,7 +741,7 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         try await waitForStartedCancellation()
-        guard let continuing = visualFallback as? any ComputerUseTextClarificationContinuing else { throw ExecutorError.visualApprovalContinuationUnavailable }
+        guard let continuing = retainedExecutor as? any ComputerUseTextClarificationContinuing else { throw ExecutorError.visualApprovalContinuationUnavailable }
         let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
         guard taskID != originatingTaskID else { throw ExecutorError.visualApprovalContinuationUnavailable }
         if retainedFallback?.taskID == taskID {
@@ -745,7 +771,7 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         try await waitForStartedCancellation()
-        guard let visual = visualFallback as? any ComputerUseVisualApprovalContinuing else {
+        guard let visual = retainedExecutor as? any ComputerUseVisualApprovalContinuing else {
             throw ExecutorError.visualApprovalContinuationUnavailable
         }
         try await visual.performApprovedVisualAction(continuation, action: action,
@@ -765,7 +791,7 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         try await waitForStartedCancellation()
-        guard let visualContinuation = visualFallback
+        guard let visualContinuation = retainedExecutor
             as? any ComputerUseVisualApprovalContinuing else {
             throw ExecutorError.visualApprovalContinuationUnavailable
         }
@@ -778,7 +804,7 @@ final class MCPFirstComputerUseExecutor:
     func cancelVisualApprovalContinuation(
         _ continuation: ComputerUseVisualApprovalContinuation
     ) {
-        (visualFallback as? any ComputerUseVisualApprovalContinuing)?
+        (retainedExecutor as? any ComputerUseVisualApprovalContinuing)?
             .cancelVisualApprovalContinuation(continuation)
     }
 
@@ -1363,13 +1389,15 @@ final class MCPFirstComputerUseExecutor:
                 let request = MCPProposalPlanningRequest(
                     taskID: state.taskID,
                     prompt: Self.planningPrompt(state),
-                    tools: structuredTools)
+                    tools: structuredTools, allowsBrowserWorkflow: true)
                 let proposal = try await planningWorker.perform(timeout: planningTimeout) { [planner] in
                     try await planner.propose(request)
                 }
                 try checkGenerationCancellation(generation)
 
                 switch proposal {
+                case .browserTools:
+                    throw RoutingSignal.browserTools
                 case .message(let message):
                     let bounded = message.trimmingCharacters(
                         in: .whitespacesAndNewlines)
@@ -2078,7 +2106,7 @@ final class MCPFirstComputerUseExecutor:
         CLARIFICATION_REQUIRED: <one short question when required information is missing>
         TASK_COMPLETE: <short result, only after a local read-only result proves it>
         VISUAL_FALLBACK_REQUIRED
-        Browser navigation is already available through the host's retained browser workflow. VISUAL_FALLBACK_REQUIRED transfers the complete task to that workflow, which uses Mac tools before considering a computer-use model. Never ask the user to supply a browser or manually open a URL.
+        The provided host browser workflow tool selects navigation, searches, native page reading and following links for the complete original goal. It works without a visual-model package. Use VISUAL_FALLBACK_REQUIRED for a non-browser step that the provided tools cannot handle. Never ask the user to supply a browser or manually open a URL.
         Never use TASK_COMPLETE to claim an email/message was sent, an event/reminder was created, a Shortcut ran, an order/purchase/payment happened, a form was submitted, or another consequential mutation occurred. Only the host can confirm an approved action. Its confirmation does not prove that every part of the user's request is complete.
         """
         if let requirements = state.contactReadRequirements,

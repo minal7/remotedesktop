@@ -4271,6 +4271,56 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
     }
 
     @available(macOS 26.0, *)
+    func testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst() async throws {
+        let tool = try makeAllowedTool(name: "focused_app", schema: emptyObjectSchema, risk: .readOnly)
+        let request = MCPProposalPlanningRequest(taskID: "mixed", prompt: "Inspect the current task.", tools: [tool], allowsBrowserWorkflow: true)
+        for (firstBrowser, secondBrowser) in [(true, false), (false, true), (true, true)] {
+            let capture = FoundationMCPProposalCapture(allowedModelToolNames: ["focused_app": 0])
+            if firstBrowser { try await capture.recordBrowserRoute() }
+            else { try await capture.record(modelToolName: "focused_app", arguments: [:]) }
+            do {
+                if secondBrowser { try await capture.recordBrowserRoute() }
+                else { try await capture.record(modelToolName: "focused_app", arguments: [:]) }
+                XCTFail("A second route or tool cannot replace the first proposal")
+            } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .multipleProposals) }
+            let recovered = try await AppleFoundationMCPPlanner().recoverFirstCapturedProposal(after: .multipleProposals, capture: capture, request: request)
+            if firstBrowser { XCTAssertEqual(recovered, .browserTools) }
+            else {
+                guard case .proposedCall(let call)? = recovered else { return XCTFail("Keep the original MCP call") }
+                XCTAssertEqual(call.toolName, "focused_app")
+            }
+            let ignored = try await AppleFoundationMCPPlanner().recoverFirstCapturedProposal(after: .generationFailed, capture: capture, request: request)
+            XCTAssertNil(ignored)
+        }
+        let capture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
+        try await capture.recordBrowserRoute()
+        let withoutBrowser = MCPProposalPlanningRequest(taskID: "other", prompt: "A scoped tool request", tools: [tool])
+        do {
+            _ = try await AppleFoundationMCPPlanner().recoverFirstCapturedProposal(after: .multipleProposals, capture: capture, request: withoutBrowser)
+            XCTFail("A caller that did not provide browser capability cannot acquire it during recovery")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unknownProposal) }
+    }
+
+    @available(macOS 26.0, *)
+    func testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision() async throws {
+        let name = FoundationBrowserRouteTool.availableName(excluding: ["host_browser_workflow", "host_browser_workflow_2"])
+        XCTAssertEqual(name, "host_browser_workflow_3")
+        let capture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
+        let tool = FoundationBrowserRouteTool(name: name, parameterSchema: try FoundationMCPJSONSchemaBridge(
+            rootSchema: FoundationBrowserRouteTool.inputSchema, rootName: name).makeGenerationSchema(), capture: capture)
+        for key in ["goal", "url", "action", "model"] {
+            let arguments = GeneratedContent(kind: .structure(properties: [key: GeneratedContent(kind: .string("untrusted"))], orderedKeys: [key]))
+            do { _ = try await tool.call(arguments: arguments); XCTFail("Routing cannot supply \(key)") }
+            catch {}
+            let proposed = await capture.browserRouteWasProposed()
+            XCTAssertFalse(proposed)
+        }
+        _ = try await tool.call(arguments: GeneratedContent(kind: .structure(properties: [:], orderedKeys: [])))
+        let proposed = await capture.browserRouteWasProposed(), mcp = await capture.proposal()
+        XCTAssertTrue(proposed); XCTAssertNil(mcp)
+    }
+
+    @available(macOS 26.0, *)
     func testVisualRouteCaptureNeverRecoversFirstRouteAfterMultipleCalls()
         async throws {
         let capture = FoundationVisualActionRouteCapture()

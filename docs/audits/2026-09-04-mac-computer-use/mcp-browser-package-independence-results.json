@@ -1,0 +1,702 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-14",
+  "scope": "Package-independent native/MCP browser admission with deferred compatible visual model",
+  "sourceBaseCommit": "d546cfd5d2c01ae630655af8311819792d628417",
+  "sourceSHA256": {
+    "host-mac/RemoteDesktopHost/ComputerUse/AppleFoundationMCPPlanner.swift": "fb28131563f7217e15a0c97f4897fb407bea0007df8cc31416ed8d5cb58f43f2",
+    "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "e8852f350d3001f357415c476e313af882ce552ee0e1b2a98683426d2927b7aa",
+    "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "ec2342d825a94f57b1f94c87012d15f16ec8fee5fce7770e127276aaa0fcc4c0",
+    "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "495cda520da54be1811931e5c070b675ca0419332f6540e08c8a621b161ed35d",
+    "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "24b13e5d42c74b0d941ccc145663818a52468fd49cad25a124a2524928da93ba",
+    "host-mac/RemoteDesktopHostTests/AppleFoundationMCPPlannerTests.swift": "18bea35456f2332f1d46fbd2900a2915142901e21e650f2ff4ce9a39f9bfb458",
+    "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "76f7cad9443bdff5332c5cec685b33ec5131c40b7712473c080e2bd65651fed8",
+    "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "627e6aacb23d6a7d0b12a78d948c41db16cbc6a5173681370f1c032c471167ca",
+    "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "1be51e069cb3c8299b6a064e13a324ada4188402893aec475e2b8028cf691a39"
+  },
+  "sourceBinding": "Final source hashes bind mcp-browser-without-package-final-01. Earlier intermediate revisions were not individually hashed. Exact commands, xcresult summaries, test identifiers, full task reports and failures remain retained.",
+  "policy": [
+    "macOS MCP/native tools first; no computer-use model package required for sufficient browser steps.",
+    "One build/test at a time, Xcode jobs 1, no source edits during active builds/tests.",
+    "No llama inference, model downloads, purchases, messages, login, push, release or installed-host replacement."
+  ],
+  "stages": {
+    "browserAdmission": {
+      "implemented": true,
+      "compiled": true,
+      "tested": "Typed no-argument host route, explicit availability, unique tool name and single-capture/recovery boundaries.",
+      "accepted": "Scoped host routing; arbitrary mixed-domain tasks remain unqualified."
+    },
+    "browserWithoutModelPackage": {
+      "implemented": true,
+      "compiled": true,
+      "tested": "Default manager composition, actual Apple planner and real installed MCP helper, production browser loader with missing native/visual receipts and a rejecting model launcher. Controlled full task completes in 10.720366 seconds; zero downloads/launch attempts/workers, one visit per page.",
+      "accepted": "Controlled informational task through HostComputerUseManager, not full HostSession/provider/phone acceptance."
+    },
+    "lateVisualDependency": {
+      "implemented": true,
+      "compiled": true,
+      "tested": "Absent, broken and available fixture packages all permit the first MCP proposal. After a scoped tool decline, absent/broken states reject before launch; valid fixture attempts one deliberately rejected launch. Same window/session/clarification retained.",
+      "accepted": "Package resolution and activation boundary; no real model inference in this checkpoint."
+    },
+    "generalProductionComputerUse": {
+      "implemented": "Partial",
+      "compiled": true,
+      "tested": "16 final focused methods pass, zero skips; broader acceptance remains incomplete.",
+      "accepted": false
+    }
+  },
+  "findings": [
+    "Original host task fails before any navigation with visual-setup-required, despite available MCP helper and adequate native page records.",
+    "First implementation separates a browser route but still relies on a magic response token; four routing/continuation methods pass while the real task fails.",
+    "Transparent actual-planner diagnostics show a 1391-byte prompt with eight tools. The model says a browser operation is required but ignores the response token. This observed failure is format compliance, not a demonstrated context limit.",
+    "Final Foundation Models callback records a typed browser route, not an invented MCP server call. It has no URL, replacement goal, executor, model or application effects. Browser availability is explicit per planning request.",
+    "Browser and MCP proposals share the existing single-write capture. Only exact multiple-proposal recovery may preserve its first proposal; other generation errors are not masked.",
+    "Browser preparation is retained before execution. Changed goals, cancellation or factory failures cannot execute another route. Clarifications/approval continuation use the retained executor.",
+    "The production loader resolves Fara only when its visual proposal/page-reading callback is reached; absent or incompatible receipts do not prevent earlier MCP work. Model selection and resource caps are unchanged.",
+    "The final bundle records two main-thread responsiveness runtime warnings. Compiler diagnostics and wrapper lines are retained in full logs.",
+    "No production flicker, whole-Mac 12 GB/heat, real-provider login or physical-phone claim follows from the controlled tests."
+  ],
+  "attempts": [
+    {
+      "name": "mcp-browser-without-package-red-01",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage"
+      ],
+      "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-red-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-red-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-red-01.log' 2>&1",
+      "exitCode": 65,
+      "key": "mcpBrowserNoPackageRed01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789412662.076,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789412620.287,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+            "testName": "testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"0\") is not equal to (\"1\")"
+          }
+        ],
+        "totalTestCount": 1
+      },
+      "executedTests": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+          "result": "Failed",
+          "durationInSeconds": 8.242303967475891
+        }
+      ],
+      "result": {
+        "finalURL": null,
+        "goal": "Open http://127.0.0.1:50119/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "nativeInstalls": 0,
+        "requestedPaths": [],
+        "scope": "default HostComputerUseManager composition; installed real helper; missing model receipts; isolated transport, ledger and owned browser",
+        "seconds": 6.974920988082886,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-FE534875-903B-4A7F-A6B6-6A641313A6A3\", text: \"This request needs visual control, which is not set up. Return to Devices and choose Check AI setup.\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "visualLoads": 0,
+        "workerSamples": 55
+      },
+      "artifactSHA256": {
+        ".build/repair-verification/mcp-browser-without-package-red-01.log": "f3359c2a4cc8375a35f71c98f6b668de9409d400719225569cd604ac6ce5d0e5",
+        ".build/repair-verification/mcp-browser-without-package-red-01/result.json": "104302a112a497b43d00c60c62bd46804583ace877631d39ce8a811fb4c6d6d2",
+        ".build/repair-verification/mcp-browser-without-package-red-01-audit/summary.json": "02e3d46bfe6ef724ad922253b8bb7d2b277848867e463e7a0ca01af6640e667c",
+        ".build/repair-verification/mcp-browser-without-package-red-01-audit/tests.json": "eb223b6aead850f60b3ff70e9669b6d747c23c05b0ac8c90898358e1d87769b5"
+      }
+    },
+    {
+      "name": "mcp-browser-without-package-green-01",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+        "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback",
+        "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough",
+        "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage",
+        "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers"
+      ],
+      "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-green-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                  -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-green-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-green-01.log' 2>&1",
+      "exitCode": 65,
+      "key": "mcpBrowserNoPackageGreen01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 4,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789413054.569,
+        "passedTests": 4,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          },
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789412950.583,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+            "testName": "testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"0\") is not equal to (\"1\")"
+          }
+        ],
+        "totalTestCount": 5
+      },
+      "executedTests": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+          "result": "Failed",
+          "durationInSeconds": 5.642710089683533
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough()",
+          "result": "Passed",
+          "durationInSeconds": 0.00895702838897705
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback()",
+          "result": "Passed",
+          "durationInSeconds": 0.005293011665344238
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage()",
+          "result": "Passed",
+          "durationInSeconds": 0.2841510772705078
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+          "result": "Passed",
+          "durationInSeconds": 0.14959192276000977
+        }
+      ],
+      "result": {
+        "finalURL": null,
+        "goal": "Open http://127.0.0.1:50120/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "nativeInstalls": 0,
+        "requestedPaths": [],
+        "scope": "default HostComputerUseManager composition; installed real helper; missing model receipts; isolated transport, ledger and owned browser",
+        "seconds": 4.322227954864502,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-F9778ABA-6CD7-43F9-BDEC-27FB97AE7154\", text: \"This request needs visual control, which is not set up. Return to Devices and choose Check AI setup.\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "visualLoads": 0,
+        "workerSamples": 33
+      },
+      "artifactSHA256": {
+        ".build/repair-verification/mcp-browser-without-package-green-01.log": "019eb252b0c001d02d7a39bd5bc69730fc544c904d2e145fb70905e8730b2600",
+        ".build/repair-verification/mcp-browser-without-package-green-01/result.json": "d254829563063ea562ad3117a51ff1f449ddbdcf31ad7670972bfc7cb679f90b",
+        ".build/repair-verification/mcp-browser-without-package-green-01-audit/summary.json": "b767c750ec63525ba93cf836c2af5cdb94c9279ac7fae1529ba6cbf1c2666246",
+        ".build/repair-verification/mcp-browser-without-package-green-01-audit/tests.json": "de0c3ff893b8d26208d419cb0fb4864ddc80f4f397029cb5a76192f8d72cb822"
+      }
+    },
+    {
+      "name": "mcp-browser-without-package-diagnostic-01",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage"
+      ],
+      "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-diagnostic-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                 -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-diagnostic-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-diagnostic-01.log' 2>&1",
+      "exitCode": 65,
+      "key": "mcpBrowserNoPackageDiagnostic01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1789413301.297,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789413206.948,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete)\") is not equal to (\"Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted)\")",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+            "testName": "testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Common Failures",
+            "impact": "100% of failures",
+            "text": "2 runs of 1 test failed with XCTAssertEqual failed: (\"0\") is not equal to (\"1\")"
+          }
+        ],
+        "totalTestCount": 1
+      },
+      "executedTests": [
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+          "result": "Failed",
+          "durationInSeconds": 5.521605968475342
+        }
+      ],
+      "result": {
+        "finalURL": null,
+        "goal": "Open http://127.0.0.1:50121/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "nativeInstalls": 0,
+        "plannerTrace": [
+          "Prompt bytes: 1391; tool count: 8",
+          "RemoteDesktopHost.MCPProposalPlanningResult.message(\"The provided tools do not support web navigation or URL handling. A browser-based operation is required.\")"
+        ],
+        "requestedPaths": [],
+        "scope": "default HostComputerUseManager composition; installed real helper; missing model receipts; isolated transport, ledger and owned browser",
+        "seconds": 4.288532018661499,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-0807C86F-7E35-43AC-AA9C-C84F6D653386\", text: \"This request needs visual control, which is not set up. Return to Devices and choose Check AI setup.\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.unableToComplete), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "visualLoads": 0,
+        "workerSamples": 32
+      },
+      "artifactSHA256": {
+        ".build/repair-verification/mcp-browser-without-package-diagnostic-01.log": "c6299e098799408b8d3000eac73ad99b884c9d62b71ba48f4df15caa44bb5b84",
+        ".build/repair-verification/mcp-browser-without-package-diagnostic-01/result.json": "d441096cd648af5a9520b187535f74019685b044311da6a09862bbb1e0a8280a",
+        ".build/repair-verification/mcp-browser-without-package-diagnostic-01-audit/summary.json": "f783d7f3296ba23a75bc6105e54b0f477dc6e130d5063ccc60cd6fa14e100b66",
+        ".build/repair-verification/mcp-browser-without-package-diagnostic-01-audit/tests.json": "985bd0dfd22ef0d8492e4e64b5ccd1e605eb9c1acf60ed7fb9d92feda5ec4caf"
+      }
+    },
+    {
+      "name": "mcp-browser-without-package-typed-01",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+        "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback",
+        "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough",
+        "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage",
+        "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers",
+        "AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst",
+        "AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision"
+      ],
+      "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-typed-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                       -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers -only-testing:RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst -only-testing:RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-typed-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-typed-01.log' 2>&1",
+      "exitCode": 0,
+      "key": "mcpBrowserNoPackageTyped01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 7,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789413722.697,
+        "passedTests": 7,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          },
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789413587.804,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 7
+      },
+      "executedTests": [
+        {
+          "nodeIdentifier": "AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst()",
+          "result": "Passed",
+          "durationInSeconds": 0.002198934555053711
+        },
+        {
+          "nodeIdentifier": "AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision()",
+          "result": "Passed",
+          "durationInSeconds": 0.001459956169128418
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+          "result": "Passed",
+          "durationInSeconds": 12.103663921356201
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough()",
+          "result": "Passed",
+          "durationInSeconds": 0.02257394790649414
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback()",
+          "result": "Passed",
+          "durationInSeconds": 0.0044869184494018555
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage()",
+          "result": "Passed",
+          "durationInSeconds": 0.12185704708099365
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+          "result": "Passed",
+          "durationInSeconds": 0.1297440528869629
+        }
+      ],
+      "result": {
+        "finalURL": "http://127.0.0.1:50122/details",
+        "goal": "Open http://127.0.0.1:50122/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "nativeInstalls": 0,
+        "plannerTrace": [
+          "Prompt bytes: 1352; tool count: 8",
+          "RemoteDesktopHost.MCPProposalPlanningResult.browserTools"
+        ],
+        "requestedPaths": [
+          "/index",
+          "/details"
+        ],
+        "scope": "default HostComputerUseManager composition; installed real helper; missing model receipts; isolated transport, ledger and owned browser",
+        "seconds": 11.61355197429657,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-90BC0FA8-69B9-48F3-8C4A-2B204D762A27\", text: \"Departure time: 21:45, Platform: 6\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "visualLoads": 0,
+        "workerSamples": 92
+      },
+      "artifactSHA256": {
+        ".build/repair-verification/mcp-browser-without-package-typed-01.log": "334e68dd5fae52c0676cba4b82b0509b9cbcb375ed94486b3b834223f621e1e8",
+        ".build/repair-verification/mcp-browser-without-package-typed-01/result.json": "3947d1eb649980f1d9cc1debfc12bc3aea448655fa537d38f3d7ef1adb053b4c",
+        ".build/repair-verification/mcp-browser-without-package-typed-01-audit/summary.json": "8418e7d59c3b748bd984649dab307688eadde5599b3100baec638548fda60c63",
+        ".build/repair-verification/mcp-browser-without-package-typed-01-audit/tests.json": "c7863d882f3d4cde4533b1e774a8ce3e8945152c337e9d1e83d7a851ac02ac34"
+      }
+    },
+    {
+      "name": "mcp-browser-without-package-final-01",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage",
+        "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback",
+        "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough",
+        "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage",
+        "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers",
+        "AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst",
+        "AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision",
+        "OSAtlasRuntimeInstallationTests/testOptInBrowserPackageResolutionWaitsForMCPGap",
+        "OSAtlasRuntimeInstallationTests/testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes",
+        "ComputerUseFaraActionTests/testOptInBrowserToolProposalsKeepOneWorkflowBeforeModelFallback",
+        "ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel",
+        "MCPFirstComputerUseExecutorTests/testVisualApprovalEffectForwardsToRetainedFallbackWithoutGlobalInputOrPlanner",
+        "MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP",
+        "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad",
+        "ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad",
+        "ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress"
+      ],
+      "cmd": "env TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1 TEST_RUNNER_RUN_MCP_BROWSER_LOOP=1 TEST_RUNNER_MCP_BROWSER_LOOP_DIRECTORY='/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-final-01' TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT=1 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer xcodebuild -quiet test -project host-mac/RemoteDesktopHost.xcodeproj -scheme RemoteDesktopHost -configuration Debug -destination 'platform=macOS,arch=arm64' -derivedDataPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification -clonedSourcePackagesDirPath /Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 1 -parallel-testing-enabled NO -test-timeouts-enabled YES -maximum-test-execution-time-allowance 90                                                              -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers -only-testing:RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst -only-testing:RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision -only-testing:RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testOptInBrowserPackageResolutionWaitsForMCPGap -only-testing:RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests/testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInBrowserToolProposalsKeepOneWorkflowBeforeModelFallback -only-testing:RemoteDesktopHostTests/ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testVisualApprovalEffectForwardsToRetainedFallbackWithoutGlobalInputOrPlanner -only-testing:RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad -only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress -resultBundlePath '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-final-01.xcresult' CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe 'PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe' CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078 CODE_SIGN_ENTITLEMENTS= PROVISIONING_PROFILE_SPECIFIER= PROVISIONING_PROFILE= > '/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/mcp-browser-without-package-final-01.log' 2>&1",
+      "exitCode": 0,
+      "key": "mcpBrowserNoPackageFinal01",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 16,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1789413985.318,
+        "passedTests": 16,
+        "result": "Passed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          },
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1789413944.823,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [
+          {
+            "category": "Longest Test Runs",
+            "impact": "84% of duration",
+            "text": "1 longest test run with outlier durations exceeding 8.81s (three standard deviations)"
+          }
+        ],
+        "totalTestCount": 16
+      },
+      "executedTests": [
+        {
+          "nodeIdentifier": "AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst()",
+          "result": "Passed",
+          "durationInSeconds": 0.002155900001525879
+        },
+        {
+          "nodeIdentifier": "AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision()",
+          "result": "Passed",
+          "durationInSeconds": 0.0014020204544067383
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInBrowserToolProposalsKeepOneWorkflowBeforeModelFallback()",
+          "result": "Passed",
+          "durationInSeconds": 0.6917129755020142
+        },
+        {
+          "nodeIdentifier": "ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel()",
+          "result": "Passed",
+          "durationInSeconds": 0.3412879705429077
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad()",
+          "result": "Passed",
+          "durationInSeconds": 0.20416700839996338
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad()",
+          "result": "Passed",
+          "durationInSeconds": 0.016074061393737793
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress()",
+          "result": "Passed",
+          "durationInSeconds": 0.12484800815582275
+        },
+        {
+          "nodeIdentifier": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+          "result": "Passed",
+          "durationInSeconds": 11.108970046043396
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough()",
+          "result": "Passed",
+          "durationInSeconds": 0.006536960601806641
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback()",
+          "result": "Passed",
+          "durationInSeconds": 0.004810929298400879
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage()",
+          "result": "Passed",
+          "durationInSeconds": 0.11575901508331299
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+          "result": "Passed",
+          "durationInSeconds": 0.11897695064544678
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()",
+          "result": "Passed",
+          "durationInSeconds": 0.004786014556884766
+        },
+        {
+          "nodeIdentifier": "MCPFirstComputerUseExecutorTests/testVisualApprovalEffectForwardsToRetainedFallbackWithoutGlobalInputOrPlanner()",
+          "result": "Passed",
+          "durationInSeconds": 0.0025120973587036133
+        },
+        {
+          "nodeIdentifier": "OSAtlasRuntimeInstallationTests/testOptInBrowserPackageResolutionWaitsForMCPGap()",
+          "result": "Passed",
+          "durationInSeconds": 0.3586270809173584
+        },
+        {
+          "nodeIdentifier": "OSAtlasRuntimeInstallationTests/testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes()",
+          "result": "Passed",
+          "durationInSeconds": 0.017521023750305176
+        }
+      ],
+      "result": {
+        "finalURL": "http://127.0.0.1:50124/details",
+        "goal": "Open http://127.0.0.1:50124/index. Find the night train to Harbor City, follow its details link, and report its departure time and platform.",
+        "maximumObservedWorkers": 0,
+        "modelLaunchAttempts": 0,
+        "nativeInstalls": 0,
+        "plannerTrace": [
+          "Prompt bytes: 1352; tool count: 8",
+          "RemoteDesktopHost.MCPProposalPlanningResult.browserTools"
+        ],
+        "requestedPaths": [
+          "/index",
+          "/details"
+        ],
+        "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; missing model receipts; isolated transport, ledger, browser and model launcher",
+        "seconds": 10.72036600112915,
+        "terminal": "Optional(RemoteDesktopHost.ComputerUseTaskUpdate(taskID: \"mcp-browser-no-package-B5CE7A92-F74F-4052-B9A7-F8428B1D6443\", text: \"Departure time: 21:45, Platform: 6\", appliedControlRevision: nil, hostControlEpoch: Optional(0), outcome: Optional(RemoteDesktopHost.ComputerUseTerminalOutcome.taskCompleted), clarification: nil, clarificationAnswerPolicy: nil, clarificationRetry: nil, supportsClarificationRecovery: false, approvedActionEvidence: nil, isApprovedActionEvidenceOnly: false, researchProgress: nil))",
+        "visualInstalls": 0,
+        "workerSamples": 91
+      },
+      "artifactSHA256": {
+        ".build/repair-verification/mcp-browser-without-package-final-01.log": "3812499801da6093e49cec0aeda443a573662c9575911ecf857c1ae0dffe99ba",
+        ".build/repair-verification/mcp-browser-without-package-final-01/result.json": "7b4d4ae4ed7720cf5e149bd5a594def15519a4bd6498f277cbfaa1c810ca7fb8",
+        ".build/repair-verification/mcp-browser-without-package-final-01-audit/summary.json": "91ed8573de35f464424115db0d1d2c0630383494f56d85998b4adf9fb155f519",
+        ".build/repair-verification/mcp-browser-without-package-final-01-audit/tests.json": "eb6e320f95c6646108231c46d8085b4d0b52a8ed4f30bbc1014f8350fada3590"
+      }
+    }
+  ],
+  "currentPassingTests": [
+    "AppleFoundationMCPPlannerTests/testBrowserAndMCPProposalsShareOneCaptureAndRecoverOnlyFirst()",
+    "AppleFoundationMCPPlannerTests/testBrowserRouteToolCannotReplaceGoalOrSupplyActionsAndAvoidsNameCollision()",
+    "ComputerUseFaraActionTests/testOptInBrowserToolProposalsKeepOneWorkflowBeforeModelFallback()",
+    "ComputerUseFaraActionTests/testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel()",
+    "ComputerUseMobileInitiationTests/testInstalledMacToolsHandleNaturalLanguageWithoutModelDownloadsOrVisualLoad()",
+    "ComputerUseMobileInitiationTests/testInstalledNativeAndDesktopPackagesComposeWithoutEagerVisualLoad()",
+    "ComputerUseMobileInitiationTests/testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress()",
+    "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage()",
+    "MCPFirstComputerUseExecutorTests/testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough()",
+    "MCPFirstComputerUseExecutorTests/testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback()",
+    "MCPFirstComputerUseExecutorTests/testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage()",
+    "MCPFirstComputerUseExecutorTests/testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers()",
+    "MCPFirstComputerUseExecutorTests/testVisualApprovalContinuationForwardsDirectlyToFallbackWithoutPlannerOrMCP()",
+    "MCPFirstComputerUseExecutorTests/testVisualApprovalEffectForwardsToRetainedFallbackWithoutGlobalInputOrPlanner()",
+    "OSAtlasRuntimeInstallationTests/testOptInBrowserPackageResolutionWaitsForMCPGap()",
+    "OSAtlasRuntimeInstallationTests/testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes()"
+  ],
+  "nextEvidence": [
+    "Run varied real public browser goals through this package-independent host path; the earlier unchanged large release task still lacks accepted whole-goal evidence retention.",
+    "Qualify full default HostSession, provider login and phone Take Control/Resume/Stop and native/browser transitions.",
+    "Distinguish remaining primary-planner errors from demonstrated native/MCP capability gaps; avoid treating malformed output as visual-model need.",
+    "Investigate retained UI responsiveness warnings and qualify whole-Mac resources after correctness repairs."
+  ]
+}

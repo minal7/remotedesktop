@@ -18,7 +18,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
     typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ComputerUseFaraModel.Proposal?
     enum Failure: Error, LocalizedError, Equatable {
-        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion
+        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion, visualModelUnavailable
         var errorDescription: String? {
             switch self {
             case .changedTask: return "The original request changed. Start a new task with the complete request."
@@ -29,6 +29,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             case .browserChanged: return "The task's browser session changed. Check the page before starting another request."
             case .invalidApproval: return "This approval no longer matches the pending browser action."
             case .invalidQuestion: return "This answer no longer matches the browser's pending question. Start a new request with the complete instruction."
+            case .visualModelUnavailable: return "This browser step needs a compatible visual model that is not set up. The task has not completed."
             }
         }
     }

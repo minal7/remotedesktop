@@ -5,6 +5,56 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    func testBrowserToolsRouteKeepsOwnerAndLeavesOtherAppTasksOnNativeFallback() async throws {
+        let planner = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED", "VISUAL_FALLBACK_REQUIRED"])
+        let browser = StubVisualExecutor(result: .completed("Browser result")), native = StubVisualExecutor()
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        var preparations = 0
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: native, planner: planner, clientPool: pool, browserExecutorFactory: {
+                preparations += 1; return browser
+            })
+        let tools = makeHostTools(), goal = "Find reference material on the web."
+        for _ in 0 ..< 2 {
+            let result = try await executor.execute(taskID: "browser", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Browser result"))
+        }
+        do {
+            _ = try await executor.execute(taskID: "browser", prompt: "Changed goal", tools: tools, progress: { _ in })
+            XCTFail("The retained browser goal cannot be replaced")
+        } catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .taskChanged) }
+        XCTAssertEqual(preparations, 1); XCTAssertEqual(planner.requests.count, 1)
+        XCTAssertEqual(browser.trustedUserPrompts, [goal, goal]); XCTAssertEqual(native.callCount, 0)
+        _ = try await executor.execute(taskID: "native", prompt: "Inspect the current app's layout.", tools: tools, progress: { _ in })
+        XCTAssertEqual(preparations, 1); XCTAssertEqual(browser.callCount, 2); XCTAssertEqual(native.callCount, 1)
+        XCTAssertEqual(planner.requests.count, 2); XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
+    }
+
+    func testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough() async throws {
+        for stop in [false, true] {
+            let planner = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
+            let browser = StubVisualExecutor(), native = StubVisualExecutor()
+            let pool = StubMCPClientPool(tools: [try makeMailTool()])
+            var executor: MCPFirstComputerUseExecutor!
+            executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: native, planner: planner, clientPool: pool, browserExecutorFactory: {
+                    if stop { executor.cancelMCPWork(); return browser }
+                    throw CocoaError(.fileReadCorruptFile)
+                })
+            let tools = makeHostTools()
+            do {
+                _ = try await executor.execute(taskID: "browser", prompt: "Find sources online.", tools: tools, progress: { _ in })
+                XCTFail("Stopped or failed browser preparation cannot complete")
+            } catch {
+                if stop { XCTAssertTrue(error is CancellationError) }
+                else { XCTAssertEqual((error as? CocoaError)?.code, .fileReadCorruptFile) }
+            }
+            XCTAssertEqual(planner.requests.count, 1)
+            XCTAssertEqual(browser.callCount + native.callCount, 0)
+            XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
+        }
+    }
+
     func testFocusedMCPReadAcceptsWholeDocumentRequestsAcrossAppNames() {
         for (app, prompt) in [
             ("TextEdit", "Tell me the complete text of the open TextEdit document."),
@@ -184,6 +234,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     func testOptInFaraQuestionsContinueThroughCapabilityMCPAndDeferredLayers() async throws {
+        try await runFaraQuestionsThroughMCP(browserRoute: false)
+    }
+
+    func testOptInBrowserToolsQuestionsKeepTheirOwnerWithoutVisualPackage() async throws {
+        try await runFaraQuestionsThroughMCP(browserRoute: true)
+    }
+
+    private func runFaraQuestionsThroughMCP(browserRoute: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: all Fara question executor layers") }
         let previousPolicy = NSApp.activationPolicy()
         let changedPolicy = NSApp.setActivationPolicy(.accessory)
@@ -221,9 +279,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         })
         let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
         let planner = StubMCPPlanner(mode: .repeatFocusedApp)
+        let browserPlanner = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let capability = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in admissions += 1; return nil }, desktopFactory: { _ in deferred })
-        let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: capability, planner: planner, clientPool: pool)
+        let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: capability,
+            planner: browserRoute ? browserPlanner : planner, clientPool: pool, browserExecutorFactory: { loads += 1; return fara })
         let first = try await observed("initial execution") {
             try await mcp.execute(taskID: "root", prompt: original, trustedUserPrompt: original, tools: tools, progress: { progress.append($0) })
         }
@@ -255,7 +315,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
         XCTAssertEqual(resumed, second)
         XCTAssertEqual(try mcp.clarification(taskID: "answer")?.goal, goal)
-        XCTAssertEqual(planner.proposedToolNames.count, 1); XCTAssertEqual(admissions, 1); XCTAssertEqual(loads, 1); XCTAssertEqual(calls, 2)
+        XCTAssertEqual(planner.proposedToolNames.count, browserRoute ? 0 : 1)
+        XCTAssertEqual(browserPlanner.requests.count, browserRoute ? 1 : 0)
+        XCTAssertEqual(admissions, browserRoute ? 0 : 1); XCTAssertEqual(loads, 1); XCTAssertEqual(calls, 2)
         mcp.invalidateClarification(taskID: "answer")
         XCTAssertNil(try mcp.clarification(taskID: "answer"))
         await pool.cancelAll()
@@ -4432,6 +4494,19 @@ private struct PlannerVisibleReadOnlyRow {
     let structuredContent: MCPJSONValue
     let completion: String
     let expectedProjection: String
+}
+
+private final class BrowserRouteMCPPlanner: MCPProposalPlanning, @unchecked Sendable {
+    let responses: [String]
+    private(set) var requests: [MCPProposalPlanningRequest] = []
+    init(responses: [String]) { self.responses = responses }
+    func availability() -> AppleFoundationMCPPlannerAvailability { .available }
+    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
+        requests.append(request)
+        guard requests.count <= responses.count else { throw AppleFoundationMCPPlannerError.noProposal }
+        if responses[requests.count - 1] == "BROWSER_TOOLS_REQUIRED" { return .browserTools }
+        return .message(responses[requests.count - 1])
+    }
 }
 
 private final class SequencedMCPPlanner: MCPProposalPlanning, @unchecked Sendable {

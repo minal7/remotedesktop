@@ -384,6 +384,10 @@ struct ComputerUsePreparedVisualExecutor {
 
 @MainActor
 protocol ComputerUseVisualExecutorLoading: AnyObject {
+    /// Construct the native browser workflow without resolving or warming a
+    /// model. Only a later visual proposal may require its package.
+    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor
+
     func load(
         receipt: ComputerUseInstallationReceipt,
         progress: @escaping @MainActor (String) -> Void
@@ -398,6 +402,13 @@ protocol ComputerUseVisualExecutorLoading: AnyObject {
 }
 
 extension ComputerUseVisualExecutorLoading {
+    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
+        try ComputerUseFaraBrowserExecutor(journalDirectory: ComputerUseTaskJournalStore.defaultDirectory
+            .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true), propose: { _ in
+                throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable
+            })
+    }
+
     func prepare(receipt: ComputerUseInstallationReceipt,
                  progress: @escaping @MainActor (String) -> Void) async throws -> ComputerUsePreparedVisualExecutor {
         .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
@@ -449,14 +460,39 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         return .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
     }
 
+    @MainActor private final class BrowserInputs {
+        var value: ComputerUseFaraRuntimeInputs?
+    }
+
+    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
+        let inputs = BrowserInputs()
+        return try makeFaraExecutor(resolveInputs: { [self] in
+            try Task.checkCancellation()
+            if let value = inputs.value { return value }
+            guard let receipt, receipt.modelVariant == .fara15_4B else {
+                throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable
+            }
+            let package = try resolver.resolveAvailablePackage(receipt: receipt,
+                runtimeDirectoryURL: Self.bundledRuntimeDirectoryURL(in: bundle), enclosingBundleURL: bundle.bundleURL)
+            guard case .fara(let value) = package else { throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable }
+            try Task.checkCancellation()
+            inputs.value = value
+            return value
+        })
+    }
+
     private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
+        try makeFaraExecutor(resolveInputs: { inputs })
+    }
+
+    private func makeFaraExecutor(resolveInputs: @escaping @MainActor @Sendable () throws -> ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
         let runtime = self.runtime
         return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
             propose: { input in
-                let endpoint = try await runtime.activateFara(inputs)
+                let endpoint = try await runtime.activateFara(resolveInputs())
                 return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
             }, readPage: { reading in
-                let endpoint = try await runtime.activateFara(inputs)
+                let endpoint = try await runtime.activateFara(resolveInputs())
                 return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
             }, finishRun: { await runtime.shutdown() })
     }

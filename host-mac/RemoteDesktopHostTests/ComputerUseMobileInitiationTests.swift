@@ -133,6 +133,86 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try await runMCPBrowserLoop(publicRelease: false)
     }
 
+    func testOptInMCPBrowserHostCompletesWithoutInstalledModelPackage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
+            throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_LOOP_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/index": .init(body: "<!doctype html><h1>Rail timetable</h1><a href='/details'>Night train to Harbor City — details</a>"),
+            "/details": .init(body: "<!doctype html><h1>Night train to Harbor City</h1><p>Departure time: 21:45</p><p>Platform: 6</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let installedHelper = await MacControlMCPInstaller().currentInstallation()
+        let helperReceipt = try XCTUnwrap(installedHelper)
+        let visual = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: false)
+        let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: false)
+        let launchGuard = PreparationRejectingLauncher()
+        let modelRuntime = OSAtlasLlamaRuntime(launcher: launchGuard)
+        let loader = OSAtlasVisualExecutorLoader(runtime: modelRuntime, faraJournalDirectory: output.appendingPathComponent("task"))
+        let channel = MobileInitiationTestChannel()
+        let plannerTrace = MCPBrowserLoopTrace()
+        var browser: ComputerUseOwnedBrowser?
+        let manager = HostComputerUseManager(injector: InputInjector(), installer: visual,
+            nativeTextInstaller: native,
+            macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
+            visualExecutorLoader: loader,
+            mcpPlanner: MobileInitiationObservedPlanner(trace: plannerTrace),
+            taskLedger: ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json")),
+            browserNavigationFactory: { mayAct in
+                let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
+                return .init(browser: owned, journalDirectory: output.appendingPathComponent("browser"))
+            }, channelFactory: { _ in channel })
+        let runtime = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
+        var samples = 0, maximumWorkers = 0
+        let monitor = Task { @MainActor in
+            while !Task.isCancelled {
+                maximumWorkers = max(maximumWorkers, try inspector.matchingProcesses(for: runtime).count)
+                samples += 1
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+            }
+        }
+        let started = Date()
+        manager.start(pairingCode: "123456")
+        await waitUntil(timeoutIterations: 1_500) { manager.capability.state == .ready }
+        manager.authorizePeer(senderID: "IOS-PEER")
+        let prompt = ComputerUseEnvelope(id: "mcp-browser-no-package-" + UUID().uuidString,
+            senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
+            body: "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform.")
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        var terminal: ComputerUseTaskUpdate?
+        for _ in 0 ..< 600 {
+            terminal = await channel.taskUpdates().first { $0.taskID == prompt.id && $0.outcome != nil }
+            if terminal != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let finalURL = browser?.currentDocument(taskID: prompt.id)?.committedURL
+        await manager.shutdown()
+        await modelRuntime.shutdown()
+        monitor.cancel(); try await monitor.value
+        let visualInstalls = await visual.installCallCount(), nativeInstalls = await native.installCallCount()
+        let launchAttempts = await launchGuard.calls
+        let report: [String: Any] = ["goal": prompt.body, "seconds": Date().timeIntervalSince(started),
+            "terminal": String(reflecting: terminal), "finalURL": finalURL?.absoluteString as Any? ?? NSNull(),
+            "requestedPaths": server.requestedPaths, "modelLaunchAttempts": launchAttempts,
+            "visualInstalls": visualInstalls, "nativeInstalls": nativeInstalls,
+            "maximumObservedWorkers": maximumWorkers, "workerSamples": samples,
+            "plannerTrace": plannerTrace.items,
+            "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; missing model receipts; isolated transport, ledger, browser and model launcher"]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertEqual(terminal?.outcome, .taskCompleted)
+        XCTAssertTrue(terminal?.text.contains("21:45") == true || terminal?.text.range(of: #"(?i)9:45\s*p\.?m"#, options: .regularExpression) != nil)
+        XCTAssertNotNil(terminal?.text.replacingOccurrences(of: "*", with: "").range(of: #"(?i)platform\s*[:#-]?\s*6\b"#, options: .regularExpression))
+        XCTAssertEqual(finalURL, base.appendingPathComponent("details"))
+        XCTAssertEqual(server.count("/index"), 1); XCTAssertEqual(server.count("/details"), 1)
+        XCTAssertEqual(visualInstalls + nativeInstalls + launchAttempts, 0)
+        XCTAssertGreaterThan(samples, 0); XCTAssertEqual(maximumWorkers, 0)
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
+    }
+
     func testOptInMCPBrowserLoopReadsPublicReleaseWithoutComputerUseModel() async throws {
         guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else { throw XCTSkip("Opt-in: unchanged public release task through MCP browser steps") }
         try await runMCPBrowserLoop(publicRelease: true)
@@ -349,6 +429,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt, tools: [selectionTool])
                 let proposal = try await ComputerUsePlanningWorker().perform(timeout: 20) { try await planner.propose(request) }
                 switch proposal {
+                case .browserTools:
+                    throw AppleFoundationMCPPlannerError.unknownProposal
                 case .message(let message):
                     report["plannerMessage"] = message
                     throw AppleFoundationMCPPlannerError.noProposal
@@ -2297,6 +2379,19 @@ private actor MobileInitiationModelInstaller: ComputerUseModelProvisioning {
     }
     func recordedFailedActivations() -> [ComputerUseInstallationReceipt] {
         failedActivations
+    }
+}
+
+private struct MobileInitiationObservedPlanner: MCPProposalPlanning {
+    let trace: MCPBrowserLoopTrace
+    func availability() -> AppleFoundationMCPPlannerAvailability { AppleFoundationMCPPlanner().availability() }
+    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
+        trace.append("Prompt bytes: \(request.prompt.utf8.count); tool count: \(request.tools.count)")
+        let planner = AppleFoundationMCPPlanner(inspectFailure: { trace.append($0) })
+        do {
+            let result = try await planner.propose(request)
+            trace.append(String(reflecting: result)); return result
+        } catch { trace.append(String(reflecting: error)); throw error }
     }
 }
 
