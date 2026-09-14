@@ -6,6 +6,18 @@ Companion to [the detailed audit](docs/audits/2026-09-04-mac-computer-use/AUDIT.
 
 **Execution priority — user instruction, September 14:** Use available, verified macOS MCP capabilities first. Computer-use models are fallbacks when those tools do not suffice. Qualify gaps in our MCP integration before treating them as model limitations. Once an executor has taken ownership of a task, Resume, login handoff and scoped answers must retain that work; a possibly performed action must be reconciled before another route tries it.
 
+**Native evidence-reference experiment — September 14:** A separate small renderer now accepts observed text references and already-resolved current-view link references. It copies original native values, or converts a full explicit English civil date from the original caption/tooltip. It rejects generated factual values, wrong/unobserved references, unresolved links, invalid dates, duplicate fields and prose completion. **21 methods run RED, then GREEN**. This remains a standalone prototype; field labels, association and whole-goal completeness are not verified by reference validity.
+
+The unchanged Granite replay still fails: six proposals in **42.35 s**, two attempts to convert the version record into a date, and no valid terminal fields. Its eventual prose has the correct date but the generic releases URL rather than the required release link. Both the terminal contract and the full external oracle fail. Peak sampled worker memory is **3.34 GiB**, one worker, with joined shutdown and credential removal. No browser/MCP effects or production adapter were added. [Tests, commands, source-bound artifacts and the failed task](docs/audits/2026-09-04-mac-computer-use/granite-evidence-results.json) are retained.
+
+| Repair scope | Implemented | Compiled | Tested | Accepted |
+| --- | --- | --- | --- | --- |
+| Native reference/value renderer | Standalone prototype | Python preparation | 21 RED→GREEN methods, original tooltip check | Diagnostic rejection boundaries only |
+| Granite terminal evidence selection | Standalone replay | Actual b9992 load | Complete task still fails | No |
+| Production planner integration | No | — | — | No |
+
+Return to MCP integration: remove the visual-package dependency for sufficient browser steps under TDD, while retaining task ownership, continuation and Stop. No additional Granite runs or model-selection changes are justified by this checkpoint. The public whole-goal, normal HostSession, provider/phone handoff and resource requirements remain open.
+
 **UI-test presentation and Granite tool planning — September 14:** The intermittent combined-run clarification failure is localized to `ComputerUseBrowserError.windowNotActive` before any model proposal. Three diagnostic batches each reproduce the failure. The last starts with accessory activation policy but later observes prohibited policy, a visible non-key browser and Codex in front. The evidence supports delayed activation-policy changes from surrounding tests.
 
 Explicit native UI batches now use `TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1` to establish one accessory policy for their XCTest process. Ordinary tests remain prohibited. Both paths still suppress production host chrome, services and automatic windows. Production browser focus and ownership checks are unchanged. This resolves the reproduced test-host failure; it does not qualify all production window flicker.
