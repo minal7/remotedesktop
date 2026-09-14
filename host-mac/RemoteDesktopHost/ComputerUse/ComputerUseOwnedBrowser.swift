@@ -911,6 +911,11 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         case ["ENTER"], ["RETURN"]: return (0x28, 36, "\r", false)
         case ["TAB"]: return (0x2B, 48, "\t", false)
         case ["SHIFT", "TAB"]: return (0x2B, 48, "\t", true)
+        case ["LEFT"], ["ARROWLEFT"]: return (0x50, 123, String(UnicodeScalar(NSLeftArrowFunctionKey)!), false)
+        case ["RIGHT"], ["ARROWRIGHT"]: return (0x4F, 124, String(UnicodeScalar(NSRightArrowFunctionKey)!), false)
+        case ["SHIFT", "LEFT"], ["SHIFT", "ARROWLEFT"]: return (0x50, 123, String(UnicodeScalar(NSLeftArrowFunctionKey)!), true)
+        case ["SHIFT", "RIGHT"], ["SHIFT", "ARROWRIGHT"]: return (0x4F, 124, String(UnicodeScalar(NSRightArrowFunctionKey)!), true)
+        case ["BACKSPACE"]: return (0x2A, 51, String(UnicodeScalar(0x7F)!), false)
         case ["PAGEDOWN"]: return (0x4E, 0x79, String(UnicodeScalar(NSPageDownFunctionKey)!), false)
         case ["PAGEUP"]: return (0x4B, 0x74, String(UnicodeScalar(NSPageUpFunctionKey)!), false)
         default: return nil
@@ -1068,7 +1073,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         case .key(let keys):
             arguments["focused"] = true
             arguments["paging"] = keys.count == 1 && ["PAGEDOWN", "PAGEUP"].contains(keys[0].uppercased())
-            arguments["textEditing"] = keys.count == 2
+            let selectionKey = Self.agentKeyStroke(keys).map { [0x2A, 0x4F, 0x50].contains($0.usage) } == true
+            if selectionKey {
+                arguments["editable"] = true
+                arguments["textSelection"] = true
+            }
+            arguments["textEditing"] = selectionKey || keys.count == 2
                 && ["CTRL", "CONTROL", "CMD", "COMMAND", "META"].contains(keys[0].uppercased()) && keys[1].uppercased() == "A"
         default: return nil
         }
@@ -1295,7 +1305,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             let time = ProcessInfo.processInfo.systemUptime
             var flags: NSEvent.ModifierFlags = key.shift ? [.shift] : []
-            if key.usage == 0x4E || key.usage == 0x4B { flags.insert(.function) }
+            if [0x4B, 0x4E, 0x4F, 0x50].contains(key.usage) { flags.insert(.function) }
             guard let down = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: time,
                 windowNumber: window.windowNumber, context: nil, characters: key.text, charactersIgnoringModifiers: key.text, isARepeat: false, keyCode: key.keyCode),
                   let up = NSEvent.keyEvent(with: .keyUp, location: .zero, modifierFlags: flags, timestamp: time + 0.001,

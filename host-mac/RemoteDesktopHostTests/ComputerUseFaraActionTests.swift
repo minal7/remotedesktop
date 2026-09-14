@@ -1841,39 +1841,59 @@ final class ComputerUseFaraActionTests: XCTestCase {
 
     @MainActor
     func testOptInFaraTabRejectsStaleFocusLoginAndRetiredControl() async throws {
-        try await runTabBoundaries(modes: ["focus-changed", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"])
+        try await runNativeFocusKeyBoundaries(modes: ["focus-changed", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"])
+    }
+
+    @MainActor
+    func testOptInCaretKeysPreserveFieldAndControlBoundaries() async throws {
+        try await runNativeFocusKeyBoundaries(modes: ["editable", "readonly", "number", "contenteditable", "button", "find",
+            "selection-changed", "value-changed", "focus-changed", "native-focus-cleared", "login", "cancelled", "revoked", "replacement", "admission-revoked", "unsupported-modifier"], keyStroke: ["Backspace"])
     }
 
     @MainActor
     func testOptInNativeMarkedTextPreconditionForFaraTab() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_MARKED_TEXT_PROBE"] == "1" else { throw XCTSkip("Unqualified native experiment: establish actual WebKit marked text before testing focus-key rejection") }
-        try await runTabBoundaries(modes: ["composition"])
+        try await runNativeFocusKeyBoundaries(modes: ["composition"])
     }
 
     @MainActor
-    private func runTabBoundaries(modes: [String]) async throws {
+    private func runNativeFocusKeyBoundaries(modes: [String], keyStroke: [String] = ["Shift", "Tab"]) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native focus-key boundaries") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
+        var allowed = true, retainedWindow: NSWindow?
+        let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
         for mode in modes {
+            allowed = true
             let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
-                <!doctype html><label>Origin<input id='origin'></label><label>Destination<input id='destination'></label>
-                <script>document.addEventListener('keydown',()=>fetch('/key',{keepalive:true}));requestAnimationFrame(()=>{document.getElementById('origin').focus();fetch('/ready')});</script>
+                <!doctype html><label>Origin<input id='origin' value='AB'></label><label>Destination<input id='destination'></label>
+                <script>window.keyCount=0;document.addEventListener('keydown',()=>{keyCount++;fetch('/key',{keepalive:true})});requestAnimationFrame(()=>{document.getElementById('origin').focus();document.getElementById('origin').setSelectionRange(2,2);fetch('/ready')});</script>
                 """)])
             let base = try await server.start(); defer { server.stop() }
-            var allowed = true, attempts = 0
-            let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
+            var attempts = 0
             try browser.claim(taskID: mode)
             let document = try await browser.navigate(taskID: mode, operationID: "open", to: base.appendingPathComponent("form"))
+            try requireSameNativeWindow(&retainedWindow)
             let deadline = ContinuousClock.now + .seconds(2)
             while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
             XCTAssertEqual(server.count("/ready"), 1, mode)
             // The experiment only operates on this test's native owned view.
             func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
-            let initial = try await browser.captureAgentObservation(document: document)
             let window = try XCTUnwrap(NSApp.keyWindow)
             let view = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            XCTAssertTrue(window.makeFirstResponder(view), mode)
+            switch mode {
+            case "readonly": _ = try await view.evaluateJavaScript("document.getElementById('origin').readOnly=true")
+            case "number": _ = try await view.evaluateJavaScript("document.getElementById('origin').type='number';document.getElementById('origin').value='10'")
+            case "contenteditable", "button":
+                _ = try await view.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend', '<\(mode == "button" ? "button" : "div contenteditable=true") id=other aria-label=Other>Keep</\(mode == "button" ? "button" : "div")>');document.getElementById('other').focus()")
+            case "find":
+                let initial = try await browser.captureAgentObservation(document: document)
+                try await browser.performAgentInput(.key(["Command", "F"]), observation: initial)
+            default: break
+            }
             if mode == "composition" {
+                let initial = try await browser.captureAgentObservation(document: document)
                 let coordinates = try await view.evaluateJavaScript("(()=>{const r=document.getElementById('origin').getBoundingClientRect();return [(r.x+r.width/2)/innerWidth*1000,(r.y+r.height/2)/innerHeight*1000]})()")
                 let point = try XCTUnwrap(coordinates as? [Double])
                 try await browser.performAgentInput(.pointer(.leftClick, .init(x: point[0], y: point[1])), observation: initial)
@@ -1885,13 +1905,16 @@ final class ComputerUseFaraActionTests: XCTestCase {
             }
             let observation = try await browser.captureAgentObservation(document: document)
             switch mode {
+            case "selection-changed": _ = try await view.evaluateJavaScript("document.getElementById('origin').setSelectionRange(0,1)")
+            case "value-changed": _ = try await view.evaluateJavaScript("document.getElementById('origin').value='Changed'")
+            case "native-focus-cleared": window.makeFirstResponder(nil)
             case "focus-changed": _ = try await view.evaluateJavaScript("document.getElementById('destination').focus()")
             case "login": _ = try await view.evaluateJavaScript("document.body.insertAdjacentHTML('beforeend','<input type=password>')")
             case "revoked": allowed = false
             case "replacement": try browser.claim(taskID: "successor")
             default: break
             }
-            let keys = mode == "unsupported-modifier" ? ["Control", "Tab"] : ["Shift", "Tab"]
+            let keys = mode == "unsupported-modifier" ? ["Control"] + keyStroke.suffix(1) : keyStroke
             let work = Task { @MainActor in
                 if mode == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
                 try await browser.performAgentInput(.key(keys), observation: observation, willBeginEffect: {
@@ -1899,15 +1922,90 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     if mode == "admission-revoked" { allowed = false }
                 })
             }
-            do { try await work.value; XCTFail("Rejected focus key dispatched: \(mode)") }
+            do { try await work.value; if mode != "editable" { XCTFail("Rejected focus key dispatched: \(mode)") } }
             catch {
                 if mode == "cancelled" { XCTAssertTrue(error is CancellationError) }
-                else { XCTAssertEqual(error as? ComputerUseBrowserError, mode == "login" ? .authenticationRequired : mode == "unsupported-modifier" ? .unsupportedDocument : .pageChanged, mode) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, mode == "login" ? .authenticationRequired : ["find", "unsupported-modifier"].contains(mode) ? .unsupportedDocument : .pageChanged, mode) }
             }
-            XCTAssertEqual(attempts, mode == "admission-revoked" ? 1 : 0, mode)
-            XCTAssertEqual(server.count("/key"), 0, mode)
+            XCTAssertEqual(attempts, ["editable", "admission-revoked"].contains(mode) ? 1 : 0, mode)
+            let delivered = try await view.evaluateJavaScript("keyCount")
+            XCTAssertEqual(delivered as? Int, mode == "editable" ? 1 : 0, mode)
+            if mode == "editable" {
+                let text = try await view.evaluateJavaScript("document.getElementById('origin').value")
+                XCTAssertEqual(text as? String, "A")
+            } else { XCTAssertEqual(server.count("/key"), 0, mode) }
             if mode == "replacement" { XCTAssertEqual(browser.taskID, "successor") }
         }
+    }
+
+    @MainActor
+    func testOptInFaraCorrectsUnicodeWithCaretSelectionAndBackspace() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native text correction keys") }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var stage = "fixture"
+        do {
+            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
+                <!doctype html><label>Draft<textarea id=draft>A👩🏽‍💻Z</textarea></label><label>Reference<input id=reference value=Keep></label>
+                <script>
+                globalThis.keys=[]; globalThis.edits=[];
+                document.addEventListener('keydown',e=>keys.push([e.key,e.shiftKey,e.isTrusted]));
+                document.addEventListener('input',e=>edits.push([e.target.id,e.target.value,e.isTrusted]));
+                requestAnimationFrame(()=>{draft.focus();draft.setSelectionRange(draft.value.length,draft.value.length);fetch('/ready')});
+                </script>
+                """)])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraCaret-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: "caret")
+            stage = "navigation"
+            _ = try await browser.navigate(taskID: "caret", operationID: "fixture", to: base.appendingPathComponent("form"))
+            let deadline = ContinuousClock.now + .seconds(2)
+            while server.count("/ready") == 0 && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(server.count("/ready"), 1)
+            let window = try XCTUnwrap(NSApp.keyWindow)
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+            let web = try XCTUnwrap(window.contentView.flatMap { webViews($0).first })
+            let actions = [#"{"action":"key","keys":["ArrowLeft"]}"#, #"{"action":"key","keys":["Shift","Right"]}"#,
+                #"{"action":"key","keys":["Shift","Left"]}"#, #"{"action":"key","keys":["Shift","Left"]}"#,
+                #"{"action":"key","keys":["Backspace"]}"#, #"{"action":"type","text":"é"}"#,
+                #"{"action":"key","keys":["Right"]}"#, #"{"action":"key","keys":["Shift","ArrowLeft"]}"#,
+                #"{"action":"type","text":"!"}"#, #"{"action":"terminate","answer":"Draft corrected."}"#]
+            let expected = [["value":"A👩🏽‍💻Z","start":9,"end":9], ["value":"A👩🏽‍💻Z","start":8,"end":8],
+                ["value":"A👩🏽‍💻Z","start":8,"end":9], ["value":"A👩🏽‍💻Z","start":8,"end":8],
+                ["value":"A👩🏽‍💻Z","start":1,"end":8], ["value":"AZ","start":1,"end":1],
+                ["value":"AéZ","start":2,"end":2], ["value":"AéZ","start":3,"end":3],
+                ["value":"AéZ","start":2,"end":3], ["value":"Aé!","start":3,"end":3]]
+            let goal = "Correct Draft to Aé! using caret movement and selection, preserving Reference."
+            var calls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { input in
+                guard calls < actions.count else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                stage = "proposal-\(calls)-read"
+                let actual = try await web.evaluateJavaScript("({value:draft.value,start:draft.selectionStart,end:draft.selectionEnd})") as? NSDictionary
+                XCTAssertEqual(actual, expected[calls] as NSDictionary, "Selection before proposal \(calls)")
+                XCTAssertEqual(input.goal, goal)
+                stage = "proposal-\(calls)-dispatch"
+                let response = self.call(actions[calls]); calls += 1
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            })
+            stage = "first-capture"
+            let result = try await executor.execute(taskID: "caret", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .completed("Draft corrected.")); XCTAssertEqual(calls, actions.count)
+            stage = "completion-replay"
+            let replay = try await executor.execute(taskID: "caret", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(replay, result); XCTAssertEqual(calls, actions.count)
+            stage = "final-read"
+            let final = try await web.evaluateJavaScript("JSON.stringify({value:draft.value,reference:reference.value,keys,edits})") as? String
+            let expectedFinal = #"{"value":"Aé!","reference":"Keep","keys":[["ArrowLeft",false,true],["ArrowRight",true,true],["ArrowLeft",true,true],["ArrowLeft",true,true],["Backspace",false,true],["ArrowRight",false,true],["ArrowLeft",true,true]],"edits":[["draft","AZ",true],["draft","AéZ",true],["draft","Aé!",true]]}"#
+            XCTAssertEqual(final, expectedFinal)
+            XCTAssertTrue(NSApp.keyWindow === window); XCTAssertEqual(server.count("/form"), 1)
+            let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+                .filter { $0.stepIDs == ["native-dispatch-returned"] }
+            XCTAssertEqual(journals.count, actions.count - 1); XCTAssertTrue(journals.allSatisfy { $0.statuses == [.verified] })
+        } catch { XCTFail("Native caret workflow failed at \(stage): \(String(reflecting: error))") }
     }
 
     @MainActor

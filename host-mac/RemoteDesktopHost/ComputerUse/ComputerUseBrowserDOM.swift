@@ -2021,6 +2021,13 @@ enum ComputerUseBrowserDOM {
               if (!agentTargetPointStateMatches(lastPageSnapshot.agentState,agentState,pointX,pointY,args.focused === true)) return reply('stale-agent-point');
               // Typing requires the exact focused element to accept text. Ancestor
               // and link lookup below is only suitable for identifying other input.
+              // Caret/selection keys additionally need native text selection.
+              // Do not forward them to numeric controls, composites or page focus.
+              if (args.textSelection === true && (!(hit instanceof HTMLTextAreaElement
+                  || (hit instanceof HTMLInputElement && textTypes.has(hit.type)))
+                  || !Number.isInteger(hit.selectionStart) || !Number.isInteger(hit.selectionEnd))) {
+                return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};
+              }
               if (args.editable === true && !Array.from(controls.values()).some(binding => binding.element === hit
                   && !binding.metadata.disabled && !binding.metadata.readOnly
                   && ['text','search','url','tel','email','textarea','date','datetime-local','month','week','time','number'].includes(binding.metadata.kind))) {
