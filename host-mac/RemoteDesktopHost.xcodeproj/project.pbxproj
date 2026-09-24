@@ -273,6 +273,8 @@
 		FC8CC92DE9659A0C3CBC5F50 /* CloudKitLocalComputerUsePairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70C70BF18419F7BA2ABFFE05 /* CloudKitLocalComputerUsePairing.swift */; };
 		FCA720672E14ABB217211ED5 /* HostSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */; };
 		FDB9561CB17517FEC85E058A /* LocalComputerUseTLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F470F2621B745E5A6A8BC1 /* LocalComputerUseTLS.swift */; };
+		FE02F0CBEA9E03A40729E248 /* ComputerUseLocalFileCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F24333B6EE9553F281A420 /* ComputerUseLocalFileCatalog.swift */; };
+		3A2D806C0079BF032A565ECD /* ComputerUseLocalFileCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -563,6 +565,8 @@
 		FC26EE65BC584A891CDF9054 /* HIDUsage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HIDUsage.swift; sourceTree = "<group>"; };
 		FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleFoundationMCPPlannerTests.swift; sourceTree = "<group>"; };
 		FD9246779A5FFF58A130076A /* ComputerUseClarificationCompositionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseClarificationCompositionTests.swift; sourceTree = "<group>"; };
+		47F24333B6EE9553F281A420 /* ComputerUseLocalFileCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalFileCatalog.swift; sourceTree = "<group>"; };
+		535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalFileCatalogTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -676,6 +680,7 @@
 			isa = PBXGroup;
 			children = (
 				FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */,
+				535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */,
 				DED10FA558220D304359BD34 /* ComputerUseActionTextPlanTests.swift */,
 				0BD05F49BF8C0C157580AB17 /* ComputerUseBrowserDOMTests.swift */,
 				88E19E5B48DEDB41EEAA5BE0 /* ComputerUseCapabilityExecutorTests.swift */,
@@ -860,6 +865,7 @@
 				D7DF1C2610174B22069E10D7 /* ComputerUseTextEditor.swift */,
 				33764DC44EC22E8367A25F4D /* ComputerUseTextGoalPlanner.swift */,
 				A7D0C8E678144786A1D44451 /* ComputerUseMCPDocumentTask.swift */,
+				47F24333B6EE9553F281A420 /* ComputerUseLocalFileCatalog.swift */,
 				A7D0C8E678144786A1D44551 /* ComputerUseMCPBrowserStepPlanner.swift */,
 				552B1D1A5E75FF516E92A88E /* ComputerUseTextStepStore.swift */,
 				3027DBC19074EFB6AB175D55 /* ComputerUseTextTask.swift */,
@@ -1135,6 +1141,7 @@
 				62C20EC90B2BCFF0066A3538 /* ComputerUseLicenseComplianceTests.swift in Sources */,
 				DAD0589CDCA1C3CD38319701 /* ComputerUseLiteralPayloadTests.swift in Sources */,
 				ED0BA4255D0D51702FB3DBCE /* ComputerUseLocalTextGoalPlannerTests.swift in Sources */,
+				3A2D806C0079BF032A565ECD /* ComputerUseLocalFileCatalogTests.swift in Sources */,
 				33D89A9B195107B3E8C3D4F1 /* ComputerUseLocalTextProposalAcceptanceTests.swift in Sources */,
 				BC393D0286409F0A6B367D79 /* ComputerUseMobileInitiationTests.swift in Sources */,
 				F0D6F4109ECA5C2815EB06CE /* ComputerUseNativeTextIntegrationTests.swift in Sources */,
@@ -1318,6 +1325,7 @@
 				C925C66799364F1247DD0434 /* ComputerUseTextEditor.swift in Sources */,
 				082B668E5F22EF574A022B14 /* ComputerUseTextGoalPlanner.swift in Sources */,
 				A7D0C8E678144786A1D44450 /* ComputerUseMCPDocumentTask.swift in Sources */,
+				FE02F0CBEA9E03A40729E248 /* ComputerUseLocalFileCatalog.swift in Sources */,
 				A7D0C8E678144786A1D44550 /* ComputerUseMCPBrowserStepPlanner.swift in Sources */,
 				746750FC5D04FDA4281C12A7 /* ComputerUseTextStepStore.swift in Sources */,
 				2F34B7B243FAEA2CFCA96DCA /* ComputerUseTextTask.swift in Sources */,

@@ -78,13 +78,18 @@ struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
 /// the durable task ledger before consuming a reference.
 @MainActor
 final class ComputerUseTextClarificationStore {
-    enum Failure: Error, Equatable { case invalidReference, expired, scopeChanged, inputLimit }
+    enum Failure: Error, Equatable { case invalidReference, invalidChoice, expired, scopeChanged, inputLimit }
+    struct Resolution: Equatable {
+        let goal: ComputerUseUnresolvedTextGoal
+        let selectedChoice: ComputerUseClarificationChoice?
+    }
     private struct Pending {
         let reference: ComputerUseClarificationReference
         let senderID: String
         let sessionID: String
         let scope: String
         let question: String
+        let choices: [ComputerUseClarificationChoice]?
         let goal: ComputerUseUnresolvedTextGoal
     }
     private var pending: Pending?
@@ -96,8 +101,10 @@ final class ComputerUseTextClarificationStore {
     deinit { expiryTask?.cancel() }
 
     func issue(goal: ComputerUseUnresolvedTextGoal, question: String, scope: String,
+               choices: [ComputerUseClarificationChoice]? = nil,
                expiresAt: Date? = nil, for request: ComputerUseEnvelope) throws -> ComputerUseClarificationReference {
         let current = now(), expiry = min(expiresAt ?? current.addingTimeInterval(600), current.addingTimeInterval(600))
+        try ComputerUseClarificationChoice.validate(choices)
         guard request.kind == .prompt, !request.senderID.isEmpty, !request.sessionID.isEmpty, Self.validScope(scope),
               !question.isEmpty, question.utf8.count <= 8 * 1_024,
               goal.userTurns.count < ComputerUseUnresolvedTextGoal.maximumUserTurns,
@@ -105,7 +112,7 @@ final class ComputerUseTextClarificationStore {
         let reference = try ComputerUseClarificationReference(taskID: request.id, expiresAt: expiry)
         invalidate()
         pending = Pending(reference: reference, senderID: request.senderID, sessionID: request.sessionID,
-            scope: scope, question: question, goal: goal)
+            scope: scope, question: question, choices: choices, goal: goal)
         let lifetime = expiry.timeIntervalSince(current)
         expiryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(lifetime)) } catch { return }
@@ -117,14 +124,31 @@ final class ComputerUseTextClarificationStore {
 
     func consume(_ reference: ComputerUseClarificationReference, answer: String, scope: String,
                  for request: ComputerUseEnvelope) throws -> ComputerUseUnresolvedTextGoal {
+        try consumeSelection(reference, answer: answer, scope: scope, for: request).goal
+    }
+
+    /// Resolves a tapped choice to its exact retained host option. The
+    /// selection ID remains typed host metadata for later catalog execution;
+    /// it is not folded into the user's free-form text.
+    func consumeSelection(_ reference: ComputerUseClarificationReference, answer: String, choiceID: String? = nil, scope: String,
+                          for request: ComputerUseEnvelope) throws -> Resolution {
         guard request.kind == .prompt, let pending, pending.reference == reference,
               pending.senderID == request.senderID, pending.sessionID == request.sessionID,
               !request.id.isEmpty, request.id != reference.taskID else { throw Failure.invalidReference }
         guard now() < reference.expiresAt else { invalidate(); throw Failure.expired }
         guard pending.scope == scope else { invalidate(); throw Failure.scopeChanged }
+        let selectedChoice: ComputerUseClarificationChoice?
+        if let choiceID {
+            guard let choices = pending.choices,
+                  let selected = choices.first(where: { $0.id == choiceID }),
+                  selected.label.utf8.elementsEqual(answer.utf8) else { throw Failure.invalidChoice }
+            selectedChoice = selected
+        } else {
+            selectedChoice = nil
+        }
         let goal = try pending.goal.answering(pending.question, with: answer)
         invalidate()
-        return goal
+        return Resolution(goal: goal, selectedChoice: selectedChoice)
     }
 
     func matches(_ reference: ComputerUseClarificationReference) -> Bool { pending?.reference == reference }

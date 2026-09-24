@@ -1,0 +1,141 @@
+{
+  "date": "2026-09-24",
+  "baseCommit": "5d5f560223ae81d4b16bf6a68c7101cea5b8fb6f",
+  "scope": "Metadata-only local file catalog and scoped clarification choice wire/store. No model inference, personal-file discovery, browser upload, email, or E2E acceptance.",
+  "runs": [
+    {
+      "name": "native-file-selection-red01",
+      "exitCode": 65,
+      "testIDs": [
+        "ComputerUseTextClarificationTests/testTaskUpdateRoundTripsScopedClarificationChoices",
+        "ComputerUseTextClarificationTests/testClarificationProbeResultRoundTripsChoicesForRecovery",
+        "ComputerUseLocalFileCatalogTests/testCatalogReportsNamesTypesSizesAndDatesWithoutCollapsingSimilarFiles",
+        "ComputerUseLocalFileCatalogTests/testCappedPageHasOpaqueCursorAndDoesNotClaimInventoryComplete",
+        "ComputerUseLocalFileCatalogTests/testInventoryHardCapReportsIncompleteEvenWhenKnownPagesAreExhausted",
+        "ComputerUseLocalFileCatalogTests/testResolveRequiresExactCandidateAndSameTaskAndRejectsChangedFile",
+        "ComputerUseLocalFileCatalogTests/testSymlinkAndNonRegularEntriesAreNotCandidates"
+      ],
+      "passed": 0,
+      "failed": 7,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "runnerSHA256": "7679559e4fd566deb55ac29f3009a09d4aa226700dc6be66f9b7e2bfbe62a626",
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "03843762345ef828a443cba6047a361fd11fab57d8f87ecaf22c0ac38c117ffb",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "e9e06ca10028c5c6aeae15d810aa9daca847d04260ccd2eace323db985cbd13f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseLocalFileCatalogTests.swift": "a1389e9118ae7ca2f4383607027f489fa05d551e9661217ae86d4912a40fd071",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "2d131d0a9a6ba06c79422a3c3a3b06aa6b71d5409838215287702dee954b7088",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "8c6bf579208c01c97e0ea20c5bb455fb2e60849aa4f5f8149128efbb6fea1bb4",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "b712cf28154e41f1cacda4b3fda2b4b431835b5983c3f3eaf1264b1ad902c540"
+      },
+      "sourceAudit": {
+        "note": "Two owned files were changed after xcresult endTime but before root harvested results. Work preserved as patch and files restored to exact invocation snapshot before review; no run was repeated or accepted as unchanged current tree.",
+        "buildEndTime": 1790287643.246,
+        "changes": [
+          {
+            "path": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift",
+            "mtime": 1790287682.8407497,
+            "secondsAfterBuildFinished": 39.59474968910217,
+            "postRunSHA256": "a727e034c63e9d21dcbe7a49e1051ddb97702209ac8cf72f312309fe4fd72cc6"
+          },
+          {
+            "path": "protocol/Swift/ComputerUseProtocol.swift",
+            "mtime": 1790287667.4210317,
+            "secondsAfterBuildFinished": 24.175031661987305,
+            "postRunSHA256": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+          }
+        ],
+        "preservedPatch": ".build/repair-verification/file-choices-interrupted-work.patch",
+        "restoredSnapshotHashesMatch": true
+      }
+    },
+    {
+      "name": "native-file-selection-green01",
+      "exitCode": 0,
+      "testIDs": [
+        "ComputerUseLocalFileCatalogTests/testCatalogReportsNamesTypesSizesAndDatesWithoutCollapsingSimilarFiles",
+        "ComputerUseLocalFileCatalogTests/testPaginationCursorCoversRemainingPagesOfCompleteInventory",
+        "ComputerUseLocalFileCatalogTests/testInventoryHardCapReportsIncompleteEvenWhenKnownPagesAreExhausted",
+        "ComputerUseLocalFileCatalogTests/testResolveRequiresExactCandidateAndSameTaskAndRejectsChangedFile",
+        "ComputerUseLocalFileCatalogTests/testSameSizeEditWithinOneSecondInvalidatesCandidate",
+        "ComputerUseLocalFileCatalogTests/testSymlinkAndNonRegularEntriesAreNotCandidates",
+        "ComputerUseTextClarificationTests/testTaskUpdateRoundTripsScopedClarificationChoices",
+        "ComputerUseTextClarificationTests/testClarificationProbeResultRoundTripsChoicesForRecovery",
+        "ComputerUseTextClarificationTests/testClarificationChoicesRejectMalformedBoundsDuplicatesAndUnscopedUse",
+        "ComputerUseTextClarificationTests/testChoiceReplyCarriesSelectionIDOnlyWithExactClarificationAndKeepsTextPromptClean",
+        "ComputerUseTextClarificationTests/testStoreBindsChoiceIDToCurrentCandidateAndPreservesFreeTextPath",
+        "ComputerUseTextClarificationTests/testExecutionDecoderAdmitsCurrentClientRequestsAndExactAnswersWithEvidenceCapability",
+        "ComputerUseTextClarificationTests/testReferenceCannotCrossSenderSessionNonceOrBeConsumedTwice",
+        "ComputerUseTextClarificationTests/testExpiryRestartReplacementAndDocumentChangeCannotReviveOriginalGoal",
+        "ComputerUseTextClarificationTests/testInputBudgetRejectsOverflowBeforeConsumingAValidQuestion"
+      ],
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 31,
+      "runnerSHA256": "dece3a6b2afdecb4d987b25b43915f90acefb0571332c7c299ae2543116706ae",
+      "sourceSHA256": {
+        "docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md": "8ef442cb03304c044b66fac0e2cd02b87e1060d3017d63530e146b380195fb87",
+        "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "03843762345ef828a443cba6047a361fd11fab57d8f87ecaf22c0ac38c117ffb",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "32550aee839fb888da11fc8dc586cafb3b208389cee786f74ebfca25a95a3ff4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "117c7a117d57316e18b17b0847b2cc0e8c82fdd41dae67db8af4a7d65fbe3e90",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseLocalFileCatalogTests.swift": "3d83bbf19167abae28fba5851bb9a4e813e3675387e1d8ec7f3a1f5f1f057a57",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "2d131d0a9a6ba06c79422a3c3a3b06aa6b71d5409838215287702dee954b7088",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "50b0efbec07c75bdedd12da1b81c636a1b0595e92ed34bdb63ffa234b3453ead",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "sourceAudit": {
+        "count": 24,
+        "changed": []
+      }
+    }
+  ],
+  "redInterpretation": "Seven behavioral failures were expected from the compiling empty catalog and absent wire fields. Two protocol/store edits occurred after the run finished; root preserved them offsource and restored the invocation snapshots before applying reviewed GREEN patches. See the RED source audit.",
+  "greenInterpretation": "15 tests passed with no failed/skipped tests, runtime warnings, or build errors. All 24 snapshot sources remained unchanged through result harvest. Compiler warnings are outside the changed component files. Xcode beta emitted misleading command-exit-0 error-prefixed diagnostic lines in the raw log; xcresult build status succeeded with zero build errors and runner exit 0.",
+  "limitations": [
+    "Catalog metadata equality detects changed/deleted/replaced files; it is not an atomic upload or content-persistence proof.",
+    "Catalog is not yet supplied to the live planner.",
+    "Choice fields/store are not yet wired through HostManager or the phone UI.",
+    "Owned browser upload and real Drive/default-account/login workflow are not executed.",
+    "Email self/attachment workflow remains pending."
+  ]
+}

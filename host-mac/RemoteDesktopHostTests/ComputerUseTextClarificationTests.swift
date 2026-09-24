@@ -177,6 +177,110 @@ final class ComputerUseTextClarificationTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseClarificationReference(taskID: String(repeating: "x", count: 257), expiresAt: Date()))
     }
 
+    func testTaskUpdateRoundTripsScopedClarificationChoices() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let choices: [[String: Any]] = [
+            ["id": "candidate-a", "label": "Project Alpha.pptx", "detail": "Modified Sep 20 · 2.1 MB"],
+            ["id": "candidate-b", "label": "Project Beta.pptx", "detail": "Modified Sep 22 · 2.4 MB"],
+        ]
+        let referenceJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(reference)) as? [String: Any])
+        let body = try JSONSerialization.data(withJSONObject: [
+            "taskID": "question", "text": "Which presentation should I upload?",
+            "outcome": ComputerUseTerminalOutcome.userInterventionRequired.rawValue,
+            "clarification": referenceJSON, "clarificationChoices": choices,
+        ])
+
+        let update = try ComputerUseTaskUpdate.decodeBody(String(decoding: body, as: UTF8.self))
+        XCTAssertEqual(update.clarification, reference)
+        let encoded = try ComputerUseTaskUpdate.decodeBody(update.encodedBody())
+        let encodedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.encodedBody().utf8)) as? [String: Any])
+        let encodedChoices = try XCTUnwrap(encodedObject["clarificationChoices"] as? [[String: Any]])
+        XCTAssertEqual(encodedChoices.compactMap { $0["id"] as? String }, ["candidate-a", "candidate-b"])
+        XCTAssertEqual(encodedChoices.compactMap { $0["label"] as? String }, ["Project Alpha.pptx", "Project Beta.pptx"])
+    }
+
+    func testClarificationProbeResultRoundTripsChoicesForRecovery() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date(timeIntervalSince1970: 1_800_000_000))
+        let referenceJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(reference)) as? [String: Any])
+        let body = try JSONSerialization.data(withJSONObject: [
+            "type": "clarificationProbeResult", "probeID": UUID().uuidString,
+            "reference": referenceJSON, "question": "Which presentation should I upload?",
+            "clarificationChoices": [
+                ["id": "candidate-a", "label": "Project Alpha.pptx"],
+                ["id": "candidate-b", "label": "Project Beta.pptx"],
+            ],
+        ])
+
+        let result = try ComputerUseClarificationProbeResult.decodeBody(String(decoding: body, as: UTF8.self))
+        let encoded = try ComputerUseClarificationProbeResult.decodeBody(result.encodedBody())
+        let encodedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.encodedBody().utf8)) as? [String: Any])
+        let choices = try XCTUnwrap(encodedObject["clarificationChoices"] as? [[String: Any]])
+        XCTAssertEqual(choices.compactMap { $0["id"] as? String }, ["candidate-a", "candidate-b"])
+        XCTAssertEqual(choices.compactMap { $0["label"] as? String }, ["Project Alpha.pptx", "Project Beta.pptx"])
+    }
+
+    func testClarificationChoicesRejectMalformedBoundsDuplicatesAndUnscopedUse() throws {
+        XCTAssertThrowsError(try ComputerUseClarificationChoice(id: "  ", label: "candidate"))
+        XCTAssertThrowsError(try ComputerUseClarificationChoice(id: "candidate", label: "\n"))
+        XCTAssertThrowsError(try ComputerUseClarificationChoice(id: "candidate", label: "name", detail: String(repeating: "x", count: 513)))
+        let first = try ComputerUseClarificationChoice(id: "same", label: "First")
+        let duplicate = try ComputerUseClarificationChoice(id: "same", label: "Second")
+        let update = ComputerUseTaskUpdate(taskID: "question", text: "Which file?",
+            outcome: .userInterventionRequired,
+            clarification: try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(60)),
+            clarificationChoices: [first, duplicate])
+        XCTAssertThrowsError(try update.encodedBody())
+
+        let plainStatus = ComputerUseTaskUpdate(taskID: "question", text: "Which file?", clarificationChoices: [first])
+        XCTAssertThrowsError(try plainStatus.encodedBody())
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(60))
+        XCTAssertThrowsError(try ComputerUseClarificationProbeResult(probeID: UUID(), reference: reference,
+            question: nil, clarificationChoices: [first]))
+        let tooMany = try (0..<9).map { try ComputerUseClarificationChoice(id: "id-\($0)", label: "File \($0)") }
+        XCTAssertThrowsError(try ComputerUseClarificationProbeResult(probeID: UUID(), reference: reference,
+            question: "Choose a file", clarificationChoices: tooMany))
+    }
+
+    func testChoiceReplyCarriesSelectionIDOnlyWithExactClarificationAndKeepsTextPromptClean() throws {
+        let reference = try ComputerUseClarificationReference(taskID: "question", expiresAt: Date().addingTimeInterval(60))
+        let answer = try ComputerUsePromptRequest.answering(reference, text: "Project Alpha.pptx", clarificationChoiceID: "candidate-a")
+        let decoded = try ComputerUsePromptRequest.decodeBody(answer.encodedBody())
+        XCTAssertEqual(decoded.clarification, reference)
+        XCTAssertEqual(decoded.clarificationChoiceID, "candidate-a")
+        XCTAssertEqual(decoded.modelPrompt, "Project Alpha.pptx")
+        XCTAssertThrowsError(try ComputerUsePromptRequest.decodeBody(
+            "{\"version\":1,\"prompt\":\"ordinary task\",\"conversation\":[],\"clarificationChoiceID\":\"candidate-a\"}"))
+    }
+
+    func testStoreBindsChoiceIDToCurrentCandidateAndPreservesFreeTextPath() throws {
+        let store = ComputerUseTextClarificationStore()
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Upload a presentation")
+        let choices = [try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx"),
+                       try ComputerUseClarificationChoice(id: "candidate-b", label: "Project Beta.pptx")]
+        let reference = try store.issue(goal: goal, question: "Which presentation?", scope: scope,
+            choices: choices, for: request("question"))
+        XCTAssertThrowsError(try store.consumeSelection(reference, answer: "Project Alpha.pptx", choiceID: "foreign-id",
+            scope: scope, for: request("answer"))) {
+            XCTAssertEqual($0 as? ComputerUseTextClarificationStore.Failure, .invalidChoice)
+        }
+        XCTAssertThrowsError(try store.consumeSelection(reference, answer: "Project Beta.pptx", choiceID: "candidate-a",
+            scope: scope, for: request("answer"))) {
+            XCTAssertEqual($0 as? ComputerUseTextClarificationStore.Failure, .invalidChoice)
+        }
+        let selected = try store.consumeSelection(reference, answer: "Project Alpha.pptx", choiceID: "candidate-a",
+            scope: scope, for: request("answer"))
+        XCTAssertEqual(selected.selectedChoice?.id, "candidate-a")
+        XCTAssertEqual(selected.goal.userTurns.last, "Project Alpha.pptx")
+
+        let freeTextStore = ComputerUseTextClarificationStore()
+        let freeTextReference = try freeTextStore.issue(goal: goal, question: "Which presentation?", scope: scope,
+            choices: choices, for: request("another-question"))
+        let freeText = try freeTextStore.consumeSelection(freeTextReference, answer: "The latest one", scope: scope,
+            for: request("free-text-answer"))
+        XCTAssertNil(freeText.selectedChoice)
+        XCTAssertEqual(freeText.goal.userTurns.last, "The latest one")
+    }
+
     func testRetainedGoalSurvivesTwoAnswersWithoutTruncatingOrMixingQuestionsIntoUserText() throws {
         let store = ComputerUseTextClarificationStore()
         let literal = "  e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  "

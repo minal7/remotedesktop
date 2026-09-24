@@ -854,31 +854,93 @@ public struct ComputerUseClarificationProbe: Codable, Equatable, Sendable {
     }
 }
 
+/// A host-provided option for resolving one live clarification. The opaque ID
+/// binds a later selection to the host's retained candidate; labels/details
+/// are display data and never expand the original task's authority.
+public struct ComputerUseClarificationChoice: Codable, Equatable, Sendable {
+    public static let maximumChoices = 8
+    public static let maximumIDBytes = 128
+    public static let maximumDisplayBytes = 512
+
+    public let id: String
+    public let label: String
+    public let detail: String?
+
+    public init(id: String, label: String, detail: String? = nil) throws {
+        guard Self.validID(id), Self.validDisplay(label), detail.map(Self.validDisplay) ?? true else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
+        self.id = id
+        self.label = label
+        self.detail = detail
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, label, detail }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(id: values.decode(String.self, forKey: .id),
+                      label: values.decode(String.self, forKey: .label),
+                      detail: values.decodeIfPresent(String.self, forKey: .detail))
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(label, forKey: .label)
+        try values.encodeIfPresent(detail, forKey: .detail)
+    }
+
+    public static func validate(_ choices: [Self]?) throws {
+        guard let choices else { return }
+        guard (1...maximumChoices).contains(choices.count),
+              Set(choices.map(\.id)).count == choices.count,
+              choices.allSatisfy({ validID($0.id) && validDisplay($0.label) && ($0.detail.map(validDisplay) ?? true) }) else {
+            throw ComputerUsePayloadError.invalidClarification
+        }
+    }
+
+    private static func validID(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf8.count <= maximumIDBytes
+    }
+
+    private static func validDisplay(_ value: String) -> Bool {
+        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && value.utf8.count <= maximumDisplayBytes
+    }
+}
+
 public struct ComputerUseClarificationProbeResult: Codable, Equatable, Sendable {
     public let probeID: UUID
     public let reference: ComputerUseClarificationReference
     /// Nil means the original native question is unavailable, not completed.
     public let question: String?
     public let answerPolicy: ComputerUseClarificationAnswerPolicy?
+    public let clarificationChoices: [ComputerUseClarificationChoice]?
     public init(probeID: UUID, reference: ComputerUseClarificationReference, question: String?,
-                answerPolicy: ComputerUseClarificationAnswerPolicy? = nil) throws {
+                answerPolicy: ComputerUseClarificationAnswerPolicy? = nil,
+                clarificationChoices: [ComputerUseClarificationChoice]? = nil) throws {
         guard question.map(ComputerUseClarificationText.isValid) ?? (answerPolicy == nil) else {
             throw ComputerUsePayloadError.invalidClarification
         }
+        try ComputerUseClarificationChoice.validate(clarificationChoices)
+        guard clarificationChoices == nil || question != nil else { throw ComputerUsePayloadError.invalidClarification }
         self.probeID = probeID; self.reference = reference; self.question = question; self.answerPolicy = answerPolicy
+        self.clarificationChoices = clarificationChoices
     }
-    private enum CodingKeys: String, CodingKey { case type, probeID, reference, question, answerPolicy }
+    private enum CodingKeys: String, CodingKey { case type, probeID, reference, question, answerPolicy, clarificationChoices }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         guard try values.decode(String.self, forKey: .type) == "clarificationProbeResult" else { throw ComputerUsePayloadError.invalidClarification }
         try self.init(probeID: values.decode(UUID.self, forKey: .probeID), reference: values.decode(ComputerUseClarificationReference.self, forKey: .reference),
-            question: values.decodeIfPresent(String.self, forKey: .question), answerPolicy: values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .answerPolicy))
+            question: values.decodeIfPresent(String.self, forKey: .question), answerPolicy: values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .answerPolicy),
+            clarificationChoices: values.decodeIfPresent([ComputerUseClarificationChoice].self, forKey: .clarificationChoices))
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode("clarificationProbeResult", forKey: .type)
         try values.encode(probeID, forKey: .probeID); try values.encode(reference, forKey: .reference)
         try values.encodeIfPresent(question, forKey: .question); try values.encodeIfPresent(answerPolicy, forKey: .answerPolicy)
+        try values.encodeIfPresent(clarificationChoices, forKey: .clarificationChoices)
     }
     public func encodedBody() throws -> String { try encodeComputerUseBody(self) }
     public static func decodeBody(_ body: String) throws -> Self { try decodeComputerUseBody(body, as: Self.self) }
@@ -905,6 +967,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     public let clarification: ComputerUseClarificationReference?
     public let clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy?
     public let clarificationRetry: ComputerUseClarificationRetry?
+    public let clarificationChoices: [ComputerUseClarificationChoice]?
     public let supportsClarificationRecovery: Bool
     public let approvedActionEvidence: ComputerUseApprovedActionEvidence?
     /// Carried in a status envelope. It updates historical evidence only and
@@ -922,6 +985,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         clarification: ComputerUseClarificationReference? = nil,
         clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy? = nil,
         clarificationRetry: ComputerUseClarificationRetry? = nil,
+        clarificationChoices: [ComputerUseClarificationChoice]? = nil,
         supportsClarificationRecovery: Bool = false,
         approvedActionEvidence: ComputerUseApprovedActionEvidence? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
@@ -936,6 +1000,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         self.clarification = question
         self.clarificationAnswerPolicy = clarificationAnswerPolicy
         self.clarificationRetry = clarificationRetry
+        self.clarificationChoices = clarificationChoices
         self.supportsClarificationRecovery = supportsClarificationRecovery
         self.approvedActionEvidence = approvedActionEvidence
         self.isApprovedActionEvidenceOnly = isApprovedActionEvidenceOnly
@@ -951,6 +1016,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         case clarification
         case clarificationAnswerPolicy
         case clarificationRetry
+        case clarificationChoices
         case supportsClarificationRecovery
         case approvedActionEvidence
         case isApprovedActionEvidenceOnly
@@ -980,6 +1046,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         clarification = outcome == .userInterventionRequired && reference?.taskID == taskID ? reference : nil
         clarificationAnswerPolicy = try values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .clarificationAnswerPolicy)
         clarificationRetry = try values.decodeIfPresent(ComputerUseClarificationRetry.self, forKey: .clarificationRetry)
+        clarificationChoices = try values.decodeIfPresent([ComputerUseClarificationChoice].self, forKey: .clarificationChoices)
         supportsClarificationRecovery = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationRecovery) ?? false
         approvedActionEvidence = try values.decodeIfPresent(ComputerUseApprovedActionEvidence.self, forKey: .approvedActionEvidence)
         isApprovedActionEvidenceOnly = try values.decodeIfPresent(Bool.self, forKey: .isApprovedActionEvidenceOnly) ?? false
@@ -1004,6 +1071,7 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
         try values.encodeIfPresent(clarification, forKey: .clarification)
         try values.encodeIfPresent(clarificationAnswerPolicy, forKey: .clarificationAnswerPolicy)
         try values.encodeIfPresent(clarificationRetry, forKey: .clarificationRetry)
+        try values.encodeIfPresent(clarificationChoices, forKey: .clarificationChoices)
         if supportsClarificationRecovery { try values.encode(true, forKey: .supportsClarificationRecovery) }
         try values.encodeIfPresent(approvedActionEvidence, forKey: .approvedActionEvidence)
         if isApprovedActionEvidenceOnly { try values.encode(true, forKey: .isApprovedActionEvidenceOnly) }
@@ -1011,6 +1079,10 @@ public struct ComputerUseTaskUpdate: Codable, Equatable, Sendable {
     }
 
     private func validatePayloadUse() throws {
+        try ComputerUseClarificationChoice.validate(clarificationChoices)
+        if clarificationChoices != nil, (outcome != .userInterventionRequired || clarification == nil || clarificationRetry != nil) {
+            throw ComputerUsePayloadError.invalidClarification
+        }
         if supportsClarificationRecovery {
             guard outcome == .userInterventionRequired, clarification != nil || clarificationRetry != nil else {
                 throw ComputerUsePayloadError.invalidClarification
@@ -1116,6 +1188,9 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     public let prompt: String
     public let conversation: [ComputerUseConversationTurn]
     public let clarification: ComputerUseClarificationReference?
+    /// The selected host option for this exact clarification. The selected
+    /// display label remains the prompt text; this opaque ID is transport-only.
+    public let clarificationChoiceID: String?
     /// Allows evidence-only status updates. Older clients receive optional
     /// evidence only on their existing lifecycle replies.
     public let supportsApprovedActionEvidence: Bool
@@ -1132,6 +1207,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         self.prompt = Self.boundedPrompt(prompt)
         self.conversation = Self.boundedConversation(conversation)
         clarification = nil
+        clarificationChoiceID = nil
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = false
         self.supportsClarificationFormatRetry = false
@@ -1141,19 +1217,28 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     /// excerpt. Reject an oversized answer instead of truncating its payload.
     public static func answering(_ reference: ComputerUseClarificationReference, text: String,
         supportsApprovedActionEvidence: Bool = false, supportsClarificationRetry: Bool = false,
-        supportsClarificationFormatRetry: Bool = false) throws -> Self {
+        supportsClarificationFormatRetry: Bool = false, clarificationChoiceID: String? = nil) throws -> Self {
         try Self(exactAnswer: text, reference: reference, supportsApprovedActionEvidence: supportsApprovedActionEvidence,
-            supportsClarificationRetry: supportsClarificationRetry, supportsClarificationFormatRetry: supportsClarificationFormatRetry)
+            supportsClarificationRetry: supportsClarificationRetry, supportsClarificationFormatRetry: supportsClarificationFormatRetry,
+            clarificationChoiceID: clarificationChoiceID)
     }
 
     private init(exactAnswer: String, reference: ComputerUseClarificationReference, supportsApprovedActionEvidence: Bool,
-                 supportsClarificationRetry: Bool, supportsClarificationFormatRetry: Bool) throws {
+                 supportsClarificationRetry: Bool, supportsClarificationFormatRetry: Bool,
+                 clarificationChoiceID: String?) throws {
         guard !supportsClarificationFormatRetry || supportsClarificationRetry else { throw ComputerUsePayloadError.invalidClarification }
+        if let clarificationChoiceID {
+            guard !clarificationChoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  clarificationChoiceID.utf8.count <= ComputerUseClarificationChoice.maximumIDBytes else {
+                throw ComputerUsePayloadError.invalidClarification
+            }
+        }
         try Self.validateExactAnswer(exactAnswer)
         version = Self.currentVersion
         prompt = exactAnswer
         conversation = []
         clarification = reference
+        self.clarificationChoiceID = clarificationChoiceID
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = supportsClarificationRetry
         self.supportsClarificationFormatRetry = supportsClarificationFormatRetry
@@ -1197,6 +1282,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         case prompt
         case conversation
         case clarification
+        case clarificationChoiceID
         case supportsApprovedActionEvidence
         case supportsClarificationRetry
         case supportsClarificationFormatRetry
@@ -1207,6 +1293,14 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         version = try values.decodeIfPresent(Int.self, forKey: .version)
             ?? Self.currentVersion
         clarification = try values.decodeIfPresent(ComputerUseClarificationReference.self, forKey: .clarification)
+        clarificationChoiceID = try values.decodeIfPresent(String.self, forKey: .clarificationChoiceID)
+        if let clarificationChoiceID {
+            guard clarification != nil,
+                  !clarificationChoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  clarificationChoiceID.utf8.count <= ComputerUseClarificationChoice.maximumIDBytes else {
+                throw ComputerUsePayloadError.invalidClarification
+            }
+        }
         supportsApprovedActionEvidence = try values.decodeIfPresent(Bool.self, forKey: .supportsApprovedActionEvidence) ?? false
         supportsClarificationRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationRetry) ?? false
         supportsClarificationFormatRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationFormatRetry) ?? false
@@ -1232,6 +1326,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         try values.encode(prompt, forKey: .prompt)
         try values.encode(conversation, forKey: .conversation)
         try values.encodeIfPresent(clarification, forKey: .clarification)
+        try values.encodeIfPresent(clarificationChoiceID, forKey: .clarificationChoiceID)
         if supportsApprovedActionEvidence { try values.encode(true, forKey: .supportsApprovedActionEvidence) }
         if supportsClarificationRetry { try values.encode(true, forKey: .supportsClarificationRetry) }
         if supportsClarificationFormatRetry { try values.encode(true, forKey: .supportsClarificationFormatRetry) }
