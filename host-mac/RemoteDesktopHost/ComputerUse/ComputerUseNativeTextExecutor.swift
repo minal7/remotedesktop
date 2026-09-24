@@ -12,6 +12,13 @@ final class ComputerUseNativeTextExecutor {
         let question: String
         let scope: String
         let expiresAt: Date
+        let choices: [ComputerUseClarificationChoice]?
+
+        init(taskID: String, goal: ComputerUseUnresolvedTextGoal, question: String, scope: String,
+             expiresAt: Date, choices: [ComputerUseClarificationChoice]? = nil) {
+            self.taskID = taskID; self.goal = goal; self.question = question; self.scope = scope
+            self.expiresAt = expiresAt; self.choices = choices
+        }
     }
     private struct PendingClarification {
         let info: Clarification

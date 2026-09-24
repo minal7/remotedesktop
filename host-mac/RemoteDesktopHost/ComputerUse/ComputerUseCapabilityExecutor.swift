@@ -5,7 +5,21 @@ protocol ComputerUseTextClarificationContinuing {
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification?
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
     func invalidateClarification(taskID: String?)
+}
+
+extension ComputerUseTextClarificationContinuing {
+    /// Existing continuations still accept ordinary text answers. A typed
+    /// catalog selection must be explicitly supported, never silently dropped.
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard selectedChoice == nil else { throw ComputerUseTextClarificationStore.Failure.invalidChoice }
+        return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+    }
 }
 
 /// A native decline is not permission to enter research or visual execution.
@@ -343,6 +357,39 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         } else if let continuing = desktop as? any ComputerUseTextClarificationContinuing {
             result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
         } else { throw RoutingError.missingContinuation }
+        try rejectUnroutedResearchQuestion(result)
+        return result
+    }
+
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard let selectedChoice else {
+            return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                goal: goal, progress: progress)
+        }
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        guard route != .native else { throw ComputerUseTextClarificationStore.Failure.invalidChoice }
+        guard route == .desktop,
+              let continuing = desktop as? any ComputerUseTextClarificationContinuing else {
+            throw RoutingError.missingContinuation
+        }
+        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        if self.taskID == taskID {
+            guard promptDigest == digest else { throw RoutingError.taskChanged }
+        } else {
+            guard self.taskID == originatingTaskID, let pending = try clarification(taskID: originatingTaskID),
+                  pending.goal == goal, pending.choices?.contains(selectedChoice) == true else {
+                throw RoutingError.missingContinuation
+            }
+            self.taskID = taskID
+            promptDigest = digest
+        }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        let result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+            goal: goal, selectedChoice: selectedChoice, progress: progress)
         try rejectUnroutedResearchQuestion(result)
         return result
     }

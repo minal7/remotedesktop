@@ -4,6 +4,230 @@ import WebKit
 
 @MainActor
 final class ComputerUseBrowserDOMTests: XCTestCase {
+    func testOwnedBrowserFileInputReceivesOneResolvedFileOnce() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var stage = "fixture startup"
+        do {
+            let fixture = try await DOMFixture(body: """
+                <style>input{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+                <input id='upload' type='file' multiple onchange="const f=this.files[0]; fetch('/selected?name='+encodeURIComponent(f.name)+'&size='+f.size+'&count='+this.files.length)">
+                """, presentsWindow: true)
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            stage = "directory creation"
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+            let selectedURL = directory.appendingPathComponent("reviewed.txt")
+            let bytes = Data("controlled upload bytes".utf8)
+            stage = "fixture file write"
+            try bytes.write(to: selectedURL)
+            stage = "catalog creation and discover"
+            var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+            let listing = try catalog.discover()
+            let candidate = try XCTUnwrap(listing.candidates.first { $0.displayName == "reviewed.txt" })
+            stage = "initial page observation"
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            var resolverCalls = 0
+            stage = "arm host resolver"
+            try fixture.browser.armOneUseFileSelection(taskID: "fixture", evidence: evidence) {
+                resolverCalls += 1
+                return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+            }
+            stage = "capture and native file click"
+            try await clickFileInput(in: fixture, document: fixture.document,
+                diagnoseFailures: true, assertUploadTarget: true)
+            stage = "wait for selected-file request"
+            try await fixture.wait { fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") } }
+            stage = "assert selected file metadata"
+            let selected = try XCTUnwrap(fixture.server.requestedPaths.first { $0.hasPrefix("/selected?") })
+            XCTAssertTrue(selected.contains("name=reviewed.txt"))
+            XCTAssertTrue(selected.contains("size=\(bytes.count)"))
+            XCTAssertTrue(selected.contains("count=1"), "A multiple file input still receives exactly one host-selected file")
+            XCTAssertEqual(resolverCalls, 1)
+            // A second picker request cannot reuse the consumed resolver.
+            stage = "verify second-click refusal"
+            do {
+                try await clickFileInput(in: fixture, document: fixture.document)
+                XCTFail("A second file input click needs a new host selection")
+            } catch let error as ComputerUseBrowserError {
+                XCTAssertEqual(error, .fileSelectionUnavailable)
+            }
+            XCTAssertEqual(resolverCalls, 1, "The one-use resolver is consumed by the first picker callback")
+            XCTAssertEqual(fixture.server.requestedPaths.filter { $0.hasPrefix("/selected?") }.count, 1)
+            // The browser callback only supplies a file to the page. This test
+            // makes no claim that a remote upload was accepted or the goal met.
+        } catch {
+            XCTFail("File-picker diagnostic at stage \(stage): \(error)")
+            throw error
+        }
+    }
+
+    func testOwnedBrowserFileSelectionRejectsReplacedCatalogCandidateOnce() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>input{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+            <input id='upload' type='file' onchange="fetch('/selected?name='+encodeURIComponent(this.files[0].name))">
+        """, presentsWindow: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let selectedURL = directory.appendingPathComponent("reviewed.txt")
+        try Data("original approved bytes".utf8).write(to: selectedURL)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first { $0.displayName == "reviewed.txt" })
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        var resolverCalls = 0
+        var resolverFailure: ComputerUseLocalFileCatalog.Failure?
+        try fixture.browser.armOneUseFileSelection(taskID: "fixture", evidence: evidence) {
+            resolverCalls += 1
+            do { return try catalog.resolve(candidateID: candidate.id, taskID: "fixture") }
+            catch let error as ComputerUseLocalFileCatalog.Failure {
+                resolverFailure = error
+                throw error
+            }
+        }
+
+        try FileManager.default.removeItem(at: selectedURL)
+        try Data("replacement file with different identity".utf8).write(to: selectedURL)
+        do {
+            try await clickFileInput(in: fixture, document: fixture.document)
+            XCTFail("A replaced file must not be supplied from a previously approved catalog candidate")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertEqual(resolverCalls, 1)
+        XCTAssertEqual(resolverFailure, .staleCandidate)
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") })
+
+        do {
+            try await clickFileInput(in: fixture, document: fixture.document)
+            XCTFail("A failed one-use selection cannot be reused")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertEqual(resolverCalls, 1, "The resolver is consumed even when it rejects a stale candidate")
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") })
+    }
+
+    func testOwnedBrowserFileSelectionIsInvalidatedByUserControlTakeover() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var mayAct = true
+        let fixture = try await DOMFixture(body: """
+            <style>input{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+            <input id='upload' type='file' onchange="fetch('/selected?name='+encodeURIComponent(this.files[0].name))">
+        """, presentsWindow: true, mayAct: { mayAct })
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let selectedURL = directory.appendingPathComponent("reviewed.txt")
+        try Data("controlled bytes".utf8).write(to: selectedURL)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first { $0.displayName == "reviewed.txt" })
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        var resolverCalls = 0
+        try fixture.browser.armOneUseFileSelection(taskID: "fixture", evidence: evidence) {
+            resolverCalls += 1
+            return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+        }
+
+        mayAct = false
+        fixture.browser.prepareForUserControl(taskID: "fixture")
+        mayAct = true
+        do {
+            try await clickFileInput(in: fixture, document: fixture.document)
+            XCTFail("A selection armed before user control must not survive a fresh capture")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertEqual(resolverCalls, 0, "Takeover invalidates the armed selection before the native callback")
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") })
+    }
+
+    func testOwnedBrowserFileInputWithoutSelectionDoesNotReceiveAFile() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>input{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+            <input id='upload' type='file' onchange="fetch('/selected?name='+encodeURIComponent(this.files[0].name))">
+        """, presentsWindow: true)
+        defer { fixture.close() }
+        do {
+            try await clickFileInput(in: fixture, document: fixture.document)
+            XCTFail("A file input without a host selection must be refused")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") })
+    }
+
+    func testOwnedBrowserFileSelectionIsInvalidatedByDocumentNavigation() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>input{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+            <input id='upload' type='file' onchange="fetch('/selected?name='+encodeURIComponent(this.files[0].name))">
+            """, presentsWindow: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let selectedURL = directory.appendingPathComponent("reviewed.txt")
+        try Data("controlled".utf8).write(to: selectedURL)
+        let evidence = try await fixture.browser.observePage(document: fixture.document)
+        var resolverCalls = 0
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first { $0.displayName == "reviewed.txt" })
+        try fixture.browser.armOneUseFileSelection(taskID: "fixture", evidence: evidence) {
+            resolverCalls += 1
+            return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+        }
+        let replacement = try await fixture.browser.navigate(taskID: "fixture", operationID: "replacement",
+            to: fixture.document.committedURL)
+        do {
+            try await clickFileInput(in: fixture, document: replacement)
+            XCTFail("A selection armed for the prior document must not be used")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertEqual(resolverCalls, 0)
+        XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/selected?") })
+    }
+
+    private func clickFileInput(in fixture: DOMFixture, document: ComputerUseBrowserDocument,
+                                diagnoseFailures: Bool = false, assertUploadTarget: Bool = false) async throws {
+        let observation: ComputerUseOwnedBrowser.AgentObservation
+        do {
+            observation = try await fixture.browser.captureAgentObservation(document: document)
+        } catch {
+            if diagnoseFailures { XCTFail("File-picker diagnostic: capture failed at \(fixture.browser.lastAgentCaptureStage ?? "none"): \(error)") }
+            throw error
+        }
+        // The page viewport is 960×640 CSS pixels. Point coordinates are
+        // screenshot-normalized to 0...1000, so (45,40) lands inside the
+        // fixed input at (20,20) with a 320×44 CSS-pixel box.
+        let point = ComputerUseFaraAction.Point(x: 45, y: 40)
+        let action = ComputerUseFaraAction.pointer(.leftClick, point)
+        do {
+            if assertUploadTarget {
+                let inspectedTarget = try await fixture.browser.inspectAgentTarget(action, observation: observation)
+                let target = try XCTUnwrap(inspectedTarget)
+                XCTAssertEqual(target.context, "AXFileUpload • File upload control")
+                try await fixture.browser.performAgentInput(action, observation: observation, target: target)
+            } else {
+                try await fixture.browser.performAgentInput(action, observation: observation)
+            }
+        } catch {
+            if diagnoseFailures { XCTFail("File-picker diagnostic: performAgentInput failed after capture stage \(fixture.browser.lastAgentCaptureStage ?? "none"): \(error)") }
+            throw error
+        }
+    }
+
     func testImageOnlyLinkAndButtonLabelsUseRenderedAlternativeText() async throws {
         let fixture = try await DOMFixture(body: """
             <style>img{width:32px;height:32px}</style>
@@ -3255,6 +3479,50 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         XCTAssertEqual(fixture.editedValues.count, 1)
     }
 
+    func testNativeRetainedQuestionRejectsTypedChoiceWithoutConsumingOrdinaryAnswer() async throws {
+        let fixture = try await DOMFixture(body: """
+            <label>Origin<input value="old"></label><label>Destination<textarea>keep</textarea></label>
+            <script>document.querySelector('textarea').addEventListener('input', e => fetch('/edited?value=' + encodeURIComponent(e.target.value)));</script>
+            """)
+        defer { fixture.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let planner = DOMClarificationFixturePlanner()
+        let native = clarificationExecutor(fixture: fixture, planner: planner, directory: directory)
+        var desktopLoads = 0
+        let executor = ComputerUseCapabilityExecutor(native: native, desktopFactory: { _ in
+            desktopLoads += 1
+            XCTFail("A typed file choice is unsupported on the retained native form route")
+            throw ComputerUseTextTaskError.invalidPlan
+        })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let prompt = #"Put "blue" in a field."#
+        let initial = try await executor.execute(taskID: "choice-question", prompt: prompt,
+            trustedUserPrompt: prompt, tools: tools, progress: { _ in })
+        guard case .clarificationRequired = initial else { return XCTFail("The form should retain its normal text question") }
+        let pending = try XCTUnwrap(executor.clarification(taskID: "choice-question"))
+        let typedChoice = try ComputerUseClarificationChoice(id: "candidate-file", label: "Report.pdf")
+        do {
+            _ = try await executor.continueClarification(taskID: "choice-answer", originatingTaskID: "choice-question",
+                goal: pending.goal, selectedChoice: typedChoice, progress: { _ in })
+            XCTFail("The native route must reject typed catalog choices")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseTextClarificationStore.Failure, .invalidChoice)
+        }
+        XCTAssertEqual(try executor.clarification(taskID: "choice-question"), pending,
+            "Rejecting an unsupported selection cannot consume or transfer the native question")
+
+        let textGoal = try pending.goal.answering(pending.question, with: "Destination")
+        let completed = try await executor.continueClarification(taskID: "choice-answer", originatingTaskID: "choice-question",
+            goal: textGoal, selectedChoice: nil, progress: { _ in })
+        guard case .completed = completed else { return XCTFail("An ordinary text answer should still complete") }
+        try await fixture.wait { fixture.editedValues == ["blue"] }
+        XCTAssertEqual(fixture.editedValues, ["blue"])
+        XCTAssertEqual(planner.goals, [pending.goal, textGoal])
+        XCTAssertNil(try executor.clarification(taskID: "choice-question"))
+        XCTAssertEqual(desktopLoads, 0)
+    }
+
     func testNativeClarificationPreservesTwoQuestionsAndEachQuestionTaskIdentity() async throws {
         let fixture = try await DOMFixture(body: """
             <label>Origin<input value="old"></label><label>Destination<textarea>keep</textarea></label>
@@ -5243,13 +5511,14 @@ private final class DOMFixture {
     let target: ComputerUseBrowserTextTarget
 
     init(body: String, heldSignal: Bool = false, additionalRoutes: [String: OwnedBrowserHTTPFixture.Response] = [:], domTimeout: Duration = .seconds(5),
-         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil, mayAct: @escaping () -> Bool = { true }) async throws {
+         domScriptDidDispatch: ((ComputerUseBrowserDOMCommand) -> Void)? = nil, presentsWindow: Bool = false,
+         mayAct: @escaping () -> Bool = { true }) async throws {
         var routes = additionalRoutes
         routes["/form"] = .init(body: "<!doctype html><meta charset='utf-8'>" + body)
         routes["/signal"] = .init(held: heldSignal)
         server = try OwnedBrowserHTTPFixture(routes: routes)
         let base = try await server.start()
-        browser = ComputerUseOwnedBrowser(presentsWindow: false, domTimeout: domTimeout, domScriptDidDispatch: domScriptDidDispatch, mayAct: mayAct)
+        browser = ComputerUseOwnedBrowser(presentsWindow: presentsWindow, domTimeout: domTimeout, domScriptDidDispatch: domScriptDidDispatch, mayAct: mayAct)
         do {
             try browser.claim(taskID: "fixture")
             document = try await browser.navigate(taskID: "fixture", operationID: "open", to: base.appendingPathComponent("form"))

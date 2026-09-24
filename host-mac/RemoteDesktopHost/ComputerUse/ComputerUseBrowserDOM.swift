@@ -340,7 +340,7 @@ struct ComputerUseBrowserPageSnapshot: Decodable, Equatable, Sendable, CustomStr
               controls.allSatisfy({ control in
                   identifier(control.id, prefix: "c") && identifier(control.containerID, prefix: "g")
                   && control.label.utf8.count <= 256 && control.name.utf8.count <= 256 && control.compositeMetadataIsWellFormed
-                  && (["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "checkbox", "radio", "select", "button", "submit", "reset", "image"].contains(control.kind)
+                  && (["text", "search", "url", "tel", "email", "textarea", "date", "datetime-local", "month", "week", "time", "number", "checkbox", "radio", "select", "button", "submit", "reset", "image", "file"].contains(control.kind)
                       || (ComputerUseBrowserDeclaredState.kinds.contains(control.kind) && control.form == nil && control.constraints.isEmpty && !control.multiple)
                       || ComputerUseBrowserCompositeState.kinds.contains(control.kind))
                   && Set(control.constraints.keys).isSubset(of: ["min", "max", "step", "pattern", "minlength", "maxlength"])
@@ -1457,7 +1457,7 @@ enum ComputerUseBrowserDOM {
         // pass: the text walker deliberately excludes inputs and options.
         // Current native state is opt-in for research readings. General page
         // and form planning continue to use metadata without current values.
-        const controlKinds = new Set(['text','search','url','tel','email','textarea','date','datetime-local','month','week','time','number','checkbox','radio','select','button','submit','reset','image']);
+        const controlKinds = new Set(['text','search','url','tel','email','textarea','date','datetime-local','month','week','time','number','checkbox','radio','select','button','submit','reset','image','file']);
         const constraintNames = ['min','max','step','pattern','minlength','maxlength'];
         const small = (value, limit) => typeof value === 'string' && value.length <= limit && encoder.encode(value).length <= limit;
         function renderedControl(element) {
@@ -1598,7 +1598,8 @@ enum ComputerUseBrowserDOM {
           if (compositeRole && !label.trim()) { omittedControls = omittedControlMetadata = true; continue; }
           const name = declaredRole ? '' : element.name || '', constraints = {};
           if (!declaredRole) for (const attribute of constraintNames) if (element.hasAttribute(attribute)) constraints[attribute] = element.getAttribute(attribute);
-          const form = declaredRole ? null : formMetadata(element, kind);
+          // File controls are host-picked and are never permission to submit their form.
+          const form = declaredRole || kind === 'file' ? null : formMetadata(element, kind);
           if (!small(label, 256) || !small(name, 256) || Object.values(constraints).some(value => !small(value, 512)) || form === undefined) {
             truncated = true; omittedControls = omittedControlMetadata = true; continue;
           }
@@ -2189,7 +2190,8 @@ enum ComputerUseBrowserDOM {
               if (typeof args.controlID === 'string') {
                 const id = args.controlID, binding = controls.get(id), previous = lastPageSnapshot.controls.get(id);
                 if (!/^c[0-9]{1,64}$/.test(id) || !binding || !previous || previous.element !== binding.element
-                    || previous.form !== binding.form || previous.retired || !binding.metadata.label.trim()) return reply('stale-agent-control-identity');
+                    || previous.form !== binding.form || previous.retired
+                    || (!binding.metadata.label.trim() && binding.metadata.kind !== 'file')) return reply('stale-agent-control-identity');
                 const rect = binding.element.getBoundingClientRect();
                 if (!rect || rect.width <= 0 || rect.height <= 0 || rect.left < 0 || rect.top < 0
                     || rect.right > innerWidth || rect.bottom > innerHeight) return reply('stale-agent-control-layout');
@@ -2245,7 +2247,8 @@ enum ComputerUseBrowserDOM {
                 return {...reply('agent-target'),agentTargetID:'unidentified',agentTargetContext:''};
               }
               for (let depth=0; hit && depth<24; depth++,hit=hit.parentElement || hit.getRootNode()?.host) {
-                for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled && binding.metadata.label.trim()) {
+                for (const [id,binding] of controls) if (binding.element === hit && !binding.metadata.disabled
+                    && (binding.metadata.label.trim() || binding.metadata.kind === 'file')) {
                   const previous = lastPageSnapshot.controls.get(id);
                   const nativeTextEditing = args.textEditing === true && args.focused === true && hit === binding.element
                     && !binding.metadata.readOnly && (hit instanceof HTMLTextAreaElement || (hit instanceof HTMLInputElement && textTypes.has(hit.type)));
@@ -2273,7 +2276,8 @@ enum ComputerUseBrowserDOM {
                   if (previous.references.length !== binding.references.length
                       || previous.references.some((node,index) => node !== binding.references[index])) return reply('stale-agent-control-references');
                   const kind = binding.metadata.kind;
-                  const role = ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
+                  const role = kind === 'file' ? 'AXFileUpload'
+                    : ['text','search','url','tel','email','date','datetime-local','month','week','time','number'].includes(kind) ? 'AXTextField'
                     : kind === 'textarea' ? 'AXTextArea'
                     : kind === 'select' ? 'AXComboBox' : kind.includes('checkbox') ? 'AXCheckBox' : kind.includes('radio') ? 'AXRadioButton' : 'AXButton';
                   // An icon submitter needs its actual form's search context.
@@ -2301,7 +2305,7 @@ enum ComputerUseBrowserDOM {
                           && agentElementStateMatches(lastPageSnapshot.agentState,agentState,field.element)) searchLabel = field.metadata.label;
                     }
                   }
-                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+binding.metadata.label,agentTargetSearchLabel:searchLabel};
+                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+(binding.metadata.label.trim() || (kind === 'file' ? 'File upload control' : '')),agentTargetSearchLabel:searchLabel};
                 }
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);

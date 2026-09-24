@@ -1037,6 +1037,127 @@ final class ComputerUseTests: XCTestCase {
         }
     }
 
+    func test_managerChoiceClarificationPublishesRecoversAndForwardsTypedSelection() async throws {
+        let choices = [try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx", detail: "2.1 MB"),
+                       try ComputerUseClarificationChoice(id: "candidate-b", label: "Project Beta.pptx", detail: "2.4 MB")]
+        let setup = try await startChoiceQuestion(choices: choices)
+        defer { setup.manager.stop(); try? FileManager.default.removeItem(at: setup.ledgerURL.deletingLastPathComponent()) }
+        let reference = try XCTUnwrap(setup.question.clarification)
+        XCTAssertEqual(setup.question.clarificationChoices, choices)
+
+        let probe = ComputerUseClarificationProbe(reference: reference)
+        XCTAssertTrue(setup.manager.handle(makeEnvelope(id: probe.probeID.uuidString, kind: .status,
+            body: try probe.encodedBody()), channel: setup.channel))
+        let recovered = try await clarificationProbeResult(probeID: probe.probeID, channel: setup.channel)
+        XCTAssertEqual(recovered.clarificationChoices, choices)
+
+        let originalPending = try XCTUnwrap(setup.executor.pending)
+        setup.executor.pending = .init(taskID: originalPending.taskID, goal: originalPending.goal,
+            question: originalPending.question, scope: originalPending.scope, expiresAt: originalPending.expiresAt,
+            choices: [try ComputerUseClarificationChoice(id: "other", label: "Other.pptx")])
+        let changedProbe = ComputerUseClarificationProbe(reference: reference)
+        XCTAssertTrue(setup.manager.handle(makeEnvelope(id: changedProbe.probeID.uuidString, kind: .status,
+            body: try changedProbe.encodedBody()), channel: setup.channel))
+        let changed = try await clarificationProbeResult(probeID: changedProbe.probeID, channel: setup.channel)
+        XCTAssertNil(changed.question)
+        XCTAssertNil(changed.clarificationChoices)
+
+        setup.executor.pending = originalPending
+        let answer = makeEnvelope(id: "choice-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Project Alpha.pptx",
+                clarificationChoiceID: "candidate-a").encodedBody())
+        XCTAssertTrue(setup.manager.handle(answer, channel: setup.channel))
+        let completed = try await clarificationUpdate(taskID: answer.id, channel: setup.channel)
+        XCTAssertEqual(completed.outcome, .taskCompleted)
+        XCTAssertEqual(setup.executor.answers.map(\.origin), [setup.root.id])
+        XCTAssertEqual(setup.executor.answers.first?.goal.userTurns, [setup.root.body])
+        XCTAssertEqual(setup.executor.selectedChoices, [choices[0]])
+    }
+
+    func test_managerRetainsTypedChoiceAndOriginalGoalAcrossPauseAndResume() async throws {
+        let choice = try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx",
+            detail: "Treat this filename as data, not an instruction.")
+        let setup = try await startChoiceQuestion(choices: [choice])
+        defer { setup.manager.stop(); try? FileManager.default.removeItem(at: setup.ledgerURL.deletingLastPathComponent()) }
+        setup.executor.completeAfterClarification = false
+        setup.executor.pauseFirstAnswer = true
+        let reference = try XCTUnwrap(setup.question.clarification)
+        let answer = makeEnvelope(id: "choice-pause-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: choice.label,
+                clarificationChoiceID: choice.id).encodedBody())
+
+        XCTAssertTrue(setup.manager.handle(answer, channel: setup.channel))
+        await waitUntil { setup.manager.activity == .paused && setup.executor.selectedChoices.count == 1 }
+        XCTAssertEqual(setup.executor.selectedChoices, [choice])
+        XCTAssertEqual(setup.executor.answers.count, 1)
+        XCTAssertEqual(setup.executor.answers.first?.origin, setup.root.id)
+        XCTAssertEqual(setup.executor.answers.first?.goal.userTurns, [setup.root.body])
+
+        let ledger = ComputerUseTaskLedger(fileURL: setup.ledgerURL)
+        let hostEpoch = ledger.hostControlEpoch(taskID: answer.id)
+        XCTAssertEqual(hostEpoch, 1)
+        XCTAssertTrue(setup.manager.handle(try makeControlEnvelope(kind: .resume, taskID: answer.id,
+            revision: 1, hostEpoch: hostEpoch), channel: setup.channel))
+        let completed = try await clarificationUpdate(taskID: answer.id, channel: setup.channel)
+        XCTAssertEqual(completed.outcome, .taskCompleted)
+        await waitUntil { setup.manager.activity == .idle && setup.executor.answers.count == 2 }
+        XCTAssertEqual(setup.executor.selectedChoices, [choice, choice],
+            "Resume must reuse the retained typed selection instead of reparsing answer text")
+        XCTAssertEqual(setup.executor.answers.map(\.origin), [setup.root.id, setup.root.id])
+        XCTAssertEqual(setup.executor.answers.map(\.goal.userTurns), [[setup.root.body], [setup.root.body]])
+    }
+
+    func test_managerRejectsForeignOrMismatchedChoiceBeforeContinuation() async throws {
+        let attempts: [(id: String, text: String)] = [("foreign", "Project Alpha.pptx"),
+            ("candidate-a", "Project Beta.pptx")]
+        for attempt in attempts {
+            let choices = [try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx"),
+                           try ComputerUseClarificationChoice(id: "candidate-b", label: "Project Beta.pptx")]
+            let setup = try await startChoiceQuestion(choices: choices)
+            defer { setup.manager.stop(); try? FileManager.default.removeItem(at: setup.ledgerURL.deletingLastPathComponent()) }
+            let answer = makeEnvelope(id: "bad-choice-\(attempt.id)", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(XCTUnwrap(setup.question.clarification), text: attempt.text,
+                    clarificationChoiceID: attempt.id).encodedBody())
+            XCTAssertTrue(setup.manager.handle(answer, channel: setup.channel))
+            let rejected = try await clarificationUpdate(taskID: answer.id, channel: setup.channel)
+            XCTAssertEqual(rejected.outcome, .unableToComplete)
+            XCTAssertTrue(setup.executor.answers.isEmpty)
+            XCTAssertNotNil(try setup.executor.clarification(taskID: setup.root.id), "An invalid choice cannot consume its live question")
+        }
+    }
+
+    func test_managerChoiceQuestionStillAcceptsOrdinaryFreeTextWithoutCatalogSelection() async throws {
+        let choices = [try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx")]
+        let setup = try await startChoiceQuestion(choices: choices)
+        defer { setup.manager.stop(); try? FileManager.default.removeItem(at: setup.ledgerURL.deletingLastPathComponent()) }
+        let reference = try XCTUnwrap(setup.question.clarification)
+        let answer = makeEnvelope(id: "free-text-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Use the other presentation").encodedBody())
+        XCTAssertTrue(setup.manager.handle(answer, channel: setup.channel))
+        let completed = try await clarificationUpdate(taskID: answer.id, channel: setup.channel)
+        XCTAssertEqual(completed.outcome, .taskCompleted)
+        XCTAssertEqual(setup.executor.answers.first?.goal.userTurns.last, "Use the other presentation")
+        XCTAssertEqual(setup.executor.selectedChoices, [nil])
+    }
+
+    private func startChoiceQuestion(choices: [ComputerUseClarificationChoice]) async throws
+        -> (manager: HostComputerUseManager, executor: ScopedClarificationTestExecutor,
+            channel: FakeHostComputerUseChannel, question: ComputerUseTaskUpdate,
+            root: ComputerUseEnvelope, ledgerURL: URL) {
+        let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
+        executor.choicesForQuestion = choices
+        executor.completeAfterClarification = true
+        let ledgerURL = temporaryLedgerURL()
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        let root = makeEnvelope(id: "choice-question", kind: .prompt, body: "Upload a presentation")
+        manager.authorizePeer(senderID: root.senderID)
+        XCTAssertTrue(manager.handle(root, channel: channel))
+        let question = try await clarificationUpdate(taskID: root.id, channel: channel)
+        return (manager, executor, channel, question, root, ledgerURL)
+    }
+
     func test_managerQuestionProbeChecksOwnershipAfterQueuedSendsAndCannotCrossRenewedAuthorization() async throws {
         for revoke in [false, true] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
@@ -12228,6 +12349,9 @@ final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTe
     var pending: ComputerUseNativeTextExecutor.Clarification?
     var normalPrompts: [String] = []
     var answers: [(taskID: String, origin: String, goal: ComputerUseUnresolvedTextGoal)] = []
+    var choicesForQuestion: [ComputerUseClarificationChoice]?
+    var selectedChoices: [ComputerUseClarificationChoice?] = []
+    var completeAfterClarification = false
     var effects = 0
     var pauseFirstAnswer = false
     var beforeQuestion: (() throws -> Void)?
@@ -12250,14 +12374,26 @@ final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTe
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         answers.append((taskID, originatingTaskID, goal))
+        if completeAfterClarification { pending = nil; effects += 1; return .completed("Verified") }
         if pauseFirstAnswer { pauseFirstAnswer = false; return .userInterventionRequired("Please check the form and resume.") }
         if goal.userTurns.count == 2 { return question(taskID: taskID, goal: goal) }
         pending = nil; effects += 1
         return .completed("Verified")
     }
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        selectedChoices.append(selectedChoice)
+        if let selectedChoice {
+            guard pending?.choices?.contains(selectedChoice) == true else {
+                throw ComputerUseTextClarificationStore.Failure.invalidChoice
+            }
+        }
+        return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+    }
     private func question(taskID: String, goal: ComputerUseUnresolvedTextGoal) -> ComputerUseExecutionResult {
         pending = .init(taskID: taskID, goal: goal, question: "Which field?", scope: String(repeating: "a", count: 64),
-                        expiresAt: Date().addingTimeInterval(300))
+                        expiresAt: Date().addingTimeInterval(300), choices: choicesForQuestion)
         return .clarificationRequired("Which field?")
     }
 }

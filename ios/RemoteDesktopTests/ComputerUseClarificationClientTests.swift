@@ -308,13 +308,16 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Find concert tickets."))
         let root = try await fixture.channel.prompt(at: 0)
         let policy = try ComputerUseClarificationAnswerPolicy(maximumUTF8Bytes: 8_192, requiresNonblank: true, supportsRetry: true)
-        let reference = try await fixture.question(for: root, lifetime: 1_800, answerPolicy: policy, supportsRecovery: true)
+        let choice = try ComputerUseClarificationChoice(id: "presentation", label: "Deck.pptx", detail: "PowerPoint · 8 MB")
+        let choices = [choice]
+        let reference = try await fixture.question(for: root, lifetime: 1_800, answerPolicy: policy, supportsRecovery: true, choices: choices)
         let draft = "  Paris e\u{301} 😀\n  "
         fixture.model.updateQuestionDraft(draft.precomposedStringWithCanonicalMapping)
         try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft != nil }
         fixture.model.updateQuestionDraft(draft); fixture.model.stop()
         let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")), question = try XCTUnwrap(saved.question)
         XCTAssertTrue(saved.hasValidQuestionRecovery); XCTAssertEqual(question.reference, reference)
+        XCTAssertEqual(question.choices, choices)
         XCTAssertTrue(try XCTUnwrap(question.draft).utf8.elementsEqual(draft.utf8))
         XCTAssertEqual(try JSONDecoder().decode(ComputerUsePendingPrompt.self, from: JSONEncoder().encode(saved)), saved)
         XCTAssertEqual(saved.rebindingPairingCode("654321").question, question)
@@ -332,22 +335,32 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         // are not fresh proof for this recovery attempt.
         await channel.deliver(try ComputerUseTaskUpdate(taskID: root.id, text: question.text, outcome: .userInterventionRequired,
             clarification: reference, supportsClarificationRecovery: true).encodedBody())
-        let wrong = try ComputerUseClarificationProbeResult(probeID: UUID(), reference: reference, question: question.text, answerPolicy: policy)
+        let wrong = try ComputerUseClarificationProbeResult(probeID: UUID(), reference: reference, question: question.text, answerPolicy: policy, clarificationChoices: choices)
         await channel.deliver(try wrong.encodedBody(), kind: .status)
-        let valid = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: question.text, answerPolicy: policy)
+        let valid = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference, question: question.text, answerPolicy: policy, clarificationChoices: choices)
         for (sender, pairing, session) in [("OTHER", "123456", "session-1"), ("HOST-ID", "654321", "session-1"), ("HOST-ID", "123456", "other")] {
             await channel.deliver(try valid.encodedBody(), kind: .status, senderID: sender, pairingCode: pairing, sessionID: session)
         }
         try await channel.waitForDelivery()
         XCTAssertEqual(recovered.composerMode, .recoveringAnswer)
+        let changedChoices = [try ComputerUseClarificationChoice(id: choice.id, label: "Different file", detail: choice.detail)]
+        let changed = try ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: reference,
+            question: question.text, answerPolicy: policy, clarificationChoices: changedChoices)
+        await channel.deliver(try changed.encodedBody(), kind: .status); try await channel.waitForDelivery()
+        XCTAssertEqual(recovered.composerMode, .recoveringAnswer, "A fresh question with changed options cannot revive stale persisted choices")
         await channel.deliver(try valid.encodedBody(), kind: .status); try await channel.waitForDelivery()
         XCTAssertEqual(recovered.composerMode, .answer(reference, validUntil: question.validUntil))
+        XCTAssertEqual(recovered.clarificationChoices, choices)
         XCTAssertTrue(try XCTUnwrap(recovered.restoredClarificationDraft).utf8.elementsEqual(draft.utf8))
         recovered.updateQuestionDraft("Paris")
-        XCTAssertTrue(recovered.sendPrompt("Paris"))
+        guard recovered.sendClarificationChoice(choice.id) else {
+            XCTFail("A choice restored from the fresh matching host probe should dispatch")
+            return
+        }
         let answer = try await channel.prompt(at: 0), decoded = try ComputerUsePromptRequest.decodeBody(answer.body)
         XCTAssertNotEqual(answer.id, root.id); XCTAssertEqual(decoded.clarification, reference)
-        XCTAssertEqual(decoded.prompt, "Paris"); XCTAssertTrue(decoded.conversation.isEmpty)
+        XCTAssertEqual(decoded.clarificationChoiceID, choice.id); XCTAssertEqual(decoded.prompt, choice.label)
+        XCTAssertTrue(decoded.conversation.isEmpty)
         recovered.stop()
         let active = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456"))
         XCTAssertNil(active.question); XCTAssertEqual(active.messageID, answer.id)
@@ -878,6 +891,61 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         XCTAssertNotEqual(sent.id, original.id)
     }
 
+    func testClarificationChoiceSendsExactIDLabelAndOriginalReference() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Upload the latest presentation."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let choice = try ComputerUseClarificationChoice(id: "downloads-presentation",
+            label: "Quarterly presentation", detail: "PowerPoint · modified Sep 20 · 8 MB")
+        let reference = try await fixture.question(for: root, text: "Which file should I upload?", choices: [choice])
+        XCTAssertEqual(fixture.model.clarificationChoices, [choice])
+        XCTAssertFalse(fixture.model.canSendClarificationChoice("foreign-choice"))
+        XCTAssertFalse(fixture.model.sendClarificationChoice("foreign-choice"))
+        guard fixture.model.sendClarificationChoice(choice.id) else {
+            XCTFail("An active, connected choice should dispatch")
+            return
+        }
+        let sent = try await fixture.channel.prompt(at: 1)
+        let answer = try ComputerUsePromptRequest.decodeBody(sent.body)
+        XCTAssertEqual(answer.clarification, reference)
+        XCTAssertEqual(answer.clarificationChoiceID, choice.id)
+        XCTAssertTrue(answer.prompt.utf8.elementsEqual(choice.label.utf8))
+        XCTAssertTrue(answer.conversation.isEmpty)
+    }
+
+    func testChoiceQuestionStillAcceptsExactFreeTextAnswerWithoutChoiceID() async throws {
+        let fixture = ClarificationClientFixture()
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Upload the latest presentation."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let choice = try ComputerUseClarificationChoice(id: "slides", label: "Slides.pptx", detail: "8 MB")
+        let reference = try await fixture.question(for: root, text: "Which file?", choices: [choice])
+        XCTAssertTrue(fixture.model.sendPrompt("A different file I will name"))
+        let sent = try await fixture.channel.prompt(at: 1)
+        let answer = try ComputerUsePromptRequest.decodeBody(sent.body)
+        XCTAssertEqual(answer.clarification, reference)
+        XCTAssertNil(answer.clarificationChoiceID)
+        XCTAssertEqual(answer.prompt, "A different file I will name")
+        XCTAssertTrue(answer.conversation.isEmpty)
+    }
+
+    func testExpiredOrForeignClarificationChoiceNeverDispatches() async throws {
+        var now = Date()
+        let fixture = ClarificationClientFixture(now: { now })
+        defer { fixture.model.stop() }
+        fixture.model.start(); XCTAssertTrue(fixture.model.sendPrompt("Choose a file."))
+        let root = try await fixture.channel.prompt(at: 0)
+        let choice = try ComputerUseClarificationChoice(id: "file-a", label: "Spec A.xlsx", detail: "Modified today · 20 KB")
+        _ = try await fixture.question(for: root, text: "Which file?", lifetime: 10, choices: [choice])
+        XCTAssertFalse(fixture.model.sendClarificationChoice("file-b"))
+        now = now.addingTimeInterval(11)
+        XCTAssertFalse(fixture.model.canSendClarificationChoice(choice.id))
+        XCTAssertFalse(fixture.model.sendClarificationChoice(choice.id))
+        XCTAssertNil(fixture.model.clarificationChoices, "Expiry retires the visible options")
+        let prompts = await fixture.channel.promptCount(); XCTAssertEqual(prompts, 1)
+    }
+
     func testAnswerRetriesAndRelaunchReuseExactBodyAndTaskIDEvenAfterReferenceExpiry() async throws {
         var now = Date()
         let fixture = ClarificationClientFixture(now: { now })
@@ -1255,10 +1323,12 @@ private final class ClarificationClientFixture {
             pendingStore: store, channel: channel, questionRecoveryTimeout: questionRecoveryTimeout, now: now)
     }
     func question(for request: ComputerUseEnvelope, text: String = "Which field?", lifetime: TimeInterval = 300,
-                  answerPolicy: ComputerUseClarificationAnswerPolicy? = nil, supportsRecovery: Bool = false) async throws -> ComputerUseClarificationReference {
+                  answerPolicy: ComputerUseClarificationAnswerPolicy? = nil, supportsRecovery: Bool = false,
+                  choices: [ComputerUseClarificationChoice]? = nil) async throws -> ComputerUseClarificationReference {
         let reference = try ComputerUseClarificationReference(taskID: request.id, expiresAt: Date().addingTimeInterval(lifetime))
         await channel.deliver(try ComputerUseTaskUpdate(taskID: request.id, text: text, outcome: .userInterventionRequired,
-            clarification: reference, clarificationAnswerPolicy: answerPolicy, supportsClarificationRecovery: supportsRecovery).encodedBody())
+            clarification: reference, clarificationAnswerPolicy: answerPolicy, clarificationChoices: choices,
+            supportsClarificationRecovery: supportsRecovery).encodedBody())
         try await wait {
             guard case .answer(let received, _) = self.model.composerMode else { return false }
             return received == reference

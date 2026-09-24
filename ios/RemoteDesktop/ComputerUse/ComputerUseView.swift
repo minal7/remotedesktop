@@ -844,6 +844,39 @@ struct ComputerUseView: View {
                 .disabled(!model.isConnected)
             }
 
+            if let choices = model.clarificationChoices, !choices.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Choose an option, or enter another answer")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(choices.indices, id: \.self) { index in
+                                let choice = choices[index]
+                                Button {
+                                    if sendClarificationChoice(choice.id) { draft = ""; composerFocused = false }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(choice.label).font(.body.weight(.medium))
+                                        if let detail = choice.detail, !detail.isEmpty {
+                                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(!canSendChoice(choice.id))
+                                .accessibilityIdentifier("computer-use-clarification-choice-\(index)")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 164)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack(alignment: .bottom, spacing: 10) {
                 TextField(
                     isTakingControl
@@ -908,6 +941,17 @@ struct ComputerUseView: View {
         }
         guard !model.hasActivePrompt else { return false }
         return model.promptValidationMessage(draft) == nil
+    }
+
+    private func canSendChoice(_ id: String) -> Bool {
+        guard !isTakingControl, !isAwaitingApproval,
+              case .connected = session.state, session.isComputerUsePromptTransportReady else { return false }
+        return model.canSendClarificationChoice(id)
+    }
+
+    private func sendClarificationChoice(_ id: String) -> Bool {
+        guard canSendChoice(id) else { return false }
+        return model.sendClarificationChoice(id)
     }
 
     private func sendDraft() {

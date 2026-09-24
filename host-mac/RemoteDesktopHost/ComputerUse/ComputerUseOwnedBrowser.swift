@@ -613,7 +613,7 @@ final class ComputerUseBrowserLocationInbox: @unchecked Sendable {
 
 enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
     case observedNavigationRetired
-    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, sourceNotAllowed
+    case invalidURL, busy, ownershipLost, pageChanged, navigationFailed, deadlineExceeded, closed, unsupportedDocument, pageEvidenceUnavailable, documentUnresponsive, windowNotActive, authenticationRequired, signInWindowOpen, handbackContextLost, viewportScrollUnavailable, viewportScrollUncertain, linkNavigationUnavailable, observedNavigationUnavailable, observedNavigationUncertain, formQueryUnavailable, formQueryInvalid, fileSelectionUnavailable, sourceNotAllowed
     var errorDescription: String? {
         switch self {
         case .invalidURL: return "The browser needs an HTTP or HTTPS URL without embedded credentials."
@@ -638,6 +638,7 @@ enum ComputerUseBrowserError: Error, LocalizedError, Equatable {
         case .handbackContextLost: return "The AI browser session for this task was closed or replaced. Start a new browser task to continue."
         case .formQueryUnavailable: return "This form cannot be opened as a verified query in the AI browser."
         case .formQueryInvalid: return "The form contains a value that does not meet its requirements. Check the form before continuing."
+        case .fileSelectionUnavailable: return "The AI browser has no current host-approved file selection for this page."
         case .sourceNotAllowed: return "This page is outside the sources allowed for your request. Return to an allowed source, then choose Resume. The original request remains pending."
         }
     }
@@ -660,6 +661,173 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var sessionIdentity: String { ComputerUseTaskContract.digest([session.contextID ?? "", session.taskID, session.ownershipEpoch?.uuidString ?? ""]) }
         var authorityDigest: String { ComputerUseTaskContract.digest([sessionIdentity, id.uuidString]) }
         var taskID: String { session.taskID }
+    }
+
+    /// Arms a single host-resolved file for a visible main-frame file input
+    /// in the exact current page. This first slice does not support hidden
+    /// picker triggers. The callback supplies a file to the page; it is not
+    /// evidence that a remote upload succeeded.
+    func armOneUseFileSelection(
+        taskID: String,
+        evidence: ComputerUseBrowserPageEvidence,
+        resolve: @escaping @MainActor () throws -> URL
+    ) throws {
+        guard evidence.page.isWellFormed,
+              evidence.document.taskID == taskID,
+              evidence.page.controls.contains(where: { $0.kind == "file" && !$0.disabled }),
+              hasOwnership(taskID: taskID), validate(evidence.document),
+              let view = browser,
+              !Task.isCancelled, self.browser === view,
+              evidence.document.generation == generation else {
+            throw ComputerUseBrowserError.fileSelectionUnavailable
+        }
+        oneUseFileSelection = OneUseFileSelection(evidence: evidence, browserSessionID: browserSessionID,
+            ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch, resolve: resolve)
+        pendingFilePanelDispatch = nil
+        completedFilePanelDispatch = nil
+    }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        _ = parameters // The host supplies exactly one file, including for `multiple` inputs.
+        guard webView === browser, frame.isMainFrame,
+              let selection = oneUseFileSelection,
+              let dispatch = pendingFilePanelDispatch,
+              dispatch.selectionID == selection.id,
+              dispatch.document == selection.evidence.document,
+              dispatch.browserSessionID == selection.browserSessionID,
+              dispatch.ownershipEpoch == selection.ownershipEpoch,
+              dispatch.takeoverEpoch == selection.takeoverEpoch else {
+            completionHandler(nil)
+            return
+        }
+        let document = selection.evidence.document
+        // Consume both authorities before invoking the resolver to prevent
+        // reentrant or page-initiated picker callbacks from reusing them.
+        oneUseFileSelection = nil
+        func scopeIsCurrent() -> Bool {
+            pendingFilePanelDispatch?.id == dispatch.id
+                && selection.browserSessionID == browserSessionID
+                && selection.ownershipEpoch == ownershipEpoch
+                && selection.takeoverEpoch == takeoverEpoch
+                && taskID == document.taskID && hasOwnership(taskID: document.taskID) && mayAct()
+                && !hasOpenSignInWindow && hasRequiredPresentation && validate(document)
+                && webView.url == document.committedURL && frame.request.url == document.committedURL
+                && Self.fileFrameOrigin(frame.securityOrigin, matches: document.committedURL)
+        }
+        guard scopeIsCurrent() else {
+            completionHandler(nil)
+            completeFilePanelDispatch(dispatch.id, accepted: false)
+            return
+        }
+        do {
+            let url = try selection.resolve()
+            guard url.isFileURL else {
+                completionHandler(nil)
+                completeFilePanelDispatch(dispatch.id, accepted: false)
+                return
+            }
+            var freshURL = url
+            freshURL.removeAllCachedResourceValues()
+            let values = try freshURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true, scopeIsCurrent() else {
+                completionHandler(nil)
+                completeFilePanelDispatch(dispatch.id, accepted: false)
+                return
+            }
+            completionHandler([freshURL])
+            completeFilePanelDispatch(dispatch.id, accepted: true)
+        } catch {
+            completionHandler(nil)
+            completeFilePanelDispatch(dispatch.id, accepted: false)
+        }
+    }
+
+    private static func fileFrameOrigin(_ origin: WKSecurityOrigin, matches url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(), let host = components.host?.lowercased() else { return false }
+        let expectedPort = components.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1)
+        let observedPort = origin.port == 0 ? (scheme == "https" ? 443 : scheme == "http" ? 80 : -1) : origin.port
+        return origin.protocol.lowercased() == scheme && origin.host.lowercased() == host && observedPort == expectedPort
+    }
+
+    private func hasOneUseFileSelection(for observation: AgentObservation) -> Bool {
+        guard let selection = oneUseFileSelection else { return false }
+        let document = observation.evidence.document
+        return selection.evidence.document == document
+            && selection.browserSessionID == browserSessionID
+            && selection.ownershipEpoch == ownershipEpoch
+            && selection.takeoverEpoch == takeoverEpoch
+            && hasOwnership(taskID: document.taskID)
+            && validate(document)
+    }
+
+    private func beginFilePanelDispatch(for observation: AgentObservation) throws -> UUID {
+        guard pendingFilePanelDispatch == nil,
+              let selection = oneUseFileSelection, hasOneUseFileSelection(for: observation) else {
+            throw ComputerUseBrowserError.fileSelectionUnavailable
+        }
+        let dispatch = FilePanelDispatch(selectionID: selection.id, document: observation.evidence.document,
+            browserSessionID: browserSessionID, ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch)
+        pendingFilePanelDispatch = dispatch
+        completedFilePanelDispatch = nil
+        return dispatch.id
+    }
+
+    private func completeFilePanelDispatch(_ id: UUID, accepted: Bool) {
+        guard pendingFilePanelDispatch?.id == id else { return }
+        pendingFilePanelDispatch = nil
+        completedFilePanelDispatch = (id: id, accepted: accepted)
+    }
+
+    private func awaitFilePanelDispatch(_ id: UUID, observation: AgentObservation) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while true {
+            if Task.isCancelled {
+                oneUseFileSelection = nil
+                pendingFilePanelDispatch = nil
+                completedFilePanelDispatch = nil
+                throw CancellationError()
+            }
+            if let completed = completedFilePanelDispatch, completed.id == id {
+                completedFilePanelDispatch = nil
+                guard completed.accepted else { throw ComputerUseBrowserError.fileSelectionUnavailable }
+                let document = observation.evidence.document
+                guard ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
+                      taskID == document.taskID, hasOwnership(taskID: document.taskID), mayAct(),
+                      !hasOpenSignInWindow, hasRequiredPresentation, validate(document),
+                      browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+                return
+            }
+            guard let dispatch = pendingFilePanelDispatch, dispatch.id == id else {
+                throw ComputerUseBrowserError.fileSelectionUnavailable
+            }
+            let document = observation.evidence.document
+            guard dispatch.document == document, dispatch.browserSessionID == browserSessionID,
+                  dispatch.ownershipEpoch == ownershipEpoch, dispatch.takeoverEpoch == takeoverEpoch,
+                  taskID == document.taskID, hasOwnership(taskID: document.taskID), mayAct(),
+                  !hasOpenSignInWindow, hasRequiredPresentation, validate(document),
+                  browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame else {
+                oneUseFileSelection = nil
+                pendingFilePanelDispatch = nil
+                throw ComputerUseBrowserError.pageChanged
+            }
+            guard ContinuousClock.now < deadline else {
+                oneUseFileSelection = nil
+                pendingFilePanelDispatch = nil
+                throw ComputerUseBrowserError.fileSelectionUnavailable
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(10))
+            } catch {
+                oneUseFileSelection = nil
+                pendingFilePanelDispatch = nil
+                completedFilePanelDispatch = nil
+                throw error
+            }
+        }
     }
 
     func captureInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> InitialAgentObservation? {
@@ -1198,7 +1366,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             if agentObservationID == observation.id { agentObservationID = nil }
         }
         func check() throws {
-            try Task.checkCancellation()
+            if Task.isCancelled {
+                oneUseFileSelection = nil
+                pendingFilePanelDispatch = nil
+                completedFilePanelDispatch = nil
+                throw CancellationError()
+            }
             guard agentObservationID == observation.id, validate(observation.evidence.document),
                   ownershipEpoch == observation.ownership, takeoverEpoch == observation.takeover,
                   browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
@@ -1222,6 +1395,12 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // animation; it is not input-location authority by itself.
         let inspectedTarget = try await readAgentTarget(action, observation: observation)
         try check()
+        if inspectedTarget?.context.hasPrefix("AXFileUpload • ") == true {
+            guard case .pointer(.leftClick, _) = action,
+                  hasOneUseFileSelection(for: observation) else {
+                throw ComputerUseBrowserError.fileSelectionUnavailable
+            }
+        }
         // Keep this boundary safe even for direct native callers. A field
         // that became read-only can no longer supply an editing target.
         guard inspectedTarget?.context.isEmpty != true else { throw ComputerUseBrowserError.pageChanged }
@@ -1341,6 +1520,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             return
         }
+        var panelDispatchID: UUID?
         let dispatch: () throws -> Void
         switch action {
         case .pointer(.leftClick, let point):
@@ -1354,6 +1534,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             dispatch = {
                 self.agentPointer = point
+                if inspectedTarget?.context.hasPrefix("AXFileUpload • ") == true {
+                    panelDispatchID = try self.beginFilePanelDispatch(for: observation)
+                }
                 window.sendEvent(down)
                 // Release the same native button even if a callback revokes
                 // control. No subsequent action may reuse this observation.
@@ -1406,6 +1589,10 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try check()
         agentObservationID = nil
         try dispatch()
+        if let panelDispatchID {
+            try await awaitFilePanelDispatch(panelDispatchID, observation: observation)
+        }
+        agentObservationID = nil
     }
 
     private typealias NavigationHistory = ComputerUseBrowserNavigationDispatchHistory
@@ -1442,6 +1629,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     // its synchronous callback returns. Handback keeps ownershipEpoch intact.
     private var takeoverEpoch = UUID()
     private var browserSessionID = UUID()
+    private struct OneUseFileSelection {
+        let id = UUID()
+        let evidence: ComputerUseBrowserPageEvidence
+        let browserSessionID: UUID
+        let ownershipEpoch: UUID
+        let takeoverEpoch: UUID
+        let resolve: @MainActor () throws -> URL
+    }
+    private struct FilePanelDispatch {
+        let id = UUID()
+        let selectionID: UUID
+        let document: ComputerUseBrowserDocument
+        let browserSessionID: UUID
+        let ownershipEpoch: UUID
+        let takeoverEpoch: UUID
+    }
+    private var oneUseFileSelection: OneUseFileSelection?
+    private var pendingFilePanelDispatch: FilePanelDispatch?
+    private var completedFilePanelDispatch: (id: UUID, accepted: Bool)?
     /// Monotonic for one WKWebView lifetime. A failed/cancelled load or a URL
     /// returning to nil cannot turn a used session into an untouched one.
     private var sessionHasNavigationActivity = false
@@ -2858,6 +3064,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     func prepareForUserControl(taskID: String) {
         guard self.taskID == taskID, !mayAct() else { return }
         takeoverEpoch = UUID()
+        oneUseFileSelection = nil
+        pendingFilePanelDispatch = nil
+        completedFilePanelDispatch = nil
         let view = browser, sessionID = browserSessionID, epoch = ownershipEpoch
         let domID = pendingDOM?.id
         if let pending { failPending(id: pending.id, error: .ownershipLost) }
@@ -3402,6 +3611,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
     }
 
     private func retirePageObservations(_ reason: NavigationHistory.PageObservationEvent.Retirement) {
+        oneUseFileSelection = nil
+        pendingFilePanelDispatch = nil
+        completedFilePanelDispatch = nil
         mainSurface?.hideFind()
         if let page = observedUserPage {
             recordPageObservation(.retired, page: page, retirement: reason)

@@ -146,12 +146,22 @@ final class ComputerUseTextClarificationStore {
         } else {
             selectedChoice = nil
         }
-        let goal = try pending.goal.answering(pending.question, with: answer)
+        let goal = try choiceID == nil ? pending.goal.answering(pending.question, with: answer) : pending.goal
         invalidate()
         return Resolution(goal: goal, selectedChoice: selectedChoice)
     }
 
     func matches(_ reference: ComputerUseClarificationReference) -> Bool { pending?.reference == reference }
+
+    /// Returns options only for the exact unexpired question owner. A ledger
+    /// replay cannot reconstruct these host-held candidates after retirement.
+    func retainedChoices(for reference: ComputerUseClarificationReference,
+                         request: ComputerUseEnvelope) -> [ComputerUseClarificationChoice]? {
+        guard let pending, pending.reference == reference, reference.taskID == request.id,
+              pending.senderID == request.senderID, pending.sessionID == request.sessionID,
+              now() < reference.expiresAt else { return nil }
+        return pending.choices
+    }
 
     /// The wire store and native executor must still hold the same unresolved
     /// goal, question and form scope. A saved terminal reply cannot recreate it.
@@ -161,6 +171,7 @@ final class ComputerUseTextClarificationStore {
               pending.senderID == request.senderID, pending.sessionID == request.sessionID,
               now() < reference.expiresAt, reference.expiresAt <= native.expiresAt,
               native.taskID == request.id, native.scope == pending.scope, native.goal == pending.goal,
+              native.choices == pending.choices,
               native.question.utf8.elementsEqual(pending.question.utf8) else { return false }
         return true
     }

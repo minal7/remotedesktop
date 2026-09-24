@@ -5,6 +5,25 @@ import UniformTypeIdentifiers
 /// Metadata-only inventory for files inside one host-approved directory.
 /// Candidate IDs are local references; they never encode or expose a path.
 struct ComputerUseLocalFileCatalog {
+    enum FileKind: String, Equatable, Sendable { case any, presentation, spreadsheet, document }
+    enum SortField: String, Equatable, Sendable { case modifiedAt, createdAt, addedToDirectoryAt }
+    enum SortDirection: String, Equatable, Sendable { case ascending, descending }
+
+    struct Sort: Equatable, Sendable {
+        let field: SortField
+        let direction: SortDirection
+    }
+
+    struct Query: Equatable, Sendable {
+        let fileKind: FileKind
+        let sort: Sort?
+
+        init(fileKind: FileKind = .any, sort: Sort? = nil) {
+            self.fileKind = fileKind
+            self.sort = sort
+        }
+    }
+
     struct Candidate: Equatable, Sendable {
         let id: String
         let displayName: String
@@ -22,6 +41,8 @@ struct ComputerUseLocalFileCatalog {
         /// must also consume every page before concluding there is no match.
         let isComplete: Bool
         let nextCursor: String?
+        let hasTiedSortValues: Bool
+        let hasMissingSortValues: Bool
     }
 
     enum Failure: Error, Equatable {
@@ -77,6 +98,8 @@ struct ComputerUseLocalFileCatalog {
     private var cursors: [String: Int] = [:]
     private var inventoryWasTruncated = false
     private var hasInventory = false
+    private var queryHasTiedSortValues = false
+    private var queryHasMissingSortValues = false
 
     init(taskID: String, approvedDirectory: URL, pageSize: Int = 64,
          maximumCandidates: Int = 4096, maximumEntriesScanned: Int = 16_384) throws {
@@ -90,11 +113,17 @@ struct ComputerUseLocalFileCatalog {
     }
 
     mutating func discover() throws -> Page {
+        try discover(query: Query())
+    }
+
+    mutating func discover(query: Query) throws -> Page {
         records.removeAll(keepingCapacity: true)
         candidateRecords.removeAll(keepingCapacity: true)
         cursors.removeAll(keepingCapacity: true)
         inventoryWasTruncated = false
         hasInventory = false
+        queryHasTiedSortValues = false
+        queryHasMissingSortValues = false
 
         guard let rootIdentity = Self.lstat(approvedDirectory), rootIdentity.isDirectory else {
             throw Failure.invalidDirectory
@@ -143,6 +172,14 @@ struct ComputerUseLocalFileCatalog {
             candidateRecords[candidate.id] = record
         }
         if scanError != nil { throw Failure.directoryUnavailable }
+        records = records.filter { Self.matches($0.candidate, kind: query.fileKind) }
+        if let sort = query.sort {
+            let ordering = Self.sorted(records, by: sort)
+            records = ordering.records
+            queryHasTiedSortValues = ordering.hasTies
+            queryHasMissingSortValues = ordering.hasMissingValues
+        }
+        candidateRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.candidate.id, $0) })
         hasInventory = true
         return page(startingAt: 0)
     }
@@ -179,7 +216,60 @@ struct ComputerUseLocalFileCatalog {
             cursors[token] = end
             cursor = token
         } else { cursor = nil }
-        return Page(candidates: pageRecords.map(\.candidate), isComplete: !inventoryWasTruncated, nextCursor: cursor)
+        return Page(candidates: pageRecords.map(\.candidate), isComplete: !inventoryWasTruncated,
+            nextCursor: cursor, hasTiedSortValues: queryHasTiedSortValues,
+            hasMissingSortValues: queryHasMissingSortValues)
+    }
+
+    private static func matches(_ candidate: Candidate, kind: FileKind) -> Bool {
+        guard kind != .any else { return true }
+        let fileExtension = candidate.fileExtension.lowercased()
+        let contentType = candidate.contentTypeIdentifier.flatMap { UTType($0) }
+        switch kind {
+        case .any:
+            return true
+        case .presentation:
+            return contentType?.conforms(to: .presentation) == true
+                || ["ppt", "pptx", "pps", "ppsx", "pot", "potx", "odp", "key"].contains(fileExtension)
+        case .spreadsheet:
+            return contentType?.conforms(to: .spreadsheet) == true
+                || ["xls", "xlsx", "xlsm", "xlsb", "csv", "ods", "numbers"].contains(fileExtension)
+        case .document:
+            return contentType?.conforms(to: .text) == true || contentType?.conforms(to: .pdf) == true
+                || ["doc", "docx", "docm", "odt", "pdf", "rtf", "txt", "md", "pages"].contains(fileExtension)
+        }
+    }
+
+    private static func sorted(_ records: [Record], by sort: Sort)
+        -> (records: [Record], hasTies: Bool, hasMissingValues: Bool) {
+        let values = records.map { date(for: $0.candidate, field: sort.field) }
+        let datedValues = values.compactMap { $0 }
+        let hasTies = Set(datedValues).count != datedValues.count
+        let hasMissingValues = datedValues.count != values.count
+        let ordered = records.sorted { lhs, rhs in
+            let left = date(for: lhs.candidate, field: sort.field)
+            let right = date(for: rhs.candidate, field: sort.field)
+            switch (left, right) {
+            case (.some(_), .none): return true
+            case (.none, .some(_)): return false
+            case (.some(let left), .some(let right)) where left != right:
+                return sort.direction == .ascending ? left < right : left > right
+            default: break
+            }
+            if lhs.candidate.displayName != rhs.candidate.displayName {
+                return lhs.candidate.displayName.utf8.lexicographicallyPrecedes(rhs.candidate.displayName.utf8)
+            }
+            return lhs.url.path.utf8.lexicographicallyPrecedes(rhs.url.path.utf8)
+        }
+        return (ordered, hasTies, hasMissingValues)
+    }
+
+    private static func date(for candidate: Candidate, field: SortField) -> Date? {
+        switch field {
+        case .modifiedAt: return candidate.modifiedAt
+        case .createdAt: return candidate.createdAt
+        case .addedToDirectoryAt: return candidate.addedToDirectoryAt
+        }
     }
 
     private static func lstat(_ url: URL) -> POSIXFileIdentity? {

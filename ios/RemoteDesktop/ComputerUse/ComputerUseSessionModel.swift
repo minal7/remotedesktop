@@ -77,6 +77,7 @@ final class ComputerUseSessionModel: ObservableObject {
     @Published private(set) var retryPrompt: String?
     @Published private(set) var composerMode: ComposerMode = .request
     @Published private(set) var restoredClarificationDraft: String?
+    @Published private(set) var clarificationChoices: [ComputerUseClarificationChoice]?
     /// The newest machine-readable result received for the active or most
     /// recently finished request. Legacy hosts leave this `nil`.
     @Published private(set) var latestTerminalOutcome: ComputerUseTerminalOutcome?
@@ -149,6 +150,7 @@ final class ComputerUseSessionModel: ObservableObject {
     private var controlRetryTask: Task<Void, Never>?
     private var clarificationExpiryTask: Task<Void, Never>?
     private var clarificationAnswerPolicy: ComputerUseClarificationAnswerPolicy?
+    private var activeClarificationChoices: [ComputerUseClarificationChoice]?
     private var outboundTasks: [UUID: Task<Void, Never>] = [:]
     /// Monotonically identifies the newest local intent or authoritative host
     /// state. An older CloudKit completion may arrive after a person resumes,
@@ -375,7 +377,28 @@ final class ComputerUseSessionModel: ObservableObject {
     /// Invalid or unsaved input stays in the composer. Exact answers never
     /// pass through trimming, truncation or the legacy chat-history path.
     @discardableResult
-    func sendPrompt(_ rawPrompt: String) -> Bool {
+    func sendPrompt(_ rawPrompt: String) -> Bool { sendPrompt(rawPrompt, clarificationChoiceID: nil) }
+
+    @discardableResult
+    func sendClarificationChoice(_ choiceID: String) -> Bool {
+        if case .answer(_, let deadline) = composerMode, now() >= deadline {
+            expireClarification()
+            return false
+        }
+        guard canSendClarificationChoice(choiceID),
+              let choice = activeClarificationChoices?.first(where: { $0.id == choiceID }) else { return false }
+        return sendPrompt(choice.label, clarificationChoiceID: choice.id)
+    }
+
+    func canSendClarificationChoice(_ choiceID: String) -> Bool {
+        guard isConnected, !isStopped, activePromptID == nil, !requiresRecoveryReconnect,
+              case .answer(_, let deadline) = composerMode, now() < deadline else { return false }
+        switch state { case .ready, .error: break; case .working, .paused, .approvalRequired: return false }
+        return activeClarificationChoices?.contains(where: { $0.id == choiceID }) == true
+    }
+
+    @discardableResult
+    private func sendPrompt(_ rawPrompt: String, clarificationChoiceID: String?) -> Bool {
         guard !isStopped, activePromptID == nil else { return false }
         guard !requiresRecoveryReconnect else { return false }
         if waitingQuestionRecord != nil {
@@ -413,13 +436,21 @@ final class ComputerUseSessionModel: ObservableObject {
         let wireBody: String
         do {
             switch composerMode {
-            case .answer(let reference, _):
+            case .answer(let reference, let deadline):
+                guard now() < deadline else { expireClarification(); return false }
+                if let clarificationChoiceID {
+                    guard let choice = activeClarificationChoices?.first(where: { $0.id == clarificationChoiceID }),
+                          choice.label.utf8.elementsEqual(rawPrompt.utf8) else { return false }
+                }
                 request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true,
                     supportsClarificationRetry: clarificationAnswerPolicy?.supportsRetry == true,
-                    supportsClarificationFormatRetry: clarificationAnswerPolicy?.supportsRetry == true && clarificationAnswerPolicy?.format != nil)
+                    supportsClarificationFormatRetry: clarificationAnswerPolicy?.supportsRetry == true && clarificationAnswerPolicy?.format != nil,
+                    clarificationChoiceID: clarificationChoiceID)
             case .legacyAnswer:
+                guard clarificationChoiceID == nil else { return false }
                 request = .init(prompt: rawPrompt, conversation: recentConversation(), supportsApprovedActionEvidence: true)
             case .request:
+                guard clarificationChoiceID == nil else { return false }
                 request = .init(prompt: rawPrompt, supportsApprovedActionEvidence: true)
             case .expiredAnswer, .recoveringAnswer: return false
             }
@@ -544,6 +575,7 @@ final class ComputerUseSessionModel: ObservableObject {
         clarificationExpiryTask?.cancel()
         clarificationExpiryTask = nil
         clarificationAnswerPolicy = nil
+        activeClarificationChoices = nil; clarificationChoices = nil
         restoredClarificationDraft = nil
         composerMode = .request
     }
@@ -556,12 +588,13 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     private func awaitClarification(_ reference: ComputerUseClarificationReference, answerPolicy: ComputerUseClarificationAnswerPolicy?,
-                                    originalDeadline: Date? = nil) {
+                                    choices: [ComputerUseClarificationChoice]? = nil, originalDeadline: Date? = nil) {
         resetComposerMode()
         let current = now(), deadline = min(reference.expiresAt, originalDeadline ?? current.addingTimeInterval(600))
         guard deadline > current else { expireClarification(); return }
         composerMode = .answer(reference, validUntil: deadline)
         clarificationAnswerPolicy = answerPolicy
+        activeClarificationChoices = choices; clarificationChoices = choices
         statusText = "Answer the question to continue the original request"
         clarificationExpiryTask = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(deadline.timeIntervalSince(current))) } catch { return }
@@ -692,8 +725,13 @@ final class ComputerUseSessionModel: ObservableObject {
             statusText = "The saved question does not match the Mac. Check again or start a new request."
             return
         }
-        guard let updated = try? ComputerUsePendingQuestion(reference: question.reference, text: text, answerPolicy: result.answerPolicy,
-            receivedAt: question.receivedAt, validUntil: question.validUntil, draft: questionDraft) else { return }
+        guard result.clarificationChoices == question.choices,
+              let updated = try? ComputerUsePendingQuestion(reference: question.reference, text: text, answerPolicy: result.answerPolicy,
+            receivedAt: question.receivedAt, validUntil: question.validUntil, draft: questionDraft, choices: result.clarificationChoices) else {
+            questionProbeTimeoutTask?.cancel(); state = .error("The saved question choices do not match the Mac.")
+            statusText = "The saved question choices do not match the Mac. Check again or start a new request."
+            return
+        }
         let replacement = record.retainingQuestion(updated)
         guard replaceRecoveryRecord(replacement, expecting: record) else {
             questionProbeTimeoutTask?.cancel(); state = .error("Couldn’t securely restore this question.")
@@ -703,7 +741,7 @@ final class ComputerUseSessionModel: ObservableObject {
         waitingQuestionRecord = replacement; questionProbeID = nil
         questionProbeSendTask?.cancel(); questionProbeTimeoutTask?.cancel()
         latestTerminalOutcome = .userInterventionRequired; state = .ready
-        awaitClarification(question.reference, answerPolicy: result.answerPolicy, originalDeadline: question.validUntil)
+        awaitClarification(question.reference, answerPolicy: result.answerPolicy, choices: result.clarificationChoices, originalDeadline: question.validUntil)
         restoredClarificationDraft = questionDraft
     }
 
@@ -1191,7 +1229,8 @@ final class ComputerUseSessionModel: ObservableObject {
                         guard let prompt = activePromptText, let wireBody = activePromptBody, let createdAt = activePromptCreatedAt,
                               let question = try? ComputerUsePendingQuestion(reference: reference, text: update?.text ?? "",
                                 answerPolicy: update?.clarificationAnswerPolicy ?? update?.clarificationRetry?.answerPolicy,
-                                receivedAt: receivedAt, validUntil: deadline, draft: recovery?.text) else { continue }
+                                receivedAt: receivedAt, validUntil: deadline, draft: recovery?.text,
+                                choices: update?.clarificationChoices) else { continue }
                         let record = ComputerUsePendingPrompt(hostID: hostID, pairingCode: pairingCode, sessionID: sessionID,
                             messageID: activePromptID, prompt: prompt, wireBody: wireBody, createdAt: createdAt,
                             localAccountBinding: localAccountBinding, clarificationValidUntil: activeClarificationValidUntil, question: question)
@@ -1219,13 +1258,13 @@ final class ComputerUseSessionModel: ObservableObject {
                     clearActivePrompt(removingStoredRecord: savedQuestion == nil)
                     guard !requiresRecoveryReconnect else { continue }
                     waitingQuestionRecord = savedQuestion; questionDraft = savedQuestion?.question?.draft
-                    awaitClarification(retry.reference, answerPolicy: retry.answerPolicy, originalDeadline: recovery.deadline)
+                    awaitClarification(retry.reference, answerPolicy: retry.answerPolicy, choices: update?.clarificationChoices, originalDeadline: recovery.deadline)
                     if case .answer = composerMode {
                         restoredClarificationDraft = recovery.text; statusText = retry.answerPolicy.message(for: retry.reason)
                     }
                 } else {
                     applyAssistantOutcome(update?.outcome, text: assistantText, clarification: update?.clarification,
-                        answerPolicy: update?.clarificationAnswerPolicy, savedQuestion: savedQuestion)
+                        answerPolicy: update?.clarificationAnswerPolicy, choices: update?.clarificationChoices, savedQuestion: savedQuestion)
                 }
             case .status:
                 if let result = try? ComputerUseClarificationProbeResult.decodeBody(envelope.body) {
@@ -1664,6 +1703,7 @@ final class ComputerUseSessionModel: ObservableObject {
         text: String,
         clarification: ComputerUseClarificationReference?,
         answerPolicy: ComputerUseClarificationAnswerPolicy?,
+        choices: [ComputerUseClarificationChoice]?,
         savedQuestion: ComputerUsePendingPrompt?
     ) {
         let acceptsAnswer = lastControlKind != .cancel && pendingControlIntent?.kind != .cancel
@@ -1695,7 +1735,7 @@ final class ComputerUseSessionModel: ObservableObject {
         guard !requiresRecoveryReconnect else { return }
         waitingQuestionRecord = savedQuestion; questionDraft = savedQuestion?.question?.draft
         if let reference {
-            awaitClarification(reference, answerPolicy: answerPolicy, originalDeadline: savedQuestion?.question?.validUntil)
+            awaitClarification(reference, answerPolicy: answerPolicy, choices: choices, originalDeadline: savedQuestion?.question?.validUntil)
         } else if acceptsAnswer, outcome == nil || outcome == .userInterventionRequired,
                   text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?") {
             composerMode = .legacyAnswer

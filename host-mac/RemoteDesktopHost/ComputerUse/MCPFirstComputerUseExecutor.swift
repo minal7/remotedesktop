@@ -814,6 +814,45 @@ final class MCPFirstComputerUseExecutor:
         return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
     }
 
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard let selectedChoice else {
+            return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                goal: goal, progress: progress)
+        }
+        try beginExecution()
+        defer { activeExecutionEpoch = nil }
+        try await waitForStartedCancellation()
+        guard let continuing = retainedExecutor as? any ComputerUseTextClarificationContinuing else {
+            throw ExecutorError.visualApprovalContinuationUnavailable
+        }
+        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        guard taskID != originatingTaskID else { throw ExecutorError.visualApprovalContinuationUnavailable }
+        if retainedFallback?.taskID == taskID {
+            guard retainedFallback?.promptDigest == digest else { throw ExecutorError.taskChanged }
+        } else {
+            guard retainedFallback?.taskID == originatingTaskID,
+                  let pending = try continuing.clarification(taskID: originatingTaskID),
+                  pending.goal == goal, pending.choices?.contains(selectedChoice) == true else {
+                throw ExecutorError.visualApprovalContinuationUnavailable
+            }
+            retainedFallback = (taskID, digest)
+        }
+        if retainedBrowserIntentContract?.contract.goal != goal {
+            retainedBrowserIntentContract = nil
+            retainedBrowserVisits = nil
+        }
+        if let tools = browserTools {
+            return try await withBrowserToolProposals(taskID: originatingTaskID, tools: tools) {
+                try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                    goal: goal, selectedChoice: selectedChoice, progress: progress)
+            }
+        }
+        return try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+            goal: goal, selectedChoice: selectedChoice, progress: progress)
+    }
+
     func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
         tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {

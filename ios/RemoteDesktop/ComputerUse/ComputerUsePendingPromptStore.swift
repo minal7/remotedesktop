@@ -16,9 +16,12 @@ struct ComputerUsePendingQuestion: Codable, Equatable, Sendable {
     let receivedAt: Date
     let validUntil: Date
     let draft: String?
+    let choices: [ComputerUseClarificationChoice]?
     enum Failure: Error { case invalid }
     init(reference: ComputerUseClarificationReference, text: String, answerPolicy: ComputerUseClarificationAnswerPolicy?,
-         receivedAt: Date, validUntil: Date, draft: String? = nil) throws {
+         receivedAt: Date, validUntil: Date, draft: String? = nil,
+         choices: [ComputerUseClarificationChoice]? = nil) throws {
+        try ComputerUseClarificationChoice.validate(choices)
         guard ComputerUseClarificationText.isValid(text), receivedAt.timeIntervalSince1970.isFinite,
               validUntil.timeIntervalSince1970.isFinite, validUntil > receivedAt,
               validUntil <= reference.expiresAt, validUntil <= receivedAt.addingTimeInterval(600),
@@ -26,18 +29,19 @@ struct ComputerUsePendingQuestion: Codable, Equatable, Sendable {
             throw Failure.invalid
         }
         self.reference = reference; self.text = text; self.answerPolicy = answerPolicy
-        self.receivedAt = receivedAt; self.validUntil = validUntil; self.draft = draft
+        self.receivedAt = receivedAt; self.validUntil = validUntil; self.draft = draft; self.choices = choices
     }
-    private enum CodingKeys: String, CodingKey { case reference, text, answerPolicy, receivedAt, validUntil, draft }
+    private enum CodingKeys: String, CodingKey { case reference, text, answerPolicy, receivedAt, validUntil, draft, choices }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(reference: values.decode(ComputerUseClarificationReference.self, forKey: .reference),
             text: values.decode(String.self, forKey: .text), answerPolicy: values.decodeIfPresent(ComputerUseClarificationAnswerPolicy.self, forKey: .answerPolicy),
             receivedAt: values.decode(Date.self, forKey: .receivedAt), validUntil: values.decode(Date.self, forKey: .validUntil),
-            draft: values.decodeIfPresent(String.self, forKey: .draft))
+            draft: values.decodeIfPresent(String.self, forKey: .draft),
+            choices: values.decodeIfPresent([ComputerUseClarificationChoice].self, forKey: .choices))
     }
     func withDraft(_ draft: String?) throws -> Self {
-        try .init(reference: reference, text: text, answerPolicy: answerPolicy, receivedAt: receivedAt, validUntil: validUntil, draft: draft)
+        try .init(reference: reference, text: text, answerPolicy: answerPolicy, receivedAt: receivedAt, validUntil: validUntil, draft: draft, choices: choices)
     }
 }
 

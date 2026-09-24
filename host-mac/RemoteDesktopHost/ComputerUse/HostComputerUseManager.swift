@@ -4276,6 +4276,7 @@ final class HostComputerUseManager: ObservableObject {
     private struct TextClarificationContinuation {
         let originatingTaskID: String
         let goal: ComputerUseUnresolvedTextGoal
+        let selectedChoice: ComputerUseClarificationChoice?
     }
 
     private struct ExecutionContext {
@@ -6838,6 +6839,9 @@ final class HostComputerUseManager: ObservableObject {
         let browserContinuation: ComputerUseBrowserClarificationTransport.Continuation?
         do {
             if let reference = request.clarification, browserClarifications.matches(reference) {
+                guard request.clarificationChoiceID == nil else {
+                    throw ComputerUseTextClarificationStore.Failure.invalidChoice
+                }
                 guard executor is any ComputerUseBrowserResearchContinuing else {
                     throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
                 }
@@ -6849,9 +6853,14 @@ final class HostComputerUseManager: ObservableObject {
                       let pending = try continuing.clarification(taskID: reference.taskID) else {
                     throw ComputerUseTextClarificationStore.Failure.invalidReference
                 }
-                let goal = try textClarifications.consume(reference, answer: request.prompt,
-                    scope: pending.scope, for: envelope)
-                continuation = TextClarificationContinuation(originatingTaskID: reference.taskID, goal: goal)
+                let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+                guard textClarifications.retains(reference, native: pending, for: originalQuestion) else {
+                    throw ComputerUseTextClarificationStore.Failure.invalidReference
+                }
+                let resolution = try textClarifications.consumeSelection(reference, answer: request.prompt,
+                    choiceID: request.clarificationChoiceID, scope: pending.scope, for: envelope)
+                continuation = TextClarificationContinuation(originatingTaskID: reference.taskID,
+                    goal: resolution.goal, selectedChoice: resolution.selectedChoice)
                 browserContinuation = nil
             } else {
                 continuation = nil
@@ -7024,7 +7033,8 @@ final class HostComputerUseManager: ObservableObject {
                             throw ComputerUseTextClarificationStore.Failure.invalidReference
                         }
                         result = try await continuing.continueClarification(taskID: envelope.id,
-                            originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal, progress: progress)
+                            originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
+                            selectedChoice: textClarification.selectedChoice, progress: progress)
                     } else {
                         result = try await executor.execute(
                             taskID: envelope.id,
@@ -7556,6 +7566,7 @@ final class HostComputerUseManager: ObservableObject {
         case .clarificationRequired(let response):
             guard context.browserClarification == nil else { throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner }
             let reference: ComputerUseClarificationReference?
+            let choices: [ComputerUseClarificationChoice]?
             if let pending = try (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) {
                 let goal = try context.textClarification?.goal
                     ?? ComputerUseUnresolvedTextGoal(userRequest: context.trustedUserPrompt)
@@ -7564,17 +7575,20 @@ final class HostComputerUseManager: ObservableObject {
                     throw ComputerUseTextClarificationStore.Failure.invalidReference
                 }
                 reference = try textClarifications.issue(goal: goal, question: response, scope: pending.scope,
-                    expiresAt: pending.expiresAt, for: envelope)
+                    choices: pending.choices, expiresAt: pending.expiresAt, for: envelope)
+                choices = pending.choices
             } else {
                 guard context.textClarification == nil else { throw ComputerUseTextClarificationStore.Failure.invalidReference }
                 reference = nil
+                choices = nil
             }
             sendDurableTerminal(
                 response,
                 outcome: .userInterventionRequired,
                 replyingTo: envelope,
                 channel: context.channel,
-                clarification: reference)
+                clarification: reference,
+                clarificationChoices: choices)
             currentExecution = nil
             currentExecutionToken = nil
             executionTask = nil
@@ -7801,7 +7815,8 @@ final class HostComputerUseManager: ObservableObject {
         outcome: ComputerUseTerminalOutcome,
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel,
-        clarification: ComputerUseClarificationReference? = nil
+        clarification: ComputerUseClarificationReference? = nil,
+        clarificationChoices: [ComputerUseClarificationChoice]? = nil
     ) {
         // Only this host's exact retained browser question can carry its
         // original owner across a terminal transport reply. All other results
@@ -7834,7 +7849,9 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: envelope,
                 channel: channel,
                 outcome: terminal.outcome,
-                clarification: terminal.clarification)
+                clarification: terminal.clarification,
+                clarificationChoices: terminal.clarification == clarification
+                    && terminal.outcome == .userInterventionRequired ? clarificationChoices : nil)
         } catch {
             browserClarifications.invalidate(for: envelope)
             tools.retireOwnedBrowserResearch(taskID: envelope.id)
@@ -7886,6 +7903,7 @@ final class HostComputerUseManager: ObservableObject {
         channel: any HostComputerUseChannel,
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
+        clarificationChoices requestedClarificationChoices: [ComputerUseClarificationChoice]? = nil,
         clarificationRetry: ComputerUseClarificationRetry? = nil,
         researchProgress: ComputerUseResearchProgress? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
@@ -7897,13 +7915,30 @@ final class HostComputerUseManager: ObservableObject {
         let needsIdentityRecovery = taskLedger.requiresPromptIdentityRecovery(taskID: envelope.id)
         let evidence = needsIdentityRecovery ? nil : actionEvidence(for: envelope)
         if isApprovedActionEvidenceOnly && evidence == nil { return }
+        let liveQuestion = clarification.map { reference in
+            !needsIdentityRecovery
+                && taskLedger.terminalClarification(taskID: envelope.id) == reference
+                && retainsNativeQuestion(reference, for: envelope)
+        } ?? false
+        let liveTextQuestion = clarification.map { reference in
+            liveQuestion && taskLedger.clarificationOwner(taskID: envelope.id) != .browser
+        } ?? false
+        let availableClarificationChoices: [ComputerUseClarificationChoice]? = clarification.flatMap { reference in
+            guard liveTextQuestion else { return nil }
+            let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+            return textClarifications.retainedChoices(for: reference, request: originalQuestion)
+        }
+        let canPublishClarificationChoices = requestedClarificationChoices == nil
+            || requestedClarificationChoices == availableClarificationChoices
+        let clarificationChoices = canPublishClarificationChoices ? availableClarificationChoices : nil
+        let unavailableQuestion = clarification != nil && (!liveQuestion || !canPublishClarificationChoices)
         let liveRetry = clarificationRetry.flatMap { retry in
             !needsIdentityRecovery && !taskLedger.isCancelled(taskID: envelope.id) && browserClarifications.retainsRetry(retry, for: envelope,
                 retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) ? retry : nil
         }
         let unavailableRetry = clarificationRetry != nil && liveRetry == nil
         let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse
-            : unavailableRetry ? "The original question is no longer active. Start a new request with the complete instruction." : body
+            : unavailableRetry || unavailableQuestion ? "The original question is no longer active. Start a new request with the complete instruction." : body
         let wireBody: String
         switch kind {
         case .assistant, .status:
@@ -7913,11 +7948,12 @@ final class HostComputerUseManager: ObservableObject {
                 appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
                 hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
-                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableRetry ? .unableToComplete : outcome,
-                clarification: needsIdentityRecovery ? nil : clarification,
-                clarificationAnswerPolicy: needsIdentityRecovery ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
+                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableRetry || unavailableQuestion ? .unableToComplete : outcome,
+                clarification: needsIdentityRecovery || unavailableQuestion ? nil : clarification,
+                clarificationAnswerPolicy: needsIdentityRecovery || unavailableQuestion ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
                 clarificationRetry: liveRetry,
-                supportsClarificationRecovery: !needsIdentityRecovery && (clarification != nil || liveRetry != nil),
+                clarificationChoices: needsIdentityRecovery || unavailableQuestion ? nil : clarificationChoices,
+                supportsClarificationRecovery: !needsIdentityRecovery && !unavailableQuestion && (clarification != nil || liveRetry != nil),
                 approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
@@ -7935,7 +7971,7 @@ final class HostComputerUseManager: ObservableObject {
                       self.authorizedPeerID == envelope.senderID else { return }
             }
             var deliveredBody = wireBody
-            if clarification != nil || liveRetry != nil {
+            if (clarification != nil && !unavailableQuestion) || liveRetry != nil {
                 guard let self, let freshBody = self.revalidateClarificationDelivery(wireBody, replyingTo: envelope,
                     question: clarification, retry: liveRetry) else { return }
                 deliveredBody = freshBody
@@ -7966,7 +8002,15 @@ final class HostComputerUseManager: ObservableObject {
                 && browserClarifications.retainsRetry($0, for: envelope,
                     retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
         } ?? true
-        guard !liveQuestion || !liveRetry else { return body }
+        let liveChoices: [ComputerUseClarificationChoice]? = question.flatMap { reference in
+            guard liveQuestion else { return nil }
+            let originalRequest = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+            return textClarifications.retainedChoices(for: reference, request: originalRequest)
+        }
+        guard !liveQuestion || !liveRetry else {
+            guard original.clarificationChoices == liveChoices else { return nil }
+            return body
+        }
         return try? ComputerUseTaskUpdate(taskID: original.taskID,
             text: "The original question is no longer active. Start a new request with the complete instruction.",
             appliedControlRevision: original.appliedControlRevision, hostControlEpoch: original.hostControlEpoch,
@@ -7997,9 +8041,11 @@ final class HostComputerUseManager: ObservableObject {
             let available = !self.taskLedger.requiresPromptIdentityRecovery(taskID: probe.reference.taskID)
                 && self.taskLedger.terminalClarification(taskID: probe.reference.taskID) == probe.reference
                 && self.retainsNativeQuestion(probe.reference, for: original)
+            let choices = available ? self.textClarifications.retainedChoices(for: probe.reference, request: original) : nil
             guard let result = try? ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: probe.reference,
                 question: available ? self.taskLedger.terminalClarificationText(taskID: probe.reference.taskID) : nil,
-                answerPolicy: available ? self.browserClarifications.answerPolicy(for: probe.reference, envelope: original) : nil),
+                answerPolicy: available ? self.browserClarifications.answerPolicy(for: probe.reference, envelope: original) : nil,
+                clarificationChoices: choices),
                 let body = try? result.encodedBody() else { return }
             _ = try? await channel.send(kind: .status, body: body, to: envelope.senderID, sessionID: envelope.sessionID, messageID: nil)
         }
