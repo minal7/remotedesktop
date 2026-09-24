@@ -937,10 +937,203 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(purchase.evidence, "")
     }
 
+    func testNativeBrowserUsesNamedRecordWindowAfterWholePageTokenOverflow() async throws {
+        let (context, windows, source) = try nativeRecordWindowContexts()
+        let contract = #"{"objective":"Read the fee details and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
+        let openDetails = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l1","text":""}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(contract), try nativeStepEnvelope(openDetails)],
+            tokenCounts: [100, 3718, 2820])
+        let planner = try nativeStepPlanner(transport: transport)
+
+        let plan = try await planner.propose(context)
+        XCTAssertEqual(plan.kind, .openLink)
+        XCTAssertEqual(plan.reference, "l1", "Only a link in the selected named window may be opened")
+        XCTAssertEqual(plan.retainedContract?.requirements.map(\.id), ["r1"])
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.tokenCounts, [100, 3718, 2820])
+        XCTAssertEqual(calls.counts, 3)
+        XCTAssertEqual(calls.completions, 2,
+            "The over-budget whole-page request is tokenized but never sent for completion")
+
+        let wholeUser = try nativeStepUserObject(calls.requests[1])
+        let windowUser = try nativeStepUserObject(calls.requests[2])
+        let wholeContract = try XCTUnwrap(wholeUser["goalContract"] as? [String: Any])
+        let windowContract = try XCTUnwrap(windowUser["goalContract"] as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: wholeContract, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: windowContract, options: [.sortedKeys]))
+        let wholePage = try XCTUnwrap(wholeUser["page"] as? [String: Any])
+        let windowPage = try XCTUnwrap(windowUser["page"] as? [String: Any])
+        XCTAssertEqual(wholePage["url"] as? String, source.absoluteString)
+        XCTAssertEqual(windowPage["url"] as? String, source.absoluteString)
+        XCTAssertEqual((windowPage["recordWindow"] as? [String: Int])?["number"], 1)
+        XCTAssertEqual((windowPage["recordWindow"] as? [String: Int])?["total"], windows.count)
+        XCTAssertTrue((windowPage["links"] as? [[String: Any]])?.contains { $0["id"] as? String == "l1" } == true)
+        XCTAssertFalse((windowPage["links"] as? [[String: Any]])?.contains { $0["id"] as? String == "l2" } == true,
+            "The first bounded request must not silently include a later-window link")
+    }
+
+    func testNativeBrowserConsumesRecordInspectionWithoutRepeatingGoal() async throws {
+        let (whole, windows, source) = try nativeRecordWindowContexts()
+        let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
+        let inspectNext = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-next","text":""}"#
+        let openLaterLink = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l2","text":""}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(contract), try nativeStepEnvelope(inspectNext), try nativeStepEnvelope(openLaterLink)],
+            tokenCounts: [100, 3718, 2820, 2820])
+        let planner = try nativeStepPlanner(transport: transport)
+
+        let plan = try await planner.propose(whole)
+        XCTAssertEqual(plan.kind, .openLink)
+        XCTAssertEqual(plan.reference, "l2", "The returned link is present only in the later named window")
+        XCTAssertEqual(plan.retainedContract?.requirements.map(\.id), ["r1"])
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.tokenCounts, [100, 3718, 2820, 2820])
+        XCTAssertEqual(calls.counts, 4); XCTAssertEqual(calls.completions, 3,
+            "The inspection step is consumed internally, followed by a decision on the next window")
+        XCTAssertEqual(calls.requests.count, 4, "Goal interpretation occurs once")
+        let firstUser = try nativeStepUserObject(calls.requests[2])
+        let laterUser = try nativeStepUserObject(calls.requests[3])
+        let firstContract = try XCTUnwrap(firstUser["goalContract"] as? [String: Any])
+        let laterContract = try XCTUnwrap(laterUser["goalContract"] as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: firstContract, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: laterContract, options: [.sortedKeys]))
+        let firstPage = try XCTUnwrap(firstUser["page"] as? [String: Any])
+        let laterPage = try XCTUnwrap(laterUser["page"] as? [String: Any])
+        XCTAssertEqual(firstPage["url"] as? String, source.absoluteString)
+        XCTAssertEqual(laterPage["url"] as? String, source.absoluteString)
+        XCTAssertEqual((firstPage["recordWindow"] as? [String: Int])?["number"], 1)
+        XCTAssertEqual((laterPage["recordWindow"] as? [String: Int])?["number"], 2)
+        XCTAssertTrue((laterPage["links"] as? [[String: Any]])?.contains { $0["id"] as? String == "l2" } == true)
+        XCTAssertFalse((laterPage["links"] as? [[String: Any]])?.contains { $0["id"] as? String == "l1" } == true)
+    }
+
+    func testNativeBrowserRejectsCompletionOrHandoffFromPartialRecordWindow() async throws {
+        let (whole, _, _) = try nativeRecordWindowContexts()
+        let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
+        let cases: [(String, String)] = [
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The final fee is supported."}"#, "Partial-window answers cannot certify completion"),
+            (#"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"visualFallback","reference":"","text":"Read the missing fee."}"#, "Partial records do not prove a visual capability gap")
+        ]
+        for (step, message) in cases {
+            let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(contract), try nativeStepEnvelope(step)],
+                tokenCounts: [100, 3718, 2820])
+            let planner = try nativeStepPlanner(transport: transport)
+            do {
+                _ = try await planner.propose(whole)
+                XCTFail(message)
+            } catch {
+                XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence, message)
+            }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.tokenCounts, [100, 3718, 2820])
+            XCTAssertEqual(calls.counts, 3); XCTAssertEqual(calls.completions, 2,
+                "Reject only after validating the proposed decision, without another model call")
+        }
+
+        let invisibleLink = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l2","text":""}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(contract), try nativeStepEnvelope(invisibleLink)],
+            tokenCounts: [100, 3718, 2820])
+        let planner = try nativeStepPlanner(transport: transport)
+        do { _ = try await planner.propose(whole); XCTFail("A later-window link cannot be used before its records are selected") }
+        catch { XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse) }
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.tokenCounts, [100, 3718, 2820])
+        XCTAssertEqual(calls.counts, 3); XCTAssertEqual(calls.completions, 2)
+    }
+
+    func testNativeRecordWindowTraversalBoundsBudgetRetriesAndCancellation() async throws {
+        let (whole, _, _) = try nativeRecordWindowContexts()
+        let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
+        let next = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-next","text":""}"#
+        let previous = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-previous","text":""}"#
+
+        // A first-page answer with an unsupported amount may receive its one
+        // correction, but that later overflow cannot trigger window fallback.
+        let unsupported = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The final fee is $999."}"#
+        for tokens in [[100, 100, 3009], [100, 0]] {
+            let responses = tokens.count == 3
+                ? [try nativeStepEnvelope(contract), try nativeStepEnvelope(unsupported)]
+                : [try nativeStepEnvelope(contract)]
+            let transport = NativeStepQueueFixtureTransport(responses: responses, tokenCounts: tokens)
+            let planner = try nativeStepPlanner(transport: transport)
+            do { _ = try await planner.propose(whole); XCTFail("An invalid or overflowing request must not fall back to record windows") }
+            catch { XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .contextLimit) }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.tokenCounts, tokens)
+            XCTAssertEqual(calls.completions, tokens.count == 3 ? 2 : 1)
+            XCTAssertEqual(calls.counts, tokens.count, "No extra window request follows a failed token check")
+        }
+
+        let overBudgetWindow = NativeStepQueueFixtureTransport(
+            responses: [try nativeStepEnvelope(contract), try nativeStepEnvelope(next)], tokenCounts: [100, 3718, 2820, 3718])
+        let overBudgetPlanner = try nativeStepPlanner(transport: overBudgetWindow)
+        do { _ = try await overBudgetPlanner.propose(whole); XCTFail("An oversized named window must stop traversal") }
+        catch { XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .contextLimit) }
+        let overBudgetCalls = await overBudgetWindow.snapshot()
+        XCTAssertEqual(overBudgetCalls.tokenCounts, [100, 3718, 2820, 3718])
+        XCTAssertEqual(overBudgetCalls.counts, 4); XCTAssertEqual(overBudgetCalls.completions, 2)
+
+        let repeated = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(contract), try nativeStepEnvelope(next), try nativeStepEnvelope(previous),
+            try nativeStepEnvelope(next), try nativeStepEnvelope(previous), try nativeStepEnvelope(next)],
+            tokenCounts: [100, 3718, 2820, 2820, 2820, 2820])
+        let repeatedPlanner = try nativeStepPlanner(transport: repeated)
+        do { _ = try await repeatedPlanner.propose(whole); XCTFail("Repeated record traversal must terminate") }
+        catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unknownProposal) }
+        let repeatedCalls = await repeated.snapshot()
+        XCTAssertEqual(repeatedCalls.completions, 5,
+            "The fixture traverses 0→1→0→1, then rejects a third visit to window 0")
+        XCTAssertEqual(repeatedCalls.counts, 6)
+
+        let cancelled = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(contract), try nativeStepEnvelope(next)],
+            cancelAfterCompletion: 2, tokenCounts: [100, 3718, 2820])
+        let cancelledPlanner = try nativeStepPlanner(transport: cancelled)
+        let didCancel = await Task { () -> Bool in
+            do { _ = try await cancelledPlanner.propose(whole); return false }
+            catch { return error is CancellationError }
+        }.value
+        XCTAssertTrue(didCancel)
+        let cancelledCalls = await cancelled.snapshot()
+        XCTAssertEqual(cancelledCalls.counts, 3); XCTAssertEqual(cancelledCalls.completions, 2)
+    }
+
     private func nativeStepContext() throws -> ComputerUseMCPBrowserStepPlanner.Context {
         let page = compactReadingPage(text: "The fee is $25.", label: "The fee is $25.")
         return try ComputerUseMCPBrowserStepPlanner().context(.init(goal: "Read https://example.org/policy and report its fee.",
             screenshotPNG: Data(), currentURL: URL(string: "https://example.org/policy")), page: page, wholePage: true)
+    }
+
+    private func nativeRecordWindowContexts() throws -> (whole: ComputerUseMCPBrowserStepPlanner.Context,
+                                                            windows: [ComputerUseMCPBrowserStepPlanner.Context],
+                                                            source: URL) {
+        let source = URL(string: "https://example.org/records")!
+        let texts = (1...33).map { index in
+            ComputerUseBrowserPageSnapshot.Text(id: "t\(index)", containerID: "g1",
+                text: index == 33 ? "The final fee is $25." : "Captured policy record.")
+        }
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "9", count: 32), texts: texts,
+            links: [
+                .init(id: "l1", label: "Fee details", destination: "https://example.org/fee", textIDs: ["t1"], containerID: "g1"),
+                .init(id: "l2", label: "Other records", destination: "https://example.org/other", textIDs: ["t33"], containerID: "g1")
+            ], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(goal: "Read the page and report the final fee.",
+            screenshotPNG: Data(), currentURL: source)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let whole = try planner.context(input, page: page, wholePage: true)
+        let bounded = try planner.context(input, page: page)
+        XCTAssertGreaterThan(bounded.windows.count, 1)
+        var withWindows = whole
+        withWindows.windows = bounded.windows
+        return (withWindows, bounded.windows, source)
+    }
+
+    private func nativeStepUserObject(_ requestData: Data) throws -> [String: Any] {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+        let content = try XCTUnwrap(messages.last?["content"])
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any])
     }
 
     private func nativeStepPlanner(transport: any ComputerUseTextModelTransport,
@@ -4163,10 +4356,12 @@ private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
         let counts: Int
         let completions: Int
         let requests: [Data]
+        let tokenCounts: [Int]
     }
 
     let responses: [Data]
     let tokenCount: Int
+    let tokenCounts: [Int]?
     let cancelAfterCount: Int
     let cancelAfterCompletion: Int
     let expectedFirstRequest: Data?
@@ -4174,12 +4369,14 @@ private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
     private var counts = 0
     private var completions = 0
     private var requests: [Data] = []
+    private var countedTokens: [Int] = []
 
     init(responses: [Data], tokenCount: Int = 100, cancelAfterCount: Int = 0,
-         cancelAfterCompletion: Int = 0, expectedFirstRequest: Data? = nil) {
+         cancelAfterCompletion: Int = 0, expectedFirstRequest: Data? = nil, tokenCounts: [Int]? = nil) {
         self.responses = responses; self.tokenCount = tokenCount
         self.cancelAfterCount = cancelAfterCount; self.cancelAfterCompletion = cancelAfterCompletion
         self.expectedFirstRequest = expectedFirstRequest
+        self.tokenCounts = tokenCounts
     }
 
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
@@ -4190,7 +4387,9 @@ private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
             throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
         }
         if counts == cancelAfterCount { withUnsafeCurrentTask { $0?.cancel() } }
-        return tokenCount
+        let tokens = tokenCounts.flatMap { $0.indices.contains(counts - 1) ? $0[counts - 1] : nil } ?? tokenCount
+        countedTokens.append(tokens)
+        return tokens
     }
 
     func complete(request: URLRequest) async throws -> Data {
@@ -4204,5 +4403,5 @@ private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
         return response
     }
 
-    func snapshot() -> Snapshot { .init(counts: counts, completions: completions, requests: requests) }
+    func snapshot() -> Snapshot { .init(counts: counts, completions: completions, requests: requests, tokenCounts: countedTokens) }
 }
