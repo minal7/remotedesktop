@@ -112,12 +112,14 @@ struct ComputerUseRuntimeBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
 struct ComputerUseRuntimeBrowserStepPlanner: ComputerUseNativeBrowserStepPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
     var runtime: OSAtlasLlamaRuntime = .shared
+    var usesDirectActionPlanning = false
     var inspectExchange: (@Sendable (Data, Data, Int) -> Void)? = nil
 
     func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
         try Task.checkCancellation()
         let endpoint = try await runtime.activateNativeText(inputs)
-        return try await runtime.proposeBrowserStep(endpoint: endpoint, context: context, inspectExchange: inspectExchange)
+        return try await runtime.proposeBrowserStep(endpoint: endpoint, context: context,
+            usesDirectActionPlanning: usesDirectActionPlanning, inspectExchange: inspectExchange)
     }
 }
 
@@ -1701,6 +1703,7 @@ actor OSAtlasLlamaRuntime {
     /// Native browser steps retain the existing model lease through exact
     /// token counting, inference and decoding. No page effect runs here.
     func proposeBrowserStep(endpoint: OSAtlasLlamaEndpoint, context: ComputerUseMCPBrowserStepPlanner.Context,
+                            usesDirectActionPlanning: Bool = false,
                             inspectExchange: (@Sendable (Data, Data, Int) -> Void)? = nil) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
@@ -1711,7 +1714,8 @@ actor OSAtlasLlamaRuntime {
             try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
             let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
                 modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
-            let planner = ComputerUseLocalTextBrowserStepPlanner(connection: connection, transport: server.transport, inspectExchange: inspectExchange)
+            let planner = ComputerUseLocalTextBrowserStepPlanner(connection: connection, transport: server.transport,
+                usesDirectActionPlanning: usesDirectActionPlanning, inspectExchange: inspectExchange)
             let proposal = try await withTaskCancellationHandler {
                 try await planner.propose(context)
             } onCancel: {

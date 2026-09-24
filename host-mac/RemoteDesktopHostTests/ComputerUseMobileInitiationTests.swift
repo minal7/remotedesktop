@@ -2104,6 +2104,225 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "Replacement text preserves an explicitly empty field value")
     }
 
+    func testNativeDirectActionPlanningSubmitsFormFromOriginalGoalAndClarifications() async throws {
+        let source = URL(string: "https://example.org/search")!
+        let goalText = "Use the current page Search field to look up the topic I specify."
+        let question = "Which topic should I search for?"
+        let answer = "Apollo 11."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText).answering(question, with: answer)
+        let form = ComputerUseBrowserPageSnapshot.Control.Form(id: "f1", method: "get",
+            action: source.absoluteString, target: "", encoding: "application/x-www-form-urlencoded", noValidate: false)
+        let controls = [
+            ComputerUseBrowserPageSnapshot.Control(id: "c1", containerID: "g1", label: "Search",
+                kind: "search", name: "query", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form),
+            ComputerUseBrowserPageSnapshot.Control(id: "c2", containerID: "g1", label: "Search",
+                kind: "submit", name: "", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form)
+        ]
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "d", count: 32),
+            texts: [.init(id: "t1", containerID: "g1", text: "Search the catalog")], links: [], controls: controls,
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "form")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: Data(),
+            currentURL: source, clarifiedGoal: goal)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let submission = try nativeBrowserFunctionEnvelope("submitForm", arguments: [
+            "edits": [["controlID": "c1", "text": "Apollo 11"]], "submitControlID": "c2"
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [submission])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+
+        let plan: ComputerUseMCPBrowserStepPlanner.Plan
+        do {
+            plan = try await planner.propose(context)
+        } catch {
+            let calls = await transport.snapshot()
+            guard let requestData = calls.requests.first,
+                  let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+                  let messages = request["messages"] as? [[String: Any]],
+                  let userMessage = messages.first(where: { $0["role"] as? String == "user" }),
+                  let content = userMessage["content"] as? String,
+                  let user = try? JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any] else {
+                XCTFail("Expected the direct-action planner to submit from one native tool response; the fixture request was not a valid original-goal request: \(error)")
+                return
+            }
+            XCTAssertEqual(user["goal"] as? String, goalText)
+            XCTAssertEqual(user["clarifications"] as? [[String: String]], [["question": question, "answer": answer]])
+            XCTFail("Expected one direct native submitForm step without prerequisite/contract interpretation; legacy planner rejected the queued function response after \(calls.completions) completion(s): \(error)")
+            return
+        }
+
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 1)
+        guard let requestData = calls.requests.first else {
+            XCTFail("Direct action planning must send exactly one request")
+            return
+        }
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
+        XCTAssertNil(request["response_format"], "Direct action planning must not run the classifier or contract schema first")
+        let user = try nativeBrowserTrustedUserObject(requestData)
+        XCTAssertEqual(user["goal"] as? String, goalText)
+        XCTAssertEqual(user["clarifications"] as? [[String: String]], [["question": question, "answer": answer]])
+        let capture = try nativeBrowserCapturedObject(requestData)
+        XCTAssertNil(capture["goalContract"])
+        let tools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+        let names = Set(try tools.map { tool -> String in
+            let function = try XCTUnwrap(tool["function"] as? [String: Any])
+            return try XCTUnwrap(function["name"] as? String)
+        })
+        XCTAssertTrue(names.contains("submitForm"))
+        XCTAssertFalse(names.contains("answer"))
+        XCTAssertFalse(names.contains("visualFallback"))
+        XCTAssertEqual(plan.kind, .nativeFormSubmission)
+        XCTAssertEqual(plan.formSubmission?.edits, [.init(controlID: "c1", text: "Apollo 11")])
+        XCTAssertEqual(plan.formSubmission?.submitControlID, "c2")
+        XCTAssertNil(plan.retainedContract)
+        XCTAssertNil(plan.assessment)
+    }
+
+    func testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls() async throws {
+        let context = try nativeDirectSearchContext()
+        let rejected: [(String, Data)] = [
+            ("answer", try nativeBrowserFunctionEnvelope("answer", argumentsJSON: #"{"text":"Apollo 11","evidence":{"r1":["text:t1"]}}"#)),
+            ("incomplete", try nativeBrowserFunctionEnvelope("incomplete", argumentsJSON: #"{"text":"The search is unavailable."}"#)),
+            ("visualFallback", try nativeBrowserFunctionEnvelope("visualFallback", argumentsJSON: #"{"text":"Search the page."}"#)),
+            ("unknown tool", try nativeBrowserFunctionEnvelope("click", argumentsJSON: #"{"reference":"c1"}"#)),
+            ("extra argument", try nativeBrowserFunctionEnvelope("search", argumentsJSON: #"{"text":"Apollo 11","unexpected":true}"#)),
+            ("malformed arguments", try nativeBrowserFunctionEnvelope("submitForm", argumentsJSON: "{"))
+        ]
+        for (name, response) in rejected {
+            let transport = NativeStepQueueFixtureTransport(responses: [response])
+            var planner = try nativeStepPlanner(transport: transport)
+            planner.usesDirectActionPlanning = true
+            do {
+                _ = try await planner.propose(context)
+                XCTFail("Direct action planning accepted rejected response: \(name)")
+            } catch {
+                XCTAssertFalse(error is CancellationError, name)
+            }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 1, name)
+            XCTAssertEqual(calls.completions, 1, name)
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[0]) as? [String: Any])
+            XCTAssertNil(request["response_format"], name)
+            let names = Set(try XCTUnwrap(request["tools"] as? [[String: Any]]).map { tool -> String in
+                try XCTUnwrap((tool["function"] as? [String: Any])?["name"] as? String)
+            })
+            XCTAssertTrue(names.contains("reviewGoal"), name)
+            XCTAssertTrue(names.contains("submitForm"), name)
+            XCTAssertTrue(names.isDisjoint(with: ["answer", "incomplete", "visualFallback"]), name)
+        }
+    }
+
+    func testNativeDirectActionReviewGoalUsesLegacyUnsupportedActionContract() async throws {
+        let source = URL(string: "https://example.org/tickets")!
+        let goalText = "Find the ticket price. Purchase only if I approve a price below $25."
+        let context = try nativeDirectSearchContext(goalText: goalText, source: source,
+            pageText: "Tickets cost $20.")
+        let contract = #"{"objective":"Report the ticket price and preserve the conditional purchase request.","constraints":["Purchase only after the user approves a price below $25."],"requirements":[{"instruction":"Report the listed ticket price.","kind":"information"},{"instruction":"Purchase tickets only after the user approves a listed price below $25.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("reviewGoal", argumentsJSON: "{}"),
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(contract),
+            try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Do you approve the purchase?"}"#)
+        ])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        XCTAssertEqual(plan.kind, .askUser)
+        XCTAssertEqual(plan.text, "Do you approve the purchase?")
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 4)
+        let directRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[0]) as? [String: Any])
+        XCTAssertNil(directRequest["response_format"])
+        let directNames = Set(try XCTUnwrap(directRequest["tools"] as? [[String: Any]]).map { tool -> String in
+            try XCTUnwrap((tool["function"] as? [String: Any])?["name"] as? String)
+        })
+        XCTAssertTrue(directNames.isSuperset(of: ["search", "submitForm", "askUser", "wait", "reviewGoal"]))
+        XCTAssertFalse(directNames.contains("answer"))
+        let legacyInterpretation = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        XCTAssertEqual(((legacyInterpretation["response_format"] as? [String: Any])?["json_schema"] as? [String: Any])?["name"] as? String,
+            "browser_goal_contract")
+        let retained = try nativeBrowserCapturedObject(calls.requests[3])
+        let retainedContract = try XCTUnwrap(retained["goalContract"] as? [String: Any])
+        let requirements = try XCTUnwrap(retainedContract["requirements"] as? [[String: Any]])
+        let purchase = try XCTUnwrap(requirements.first { ($0["instruction"] as? String)?.contains("Purchase tickets") == true })
+        XCTAssertEqual(purchase["kind"] as? String, "action")
+        XCTAssertEqual((purchase["expectedEffect"] as? [String: String])?["type"], "unsupported")
+        XCTAssertFalse(plan.assessment?.requirements.contains { $0.kind == .action && $0.state == .observed } ?? false)
+        let retainedAction = try XCTUnwrap(plan.retainedContract?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(retainedAction.expectedEffect, .unsupported)
+        XCTAssertEqual(plan.assessment?.requirements.first { $0.kind == .action }?.state, .pending)
+
+        let citationGoal = "Report the current ticket price."
+        let citationContext = try nativeDirectSearchContext(goalText: citationGoal, source: source,
+            pageText: "Tickets cost $20.")
+        let citationContract = #"{"objective":"Report the current listed ticket price.","constraints":[],"requirements":[{"instruction":"Report the current listed ticket price.","kind":"information"}]}"#
+        let forgedCitation = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("reviewGoal", argumentsJSON: "{}"),
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(citationContract),
+            try nativeBrowserFunctionEnvelope("answer", argumentsJSON: #"{"text":"Tickets cost $20.","evidence":{"r1":["text:missing"]}}"#),
+            try nativeBrowserFunctionEnvelope("answer", argumentsJSON: #"{"text":"Tickets cost $20.","evidence":{"r1":["text:missing"]}}"#)
+        ])
+        var citationPlanner = try nativeStepPlanner(transport: forgedCitation)
+        citationPlanner.usesDirectActionPlanning = true
+        do {
+            _ = try await citationPlanner.propose(citationContext)
+            XCTFail("reviewGoal must route through the legacy current-evidence citation guard")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim)
+        }
+        let citationCalls = await forgedCitation.snapshot()
+        XCTAssertEqual(citationCalls.completions, 5, "The legacy citation guard gets exactly one bounded correction attempt")
+    }
+
+    func testNativeDirectActionCancellationBeforeOrAfterInferenceDiscardsProposal() async throws {
+        let context = try nativeDirectSearchContext()
+        let submission = try nativeBrowserFunctionEnvelope("submitForm", arguments: [
+            "edits": [["controlID": "c1", "text": "Apollo 11"]], "submitControlID": "c2"
+        ])
+        for (cancelAfterCount, cancelAfterCompletion, expectedCompletions) in [(1, 0, 0), (0, 1, 1)] {
+            let transport = NativeStepQueueFixtureTransport(responses: [submission],
+                cancelAfterCount: cancelAfterCount, cancelAfterCompletion: cancelAfterCompletion)
+            var planner = try nativeStepPlanner(transport: transport)
+            planner.usesDirectActionPlanning = true
+            let cancelled = await Task { () -> Bool in
+                do { _ = try await planner.propose(context); return false }
+                catch { return error is CancellationError }
+            }.value
+            XCTAssertTrue(cancelled)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.completions, expectedCompletions)
+            XCTAssertEqual(calls.counts, 1)
+            // `propose` only returns a candidate; this fixture has no dispatcher or page side effect.
+        }
+    }
+
+    private func nativeDirectSearchContext(goalText: String = "Use the current page Search field to look up Apollo 11.",
+                                           source: URL = URL(string: "https://example.org/search")!,
+                                           pageText: String = "Search the catalog") throws -> ComputerUseMCPBrowserStepPlanner.Context {
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText)
+        let form = ComputerUseBrowserPageSnapshot.Control.Form(id: "f1", method: "get",
+            action: source.absoluteString, target: "", encoding: "application/x-www-form-urlencoded", noValidate: false)
+        let controls = [
+            ComputerUseBrowserPageSnapshot.Control(id: "c1", containerID: "g1", label: "Search",
+                kind: "search", name: "query", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form),
+            ComputerUseBrowserPageSnapshot.Control(id: "c2", containerID: "g1", label: "Search",
+                kind: "submit", name: "", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form)
+        ]
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "e", count: 32),
+            texts: [.init(id: "t1", containerID: "g1", text: pageText)], links: [], controls: controls,
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "form")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: Data(), currentURL: source, clarifiedGoal: goal)
+        return try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+    }
+
     func testNativeWholePageSubmitFormRejectsUnknownDuplicateAndCrossFormControls() async throws {
         let source = URL(string: "https://example.org/search")!
         let goalText = "Use the current page form."
@@ -3906,6 +4125,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             resumeHarnessBudgetSeconds: 80, localFormSearch: true)
     }
 
+    func testOptInManagedNativeFormSearchReportsObservedHeadingWithDirectActionPlanning() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_NATIVE_FORM_SEARCH_DIRECT"] == "1" else {
+            throw XCTSkip("Opt-in: verified shared-runtime native direct browser form search against a controlled local page")
+        }
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: nil, useNativeText: true,
+            resumeHarnessBudgetSeconds: 80, localFormSearch: true, usesDirectActionPlanning: true)
+    }
+
     func testOptInMCPBrowserHostFindsPublicTravelWithoutURLWithManagedNativeText() async throws {
         try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "search", useNativeText: true)
     }
@@ -4006,7 +4233,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                                                clarificationAnswer: String? = nil,
                                                                preloadLoadedPage: Bool = false,
                                                                resumeHarnessBudgetSeconds: TimeInterval = 75,
-                                                               localFormSearch: Bool = false) async throws {
+                                                               localFormSearch: Bool = false,
+                                                               usesDirectActionPlanning: Bool = false) async throws {
         var publicGoal: String?, expectedPatterns: [String] = [], questionPatterns: [String] = [], expectedHost: String?
         if let publicCase {
             guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
@@ -4031,7 +4259,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
         }
         let outputPath = localFormSearch
-            ? try XCTUnwrap(environment["MANAGED_NATIVE_FORM_SEARCH_DIRECTORY"])
+            ? try XCTUnwrap(environment[usesDirectActionPlanning
+                ? "MANAGED_NATIVE_FORM_SEARCH_DIRECT_DIRECTORY" : "MANAGED_NATIVE_FORM_SEARCH_DIRECTORY"])
             : try XCTUnwrap(environment["MCP_BROWSER_LOOP_DIRECTORY"])
         let output = URL(fileURLWithPath: outputPath)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
@@ -4070,6 +4299,16 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             inspectExchange = { request, response, tokens in
                 if localFormSearch {
                     var safe: [String: Any] = ["inputTokens": tokens]
+                    if let requestRoot = try? JSONSerialization.jsonObject(with: request) as? [String: Any] {
+                        if let format = requestRoot["response_format"] as? [String: Any],
+                           let jsonSchema = format["json_schema"] as? [String: Any],
+                           let schemaName = jsonSchema["name"] as? String {
+                            safe["responseSchemaName"] = schemaName
+                        }
+                        if let tools = requestRoot["tools"] as? [[String: Any]] {
+                            safe["requestToolNames"] = tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+                        }
+                    }
                     if let root = try? JSONSerialization.jsonObject(with: response) as? [String: Any] {
                         for key in ["model", "usage"] { if let value = root[key] { safe[key] = value } }
                         if let choices = root["choices"] as? [[String: Any]] {
@@ -4092,7 +4331,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                         if let object = structured as? [String: Any],
                                            Set(object.keys) == ["name", "arguments"],
                                            let name = object["name"] as? String,
-                                           ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords"].contains(name),
+                                           ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal"].contains(name),
                                            let arguments = object["arguments"],
                                            let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
                                            let argumentText = String(data: argumentData, encoding: .utf8),
@@ -4108,7 +4347,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                                               Set(object.keys) == ["name", "arguments"],
                                               let name = object["name"] as? String,
-                                              ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords"].contains(name),
+                                              ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal"].contains(name),
                                               let arguments = object["arguments"],
                                               let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
                                               let argumentText = String(data: argumentData, encoding: .utf8),
@@ -4184,8 +4423,19 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let inspectProposal: (@Sendable (String) -> Void)?
         if localFormSearch { inspectProposal = nil }
         else { inspectProposal = { plannerTrace.append($0) } }
-        let browserStepPlanner = ComputerUseMCPBrowserStepPlanner(inspectProposal: inspectProposal,
+        var browserStepPlanner = ComputerUseMCPBrowserStepPlanner(inspectProposal: inspectProposal,
             inspectCatalogue: inspectCatalogue, inspectExchange: inspectExchange)
+        if usesDirectActionPlanning {
+            browserStepPlanner.nativeTextPlanner = {
+                guard let receipt = await native.currentInstallation() else { return nil }
+                try Task.checkCancellation()
+                let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+                    receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+                return ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, runtime: modelRuntime,
+                    usesDirectActionPlanning: true, inspectExchange: inspectExchange)
+            }
+        }
         let manager = HostComputerUseManager(injector: InputInjector(), installer: visual,
             nativeTextInstaller: native,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
@@ -4349,6 +4599,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "plannerTrace": plannerTrace.items,
             "usesNativeTextModel": useNativeText,
             "localFormSearch": localFormSearch,
+            "usesDirectActionPlanning": usesDirectActionPlanning,
             "expectedFormRequestPath": localFormSearch ? (formSearchPath as Any) : NSNull(),
             "formRequestCount": localFormSearch ? server.count(formSearchPath) : NSNull(),
             "nativeFunctionNames": localFormSearch ? nativeFunctionNames : [],
