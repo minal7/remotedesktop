@@ -16,13 +16,22 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
 
     func makeRequest(_ context: ComputerUseMCPBrowserStepPlanner.Context) throws -> URLRequest {
         guard context.json.utf8.count <= 48 * 1_024, !context.isPartialRecordView,
-              context.navigation.isEmpty, case .object(var schema) = context.schema,
-              case .object(var properties)? = schema["properties"],
-              case .object(var kind)? = properties["kind"], case .array(let kinds)? = kind["enum"],
-              case .object(var text)? = properties["text"] else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+              context.navigation.isEmpty, case .object(let schema) = context.schema,
+              case .object(let properties)? = schema["properties"],
+              case .object(let kind)? = properties["kind"], case .array(let kinds)? = kind["enum"],
+              case .object(let text)? = properties["text"],
+              case .object(let assessment)? = properties["assessment"],
+              case .object(let assessmentProperties)? = assessment["properties"],
+              case .object(let requirements)? = assessmentProperties["requirements"],
+              case .object(let requirement)? = requirements["items"],
+              case .object(let requirementProperties)? = requirement["properties"],
+              let instructionSchema = requirementProperties["instruction"],
+              case .object(let evidence)? = requirementProperties["evidence"],
+              case .array(let evidenceChoices)? = evidence["enum"] else {
+            throw ComputerUseBrowserGoalPlanError.invalidResponse
+        }
         // b9992 cannot compile bounded character repetitions. The decoder
         // enforces every UTF-8 byte bound after generation.
-        text.removeValue(forKey: "maxLength")
         func removingMaximumLengths(_ value: MCPJSONValue) -> MCPJSONValue {
             switch value {
             case .object(let entries):
@@ -34,9 +43,89 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
             default: return value
             }
         }
-        kind["enum"] = .array(kinds.filter { $0 != .string("inspectRecords") })
-        properties["text"] = .object(text); properties["kind"] = .object(kind); schema["properties"] = .object(properties)
-        let grammarSchema = removingMaximumLengths(.object(schema))
+
+        func stringSchema(minimumLength: Int? = nil) -> MCPJSONValue {
+            var fields: [String: MCPJSONValue] = ["type": .string("string")]
+            if let minimumLength { fields["minLength"] = .integer(minimumLength) }
+            return .object(fields)
+        }
+        func enumSchema(_ values: [String]) -> MCPJSONValue {
+            .object(["type": .string("string"), "enum": .array(values.map(MCPJSONValue.string))])
+        }
+        func objectSchema(_ fields: [String: MCPJSONValue]) -> MCPJSONValue {
+            .object(["type": .string("object"), "additionalProperties": .bool(false),
+                "properties": .object(fields),
+                "required": .array(fields.keys.sorted().map(MCPJSONValue.string))])
+        }
+        func requirementSchema(kind: String, states: [String], evidenceReferences: [String]) -> MCPJSONValue {
+            objectSchema([
+                "instruction": instructionSchema,
+                "kind": enumSchema([kind]),
+                "state": enumSchema(states),
+                "evidence": enumSchema(evidenceReferences)])
+        }
+
+        let availableKinds = Set(kinds.compactMap { value -> String? in
+            guard case .string(let name) = value, name != "inspectRecords" else { return nil }
+            return name
+        })
+        let schemaEvidenceReferences = Set(evidenceChoices.compactMap { value -> String? in
+            guard case .string(let reference) = value else { return nil }
+            return reference
+        })
+        let observedEvidenceReferences = context.evidenceReferences
+            .filter { schemaEvidenceReferences.contains($0.key) && !$0.key.isEmpty
+                && !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .keys.sorted()
+        let emptyEvidence = [""]
+
+        var commonRequirementVariants: [MCPJSONValue] = [
+            requirementSchema(kind: "information", states: ["pending", "needsUser"], evidenceReferences: emptyEvidence),
+            requirementSchema(kind: "action", states: ["pending", "needsUser"], evidenceReferences: emptyEvidence)
+        ]
+        if !observedEvidenceReferences.isEmpty {
+            commonRequirementVariants.append(requirementSchema(kind: "information", states: ["observed"],
+                evidenceReferences: observedEvidenceReferences))
+        }
+        let commonRequirementItems = MCPJSONValue.object(["oneOf": .array(commonRequirementVariants)])
+
+        func assessmentSchema(requirementItems: MCPJSONValue, workerObjective: MCPJSONValue) -> MCPJSONValue {
+            objectSchema([
+                "objective": stringSchema(minimumLength: 1),
+                "constraints": stringSchema(),
+                "workerObjective": workerObjective,
+                "requirements": .object(["type": .string("array"), "minItems": .integer(1),
+                    "maxItems": .integer(8), "items": requirementItems])])
+        }
+        func envelopeSchema(kindNames: [String], assessmentSchema: MCPJSONValue) -> MCPJSONValue {
+            objectSchema([
+                "kind": enumSchema(kindNames),
+                "reference": properties["reference"] ?? enumSchema([""]),
+                "text": .object(text),
+                "assessment": assessmentSchema])
+        }
+
+        var envelopeVariants: [MCPJSONValue] = []
+        if availableKinds.contains("answer"), !observedEvidenceReferences.isEmpty {
+            let observedInformation = requirementSchema(kind: "information", states: ["observed"],
+                evidenceReferences: observedEvidenceReferences)
+            envelopeVariants.append(envelopeSchema(kindNames: ["answer"], assessmentSchema: assessmentSchema(
+                requirementItems: observedInformation, workerObjective: enumSchema([""]))))
+        }
+        let ordinaryKinds = availableKinds.subtracting(["answer", "visualFallback"]).sorted()
+        if !ordinaryKinds.isEmpty {
+            envelopeVariants.append(envelopeSchema(kindNames: ordinaryKinds, assessmentSchema: assessmentSchema(
+                requirementItems: commonRequirementItems, workerObjective: enumSchema([""]))))
+        }
+        if availableKinds.contains("visualFallback") {
+            envelopeVariants.append(envelopeSchema(kindNames: ["visualFallback"], assessmentSchema: assessmentSchema(
+                requirementItems: commonRequirementItems, workerObjective: stringSchema(minimumLength: 1))))
+        }
+        guard !envelopeVariants.isEmpty else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+        // Each oneOf alternative is a complete object: pinned llama.cpp cannot
+        // combine properties with a union on the same schema object. The Swift
+        // decoder remains authoritative for semantic and byte-level checks.
+        let grammarSchema = removingMaximumLengths(.object(["oneOf": .array(envelopeVariants)]))
         let body: [String: Any] = ["model": connection.modelAlias,
             "messages": [["role": "system", "content": ComputerUseMCPBrowserStepPlanner.instructions + "\n" + Self.readingInstructions],
                          ["role": "user", "content": context.json]],

@@ -1,6 +1,6 @@
 {
   "frozenDate": "2026-09-23",
-  "status": "original case executed three times and rejected; remaining cases pending",
+  "status": "Qwen original failed four times; Agents original information response passed replay, conditional case failed semantic qualification in both non-thinking and bounded reasoning profiles; remaining cases pending",
   "policy": "Exact user inputs frozen before new orchestration inference. Oracles remain outside model context. Information completion also requires full independent fact/source association review; binary outcome alone is insufficient. Action cases dispatch no effects during semantic evaluation.",
   "source": "https://www.sfjazz.org/tickets/ticket-policies/",
   "cases": [
@@ -47,5 +47,6 @@
       "mustNot": "discard accepted clarification when answering policy question"
     }
   ],
-  "results": "browser-orchestration-results-sept23.json"
+  "results": "browser-orchestration-results-sept23.json",
+  "additionalResults": "browser-generation-contract-results-sept23.json"
 }

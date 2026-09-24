@@ -10,6 +10,19 @@ import FoundationModels
 
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
+    private struct FrozenNativeBrowserExchangeCase {
+        let caseID: String
+        let cataloguePath: String
+        let oraclePath: String
+        let captureSHA256: String
+        let goal: String
+        let url: URL
+        let disposition: String
+        let patterns: [String]
+        let input: ComputerUseFaraModel.Input
+        let context: ComputerUseMCPBrowserStepPlanner.Context
+    }
+
     func testOptInNativeBrowserPlannerFactoryFailureDoesNotRequestVisualControl() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native browser owner and failing planner factory; no inference") }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativePlannerFailure-" + UUID().uuidString)
@@ -45,40 +58,9 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     func testOptInManagedNativeBrowserStepFromFrozenPublicRecords() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_NATIVE_BROWSER_STEP"] == "1" else { throw XCTSkip("Opt-in: one saved public page, actual managed text model, no browser effects") }
-        let manifestPath = try XCTUnwrap(environment["MCP_NATIVE_CAPACITY_MANIFEST"])
-        let caseID = try XCTUnwrap(environment["NATIVE_READING_CASE_ID"])
-        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: manifestPath))) as? [String: Any])
-        let item = try XCTUnwrap((manifest["cases"] as? [[String: String]])?.first { $0["id"] == caseID })
-        let raw = try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(item["catalogue"])))
-        let hash = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(hash, item["sha256"])
-        guard hash == item["sha256"] else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
-        let page = try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self, from: raw)
-        let url = try XCTUnwrap(URL(string: XCTUnwrap(item["url"]))), goal = try XCTUnwrap(item["goal"])
-        let oracleURL = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_READING_ORACLE"]))
-        let oracle = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: oracleURL)) as? [String: Any])
-        let expected = try XCTUnwrap(oracle[caseID] as? [String: Any])
-        let disposition = expected["expectedDisposition"] as? String ?? item["expectedDisposition"] as? String ?? "information_complete"
-        let patterns = expected["expectedPatterns"] as? [String] ?? []
-        guard expected["goal"] as? String == goal,
-              disposition == "action_remaining" || !patterns.isEmpty else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
-        var clarifiedGoal: ComputerUseUnresolvedTextGoal? = nil
-        if let clarificationsJSON = item["clarificationsJSON"] {
-            guard let data = clarificationsJSON.data(using: .utf8),
-                  let clarifications = try JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
-                throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
-            }
-            var retained = try ComputerUseUnresolvedTextGoal(userRequest: goal)
-            for turn in clarifications {
-                retained = try retained.answering(XCTUnwrap(turn["question"]), with: XCTUnwrap(turn["answer"]))
-            }
-            clarifiedGoal = retained
-        }
-        let prior = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: ["name":"computer_use", "arguments":["action":"visit_url", "url":url.absoluteString]], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self) + "</tool_call>"
-        let input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: Data(),
-            history: [.init(screenshotPNG: Data(), response: prior, action: .visitURL(url))], currentURL: url,
-            clarifiedGoal: clarifiedGoal)
-        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let frozen = try frozenNativeBrowserExchangeCase(environment: environment)
+        let caseID = frozen.caseID, goal = frozen.goal, input = frozen.input, context = frozen.context
+        let hash = frozen.captureSHA256
         let installation = await ComputerUseInstaller.nativeText().currentInstallation()
         let receipt = try XCTUnwrap(installation)
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
@@ -107,7 +89,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) { trace.append(String(decoding: data, as: UTF8.self)) }
         })
         let start = Date()
-        var report: [String: Any] = ["case": caseID, "goal": goal, "expectedDisposition": disposition,
+        var report: [String: Any] = ["case": caseID, "goal": goal, "expectedDisposition": frozen.disposition,
             "captureSHA256": hash, "scope": "managed-frozen-native-step-no-effects", "input": context.json]
         var failure: Error?
         do {
@@ -119,7 +101,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     "requirements": assessment.requirements.map { ["instruction": $0.instruction, "kind": $0.kind.rawValue,
                         "state": $0.state.rawValue, "evidence": $0.evidence] }]
             }
-            if disposition == "action_remaining" {
+            if frozen.disposition == "action_remaining" {
                 let pendingActions = plan.assessment?.requirements.filter {
                     $0.kind == .action && ($0.state == .pending || $0.state == .needsUser)
                 } ?? []
@@ -135,7 +117,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     report["hostCompletionRejection"] = String(describing: error)
                 }
             } else {
-                let matches = patterns.map { plan.text.range(of: $0, options: .regularExpression) != nil }
+                let matches = frozen.patterns.map { plan.text.range(of: $0, options: .regularExpression) != nil }
                 report["patternMatches"] = matches
                 XCTAssertEqual(plan.kind, .answer); XCTAssertTrue(matches.allSatisfy { $0 })
                 try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan, goal: input.validatedBrowserGoal(), hasPageObservation: true)
@@ -154,6 +136,163 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         if let failure { throw failure }
     }
 
+    func testOptInFrozenNativeBrowserExchangeExportAndReplay() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_NATIVE_BROWSER_EXCHANGE_HARNESS"] == "1" else {
+            throw XCTSkip("Opt-in: export or replay a frozen native browser exchange; no model loading or inference")
+        }
+        let frozen = try frozenNativeBrowserExchangeCase(environment: environment)
+        let fixtureTransport = NativeStepFixtureTransport()
+        let planner = try nativeStepPlanner(transport: fixtureTransport,
+            modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+        let request = try planner.makeRequest(frozen.context)
+        let requestBody = try XCTUnwrap(request.httpBody)
+        let requestSHA256 = Self.sha256(requestBody)
+        let contextData = Data(frozen.context.json.utf8)
+        let contextSHA256 = Self.sha256(contextData)
+        var report: [String: Any] = [
+            "case": frozen.caseID,
+            "goal": frozen.goal,
+            "expectedDisposition": frozen.disposition,
+            "capturePath": frozen.cataloguePath,
+            "oraclePath": frozen.oraclePath,
+            "captureSHA256": frozen.captureSHA256,
+            "sourceURL": frozen.url.absoluteString,
+            "contextSHA256": contextSHA256,
+            "requestSHA256": requestSHA256,
+            "requestURL": request.url?.absoluteString as Any? ?? NSNull(),
+            "requestModelAlias": ComputerUseNativeTextRuntimeInputs.modelAlias,
+            "context": frozen.context.json,
+            "schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(frozen.context.schema)),
+            "scope": "production-request-body-and-decoder-fixture-transport-no-inference",
+        ]
+        var replayFailure: Error?
+
+        if let path = environment["NATIVE_BROWSER_EXCHANGE_REQUEST"] {
+            try writeExchangeArtifact(requestBody, to: path)
+            report["requestExportPath"] = path
+        }
+        if let path = environment["NATIVE_BROWSER_EXCHANGE_CONTEXT"] {
+            try writeExchangeArtifact(contextData, to: path)
+            report["contextExportPath"] = path
+        }
+        if let responsePath = environment["NATIVE_BROWSER_EXCHANGE_RESPONSE"] {
+            let response = try Data(contentsOf: URL(fileURLWithPath: responsePath))
+            report["responsePath"] = responsePath
+            report["responseSHA256"] = Self.sha256(response)
+            do {
+                let plan = try planner.decode(response, context: frozen.context)
+                report["decodedKind"] = plan.kind.rawValue
+                report["decodedText"] = plan.text
+                report["decodedReference"] = plan.reference
+                report["assessment"] = plan.assessment.map { assessment in
+                    ["objective": assessment.objective, "constraints": assessment.constraints,
+                     "workerObjective": assessment.workerObjective,
+                     "requirements": assessment.requirements.map { requirement in
+                        ["instruction": requirement.instruction, "kind": requirement.kind.rawValue,
+                         "state": requirement.state.rawValue, "evidence": requirement.evidence]
+                     }]
+                } as Any? ?? NSNull()
+                switch frozen.disposition {
+                case "information_complete":
+                    let matches = frozen.patterns.map { plan.text.range(of: $0, options: .regularExpression) != nil }
+                    report["patternMatches"] = matches
+                    XCTAssertEqual(plan.kind, .answer)
+                    XCTAssertTrue(matches.allSatisfy { $0 })
+                    try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                        plan: plan, goal: frozen.input.validatedBrowserGoal(), hasPageObservation: true)
+                    report["hostCompletionAccepted"] = true
+                case "action_remaining":
+                    XCTAssertNotEqual(plan.kind, .answer, "The external oracle requires outstanding action")
+                    let pendingActions = plan.assessment?.requirements.filter {
+                        $0.kind == .action && ($0.state == .pending || $0.state == .needsUser)
+                    } ?? []
+                    XCTAssertFalse(pendingActions.isEmpty, "The model assessment must preserve the outstanding action")
+                    report["pendingActionCount"] = pendingActions.count
+                    XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                        plan: plan, goal: frozen.input.validatedBrowserGoal(), hasPageObservation: true))
+                    report["hostCompletionAccepted"] = false
+                default:
+                    throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+                }
+            } catch {
+                report["decoderError"] = String(describing: error)
+                replayFailure = error
+                report["hostCompletionAccepted"] = false
+            }
+        }
+
+        guard environment["NATIVE_BROWSER_EXCHANGE_REQUEST"] != nil
+                || environment["NATIVE_BROWSER_EXCHANGE_CONTEXT"] != nil
+                || environment["NATIVE_BROWSER_EXCHANGE_RESPONSE"] != nil else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        let fixtureCalls = await fixtureTransport.calls
+        XCTAssertEqual(fixtureCalls.counts, 0, "Export and replay must not call a model transport")
+        XCTAssertEqual(fixtureCalls.completions, 0, "Export and replay must not call a model transport")
+        if let reportPath = environment["NATIVE_BROWSER_EXCHANGE_REPORT"] {
+            let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try writeExchangeArtifact(data, to: reportPath)
+        }
+        if let replayFailure { throw replayFailure }
+    }
+
+    private func frozenNativeBrowserExchangeCase(environment: [String: String]) throws -> FrozenNativeBrowserExchangeCase {
+        let manifestPath = try XCTUnwrap(environment["MCP_NATIVE_CAPACITY_MANIFEST"])
+        let caseID = try XCTUnwrap(environment["NATIVE_READING_CASE_ID"])
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: manifestPath))) as? [String: Any])
+        let item = try XCTUnwrap((manifest["cases"] as? [[String: String]])?.first { $0["id"] == caseID })
+        let cataloguePath = try XCTUnwrap(item["catalogue"])
+        let raw = try Data(contentsOf: URL(fileURLWithPath: cataloguePath))
+        let hash = Self.sha256(raw)
+        XCTAssertEqual(hash, item["sha256"])
+        guard hash == item["sha256"] else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+        let page = try JSONDecoder().decode(ComputerUseBrowserPageSnapshot.self, from: raw)
+        let url = try XCTUnwrap(URL(string: XCTUnwrap(item["url"])))
+        let goal = try XCTUnwrap(item["goal"])
+        let oraclePath = try XCTUnwrap(environment["NATIVE_READING_ORACLE"])
+        let oracle = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: oraclePath))) as? [String: Any])
+        let expected = try XCTUnwrap(oracle[caseID] as? [String: Any])
+        let disposition = expected["expectedDisposition"] as? String ?? item["expectedDisposition"] ?? "information_complete"
+        let patterns = expected["expectedPatterns"] as? [String] ?? []
+        guard expected["goal"] as? String == goal,
+              disposition == "action_remaining" || !patterns.isEmpty else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        var clarifiedGoal: ComputerUseUnresolvedTextGoal? = nil
+        if let clarificationsJSON = item["clarificationsJSON"] {
+            guard let data = clarificationsJSON.data(using: .utf8),
+                  let clarifications = try JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
+                throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+            }
+            var retained = try ComputerUseUnresolvedTextGoal(userRequest: goal)
+            for turn in clarifications {
+                retained = try retained.answering(XCTUnwrap(turn["question"]), with: XCTUnwrap(turn["answer"]))
+            }
+            clarifiedGoal = retained
+        }
+        let prior = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: [
+            "name": "computer_use", "arguments": ["action": "visit_url", "url": url.absoluteString],
+        ], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self) + "</tool_call>"
+        let input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: Data(),
+            history: [.init(screenshotPNG: Data(), response: prior, action: .visitURL(url))], currentURL: url,
+            clarifiedGoal: clarifiedGoal)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        return .init(caseID: caseID, cataloguePath: cataloguePath, oraclePath: oraclePath,
+            captureSHA256: hash, goal: goal, url: url, disposition: disposition,
+            patterns: patterns, input: input, context: context)
+    }
+
+    private func writeExchangeArtifact(_ data: Data, to path: String) throws {
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .withoutOverwriting)
+    }
+
+    private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
     func testNativeTextBrowserRequestUsesBoundedNonThinkingNativeRecords() throws {
         let context = try nativeStepContext()
         let request = try nativeStepPlanner(transport: NativeStepFixtureTransport()).makeRequest(context)
@@ -161,16 +300,54 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer fixture-token-value")
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "fixture-model")
         XCTAssertEqual(body["max_tokens"] as? Int, 768)
         XCTAssertEqual((body["chat_template_kwargs"] as? [String: Bool])?["enable_thinking"], false)
         let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
         XCTAssertEqual(messages.count, 2); XCTAssertEqual(messages[1]["content"], context.json)
+        XCTAssertEqual(messages[0]["content"], ComputerUseMCPBrowserStepPlanner.instructions
+            + "\n" + ComputerUseLocalTextBrowserStepPlanner.readingInstructions)
         XCTAssertFalse(messages.contains { $0["content"]?.contains("image_url") == true })
         let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-        let schema = try XCTUnwrap((format["json_schema"] as? [String: Any])?["schema"] as? [String: Any])
-        let properties = try XCTUnwrap(schema["properties"] as? [String: [String: Any]])
-        XCTAssertNil(properties["text"]?["maxLength"], "The pinned llama grammar rejects a 4096 repetition bound; decoding still bounds UTF-8 bytes")
-        XCTAssertFalse((properties["kind"]?["enum"] as? [String])?.contains("inspectRecords") ?? true)
+        XCTAssertEqual(format["type"] as? String, "json_schema")
+        let jsonSchema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        XCTAssertEqual(jsonSchema["name"] as? String, "browser_step")
+        XCTAssertEqual(jsonSchema["strict"] as? Bool, true)
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+
+        let branches: [[String: Any]]
+        if let oneOf = schema["oneOf"] as? [[String: Any]] {
+            branches = oneOf
+        } else if let anyOf = schema["anyOf"] as? [[String: Any]] {
+            branches = anyOf
+        } else {
+            branches = [schema]
+        }
+        XCTAssertFalse(branches.isEmpty)
+        func containsUnsupportedMaximumLength(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                return object["maxLength"] != nil || object.values.contains(where: containsUnsupportedMaximumLength)
+            }
+            if let array = value as? [Any] { return array.contains(where: containsUnsupportedMaximumLength) }
+            return false
+        }
+        XCTAssertFalse(containsUnsupportedMaximumLength(schema),
+            "The pinned llama grammar rejects maxLength; production decoding still enforces UTF-8 byte limits")
+        for branch in branches {
+            XCTAssertEqual(branch["type"] as? String, "object")
+            XCTAssertEqual(branch["additionalProperties"] as? Bool, false)
+            let properties = try XCTUnwrap(branch["properties"] as? [String: Any])
+            XCTAssertEqual(Set(properties.keys), Set(["kind", "reference", "text", "assessment"]))
+            XCTAssertEqual(Set(branch["required"] as? [String] ?? []), Set(properties.keys))
+            let kind = try XCTUnwrap(properties["kind"] as? [String: Any])
+            let kinds = try XCTUnwrap(kind["enum"] as? [String])
+            XCTAssertFalse(kinds.contains("inspectRecords"))
+
+            let assessment = try XCTUnwrap(properties["assessment"] as? [String: Any])
+            XCTAssertEqual(assessment["additionalProperties"] as? Bool, false)
+            let assessmentProperties = try XCTUnwrap(assessment["properties"] as? [String: Any])
+            XCTAssertEqual(Set(assessment["required"] as? [String] ?? []), Set(assessmentProperties.keys))
+        }
     }
 
     func testNativeTextBrowserResponseRejectsMalformedEnvelopesAndUnsupportedClaims() throws {
@@ -224,9 +401,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             screenshotPNG: Data(), currentURL: URL(string: "https://example.org/policy")), page: page, wholePage: true)
     }
 
-    private func nativeStepPlanner(transport: any ComputerUseTextModelTransport) throws -> ComputerUseLocalTextBrowserStepPlanner {
+    private func nativeStepPlanner(transport: any ComputerUseTextModelTransport,
+                                  modelAlias: String = "fixture-model") throws -> ComputerUseLocalTextBrowserStepPlanner {
         try .init(connection: .init(baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")),
-            bearerToken: "fixture-token-value", modelAlias: "fixture-model"), transport: transport)
+            bearerToken: "fixture-token-value", modelAlias: modelAlias), transport: transport)
     }
 
     private func nativeStepEnvelope(_ content: String) throws -> Data {
