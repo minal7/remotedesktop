@@ -1,0 +1,343 @@
+{
+  "title": "Native goal-clarification prototype, September 2026",
+  "scope": "Off-source goal-only request replay using a prototype schema. The prototype schema is not production-compatible; no host test, browser action, MCP call, or user effect ran.",
+  "qualification": "This result probes goal-interpretation ability only. A passing interpretation does not establish complete contract acceptance or planner/host integration.",
+  "candidateDisposition": "Rejected before any application edit, build, or live-browser run. Only cases 01 and 04 ran; cases 02 and 03 remain prepared but unrun.",
+  "model": {
+    "alias": "native-form-planner-v2",
+    "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+    "modelBytes": 2740937888,
+    "runtimeSHA256": "68a0f18fe25616b66bd709dbdfb1c2772b1940d4ef320b4616fc3f005830983a",
+    "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+    "templateSource": "Qwen model embedded template via /apply-template; no external template supplied"
+  },
+  "runner": {
+    "sourceReferenceArchive": "docs/audits/2026-09-04-mac-computer-use/native-navigation-handoff-results-sept23.json",
+    "sourceReferenceArchiveSHA256": "3207a742d42d9cf4591e795b1e87cd6de3424cabc48445c5cfa5353579174720",
+    "path": ".build/repair-verification/run-qwen-native-exact-requests.py",
+    "sha256": "576f9df2b1a41cfde78dafa7178127c20c971947305d283ca87a0b29bbed36a2",
+    "sourceUTF8": "#!/usr/bin/env python3\n\"\"\"Exact native-browser request preflight and optional pinned-Qwen replay.\n\nDefault mode only copies and hashes request bodies. `--run` starts one owned,\nauthenticated loopback Qwen worker, applies its embedded template to every\nrequest and tokenizes all prompts before any completion call. `--run\n--tokenize-only` performs that preflight without completing requests.\nNo browser, MCP dispatch, network access beyond loopback, or goal oracle.\n\"\"\"\nimport argparse\nimport ctypes\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport secrets\nimport shutil\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport urllib.error\nimport urllib.request\n\nGIB = 1024 ** 3\nCONTEXT = 4096\nOUTPUT_TOKENS = 1024\nFRAMING_RESERVE = 64\nMAX_INPUT_TOKENS = CONTEXT - OUTPUT_TOKENS - FRAMING_RESERVE\nMODEL_BYTES = 2740937888\nMODEL_SHA256 = \"00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4\"\nRUNTIME_DEFAULT = Path(\"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\")\n\n\ndef digest_bytes(data):\n    return hashlib.sha256(data).hexdigest()\n\n\ndef digest_file(path):\n    h = hashlib.sha256()\n    with path.open(\"rb\") as f:\n        for block in iter(lambda: f.read(4 * 1024 * 1024), b\"\"):\n            h.update(block)\n    return h.hexdigest()\n\n\ndef read_request(path):\n    raw = path.read_bytes()\n    if len(raw) > 2 * 1024 * 1024:\n        raise ValueError(f\"request exceeds 2 MiB: {path}\")\n    request = json.loads(raw)\n    if not isinstance(request, dict) or request.get(\"model\") != \"native-form-planner-v2\" or request.get(\"max_tokens\") != OUTPUT_TOKENS:\n        raise ValueError(f\"request has unexpected model alias/output budget: {path}\")\n    messages = request.get(\"messages\")\n    if not isinstance(messages, list) or not messages or any(not isinstance(m, dict) or m.get(\"role\") not in (\"system\", \"user\") for m in messages):\n        raise ValueError(f\"request is not a native system/user exchange: {path}\")\n    return raw, request\n\n\ndef write_json(path, value):\n    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + \"\\n\")\n\n\ndef named_workers():\n    text = subprocess.check_output([\"/bin/ps\", \"-axo\", \"pid=,comm=\"], text=True, timeout=3)\n    return [int(fields[0]) for line in text.splitlines()\n            if len(fields := line.strip().split(None, 1)) == 2\n            and Path(fields[1]).name in (\"llama-server\", \"llama-cli\")]\n\n\ndef run_worker(args, output, entries, report):\n    if sys.platform != \"darwin\":\n        raise ValueError(\"worker guard requires macOS proc_pid_rusage\")\n    if not args.runtime or not args.model:\n        raise ValueError(\"--run requires --runtime and --model\")\n    binary, model = args.runtime.resolve(), args.model.resolve()\n    if model.stat().st_size != MODEL_BYTES or digest_file(model) != MODEL_SHA256:\n        raise ValueError(\"model does not match the pinned Qwen3.5-4B Q4_K_M bytes\")\n    if named_workers():\n        raise RuntimeError(\"another llama worker is active\")\n    subprocess.run([\"/usr/bin/codesign\", \"--verify\", \"--strict\", str(binary)], check=True, timeout=5,\n                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)\n    version = subprocess.run([str(binary), \"--version\"], capture_output=True, text=True, timeout=5, check=True)\n    version_text = version.stdout + version.stderr\n    if \"b9992\" not in version_text and \"6eddde06\" not in version_text:\n        raise ValueError(\"runtime version is not pinned b9992 / 6eddde06\")\n    report.update(runtimeSHA256=digest_file(binary), runtimeVersion=version_text.strip(), modelSHA256=MODEL_SHA256,\n                  modelBytes=MODEL_BYTES, templateSource=\"Qwen model embedded template via /apply-template; no external template supplied\")\n\n    libproc = ctypes.CDLL(\"/usr/lib/libproc.dylib\")\n    libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]\n    libproc.proc_pid_rusage.restype = ctypes.c_int\n    def memory(pid):\n        buffer = ctypes.create_string_buffer(1024)\n        if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:\n            return None\n        return max(struct.unpack_from(\"=QQ\", buffer.raw, 64))\n    if not memory(os.getpid()):\n        raise RuntimeError(\"memory accounting unavailable\")\n\n    token = secrets.token_urlsafe(32)\n    key = output / \"temporary-api-key\"\n    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), \"w\") as handle:\n        handle.write(token)\n    with socket.socket() as sock:\n        sock.bind((\"127.0.0.1\", 0)); port = sock.getsockname()[1]\n    launch = [str(binary), \"--model\", str(model), \"--alias\", \"native-form-planner-v2\",\n        \"--host\", \"127.0.0.1\", \"--port\", str(port), \"--api-key-file\", str(key),\n        \"--offline\", \"--no-ui\", \"--no-mmproj\", \"--log-disable\", \"--parallel\", \"1\",\n        \"--ctx-size\", \"4096\", \"--cache-ram\", \"0\", \"--threads\", \"4\", \"--threads-batch\", \"4\",\n        \"--poll\", \"0\", \"--poll-batch\", \"0\", \"--n-gpu-layers\", \"99\", \"--jinja\",\n        \"--reasoning\", \"on\", \"--reasoning-budget\", \"512\"]\n    report[\"workerThreads\"] = 4\n    report[\"launchProfile\"] = \"Production native-text launch args; one worker; 4096 context; 4 threads; 4 GiB process cap; request output 1024; one shared 45-second request deadline.\"\n    write_json(output / \"launch-arguments.json\", launch)\n\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *unused, **kwargs): return None\n    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())\n    def fetch(path, body=None, timeout=5, authorized=True):\n        headers = {\"Content-Type\": \"application/json\"}\n        if authorized:\n            headers[\"Authorization\"] = \"Bearer \" + token\n        data = None if body is None else body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False, separators=(\",\", \":\")).encode(\"utf-8\")\n        req = urllib.request.Request(f\"http://127.0.0.1:{port}{path}\", data=data, headers=headers)\n        with opener.open(req, timeout=timeout) as response:\n            data = response.read(2 * 1024 * 1024 + 1)\n            if len(data) > 2 * 1024 * 1024:\n                raise ValueError(\"loopback response exceeds 2 MiB\")\n            return json.loads(data)\n\n    process = watcher = None\n    done = threading.Event()\n    started = time.monotonic()\n    limits = {\"startup\": started + 45, \"requests\": None}\n    samples = {\"n\": 0, \"peak\": 0, \"workers\": 0, \"reason\": None}\n    lock = threading.Lock()\n    def stop_owned():\n        if process is not None and process.poll() is None:\n            try: os.killpg(process.pid, signal.SIGTERM)\n            except ProcessLookupError: pass\n    def monitor():\n        missed = 0\n        last_workers = 0.0\n        while not done.wait(0.1):\n            if process.poll() is not None: return\n            now = time.monotonic()\n            measured = memory(process.pid)\n            missed = missed + 1 if measured is None else 0\n            if measured is not None:\n                samples[\"n\"] += 1; samples[\"peak\"] = max(samples[\"peak\"], measured)\n            reason = \"memory-limit\" if measured is not None and measured > 4 * GIB else None\n            if missed >= 10: reason = \"memory-accounting-unavailable\"\n            with lock:\n                if now > limits[\"startup\"] and limits[\"requests\"] is None: reason = \"startup-deadline\"\n                if limits[\"requests\"] is not None and now > limits[\"requests\"]: reason = \"shared-request-deadline\"\n            if now - started > 100: reason = \"total-deadline\"\n            if now - last_workers >= 1:\n                try:\n                    workers = named_workers(); samples[\"workers\"] = max(samples[\"workers\"], len(workers))\n                    if workers != [process.pid]: reason = \"worker-count\"\n                except Exception: reason = \"worker-count-unavailable\"\n                last_workers = now\n            if reason:\n                samples[\"reason\"] = reason; stop_owned()\n                if not done.wait(1) and process.poll() is None:\n                    try: os.killpg(process.pid, signal.SIGKILL)\n                    except ProcessLookupError: pass\n                return\n\n    try:\n        with (output / \"server.log\").open(\"wb\") as log:\n            process = subprocess.Popen(launch, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,\n                start_new_session=True, env={k:v for k,v in os.environ.items()\n                    if not k.startswith((\"LLAMA_\", \"GGML_\", \"HF_\", \"HUGGINGFACE_\"))})\n            report[\"ownedPID\"] = process.pid\n            watcher = threading.Thread(target=monitor, daemon=True); watcher.start()\n            while True:\n                if process.poll() is not None or samples[\"reason\"]:\n                    raise RuntimeError(\"owned worker stopped during startup\")\n                if time.monotonic() > limits[\"startup\"]: raise TimeoutError(\"startup exceeded 45 seconds\")\n                try:\n                    if fetch(\"/health\", timeout=1).get(\"status\") == \"ok\": break\n                except (urllib.error.URLError, TimeoutError): pass\n                time.sleep(0.1)\n            try:\n                fetch(\"/v1/chat/completions\", body={}, authorized=False)\n                raise RuntimeError(\"inference endpoint accepted unauthenticated request\")\n            except urllib.error.HTTPError as error:\n                if error.code != 401: raise\n            report[\"unauthenticatedRequestRejected\"] = True\n\n            # Bind every request to the actual embedded template and check all\n            # token budgets before issuing any completion request.\n            prepared = []\n            for entry in entries:\n                applied = fetch(\"/apply-template\", entry[\"raw\"])\n                prompt = applied.get(\"prompt\")\n                if not isinstance(prompt, str) or not prompt:\n                    raise ValueError(\"/apply-template did not return a prompt\")\n                tokens = fetch(\"/tokenize\", {\"model\": entry[\"request\"][\"model\"], \"content\": prompt,\n                    \"add_special\": False, \"parse_special\": True}).get(\"tokens\")\n                if (not isinstance(tokens, list) or not tokens or len(tokens) > 8192\n                        or any(type(token_id) is not int or token_id < 0 for token_id in tokens)):\n                    raise ValueError(\"/tokenize returned malformed or overlong token IDs\")\n                prepared.append((entry, prompt, len(tokens)))\n            over = [{\"id\": entry[\"id\"], \"tokens\": count} for entry, _, count in prepared if count > MAX_INPUT_TOKENS]\n            report[\"preflight\"] = [{\"id\": entry[\"id\"], \"inputTokens\": count,\n                \"promptSHA256\": digest_bytes(prompt.encode(\"utf-8\")), \"fits\": count <= MAX_INPUT_TOKENS}\n                for entry, prompt, count in prepared]\n            if over:\n                report[\"status\"] = \"rejected-context-before-completions\"\n                report[\"overBudget\"] = over\n                return\n            if args.tokenize_only:\n                report[\"status\"] = \"tokenization-only\"\n                return\n            with lock: limits[\"requests\"] = time.monotonic() + 45\n            for entry, prompt, count in prepared:\n                began = time.monotonic()\n                response = fetch(\"/v1/chat/completions\", entry[\"raw\"], timeout=45)\n                elapsed = time.monotonic() - began\n                write_json(output / (entry[\"id\"] + \"-raw-response.json\"), response)\n                message = response.get(\"choices\", [{}])[0].get(\"message\", {})\n                report[\"completions\"].append({\"id\": entry[\"id\"], \"inputTokens\": count, \"seconds\": elapsed,\n                    \"content\": message.get(\"content\"), \"usage\": response.get(\"usage\"),\n                    \"timings\": response.get(\"timings\")})\n                write_json(output / \"result.json\", report)\n            report[\"status\"] = \"responses-collected-unqualified\"\n    finally:\n        done.set()\n        if watcher is not None: watcher.join(timeout=4)\n        stop_owned()\n        if process is not None:\n            try: process.wait(timeout=3)\n            except subprocess.TimeoutExpired:\n                os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=3)\n            report[\"ownedProcessExited\"] = process.poll() is not None\n            report[\"exitCode\"] = process.returncode\n        done.set()\n        if watcher is not None: watcher.join(timeout=4)\n        key.unlink(missing_ok=True)\n        report[\"credentialRemoved\"] = not key.exists()\n        report[\"workerWallSeconds\"] = time.monotonic() - started\n        report[\"workerMemorySamples\"] = samples[\"n\"]\n        report[\"peakSampledProcessMemoryBytes\"] = samples[\"peak\"]\n        report[\"peakNamedWorkerCount\"] = samples[\"workers\"]\n        if samples[\"reason\"]: report[\"watchdogReason\"] = samples[\"reason\"]\n\n\ndef main():\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--requests\", nargs=\"+\", type=Path, required=True,\n                        help=\"one or more exact request-body JSON files\")\n    parser.add_argument(\"--output\", type=Path, required=True)\n    parser.add_argument(\"--run\", action=\"store_true\", help=\"start one pinned local worker; otherwise prepare only\")\n    parser.add_argument(\"--tokenize-only\", action=\"store_true\", help=\"with --run, stop after all embedded-template token checks\")\n    parser.add_argument(\"--runtime\", type=Path, default=RUNTIME_DEFAULT)\n    parser.add_argument(\"--model\", type=Path, help=\"pinned Qwen model file; required with --run\")\n    args = parser.parse_args()\n    if args.tokenize_only and not args.run:\n        parser.error(\"--tokenize-only requires --run to access the model's embedded template\")\n    output = args.output.resolve(); output.mkdir(parents=True, exist_ok=False)\n    entries = []\n    for index, origin in enumerate(args.requests, 1):\n        path = origin.resolve(); raw, request = read_request(path)\n        entry_id = f\"request-{index:02d}\"\n        target = output / (entry_id + \"-request.json\")\n        target.write_bytes(raw)\n        entries.append({\"id\": entry_id, \"path\": str(path), \"request\": request, \"raw\": raw,\n                        \"rawSHA256\": digest_bytes(raw), \"copy\": str(target)})\n    report = {\"status\": \"prepared\", \"scope\": \"off-source native request replay; no browser, MCP calls, or effects\",\n        \"plannedCount\": len(entries), \"requests\": [{\"id\": e[\"id\"], \"path\": e[\"path\"],\n        \"bodyCopy\": e[\"copy\"], \"bodyBytes\": len(e[\"raw\"]), \"bodySHA256\": e[\"rawSHA256\"]} for e in entries],\n        \"contextTokens\": CONTEXT, \"outputTokens\": OUTPUT_TOKENS, \"framingReserve\": FRAMING_RESERVE,\n        \"maximumInputTokens\": MAX_INPUT_TOKENS, \"memoryStopLimitBytes\": 4*GIB, \"sharedCompletionDeadlineSeconds\": 45,\n        \"modelSHA256\": MODEL_SHA256, \"modelBytes\": MODEL_BYTES, \"runnerSHA256\": digest_file(Path(__file__)),\n        \"workerThreads\": 4, \"priorPreflight01Limitations\": [\"2-thread launch profile\", \"tokenize request omitted model alias\"],\n        \"productionChanged\": False,\n        \"modelAliasChanged\": False, \"oracleSupplied\": False, \"completions\": []}\n    write_json(output / \"result.json\", report)\n    if args.run:\n        try:\n            run_worker(args, output, entries, report)\n        except BaseException as error:\n            report[\"status\"] = \"failed\"\n            report[\"error\"] = type(error).__name__ + \": \" + str(error)\n    else:\n        report[\"status\"] = \"prepared-no-worker\"\n    write_json(output / \"result.json\", report)\n    print(json.dumps({\"status\": report[\"status\"], \"requestCount\": len(entries),\n        \"requestHashes\": [e[\"rawSHA256\"] for e in entries], \"preflight\": report.get(\"preflight\", []),\n        \"completions\": report.get(\"completions\", []), \"watchdogReason\": report.get(\"watchdogReason\")},\n        ensure_ascii=False, indent=2))\n    return 0 if report[\"status\"] in (\"prepared-no-worker\", \"tokenization-only\", \"responses-collected-unqualified\", \"rejected-context-before-completions\") else 1\n\nif __name__ == \"__main__\":\n    raise SystemExit(main())\n"
+  },
+  "inputManifest": {
+    "path": ".build/repair-verification/native-goal-clarification-inputs/manifest.json",
+    "sha256": "ca776eff8ab4ba4c4ad654261a96aaec41de017a9036e4b00d8d3db772f42c17",
+    "content": {
+      "purpose": "Off-source goal-only hypothesis requests for whether the pinned native model can identify user-only missing information while preserving accepted clarification answers and later action conditions.",
+      "scope": "Prototype schema; not current production-compatible; no host test. One candidate prompt/schema variant only. No page, history, record evidence, execution, or effect is included.",
+      "source": {
+        "report": ".build/repair-verification/native-link-live-discovery-02/result.json",
+        "reportSHA256": "d0c26aafad58c43086b8e2eb76945a3c322020a5f317f12d3c8a24caccfce4e3",
+        "plannerTraceIndex": 5,
+        "originalRequestSHA256": "fdae78f72dc50b4f590fc0ddbc4bbd65be628f4a684f6d8d10638ae3c85df5c0",
+        "originalRequestBytes": 2097,
+        "originalInputTokens": 224,
+        "originalGoal": "Find the youth fare discount on BART’s official website. Tell me the qualifying ages, discount percentage, required card, and which children ride free. Include the official source link.",
+        "sourceHEAD": "a6410f1af4c9b9e5862db785f727b15ad870e051",
+        "systemSentenceReplaced": {
+          "old": "Do not assess completion, evidence, observations, routing, tools, or next steps.",
+          "new": "Do not assess completion, evidence, observations, routing, or tools."
+        },
+        "schemaChange": {
+          "addedRequiredStringProperty": "clarificationQuestion"
+        }
+      },
+      "candidatePromptAppendix": {
+        "file": "candidate-prompt-appendix.txt",
+        "sha256": "bda1a6f690fd178afaaccef65d7b19f889eab2a704fa58a6e3333dace17b3905",
+        "text": "Set clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research."
+      },
+      "cases": {
+        "01-missing-city": {
+          "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+          "clarifications": [],
+          "expectedBehavior": "Ask which city; do not infer a city from page context."
+        },
+        "02-bart-discovery": {
+          "goal": "Find the youth fare discount on BART’s official website. Tell me the qualifying ages, discount percentage, required card, and which children ride free. Include the official source link.",
+          "clarifications": [],
+          "expectedBehavior": "Empty clarificationQuestion; preserve all five information requirements including official source link."
+        },
+        "03-clarified-city": {
+          "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+          "clarifications": [
+            {
+              "question": "Which city should I use?",
+              "answer": "San Francisco, and use BART."
+            }
+          ],
+          "expectedBehavior": "Empty clarificationQuestion; retain accepted answer San Francisco and BART in the interpreted requirements/constraints."
+        },
+        "04-sfjazz-approval-condition": {
+          "goal": "Find the ticket return policy and current ticket prices on SFJAZZ’s official website. Ask for my confirmation before buying any tickets.",
+          "clarifications": [],
+          "expectedBehavior": "Empty clarificationQuestion; preserve the future purchase confirmation condition without claiming a purchase."
+        }
+      },
+      "files": {
+        "01-missing-city.json": {
+          "sha256": "9aac2d1a9913074292560e60c0a02d69b760568fc629121f53c0bbf8acd96ce2",
+          "bytes": 2388,
+          "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+          "clarifications": []
+        },
+        "02-bart-discovery.json": {
+          "sha256": "aa27031032bd1468442eb5afdc876fd269809c0a255cf4ae3f0ad912ef0ead29",
+          "bytes": 2472,
+          "goal": "Find the youth fare discount on BART’s official website. Tell me the qualifying ages, discount percentage, required card, and which children ride free. Include the official source link.",
+          "clarifications": []
+        },
+        "03-clarified-city.json": {
+          "sha256": "aeec2e3d1ec6d56919d3b8d70c6a9bba87162b880006375d681ddb4d962e0514",
+          "bytes": 2475,
+          "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+          "clarifications": [
+            {
+              "question": "Which city should I use?",
+              "answer": "San Francisco, and use BART."
+            }
+          ]
+        },
+        "04-sfjazz-approval-condition.json": {
+          "sha256": "1ff07424491928decef43de9dc4acbb096346f10084b4f92c456f190d632f026",
+          "bytes": 2423,
+          "goal": "Find the ticket return policy and current ticket prices on SFJAZZ’s official website. Ask for my confirmation before buying any tickets.",
+          "clarifications": []
+        }
+      },
+      "requestAuthorityNote": "Expected behaviors are review criteria only and are not present in any request body."
+    }
+  },
+  "preparedGoals": [
+    {
+      "case": "01-missing-city",
+      "status": "run",
+      "path": ".build/repair-verification/native-goal-clarification-inputs/01-missing-city.json",
+      "sha256": "9aac2d1a9913074292560e60c0a02d69b760568fc629121f53c0bbf8acd96ce2",
+      "bytes": 2388,
+      "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+      "clarifications": [],
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    },
+    {
+      "case": "02-bart-discovery",
+      "status": "prepared-not-run",
+      "path": ".build/repair-verification/native-goal-clarification-inputs/02-bart-discovery.json",
+      "sha256": "aa27031032bd1468442eb5afdc876fd269809c0a255cf4ae3f0ad912ef0ead29",
+      "bytes": 2472,
+      "goal": "Find the youth fare discount on BART’s official website. Tell me the qualifying ages, discount percentage, required card, and which children ride free. Include the official source link.",
+      "clarifications": [],
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the youth fare discount on BART’s official website. Tell me the qualifying ages, discount percentage, required card, and which children ride free. Include the official source link.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    },
+    {
+      "case": "03-clarified-city",
+      "status": "prepared-not-run",
+      "path": ".build/repair-verification/native-goal-clarification-inputs/03-clarified-city.json",
+      "sha256": "aeec2e3d1ec6d56919d3b8d70c6a9bba87162b880006375d681ddb4d962e0514",
+      "bytes": 2475,
+      "goal": "Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.",
+      "clarifications": [
+        {
+          "question": "Which city should I use?",
+          "answer": "San Francisco, and use BART."
+        }
+      ],
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.\\\",\\\"clarifications\\\":[{\\\"question\\\":\\\"Which city should I use?\\\",\\\"answer\\\":\\\"San Francisco, and use BART.\\\"}]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    },
+    {
+      "case": "04-sfjazz-approval-condition",
+      "status": "run",
+      "path": ".build/repair-verification/native-goal-clarification-inputs/04-sfjazz-approval-condition.json",
+      "sha256": "1ff07424491928decef43de9dc4acbb096346f10084b4f92c456f190d632f026",
+      "bytes": 2423,
+      "goal": "Find the ticket return policy and current ticket prices on SFJAZZ’s official website. Ask for my confirmation before buying any tickets.",
+      "clarifications": [],
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the ticket return policy and current ticket prices on SFJAZZ’s official website. Ask for my confirmation before buying any tickets.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    }
+  ],
+  "requests": [
+    {
+      "id": "request-01",
+      "case": "01-missing-city",
+      "preparedSourcePath": ".build/repair-verification/native-goal-clarification-inputs/01-missing-city.json",
+      "requestPath": ".build/repair-verification/native-goal-clarification-probe-01/request-01-request.json",
+      "sha256": "9aac2d1a9913074292560e60c0a02d69b760568fc629121f53c0bbf8acd96ce2",
+      "bytes": 2388,
+      "inputTokens": 264,
+      "promptSHA256": "092c2d06a8fc429a2c6c3c5d53e43340fc40ce8d73925996ee794e739a82515c",
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the public transit youth fare discount for my city. Tell me the qualifying ages and required card.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}",
+      "responseContent": "{\n        \"objective\": \"Find public transit youth fare discount details\",\n        \"constraints\": [\n            \"Provide qualifying ages\",\n            \"Specify required card type\"\n        ],\n        \"requirements\": [\n            {\"instruction\": \"Search for the specific city name provided by the user to ensure accurate local transit information.\", \"kind\": \"information\"}\n        ],\"clarificationQuestion\": \"What is the name of your city?\"\n    }",
+      "usage": {
+        "completion_tokens": 618,
+        "prompt_tokens": 264,
+        "total_tokens": 882,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "seconds": 11.204621625001892,
+      "semanticReview": {
+        "assessment": "fail",
+        "reason": "It asked the correct city question, but moved qualifying ages and required card into constraints and replaced the requested outcomes with a city-search instruction. The interpreted contract therefore lost required information outcomes."
+      }
+    },
+    {
+      "id": "request-02",
+      "case": "04-sfjazz-approval-condition",
+      "preparedSourcePath": ".build/repair-verification/native-goal-clarification-inputs/04-sfjazz-approval-condition.json",
+      "requestPath": ".build/repair-verification/native-goal-clarification-probe-01/request-02-request.json",
+      "sha256": "1ff07424491928decef43de9dc4acbb096346f10084b4f92c456f190d632f026",
+      "bytes": 2423,
+      "inputTokens": 271,
+      "promptSHA256": "a9375c4d0a2d43c3d9bc41daff73d112af5e8f9e5c358c8a2bd6a2c2f4ea25fd",
+      "requestUTF8": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, or tools. Do not omit unresolved work or infer that an action is complete.\\nSet clarificationQuestion to one concise question only if information only the user can supply is missing and prevents meaningful research from starting. Otherwise use an empty string. Researchable facts and routine navigation are not missing user input. Preserve approvals for later actions as constraints; they do not by themselves prevent research.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Find the ticket return policy and current ticket prices on SFJAZZ’s official website. Ask for my confirmation before buying any tickets.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"json_schema\":{\"name\":\"browser_goal_contract\",\"schema\":{\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"items\":{\"type\":\"string\"},\"maxItems\":8,\"type\":\"array\"},\"requirements\":{\"items\":{\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"enum\":[\"information\",\"action\"],\"type\":\"string\"}},\"required\":[\"instruction\",\"kind\"],\"type\":\"object\"},\"maxItems\":8,\"minItems\":1,\"type\":\"array\"},\"clarificationQuestion\":{\"type\":\"string\"}},\"required\":[\"objective\",\"constraints\",\"requirements\",\"clarificationQuestion\"],\"type\":\"object\"},\"strict\":true},\"type\":\"json_schema\"},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}",
+      "responseContent": "{\n      \"objective\": \"Find SFJAZZ ticket return policy and prices on their official website\",\n      \"constraints\": [\n        \"Do not buy tickets without user confirmation\"\n      ],\n      \"requirements\": [\n        {\"instruction\": \"Find SFJAZZ ticket return policy\", \"kind\": \"information\"},\n        {\"instruction\": \"Find current ticket prices on SFJAZZ's official website\", \"kind\": \"information\"}\n      ],\"clarificationQuestion\": \"\"\n    }",
+      "usage": {
+        "completion_tokens": 629,
+        "prompt_tokens": 271,
+        "total_tokens": 900,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "seconds": 11.357473290998314,
+      "semanticReview": {
+        "assessment": "pass-scoped",
+        "reason": "It preserved the return-policy and current-price information outcomes, emitted no clarification question, retained the future purchase-confirmation condition, and invented no purchase action."
+      }
+    }
+  ],
+  "limitsAndResources": {
+    "contextTokens": 4096,
+    "outputTokens": 1024,
+    "framingReserve": 64,
+    "maximumInputTokens": 3008,
+    "memoryStopLimitBytes": 4294967296,
+    "sharedCompletionDeadlineSeconds": 45,
+    "workerThreads": 4,
+    "workerWallSeconds": 23.55469549999907,
+    "workerMemorySamples": 210,
+    "peakSampledProcessMemoryBytes": 3246473216,
+    "peakNamedWorkerCount": 1,
+    "ownedProcessExited": true,
+    "exitCode": 0,
+    "credentialRemoved": true
+  },
+  "sanitizedResult": {
+    "status": "responses-collected-unqualified",
+    "scope": "off-source native request replay; no browser, MCP calls, or effects",
+    "plannedCount": 2,
+    "requests": [
+      {
+        "id": "request-01",
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-clarification-inputs/01-missing-city.json",
+        "bodyCopy": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-clarification-probe-01/request-01-request.json",
+        "bodyBytes": 2388,
+        "bodySHA256": "9aac2d1a9913074292560e60c0a02d69b760568fc629121f53c0bbf8acd96ce2"
+      },
+      {
+        "id": "request-02",
+        "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-clarification-inputs/04-sfjazz-approval-condition.json",
+        "bodyCopy": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-clarification-probe-01/request-02-request.json",
+        "bodyBytes": 2423,
+        "bodySHA256": "1ff07424491928decef43de9dc4acbb096346f10084b4f92c456f190d632f026"
+      }
+    ],
+    "contextTokens": 4096,
+    "outputTokens": 1024,
+    "framingReserve": 64,
+    "maximumInputTokens": 3008,
+    "memoryStopLimitBytes": 4294967296,
+    "sharedCompletionDeadlineSeconds": 45,
+    "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+    "modelBytes": 2740937888,
+    "runnerSHA256": "576f9df2b1a41cfde78dafa7178127c20c971947305d283ca87a0b29bbed36a2",
+    "workerThreads": 4,
+    "priorPreflight01Limitations": [
+      "2-thread launch profile",
+      "tokenize request omitted model alias"
+    ],
+    "productionChanged": false,
+    "modelAliasChanged": false,
+    "oracleSupplied": false,
+    "completions": [
+      {
+        "id": "request-01",
+        "inputTokens": 264,
+        "seconds": 11.204621625001892,
+        "content": "{\n        \"objective\": \"Find public transit youth fare discount details\",\n        \"constraints\": [\n            \"Provide qualifying ages\",\n            \"Specify required card type\"\n        ],\n        \"requirements\": [\n            {\"instruction\": \"Search for the specific city name provided by the user to ensure accurate local transit information.\", \"kind\": \"information\"}\n        ],\"clarificationQuestion\": \"What is the name of your city?\"\n    }",
+        "usage": {
+          "completion_tokens": 618,
+          "prompt_tokens": 264,
+          "total_tokens": 882,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 264,
+          "prompt_ms": 456.686,
+          "prompt_per_token_ms": 1.729871212121212,
+          "prompt_per_second": 578.0777164178452,
+          "predicted_n": 618,
+          "predicted_ms": 10735.421,
+          "predicted_per_token_ms": 17.37123139158576,
+          "predicted_per_second": 57.56644289963104
+        }
+      },
+      {
+        "id": "request-02",
+        "inputTokens": 271,
+        "seconds": 11.357473290998314,
+        "content": "{\n      \"objective\": \"Find SFJAZZ ticket return policy and prices on their official website\",\n      \"constraints\": [\n        \"Do not buy tickets without user confirmation\"\n      ],\n      \"requirements\": [\n        {\"instruction\": \"Find SFJAZZ ticket return policy\", \"kind\": \"information\"},\n        {\"instruction\": \"Find current ticket prices on SFJAZZ's official website\", \"kind\": \"information\"}\n      ],\"clarificationQuestion\": \"\"\n    }",
+        "usage": {
+          "completion_tokens": 629,
+          "prompt_tokens": 271,
+          "total_tokens": 900,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        },
+        "timings": {
+          "cache_n": 0,
+          "prompt_n": 271,
+          "prompt_ms": 451.148,
+          "prompt_per_token_ms": 1.6647527675276754,
+          "prompt_per_second": 600.6897958098008,
+          "predicted_n": 629,
+          "predicted_ms": 10894.269,
+          "predicted_per_token_ms": 17.31998251192369,
+          "predicted_per_second": 57.736778851339174
+        }
+      }
+    ],
+    "runtimeSHA256": "68a0f18fe25616b66bd709dbdfb1c2772b1940d4ef320b4616fc3f005830983a",
+    "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+    "templateSource": "Qwen model embedded template via /apply-template; no external template supplied",
+    "launchProfile": "Production native-text launch args; one worker; 4096 context; 4 threads; 4 GiB process cap; request output 1024; one shared 45-second request deadline.",
+    "ownedPID": 92363,
+    "unauthenticatedRequestRejected": true,
+    "preflight": [
+      {
+        "id": "request-01",
+        "inputTokens": 264,
+        "promptSHA256": "092c2d06a8fc429a2c6c3c5d53e43340fc40ce8d73925996ee794e739a82515c",
+        "fits": true
+      },
+      {
+        "id": "request-02",
+        "inputTokens": 271,
+        "promptSHA256": "a9375c4d0a2d43c3d9bc41daff73d112af5e8f9e5c358c8a2bd6a2c2f4ea25fd",
+        "fits": true
+      }
+    ],
+    "ownedProcessExited": true,
+    "exitCode": 0,
+    "credentialRemoved": true,
+    "workerWallSeconds": 23.55469549999907,
+    "workerMemorySamples": 210,
+    "peakSampledProcessMemoryBytes": 3246473216,
+    "peakNamedWorkerCount": 1
+  },
+  "rawResponsesIncluded": false
+}
