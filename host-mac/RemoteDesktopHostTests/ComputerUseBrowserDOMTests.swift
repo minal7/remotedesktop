@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import RemoteDesktopHost
 
 @MainActor
@@ -1981,6 +1982,116 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let receipt = try await fixture.browser.openObservedDestination(target, operationID: ComputerUseTaskContract.digest(["no-validate-query"]))
         XCTAssertEqual(receipt.document.requestedURL.query, "q=")
         XCTAssertEqual(fixture.server.count("/invalid"), 0)
+    }
+
+    func testFormQueryPreflightAllowsEmptyRequiredFieldButNeverMintsQueryAuthority() async throws {
+        let variants: [(String, Bool)] = [
+            ("<form action='/results' method='get'><label>Query<input id='q' name='q' required></label><button id='button'>Search</button></form>", true),
+            ("<form action='/results' method='post'><label>Query<input id='q' name='q' required></label><button id='button'>Search</button></form>", false),
+            ("<form action='https://example.invalid/results' method='get'><label>Query<input id='q' name='q' required></label><button id='button'>Search</button></form>", false),
+            ("<form action='/results' method='get'><label>Query<input id='q' name='q' required></label><input type='password' name='secret' value='private' disabled><button id='button'>Search</button></form>", false)
+        ]
+        for (form, shouldPreflight) in variants {
+            let fixture = try await DOMFixture(body: """
+                \(form)<script>document.addEventListener('invalid', () => fetch('/invalid'), true);</script>
+                """)
+            defer { fixture.close() }
+            let evidence = try await fixture.browser.observePage(document: fixture.document)
+            let button = try XCTUnwrap(evidence.page.controls.first { $0.label == "Search" })
+            if shouldPreflight {
+                try await fixture.browser.preflightFormQuery(controlID: button.id, evidence: evidence)
+                do {
+                    _ = try await fixture.browser.prepareFormQuery(controlID: button.id, evidence: evidence)
+                    XCTFail("Preflight cannot bypass required-field validity at submission")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .formQueryInvalid) }
+            } else {
+                do {
+                    try await fixture.browser.preflightFormQuery(controlID: button.id, evidence: evidence)
+                    XCTFail("Unsafe form metadata must fail before any input or navigation")
+                } catch { XCTAssertEqual(error as? ComputerUseBrowserError, .formQueryUnavailable) }
+            }
+            XCTAssertEqual(fixture.server.count("/invalid"), 0)
+            XCTAssertFalse(fixture.server.requestedPaths.contains { $0.hasPrefix("/results") })
+        }
+    }
+
+    func testAgentFormControlReferenceMustRemainVisibleAndIdentical() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><style>body{margin:0}form{position:fixed;left:80px;top:80px}#cover{display:none;position:fixed;inset:0;z-index:99;background:white}</style>
+            <form action='/results' method='get'><label>Search<input id='query' type='search' name='q'></label><button id='submit'>Search</button></form>
+            <div id='cover'></div>
+            """)])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        var stage = "claim task"
+        do {
+            try browser.claim(taskID: "direct-form-control")
+            stage = "navigate to fixture page"
+            let document = try await browser.navigate(taskID: "direct-form-control", operationID: "fixture",
+                to: base.appendingPathComponent("page"))
+            stage = "capture initial page"
+            let observation = try await browser.captureAgentObservation(document: document)
+            stage = "resolve initially captured search control"
+            let control = try XCTUnwrap(observation.approvalPageEvidence.page.controls.first {
+                $0.kind == "search" && $0.label == "Search"
+            })
+            let resolved = try await browser.inspectAgentFormControl(controlID: control.id, observation: observation)
+            XCTAssertEqual(resolved.controlID, control.id)
+            XCTAssertTrue(resolved.context.contains("Search"))
+
+            @MainActor func webViews(_ view: NSView) -> [WKWebView] {
+                if let web = view as? WKWebView { return [web] }
+                return view.subviews.flatMap { webViews($0) }
+            }
+            stage = "find owned WebKit view"
+            let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+            func evaluate(_ script: String) async throws {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    web.evaluateJavaScript(script) { _, error in
+                        if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume() }
+                    }
+                }
+            }
+            stage = "show overlay"
+            try await evaluate("document.getElementById('cover').style.display='block'; true")
+            stage = "reject overlaid captured control"
+            do {
+                _ = try await browser.inspectAgentFormControl(controlID: control.id, observation: observation)
+                XCTFail("An overlay must prevent ID-based targeting")
+            } catch {
+                XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged,
+                    "stage=\(stage); originalError=\(String(reflecting: error)); captureStage=\(browser.lastAgentCaptureStage ?? "none")")
+            }
+
+            stage = "remove overlay"
+            try await evaluate("document.getElementById('cover').style.display='none'; true")
+            stage = "recapture page after overlay"
+            let fresh = try await browser.captureAgentObservation(document: document)
+            stage = "resolve fresh captured control"
+            let freshControl = try XCTUnwrap(fresh.approvalPageEvidence.page.controls.first { $0.id == control.id })
+            _ = try await browser.inspectAgentFormControl(controlID: freshControl.id, observation: fresh)
+            stage = "replace captured input element"
+            try await evaluate("const old=document.getElementById('query'); old.replaceWith(old.cloneNode(true)); true")
+            stage = "reject replaced captured input"
+            do {
+                _ = try await browser.inspectAgentFormControl(controlID: freshControl.id, observation: fresh)
+                XCTFail("A replacement DOM element must not inherit the captured reference")
+            } catch {
+                XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged,
+                    "stage=\(stage); originalError=\(String(reflecting: error)); captureStage=\(browser.lastAgentCaptureStage ?? "none")")
+            }
+            XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") })
+        } catch {
+            let captureStage = browser.lastAgentCaptureStage ?? "none"
+            let currentURL = browser.currentDocument(taskID: "direct-form-control")?.committedURL.absoluteString ?? "none"
+            XCTFail("Form control resolver failed at stage=\(stage); originalError=\(String(reflecting: error)); targetStatus=\(browser.lastAgentTargetStatus ?? "none"); captureStage=\(captureStage); currentURL=\(currentURL)")
+        }
     }
 
     func testFormQueryRechecksAuthenticationAndUserControlBeforeDispatch() async throws {

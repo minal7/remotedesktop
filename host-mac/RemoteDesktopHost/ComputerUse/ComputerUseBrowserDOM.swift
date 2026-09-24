@@ -4,7 +4,7 @@ import WebKit
 enum ComputerUseBrowserDOMCommand: String {
     case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, validatePageReadEvidence, observeResearchControls, agentTarget, validateAgentChrome
     case scrollViewport, viewportScrollReceipt, validateAgentScroll, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
-    case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
+    case prepareFormQuery, preflightFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
     case popupCandidates, preparePopup, validatePopup, openPopup, popupReceipt, retireUnsentPopup
     case optionSelectionCandidates, prepareOptionSelection, validateOptionSelection, selectOption, optionSelectionReceipt, retireUnsentOptionSelection
@@ -1652,7 +1652,7 @@ enum ComputerUseBrowserDOM {
         }
         return {texts, links, controls, controlStates, controlStateObserved:includeControlState, scopedControlIDs, containers:structure, omittedStructure, truncated, omittedEmbeddedContent, omittedControls, omittedControlMetadata, viewport: readViewport()};
       }
-      function readFormQuery(binding) {
+      function readFormQuery(binding, checkValidity = true) {
         if (!binding || binding.metadata.kind !== 'submit' || binding.metadata.disabled || !binding.form) return {status:'unsupported'};
         const form = binding.form, submitter = binding.element, metadata = binding.metadata.form;
         if (!(form instanceof HTMLFormElement) || !form.isConnected || !metadata || metadata.method !== 'get') return {status:'unsupported'};
@@ -1693,7 +1693,7 @@ enum ComputerUseBrowserDOM {
             return {status:'unsupported'};
           if (kind !== 'hidden' && [name, element.id, labelFor(element).label].some(value =>
               /\b(password|passcode|otp|verification[ _-]*code|security[ _-]*code|credit[ _-]*card|card[ _-]*number)\b/i.test(value))) return {status:'unsupported'};
-          if (!metadata.noValidate && element.willValidate && !element.validity.valid) return {status:'form-invalid'};
+          if (checkValidity && !metadata.noValidate && element.willValidate && !element.validity.valid) return {status:'form-invalid'};
           if (kind === 'select' && element.options.length > 128) return {status:'unsupported'};
           const selected = kind === 'select' ? Array.from(element.options).map(option =>
             [option.value, option.selected, option.disabled || (option.parentElement instanceof HTMLOptGroupElement && option.parentElement.disabled)]) : null;
@@ -1981,7 +1981,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'validatePageReadEvidence', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'validatePageReadEvidence', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'preflightFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply(command === 'pageSnapshot' ? 'page-loading' : 'stale');
@@ -2185,8 +2185,34 @@ enum ComputerUseBrowserDOM {
                 if (!agentState.pageKeyFocus) return reply('unsupported-agent-page-key');
                 return {...reply('agent-target'),agentTargetID:'native-page',agentTargetContext:'AXScrollArea • Browser page'};
               }
-              let hit;
-              if (args.focused === true) {
+              let hit, directPoint = null;
+              if (typeof args.controlID === 'string') {
+                const id = args.controlID, binding = controls.get(id), previous = lastPageSnapshot.controls.get(id);
+                if (!/^c[0-9]{1,64}$/.test(id) || !binding || !previous || previous.element !== binding.element
+                    || previous.form !== binding.form || previous.retired || !binding.metadata.label.trim()) return reply('stale-agent-control-identity');
+                const rect = binding.element.getBoundingClientRect();
+                if (!rect || rect.width <= 0 || rect.height <= 0 || rect.left < 0 || rect.top < 0
+                    || rect.right > innerWidth || rect.bottom > innerHeight) return reply('stale-agent-control-layout');
+                const centerX = rect.left + rect.width/2, centerY = rect.top + rect.height/2;
+                let visibleHit = doc.elementFromPoint(centerX,centerY);
+                for (let depth=0; depth<16 && visibleHit?.shadowRoot; depth++) {
+                  const child = visibleHit.shadowRoot.elementFromPoint(centerX,centerY);
+                  if (!child || child === visibleHit) break;
+                  visibleHit = child;
+                }
+                if (!visibleHit || (visibleHit !== binding.element && !binding.element.contains(visibleHit))) return reply('stale-agent-control-obscured');
+                const grid = lastPageSnapshot.agentState.hitTargets;
+                if (!grid || ![grid.originX,grid.originY,grid.stepX,grid.stepY,grid.columns,grid.rows].every(Number.isFinite)
+                    || grid.stepX <= 0 || grid.stepY <= 0 || !Number.isInteger(grid.columns) || !Number.isInteger(grid.rows)) return reply('stale-agent-control-raster');
+                const column = Math.round((centerX-grid.originX)/grid.stepX), row = Math.round((centerY-grid.originY)/grid.stepY);
+                if (column < 0 || row < 0 || column >= grid.columns || row >= grid.rows) return reply('stale-agent-control-raster');
+                const x = grid.originX + column*grid.stepX, y = grid.originY + row*grid.stepY;
+                if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight
+                    || x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return reply('stale-agent-control-raster');
+                hit = agentHitAtPoint(x,y);
+                if (!hit || (hit !== binding.element && !binding.element.contains(hit))) return reply('stale-agent-control-obscured');
+                directPoint = {x,y};
+              } else if (args.focused === true) {
                 hit = doc.activeElement;
                 for (let depth=0; hit?.shadowRoot?.activeElement && depth<16; depth++) hit = hit.shadowRoot.activeElement;
               } else {
@@ -2200,8 +2226,8 @@ enum ComputerUseBrowserDOM {
                 }
               }
               const targetRect = args.focused === true && hit?.getBoundingClientRect();
-              const pointX = targetRect ? targetRect.x + targetRect.width/2 : args.x;
-              const pointY = targetRect ? targetRect.y + targetRect.height/2 : args.y;
+              const pointX = directPoint ? directPoint.x : targetRect ? targetRect.x + targetRect.width/2 : args.x;
+              const pointY = directPoint ? directPoint.y : targetRect ? targetRect.y + targetRect.height/2 : args.y;
               const pointFailure = agentTargetPointFailure(lastPageSnapshot.agentState,agentState,pointX,pointY,args.focused === true);
               if (pointFailure) return reply('stale-agent-point-' + pointFailure);
               // Typing requires the exact focused element to accept text. Ancestor
@@ -2428,7 +2454,7 @@ enum ComputerUseBrowserDOM {
               const binding = links.get(args.linkID);
               return reply(binding?.canOpen ? 'link-current' : 'unsupported');
             }
-            if (command === 'prepareFormQuery' || command === 'validateFormQuery') {
+            if (command === 'prepareFormQuery' || command === 'preflightFormQuery' || command === 'validateFormQuery') {
               const previous = command === 'validateFormQuery' ? formQueries.get(args.queryID) : null;
               if (command === 'validateFormQuery' && (!previous || previous.snapshotID !== args.snapshotID
                   || previous.controlID !== args.controlID || (previous.requirements?.digest ?? null) !== (args.requirementsDigest ?? null))) return reply('stale');
@@ -2438,7 +2464,11 @@ enum ComputerUseBrowserDOM {
               const requirements = previous ? previous.requirements : args.requirements;
               if (!fieldPreservationCurrent()) return reply('constraint-changed');
               if (requirements !== undefined && !formRequirementsCurrent(requirements)) return reply('stale');
-              const current = readFormQuery(controls.get(args.controlID));
+              const current = readFormQuery(controls.get(args.controlID), command !== 'preflightFormQuery');
+              if (command === 'preflightFormQuery') {
+                if (current.status !== 'form-query') return reply(current.status);
+                return reply('form-preflight-safe');
+              }
               if (current.status !== 'form-query') return reply(current.status);
               if (requirements?.fields.some(field => field.mustSubmit
                   && !current.submittedMembers.has(bindings.get(field.id)?.element))) return reply('stale');

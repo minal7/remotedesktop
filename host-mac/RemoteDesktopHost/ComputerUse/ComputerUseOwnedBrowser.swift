@@ -774,6 +774,14 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
                 accessibilityIdentity: ComputerUseTaskContract.digest([observation.authorityDigest, elementID, context, String(isSearchSubmission), navigation?.rawValue ?? "activation", findAction?.rawValue ?? "page"]), visualDigest: nil)
         }
     }
+    /// Current native form binding resolved from an exact page reference. It
+    /// carries context for policy checks, never coordinates or dispatch rights.
+    struct AgentFormControl: Equatable, Sendable {
+        fileprivate let observation: AgentObservation
+        let controlID: String
+        let context: String
+        let isVerifiedSearchSubmission: Bool
+    }
     private var agentObservationID: UUID?
     private var agentOperationInProgress = false
     private var agentPointer = ComputerUseFaraAction.Point(x: 500, y: 500)
@@ -1148,6 +1156,27 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         return AgentTarget(observation: observation, proposal: action, action: predicted,
             context: context + (searchLabel.map { " • " + $0 } ?? ""),
             isSearchSubmission: searchLabel != nil, navigation: navigation, findAction: nil, elementID: id)
+    }
+
+    func inspectAgentFormControl(controlID: String, observation: AgentObservation) async throws -> AgentFormControl {
+        try Task.checkCancellation()
+        try validateAgentSession(observation)
+        guard observation.evidence.page.controls.contains(where: { $0.id == controlID }),
+              controlID.utf8.count <= 65 else { throw ComputerUseBrowserError.pageChanged }
+        let result = try await callDOM(.agentTarget, arguments: [
+            "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
+            "controlID": controlID
+        ], document: observation.evidence.document)
+        lastAgentTargetStatus = result.status
+        try Task.checkCancellation(); try validateAgentSession(observation)
+        guard result.status == "agent-target", result.documentID == observation.evidence.documentID,
+              result.agentTargetID == controlID, let context = result.agentTargetContext,
+              context.utf8.count <= 8_192 else { throw ComputerUseBrowserError.pageChanged }
+        let searchLabel = result.agentTargetSearchLabel
+        guard searchLabel == nil || (searchLabel?.utf8.count ?? Int.max) <= 256 else { throw ComputerUseBrowserError.pageChanged }
+        return AgentFormControl(observation: observation, controlID: controlID,
+            context: context + (searchLabel.map { " • " + $0 } ?? ""),
+            isVerifiedSearchSubmission: searchLabel != nil)
     }
 
     func validateAgentTarget(_ target: AgentTarget) async throws {
@@ -2155,6 +2184,25 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
         return .init(evidence: evidence, source: .formQuery(controlID: controlID, queryID: query.id,
             requirementsDigest: requirements?.digest), destination: destination, sourcePolicyDigest: sourcePolicy?.digest)
+    }
+
+    /// Check every existing form safety rule before writing to a required but
+    /// empty field. Skipping native HTML validity here never creates a query
+    /// target or navigation receipt; submission repeats the strict check.
+    func preflightFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws {
+        try validateSourceDocument(evidence.document)
+        guard evidence.page.isWellFormed, hasRequiredPresentation,
+              evidence.page.controls.contains(where: { $0.id == controlID && $0.kind == "submit" && !$0.disabled }) else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        let reply = try await callDOM(.preflightFormQuery, arguments: [
+            "documentID": evidence.documentID, "snapshotID": evidence.page.id, "controlID": controlID
+        ], document: evidence.document)
+        try validateSourceDocument(evidence.document)
+        guard hasRequiredPresentation, reply.status == "form-preflight-safe", reply.documentID == evidence.documentID,
+              reply.formQuery == nil, reply.fields == nil, reply.page == nil else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
     }
 
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {

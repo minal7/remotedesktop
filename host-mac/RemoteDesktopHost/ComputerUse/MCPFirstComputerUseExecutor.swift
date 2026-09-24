@@ -952,8 +952,15 @@ final class MCPFirstComputerUseExecutor:
             // navigation may precede the managed local page planner.
             throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         }
+        if plan.kind == .nativeFormSubmission {
+            guard case .page(let page) = observation, let submission = plan.formSubmission else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+            return .nativeFormSubmission(plan: submission, authorityDigest: page.authorityDigest)
+        }
         let arguments: [String: Any]
         switch plan.kind {
+        case .nativeFormSubmission: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         case .inspectRecords: throw AppleFoundationMCPPlannerError.unknownProposal
         case .visualFallback:
             guard let assessment = plan.assessment else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }

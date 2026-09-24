@@ -3693,6 +3693,222 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeFormSubmissionRejectsForeignFieldAndCancellationBeforeDispatch() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["foreign-field", "cancel-before-dispatch"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/search": .init(body: """
+                    <!doctype html><html><body>
+                    <form action="/results" method="get"><label>Search <input name="q" type="search"></label><button type="submit">Search</button></form>
+                    <form action="/other" method="get"><label>Other <input name="other" type="search"></label><button type="submit">Other</button></form>
+                    <script>document.querySelectorAll('input').forEach(e=>e.addEventListener('input',()=>fetch('/edited',{keepalive:true})))</script>
+                    </body></html>
+                    """),
+                "/results?q=Apollo+11": .init(body: "<h1>Result</h1>"),
+                "/other?other=Apollo+11": .init(body: "<h1>Other result</h1>")
+            ])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraNativeFormReject-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let taskID = "native-form-reject-" + mode + "-" + UUID().uuidString
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "open-search", to: base.appendingPathComponent("search"))
+            var plannerCalls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+                propose: { _ in throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, observation in
+                    plannerCalls += 1
+                    guard case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    let fields = page.approvalPageEvidence.page.controls.filter { $0.kind == "search" && !$0.disabled }
+                    let target = try XCTUnwrap(fields.first { $0.form?.action.hasSuffix("/results") == true })
+                    let foreign = try XCTUnwrap(fields.first { $0.form?.id != target.form?.id })
+                    let submit = try XCTUnwrap(page.approvalPageEvidence.page.controls.first {
+                        $0.kind == "submit" && !$0.disabled && $0.form?.id == target.form?.id
+                    })
+                    let editedControl = mode == "foreign-field" ? foreign : target
+                    if mode == "cancel-before-dispatch" { withUnsafeCurrentTask { $0?.cancel() } }
+                    return .nativeFormSubmission(plan: .init(edits: [.init(controlID: editedControl.id, text: "Apollo 11")],
+                        submitControlID: submit.id), authorityDigest: page.authorityDigest)
+                })
+            let execution = Task {
+                try await executor.execute(taskID: taskID, prompt: "Search the current page for Apollo 11.",
+                    trustedUserPrompt: "Search the current page for Apollo 11.", tools: tools, progress: { _ in })
+            }
+            do {
+                _ = try await execution.value
+                XCTFail("A foreign-form field or cancellation cannot dispatch native input or GET: \(mode)")
+            } catch {
+                if mode == "cancel-before-dispatch" { XCTAssertTrue(error is CancellationError) }
+            }
+            let quietDeadline = ContinuousClock.now + .milliseconds(150)
+            while !server.requestedPaths.contains("/edited") && ContinuousClock.now < quietDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(plannerCalls, 1)
+            XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") || $0.hasPrefix("/other") }, mode)
+            XCTAssertEqual(server.count("/edited"), 0, mode)
+            let document = try XCTUnwrap(browser.currentDocument(taskID: taskID))
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: document)
+            let fields = try await target.fields()
+            XCTAssertTrue(fields.allSatisfy { $0.snapshot.value.isEmpty }, "No field value may be written: \(mode)")
+        }
+    }
+
+    @MainActor
+    func testNativeFormSubmissionRunsRetainedEditAndReadsCurrentResultOnce() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/search": .init(body: """
+                <!doctype html><html><body>
+                <form id="search-form" action="/results" method="get">
+                  <label>Search <input id="query" name="q" type="search" value=""></label>
+                  <button id="submit" type="submit">Search</button>
+                </form>
+                </body></html>
+                """),
+            "/results?q=Apollo+11": .init(body: "<!doctype html><h1>Apollo 11 Mission Record: Eagle Landing</h1>")
+        ])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraNativeFormSubmission-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "native-form-submission-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "open-search", to: base.appendingPathComponent("search"))
+
+        let goal = "Search the current page for Apollo 11, then report the result heading."
+        var plannerCalls = 0, visualCalls = 0
+        let completion = call(#"{"action":"terminate","answer":"Apollo 11 Mission Record: Eagle Landing."}"#)
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { _, observation in
+                plannerCalls += 1
+                guard case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                if plannerCalls == 1 {
+                    let controls = page.approvalPageEvidence.page.controls
+                    let queries = controls.filter { $0.kind == "search" && $0.label == "Search" && !$0.disabled && !$0.readOnly }
+                    XCTAssertEqual(queries.count, 1, "The fixture must expose one unique observed Search field")
+                    let query = try XCTUnwrap(queries.first)
+                    let submits = controls.filter { $0.kind == "submit" && !$0.disabled && $0.form?.id == query.form?.id }
+                    XCTAssertEqual(submits.count, 1, "The selected form must expose one unique observed submit control")
+                    let submit = try XCTUnwrap(submits.first)
+                    let plan = ComputerUseMCPBrowserStepPlanner.FormSubmission(
+                        edits: [.init(controlID: query.id, text: "Apollo 11")], submitControlID: submit.id)
+                    return .nativeFormSubmission(plan: plan, authorityDigest: page.authorityDigest)
+                }
+                XCTAssertEqual(plannerCalls, 2)
+                XCTAssertEqual(page.currentURL.path, "/results")
+                XCTAssertTrue(page.approvalPageEvidence.page.texts.contains { $0.text == "Apollo 11 Mission Record: Eagle Landing" },
+                    "Completion must be based on a fresh capture of the submitted result")
+                return .proposal(try .init(response: completion,
+                    action: ComputerUseFaraAction.decodeNativeMessage(completion)))
+            })
+
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+        } catch {
+            let captureStage = browser.lastAgentCaptureStage ?? "none"
+            let currentURL = browser.currentDocument(taskID: taskID)?.committedURL.absoluteString ?? "none"
+            XCTFail("Native form submission loop failed before current-result completion: \(String(reflecting: error)); plannerCalls=\(plannerCalls), visualCalls=\(visualCalls), targetStatus=\(browser.lastAgentTargetStatus ?? "none"), captureStage=\(captureStage), currentURL=\(currentURL)")
+            return
+        }
+        XCTAssertEqual(result, .completed("Apollo 11 Mission Record: Eagle Landing."))
+        XCTAssertEqual(plannerCalls, 2, "After the retained form receipt, the planner must read the fresh result page")
+        XCTAssertEqual(visualCalls, 0)
+        let deadline = ContinuousClock.now + .seconds(2)
+        while server.count("/results?q=Apollo+11") == 0 && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(server.count("/results?q=Apollo+11"), 1, "The verified native GET runs once with the edited field value")
+
+        let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(replay, .completed("Apollo 11 Mission Record: Eagle Landing."))
+        XCTAssertEqual(plannerCalls, 2, "Replaying a completed task must return its retained result without planning again")
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(server.count("/results?q=Apollo+11"), 1, "Replaying completion must not submit the form again")
+    }
+
+    @MainActor
+    func testNativeFormSubmissionRejectsChangedSubmitterMetadataAfterEdit() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/search": .init(body: """
+                <!doctype html><html><body>
+                <form action="/results" method="get">
+                  <label>Search <input name="q" type="search" value=""></label>
+                  <button type="submit">Search</button>
+                </form>
+                <script>
+                  document.querySelector('input').addEventListener('input', () => {
+                    document.querySelector('form').setAttribute('action', '/different');
+                    fetch('/edited', {keepalive:true});
+                  });
+                </script>
+                </body></html>
+                """),
+            "/results?q=Apollo+11": .init(body: "<h1>Unexpected original action</h1>"),
+            "/different?q=Apollo+11": .init(body: "<h1>Unexpected changed action</h1>")
+        ])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraChangedFormMetadata-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "native-form-changed-metadata-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "open-search", to: base.appendingPathComponent("search"))
+
+        let goal = "Search the current page for Apollo 11, then report the result heading."
+        var plannerCalls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { _, observation in
+                plannerCalls += 1
+                guard case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                let controls = page.approvalPageEvidence.page.controls
+                let queries = controls.filter { $0.kind == "search" && $0.label == "Search" && !$0.disabled && !$0.readOnly }
+                XCTAssertEqual(queries.count, 1)
+                let query = try XCTUnwrap(queries.first)
+                let submits = controls.filter { $0.kind == "submit" && !$0.disabled && $0.form?.id == query.form?.id }
+                XCTAssertEqual(submits.count, 1)
+                return .nativeFormSubmission(
+                    plan: .init(edits: [.init(controlID: query.id, text: "Apollo 11")],
+                        submitControlID: try XCTUnwrap(submits.first).id),
+                    authorityDigest: page.authorityDigest)
+            })
+
+        var rejected = false
+        do {
+            _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+        } catch {
+            rejected = true
+        }
+        let editDeadline = ContinuousClock.now + .seconds(2)
+        while server.count("/edited") == 0 && ContinuousClock.now < editDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(rejected, "Submitter metadata changing during the edit must invalidate the retained query plan")
+        XCTAssertEqual(server.count("/edited"), 1, "The input edit is observed exactly once before metadata validation")
+        XCTAssertFalse(server.requestedPaths.contains { $0.hasPrefix("/results") || $0.hasPrefix("/different") },
+            "Neither the captured nor handler-rewritten action may receive a GET")
+        XCTAssertEqual(plannerCalls, 1, "Changed submitter authority must stop this plan before another model turn")
+    }
+
+
+    @MainActor
     func testOptInFaraReturnSubmitsSearchOnceAndRetainsApprovalAndControlGates() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: real Return key and form navigation") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

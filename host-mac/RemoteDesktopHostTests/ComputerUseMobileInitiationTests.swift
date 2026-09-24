@@ -1767,6 +1767,116 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertFalse(emptyNames.contains("openLink")); XCTAssertFalse(emptyNames.contains("inspectRecords"))
     }
 
+    func testNativeWholePageSubmitFormUsesOnlyObservedControlReferences() async throws {
+        let source = URL(string: "https://example.org/search")!
+        let goalText = "Use the current page search field to look up Apollo 11."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText)
+        let form = ComputerUseBrowserPageSnapshot.Control.Form(id: "f1", method: "get",
+            action: source.absoluteString, target: "", encoding: "application/x-www-form-urlencoded", noValidate: false)
+        let controls = [
+            ComputerUseBrowserPageSnapshot.Control(id: "c1", containerID: "g1", label: "Search",
+                kind: "search", name: "query", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form),
+            ComputerUseBrowserPageSnapshot.Control(id: "c2", containerID: "g1", label: "Search",
+                kind: "submit", name: "", disabled: false, readOnly: false, required: false,
+                multiple: false, constraints: [:], options: [], form: form)
+        ]
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "c", count: 32),
+            texts: [.init(id: "t1", containerID: "g1", text: "Search the catalog")], links: [], controls: controls,
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "form")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: Data(), currentURL: source, clarifiedGoal: goal)
+        XCTAssertTrue(page.isWellFormed)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = try planner.context(input, page: page, wholePage: true)
+        let contract = #"{"objective":"Search the current catalog and report its result.","constraints":[],"requirements":[{"instruction":"Use the current page search field to look up Apollo 11.","kind":"information"}]}"#
+        let exactReplacement = "  Apollo 11 e\u{301} 😀  "
+        let submission = try nativeBrowserFunctionEnvelope("submitForm", argumentsJSON:
+            String(decoding: try JSONSerialization.data(withJSONObject: ["edits": [["controlID": "c1", "text": exactReplacement]],
+                "submitControlID": "c2"], options: [.sortedKeys]), as: UTF8.self))
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(contract), submission
+        ])
+        var plan: ComputerUseMCPBrowserStepPlanner.Plan?
+        do { plan = try await nativeStepPlanner(transport: transport).propose(context) }
+        catch { XCTFail("A valid current-page form submission should decode: \(error)") }
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 3)
+        guard calls.requests.count > 2 else { XCTFail("The whole-page tool request was not captured"); return }
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        let tools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+        let functions = try tools.map { try XCTUnwrap($0["function"] as? [String: Any]) }
+        XCTAssertTrue(functions.contains { $0["name"] as? String == "submitForm" })
+        let capture = try nativeBrowserCapturedObject(calls.requests[2])
+        let capturedPage = try XCTUnwrap(capture["page"] as? [String: Any])
+        let projectedControls = try XCTUnwrap(capturedPage["controls"] as? [[String: Any]])
+        XCTAssertEqual(Set(projectedControls.compactMap { $0["id"] as? String }), ["c1", "c2"])
+        XCTAssertFalse(String(decoding: try JSONSerialization.data(withJSONObject: projectedControls), as: UTF8.self)
+            .contains("Apollo 11"), "The capture must not contain proposed or current field values")
+        XCTAssertEqual(plan?.kind.rawValue, "nativeFormSubmission")
+        if let plan {
+            XCTAssertEqual(plan.reference, "c2")
+            XCTAssertEqual(plan.assessment?.requirements.first?.state, .pending,
+                "The submission proposal cannot mark the requested outcome complete")
+            XCTAssertEqual(plan.formSubmission?.edits, [.init(controlID: "c1", text: exactReplacement)])
+            XCTAssertTrue(try XCTUnwrap(plan.formSubmission?.edits.first?.text).utf8.elementsEqual(exactReplacement.utf8))
+            XCTAssertEqual(plan.formSubmission?.submitControlID, "c2")
+        }
+        let emptySubmission = try nativeBrowserFunctionEnvelope("submitForm", argumentsJSON:
+            #"{"edits":[{"controlID":"c1","text":""}],"submitControlID":"c2"}"#)
+        let emptyTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#), try nativeStepEnvelope(contract), emptySubmission
+        ])
+        let emptyPlan = try await nativeStepPlanner(transport: emptyTransport).propose(context)
+        XCTAssertEqual(emptyPlan.formSubmission?.edits, [.init(controlID: "c1", text: "")],
+            "Replacement text preserves an explicitly empty field value")
+    }
+
+    func testNativeWholePageSubmitFormRejectsUnknownDuplicateAndCrossFormControls() async throws {
+        let source = URL(string: "https://example.org/search")!
+        let goalText = "Use the current page form."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText)
+        func form(_ id: String) -> ComputerUseBrowserPageSnapshot.Control.Form {
+            .init(id: id, method: "get", action: source.absoluteString, target: "",
+                encoding: "application/x-www-form-urlencoded", noValidate: false)
+        }
+        let firstForm = form("f1"), secondForm = form("f2")
+        let controls = [
+            ComputerUseBrowserPageSnapshot.Control(id: "c1", containerID: "g1", label: "Search", kind: "search", name: "q",
+                disabled: false, readOnly: false, required: false, multiple: false, constraints: [:], options: [], form: firstForm),
+            ComputerUseBrowserPageSnapshot.Control(id: "c2", containerID: "g1", label: "Submit", kind: "submit", name: "",
+                disabled: false, readOnly: false, required: false, multiple: false, constraints: [:], options: [], form: firstForm),
+            ComputerUseBrowserPageSnapshot.Control(id: "c3", containerID: "g1", label: "Other", kind: "text", name: "other",
+                disabled: false, readOnly: false, required: false, multiple: false, constraints: [:], options: [], form: secondForm),
+            ComputerUseBrowserPageSnapshot.Control(id: "c4", containerID: "g1", label: "Other submit", kind: "submit", name: "",
+                disabled: false, readOnly: false, required: false, multiple: false, constraints: [:], options: [], form: secondForm)
+        ]
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "d", count: 32),
+            texts: [.init(id: "t1", containerID: "g1", text: "Two forms")], links: [], controls: controls,
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "form")], omittedStructure: false)
+        XCTAssertTrue(page.isWellFormed)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(
+            .init(goal: goalText, screenshotPNG: Data(), currentURL: source, clarifiedGoal: goal), page: page, wholePage: true)
+        let contract = #"{"objective":"Use the current form.","constraints":[],"requirements":[{"instruction":"Use the current page form.","kind":"information"}]}"#
+        let invalid = [
+            #"{"edits":[{"controlID":"c9","text":"x"}],"submitControlID":"c2"}"#,
+            #"{"edits":[{"controlID":"c1","text":"x"},{"controlID":"c1","text":"y"}],"submitControlID":"c2"}"#,
+            #"{"edits":[{"controlID":"c3","text":"x"}],"submitControlID":"c2"}"#
+        ]
+        for arguments in invalid {
+            let transport = NativeStepQueueFixtureTransport(responses: [
+                try nativeStepEnvelope(#"{"kind":"continue","text":""}"#), try nativeStepEnvelope(contract),
+                try nativeBrowserFunctionEnvelope("submitForm", argumentsJSON: arguments)
+            ])
+            do {
+                _ = try await nativeStepPlanner(transport: transport).propose(context)
+                XCTFail("Malformed or cross-form references must be rejected")
+            } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+        }
+    }
+
     func testNativeWholePageUnifiedToolsPreserveAuthorityAndValidateDynamicAnswerEvidence() async throws {
         let original = "Read the policy and report the return fee and deadline."
         let clarificationQuestion = "Which policy should I use?"
@@ -3517,6 +3627,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "concert", useNativeText: true)
     }
 
+    func testOptInManagedNativeFormSearchReportsObservedHeading() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_NATIVE_FORM_SEARCH"] == "1" else {
+            throw XCTSkip("Opt-in: actual managed native browser form search against a controlled local page")
+        }
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: nil, useNativeText: true,
+            resumeHarnessBudgetSeconds: 80, localFormSearch: true)
+    }
+
     func testOptInMCPBrowserHostFindsPublicTravelWithoutURLWithManagedNativeText() async throws {
         try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "search", useNativeText: true)
     }
@@ -3616,7 +3734,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                                                expectedInitialClarification: Bool = false,
                                                                clarificationAnswer: String? = nil,
                                                                preloadLoadedPage: Bool = false,
-                                                               resumeHarnessBudgetSeconds: TimeInterval = 75) async throws {
+                                                               resumeHarnessBudgetSeconds: TimeInterval = 75,
+                                                               localFormSearch: Bool = false) async throws {
         var publicGoal: String?, expectedPatterns: [String] = [], questionPatterns: [String] = [], expectedHost: String?
         if let publicCase {
             guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
@@ -3636,16 +3755,33 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 XCTAssertFalse(expectedPatterns.isEmpty)
             }
         }
-        guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
+        let environment = ProcessInfo.processInfo.environment
+        guard localFormSearch || environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
             throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
         }
-        let output = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MCP_BROWSER_LOOP_DIRECTORY"]))
+        let outputPath = localFormSearch
+            ? try XCTUnwrap(environment["MANAGED_NATIVE_FORM_SEARCH_DIRECTORY"])
+            : try XCTUnwrap(environment["MCP_BROWSER_LOOP_DIRECTORY"])
+        let output = URL(fileURLWithPath: outputPath)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let formSearchPath = "/search?query=Apollo+11"
+        let formSearchPage = """
+            <!doctype html><h1>Mission archive</h1>
+            <form method="get" action="/search">
+              <label for="query">Search</label><input id="query" name="query" type="search">
+              <button type="submit">Search</button>
+            </form>
+            """
+        let formResultPage = """
+            <!doctype html><h1>Apollo 11 Mission Record: Eagle Landing</h1>
+            <p>Mission archive entry.</p>
+            """
         let server = try OwnedBrowserHTTPFixture(routes: [
-            "/index": .init(body: "<!doctype html><h1>Rail timetable</h1><a href='/details'>Night train to Harbor City — details</a>"),
+            "/index": .init(body: localFormSearch ? formSearchPage : "<!doctype html><h1>Rail timetable</h1><a href='/details'>Night train to Harbor City — details</a>"),
             "/details": .init(body: "<!doctype html><h1>Night train to Harbor City</h1><p>Departure time: 21:45</p><p>Platform: 6</p>"),
             "/seeded-city": .init(body: "<!doctype html><h1>San Francisco BART youth fares</h1><p>This local transit guide covers BART in San Francisco.</p><a href='/seeded-city-details'>Youth fare details</a>"),
-            "/seeded-city-details": .init(body: "<!doctype html><h1>BART youth fare details</h1><p>Example local page content.</p>")])
+            "/seeded-city-details": .init(body: "<!doctype html><h1>BART youth fare details</h1><p>Example local page content.</p>"),
+            formSearchPath: .init(body: formResultPage)])
         let base = try await server.start(); defer { server.stop() }
         let installedHelper = await MacControlMCPInstaller().currentInstallation()
         let helperReceipt = try XCTUnwrap(installedHelper)
@@ -3659,8 +3795,67 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let channel = MobileInitiationTestChannel()
         let plannerTrace = MCPBrowserLoopTrace()
         let inspectExchange: (@Sendable (Data, Data, Int) -> Void)?
-        if publicCase != nil {
+        if publicCase != nil || localFormSearch {
             inspectExchange = { request, response, tokens in
+                if localFormSearch {
+                    var safe: [String: Any] = ["inputTokens": tokens]
+                    if let root = try? JSONSerialization.jsonObject(with: response) as? [String: Any] {
+                        for key in ["model", "usage"] { if let value = root[key] { safe[key] = value } }
+                        if let choices = root["choices"] as? [[String: Any]] {
+                            safe["choices"] = choices.map { choice -> [String: Any] in
+                                var item: [String: Any] = [:]
+                                if let finish = choice["finish_reason"] { item["finish_reason"] = finish }
+                                if let message = choice["message"] as? [String: Any] {
+                                    var messageProjection: [String: Any] = [:]
+                                    if let calls = message["tool_calls"] as? [[String: Any]] {
+                                        messageProjection["tool_calls"] = calls.compactMap { call -> [String: Any]? in
+                                            guard let function = call["function"] as? [String: Any],
+                                                  let name = function["name"] as? String,
+                                                  let arguments = function["arguments"] as? String else { return nil }
+                                            return ["function": ["name": name, "arguments": arguments]]
+                                        }
+                                    }
+                                    if let content = message["content"] as? String,
+                                       let structuredData = content.data(using: .utf8),
+                                       let structured = try? JSONSerialization.jsonObject(with: structuredData) {
+                                        if let object = structured as? [String: Any],
+                                           Set(object.keys) == ["name", "arguments"],
+                                           let name = object["name"] as? String,
+                                           ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords"].contains(name),
+                                           let arguments = object["arguments"],
+                                           let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
+                                           let argumentText = String(data: argumentData, encoding: .utf8),
+                                           messageProjection["tool_calls"] == nil {
+                                            messageProjection["tool_calls"] = [["function": ["name": name, "arguments": argumentText]]]
+                                        } else {
+                                            messageProjection["structuredContent"] = structured
+                                        }
+                                    } else if let content = message["content"] as? String,
+                                              let open = content.range(of: "<tool_call>"),
+                                              let close = content[open.upperBound...].range(of: "</tool_call>"),
+                                              let data = String(content[open.upperBound..<close.lowerBound]).data(using: .utf8),
+                                              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                                              Set(object.keys) == ["name", "arguments"],
+                                              let name = object["name"] as? String,
+                                              ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords"].contains(name),
+                                              let arguments = object["arguments"],
+                                              let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
+                                              let argumentText = String(data: argumentData, encoding: .utf8),
+                                              messageProjection["tool_calls"] == nil {
+                                        messageProjection["tool_calls"] = [["function": ["name": name, "arguments": argumentText]]]
+                                    }
+                                    item["message"] = messageProjection
+                                }
+                                return item
+                            }
+                        }
+                    }
+                    if let data = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]) {
+                        plannerTrace.append(String(decoding: data, as: UTF8.self))
+                    }
+                    _ = request // Do not retain page-bearing requests or model narrative.
+                    return
+                }
                 let safeResponse: [String: Any]
                 if let root = try? JSONSerialization.jsonObject(with: response) as? [String: Any] {
                     var sanitized: [String: Any] = [:]
@@ -3696,23 +3891,36 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         var browser: ComputerUseOwnedBrowser?
         let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json"))
+        let inspectCatalogue: (@Sendable (ComputerUseBrowserPageSnapshot, URL) throws -> Void)?
+        if localFormSearch {
+            inspectCatalogue = nil
+        } else {
+            inspectCatalogue = { snapshot, source in
+                let data: [String: Any] = ["id": snapshot.id, "sourceURL": source.absoluteString,
+                    "texts": snapshot.texts.map { ["id": $0.id, "containerID": $0.containerID, "text": $0.text, "tooltip": $0.tooltip as Any? ?? NSNull()] },
+                    "links": snapshot.links.map { ["id": $0.id, "containerID": $0.containerID as Any? ?? NSNull(), "label": $0.label,
+                        "destination": $0.destination, "textIDs": $0.textIDs] },
+                    "containers": snapshot.containers.map { ["id": $0.id, "parentID": $0.parentID as Any? ?? NSNull(), "kind": $0.kind] },
+                    "truncated": snapshot.truncated, "omittedStructure": snapshot.omittedStructure,
+                    "omittedEmbeddedContent": snapshot.omittedEmbeddedContent]
+                try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                    .write(to: output.appendingPathComponent("catalogue-\(snapshot.id).json"), options: .atomic)
+            }
+        }
+        let mcpPlanner: any MCPProposalPlanning
+        if localFormSearch { mcpPlanner = AppleFoundationMCPPlanner() }
+        else { mcpPlanner = MobileInitiationObservedPlanner(trace: plannerTrace) }
+        let inspectProposal: (@Sendable (String) -> Void)?
+        if localFormSearch { inspectProposal = nil }
+        else { inspectProposal = { plannerTrace.append($0) } }
+        let browserStepPlanner = ComputerUseMCPBrowserStepPlanner(inspectProposal: inspectProposal,
+            inspectCatalogue: inspectCatalogue, inspectExchange: inspectExchange)
         let manager = HostComputerUseManager(injector: InputInjector(), installer: visual,
             nativeTextInstaller: native,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
             visualExecutorLoader: loader,
-            mcpPlanner: MobileInitiationObservedPlanner(trace: plannerTrace),
-            mcpBrowserStepPlanner: .init(inspectProposal: { plannerTrace.append($0) },
-                inspectCatalogue: { snapshot, source in
-                    let data: [String: Any] = ["id": snapshot.id, "sourceURL": source.absoluteString,
-                        "texts": snapshot.texts.map { ["id": $0.id, "containerID": $0.containerID, "text": $0.text, "tooltip": $0.tooltip as Any? ?? NSNull()] },
-                        "links": snapshot.links.map { ["id": $0.id, "containerID": $0.containerID as Any? ?? NSNull(), "label": $0.label,
-                            "destination": $0.destination, "textIDs": $0.textIDs] },
-                        "containers": snapshot.containers.map { ["id": $0.id, "parentID": $0.parentID as Any? ?? NSNull(), "kind": $0.kind] },
-                        "truncated": snapshot.truncated, "omittedStructure": snapshot.omittedStructure,
-                        "omittedEmbeddedContent": snapshot.omittedEmbeddedContent]
-                    try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-                        .write(to: output.appendingPathComponent("catalogue-\(snapshot.id).json"), options: .atomic)
-                }, inspectExchange: inspectExchange),
+            mcpPlanner: mcpPlanner,
+            mcpBrowserStepPlanner: browserStepPlanner,
             taskLedger: ledger,
             browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
@@ -3763,11 +3971,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         let prompt = ComputerUseEnvelope(id: "mcp-browser-no-package-" + UUID().uuidString,
             senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
-            body: publicGoal ?? "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform.")
+            body: publicGoal ?? (localFormSearch
+                ? "Open \(base.appendingPathComponent("index").absoluteString). Use its Search field to look up Apollo 11, then report the heading from the resulting page."
+                : "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform."))
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         var terminal: ComputerUseTaskUpdate?
         for _ in 0 ..< (preloadLoadedPage ? 450 : resumePollLimit) {
             if preloadLoadedPage && Date().timeIntervalSince(started) >= 45 { break }
+            if localFormSearch && Date().timeIntervalSince(started) >= 80 { break }
             if clarificationAnswer != nil && Date().timeIntervalSince(started) >= resumeHarnessBudgetSeconds { break }
             terminal = await channel.taskUpdates().first { $0.taskID == prompt.id && $0.outcome != nil }
             if terminal != nil { break }
@@ -3781,6 +3992,21 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let initialTrace = Array(plannerTrace.items.dropFirst(traceIndexBeforeGoal))
         let originalBrowserTaskID = browser?.taskID
         let initialNativeStepCount = initialTrace.filter { $0.contains("Native text step:") }.count
+        let nativeFunctionNames = plannerTrace.items.flatMap { item -> [String] in
+            guard let data = item.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = root["choices"] as? [[String: Any]] else { return [] }
+            return choices.flatMap { choice -> [String] in
+                guard let message = choice["message"] as? [String: Any],
+                      let calls = message["tool_calls"] as? [[String: Any]] else { return [] }
+                return calls.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
+            }
+        }
+        let localFormCompletedInspectedExchanges = localFormSearch ? plannerTrace.items.filter { item in
+            guard let data = item.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return object["inputTokens"] as? Int != nil
+        }.count : 0
         var answerEnvelope: ComputerUseEnvelope?
         var answerConstructionFailure: String?
         if let clarificationAnswer, let reference = firstTerminal?.clarification {
@@ -3823,7 +4049,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }.count
         let loadedDeadlineExceeded = preloadLoadedPage && terminal == nil && Date().timeIntervalSince(started) >= 45
         let terminalSummary: Any
-        if preloadLoadedPage {
+        if localFormSearch {
+            let answer = terminal?.text ?? ""
+            terminalSummary = ["outcome": terminal?.outcome?.rawValue ?? "missing",
+                "answerUTF8Bytes": answer.utf8.count,
+                "containsObservedResultHeading": answer.contains("Apollo 11 Mission Record: Eagle Landing")]
+        } else if preloadLoadedPage {
             terminalSummary = ["outcome": terminal?.outcome?.rawValue ?? "missing",
                 "visibleText": terminal?.text as Any? ?? NSNull(),
                 "clarificationPresent": clarificationReference != nil,
@@ -3846,6 +4077,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "maximumObservedWorkers": maximumWorkers, "workerSamples": samples,
             "plannerTrace": plannerTrace.items,
             "usesNativeTextModel": useNativeText,
+            "localFormSearch": localFormSearch,
+            "expectedFormRequestPath": localFormSearch ? (formSearchPath as Any) : NSNull(),
+            "formRequestCount": localFormSearch ? server.count(formSearchPath) : NSNull(),
+            "nativeFunctionNames": localFormSearch ? nativeFunctionNames : [],
+            "completedInspectedModelExchanges": localFormSearch ? localFormCompletedInspectedExchanges : NSNull(),
+            "localFormHarnessBudgetSeconds": localFormSearch ? 80 : NSNull(),
             "expectedInitialClarification": expectedInitialClarification,
             "initialNativePlannerCalls": initialPlannerCalls,
             "initialStagePlannerCalls": initialPlannerCalls,
@@ -3956,6 +4193,21 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
             XCTAssertEqual(finalURL?.host, expectedHost)
             XCTAssertTrue(server.requestedPaths.isEmpty)
+        } else if localFormSearch {
+            XCTAssertEqual(terminal?.outcome, .taskCompleted)
+            XCTAssertTrue(terminal?.text.contains("Apollo 11 Mission Record: Eagle Landing") == true)
+            XCTAssertEqual(server.count("/index"), 1)
+            XCTAssertEqual(server.count(formSearchPath), 1)
+            XCTAssertEqual(server.requestedPaths.filter { $0.hasPrefix("/search?") }, [formSearchPath])
+            XCTAssertTrue(server.requestedPaths.allSatisfy { ["/index", formSearchPath, "/favicon.ico"].contains($0) },
+                "The browser must stay on the controlled fixture, with no unrelated search route")
+            XCTAssertFalse(nativeFunctionNames.contains("search"), "Use the page's Search field, not global web search")
+            XCTAssertTrue(nativeFunctionNames.contains("submitForm"), "The successful trace must include the native form submission function")
+            XCTAssertEqual(originalBrowserTaskID, prompt.id)
+            XCTAssertEqual(finalBrowserTaskID, prompt.id)
+            XCTAssertEqual(finalURL?.path, "/search")
+            XCTAssertEqual(URLComponents(url: try XCTUnwrap(finalURL), resolvingAgainstBaseURL: false)?.queryItems,
+                           [URLQueryItem(name: "query", value: "Apollo 11")])
         } else {
             XCTAssertEqual(terminal?.outcome, .taskCompleted)
             XCTAssertTrue(terminal?.text.contains("21:45") == true || terminal?.text.range(of: #"(?i)9:45\s*p\.?m"#, options: .regularExpression) != nil)

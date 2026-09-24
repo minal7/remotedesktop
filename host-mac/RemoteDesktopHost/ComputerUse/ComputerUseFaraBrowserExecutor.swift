@@ -19,12 +19,24 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     enum ToolPlan: Sendable {
         case proposal(ComputerUseFaraModel.Proposal)
         case nativeReadCompletion(MCPFirstComputerUseExecutor.NativeReadCompletion)
+        case nativeFormSubmission(plan: ComputerUseMCPBrowserStepPlanner.FormSubmission, authorityDigest: String)
         case handoff(ComputerUseFaraModel.WorkerDirective)
         case noProposal
     }
     private struct PlannedProposal: Sendable {
         let proposal: ComputerUseFaraModel.Proposal
         let nativeReadCompletion: MCPFirstComputerUseExecutor.NativeReadCompletion?
+    }
+    private enum PlannedStep: Sendable {
+        case proposal(PlannedProposal)
+        case nativeFormSubmission(plan: ComputerUseMCPBrowserStepPlanner.FormSubmission, authorityDigest: String)
+    }
+    private struct PendingNativeFormSubmission: Sendable {
+        let plan: ComputerUseMCPBrowserStepPlanner.FormSubmission
+        let authorityDigest: String
+        let observation: ComputerUseOwnedBrowser.AgentObservation
+        let operationID: String
+        var receipt: ComputerUseBrowserNavigationReceipt?
     }
     typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ToolPlan
     enum Failure: Error, LocalizedError, Equatable {
@@ -76,6 +88,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var unsupportedNavigations = 0
         var terminal: ComputerUseExecutionResult?
         var approval: PendingApproval?
+        var pendingNativeFormSubmission: PendingNativeFormSubmission?
         var isStarting = false
         init(taskID: String, goal: String, browserIdentity: String, journal: ComputerUseTaskJournal) {
             self.taskID = taskID; self.goal = goal; self.browserIdentity = browserIdentity; self.journal = journal
@@ -249,7 +262,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
 
     private func nextProposal(_ input: ComputerUseFaraModel.Input, observation: ToolObservation,
-                              tools: ComputerUseHostTools) async throws -> PlannedProposal {
+                              tools: ComputerUseHostTools) async throws -> PlannedStep {
         let toolPlanner = proposeUsingTools, visualPlanner = propose
         let hasToolPlanner = toolPlanner != nil || tools.hasOwnedBrowserToolProposals
         return try await planning.perform(timeout: 45) {
@@ -273,12 +286,12 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 try await checkObservation()
                 return plan
             }
-            @MainActor func visualProposal(_ visualInput: ComputerUseFaraModel.Input) async throws -> PlannedProposal {
+            @MainActor func visualProposal(_ visualInput: ComputerUseFaraModel.Input) async throws -> PlannedStep {
                 try await checkObservation()
                 let proposal = try await visualPlanner(visualInput)
                 try await checkObservation()
                 guard hasToolPlanner, case .reportCompletion(let candidateText) = proposal.action else {
-                    return PlannedProposal(proposal: proposal, nativeReadCompletion: nil)
+                    return .proposal(PlannedProposal(proposal: proposal, nativeReadCompletion: nil))
                 }
                 var reviewInput = input
                 reviewInput.browserWorkerDirective = nil
@@ -291,18 +304,25 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     // A visual specialist's answer has no native evidence receipt;
                     // retain the existing full-scene validation path.
                     reviewedProposal = receipt.proposal
+                case .nativeFormSubmission:
+                    // Visual answer review is read-only. A form effect can
+                    // only be proposed by the native whole-task planner.
+                    throw Failure.unsupportedAction
                 default: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
                 }
-                return PlannedProposal(proposal: try Self.readOnlyToolProposal(reviewedProposal), nativeReadCompletion: nil)
+                return .proposal(PlannedProposal(proposal: try Self.readOnlyToolProposal(reviewedProposal), nativeReadCompletion: nil))
             }
             if hasToolPlanner {
                 switch try await toolPlan(for: input) {
                 case .proposal(let proposal):
                     // This proposal boundary is read/navigation-only. Real
                     // MCP mutations need their own approved effect receipts.
-                    return PlannedProposal(proposal: try Self.readOnlyToolProposal(proposal), nativeReadCompletion: nil)
+                    return .proposal(PlannedProposal(proposal: try Self.readOnlyToolProposal(proposal), nativeReadCompletion: nil))
                 case .nativeReadCompletion(let receipt):
-                    return PlannedProposal(proposal: try Self.readOnlyToolProposal(receipt.proposal), nativeReadCompletion: receipt)
+                    return .proposal(PlannedProposal(proposal: try Self.readOnlyToolProposal(receipt.proposal), nativeReadCompletion: receipt))
+                case .nativeFormSubmission(let plan, let authorityDigest):
+                    guard case .page = observation else { throw Failure.unsupportedAction }
+                    return .nativeFormSubmission(plan: plan, authorityDigest: authorityDigest)
                 case .handoff(let directive):
                     guard input.surface == .browser else { throw Failure.unsupportedAction }
                     try directive.validate()
@@ -333,8 +353,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history,
             userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal)
         let planned = try await nextProposal(input, observation: .initial(observation), tools: tools)
-        if planned.nativeReadCompletion != nil { throw Failure.unsupportedAction }
-        let proposal = planned.proposal
+        guard case .proposal(let proposalPlan) = planned else { throw Failure.unsupportedAction }
+        if proposalPlan.nativeReadCompletion != nil { throw Failure.unsupportedAction }
+        let proposal = proposalPlan.proposal
         try Task.checkCancellation(); try lease.assertOwnership()
         try tools.validateOwnedBrowserInitialAgentObservation(observation)
         let destination: URL
@@ -521,10 +542,13 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
                 clarifiedGoal: session.clarifiedGoal)
-            let planned: PlannedProposal
-            do {
-                planned = try await nextProposal(input, observation: .page(observation), tools: tools)
-            } catch ComputerUseBrowserError.pageChanged {
+            let plannedStep: PlannedStep
+            if let pending = session.pendingNativeFormSubmission {
+                plannedStep = .nativeFormSubmission(plan: pending.plan, authorityDigest: pending.authorityDigest)
+            } else {
+                do {
+                    plannedStep = try await nextProposal(input, observation: .page(observation), tools: tools)
+                } catch ComputerUseBrowserError.pageChanged {
                 // The native planner may finish after its read-only page has
                 // changed. No proposal escaped this boundary, so discard it
                 // without adding history or feedback and plan from fresh data.
@@ -538,8 +562,82 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
                 }
                 try Task.checkCancellation(); try lease.assertOwnership()
+                    continue
+                }
+            }
+            if case .nativeFormSubmission(let plan, let authorityDigest) = plannedStep {
+                var pending: PendingNativeFormSubmission
+                if let retained = session.pendingNativeFormSubmission {
+                    guard retained.plan == plan, retained.authorityDigest == authorityDigest else { throw Failure.uncertainAction }
+                    pending = retained
+                } else {
+                    guard authorityDigest == observation.authorityDigest else { throw Failure.browserChanged }
+                    let operationID = ComputerUseTaskContract.digest([session.journal.taskID, "native-form-submission-v1", authorityDigest])
+                    pending = .init(plan: plan, authorityDigest: authorityDigest, observation: observation,
+                        operationID: operationID, receipt: nil)
+                    session.pendingNativeFormSubmission = pending
+                }
+                progress("Preparing the observed browser form…")
+                let receipt: ComputerUseBrowserNavigationReceipt
+                if let retainedReceipt = pending.receipt {
+                    receipt = retainedReceipt
+                } else {
+                    receipt = try await tools.performOwnedBrowserNativeFormSubmission(pending.plan,
+                        authorityDigest: pending.authorityDigest, observation: pending.observation,
+                        prompt: session.goal, operationID: pending.operationID,
+                        checkCurrent: {
+                            try Task.checkCancellation(); try lease.assertOwnership()
+                            guard tools.matchesOwnedBrowserAgentSession(taskID: taskID, identity: session.browserIdentity) else {
+                                throw Failure.browserChanged
+                            }
+                        }, willBeginEffect: {
+                            try Task.checkCancellation(); try lease.assertOwnership()
+                            guard tools.matchesOwnedBrowserAgentSession(taskID: taskID, identity: session.browserIdentity) else {
+                                throw Failure.browserChanged
+                            }
+                        })
+                    pending.receipt = receipt
+                    session.pendingNativeFormSubmission = pending
+                }
+                guard receipt.document.taskID == taskID else { throw Failure.browserChanged }
+                // Keep the pending operation until the fresh capture succeeds.
+                // Resume then receives the cached receipt rather than planning
+                // or dispatching this form again.
+                observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID)
+                session.pendingNativeFormSubmission = nil
+                let priorUserResponse = session.userResponse
+                let priorActionError = session.actionError
+                if !session.history.isEmpty {
+                    session.history[session.history.count - 1].resultObservation = .init(
+                        currentURL: pending.observation.currentURL,
+                        userResponse: priorUserResponse, actionError: priorActionError)
+                }
+                let operationResult: [String: Any] = [
+                    "name": "submitForm",
+                    "arguments": ["edits": pending.plan.edits.map { ["controlID": $0.controlID, "text": $0.text] },
+                        "submitControlID": pending.plan.submitControlID],
+                    "result": ["status": "observedNavigation", "currentURL": receipt.document.committedURL.absoluteString]
+                ]
+                let operationData = try JSONSerialization.data(withJSONObject: operationResult,
+                    options: [.sortedKeys, .withoutEscapingSlashes])
+                let operationResponse = String(decoding: operationData, as: UTF8.self)
+                session.history.append(.init(screenshotPNG: pending.observation.png, response: operationResponse,
+                    currentURL: pending.observation.currentURL, pageReading: session.pageReading,
+                    userResponse: priorUserResponse, actionError: priorActionError, action: nil,
+                    resultObservation: .init(currentURL: observation.currentURL, userResponse: nil, actionError: nil)))
+                session.turns += 1
+                session.pageReading = nil; session.userResponse = nil; session.actionError = nil
+                while session.history.count > 20 {
+                    guard let index = session.history.firstIndex(where: {
+                        if $0.userResponse != nil { return false }
+                        if case .some(.askUser(_)) = $0.action { return false }
+                        return true
+                    }) else { break }
+                    session.history.remove(at: index)
+                }
                 continue
             }
+            guard case .proposal(let planned) = plannedStep else { throw Failure.unsupportedAction }
             let proposal = planned.proposal
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.

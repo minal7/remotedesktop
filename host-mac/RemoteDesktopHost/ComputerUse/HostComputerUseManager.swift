@@ -1496,6 +1496,36 @@ final class ComputerUseHostTools {
         return try await browserNavigationTask.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
+    func performOwnedBrowserNativeFormSubmission(
+        _ plan: ComputerUseMCPBrowserStepPlanner.FormSubmission,
+        authorityDigest: String,
+        observation: ComputerUseOwnedBrowser.AgentObservation,
+        prompt: String,
+        operationID: String,
+        checkCurrent: @escaping @MainActor () throws -> Void,
+        willBeginEffect: @escaping @MainActor () throws -> Void
+    ) async throws -> ComputerUseBrowserNavigationReceipt {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard authorityDigest == observation.authorityDigest else { throw ComputerUseBrowserError.pageChanged }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+
+        let guardedCheckCurrent: @MainActor () throws -> Void = {
+            try Task.checkCancellation()
+            guard self.mayAct() else { throw ToolError.paused }
+            try checkCurrent()
+        }
+        let guardedWillBeginEffect: @MainActor () throws -> Void = {
+            try guardedCheckCurrent()
+            try willBeginEffect()
+        }
+        try guardedCheckCurrent()
+        return try await browserNavigationTask.performNativeFormSubmission(
+            plan, authorityDigest: authorityDigest, observation: observation, prompt: prompt,
+            operationID: operationID, checkCurrent: guardedCheckCurrent,
+            willBeginEffect: guardedWillBeginEffect)
+    }
+
     func ownedBrowserHandbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
         guard let browserNavigationTask else { return required ? .unavailable(taskID: taskID) : nil }
         return browserNavigationTask.handbackRequirement(taskID: ownedBrowserTaskID(forExecution: taskID), required: required)

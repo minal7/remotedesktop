@@ -53,6 +53,40 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     private var retainedURLs: [URL] = []
     private var workflow: ComputerUseBrowserWorkflowTask?
     private var research: ComputerUseBrowserResearchTask?
+    private var nativeFormStages: [String: NativeFormSubmissionStage] = [:]
+
+    private final class NativeFormSubmissionStage {
+        final class JournalBox { var journal: ComputerUseTaskJournal? }
+        final class Gate {
+            var check: () throws -> Void = { throw ComputerUseBrowserError.closed }
+            var willBeginEffect: () throws -> Void = { throw ComputerUseBrowserError.closed }
+            var didMarkEffect = false
+            func beforeInput() throws {
+                try check()
+                if !didMarkEffect { try willBeginEffect(); didMarkEffect = true }
+            }
+        }
+        let fingerprint: String
+        let target: ComputerUseBrowserTextTarget
+        let task: ComputerUseTextTask
+        let evidence: ComputerUseBrowserPageEvidence
+        let submitterControl: ComputerUseBrowserPageSnapshot.Control
+        let submitControlID: String
+        let promptDigest: String
+        let operationID: String
+        let gate: Gate
+        var inputsCompleted = false
+        var queryTarget: ComputerUseBrowserNavigationTarget?
+        var navigationReceipt: ComputerUseBrowserNavigationReceipt?
+
+        init(fingerprint: String, target: ComputerUseBrowserTextTarget, task: ComputerUseTextTask,
+             evidence: ComputerUseBrowserPageEvidence, submitterControl: ComputerUseBrowserPageSnapshot.Control,
+             submitControlID: String, promptDigest: String, operationID: String, gate: Gate) {
+            self.fingerprint = fingerprint; self.target = target; self.task = task; self.evidence = evidence
+            self.submitterControl = submitterControl; self.submitControlID = submitControlID; self.promptDigest = promptDigest
+            self.operationID = operationID; self.gate = gate
+        }
+    }
 
     init(browser: ComputerUseOwnedBrowser, journalDirectory: URL, effectNamespace: String? = nil,
          beforeNavigationDispatch: (@MainActor (Int) async throws -> Void)? = nil,
@@ -62,6 +96,167 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         self.effectNamespace = effectNamespace
         self.beforeNavigationDispatch = beforeNavigationDispatch
         self.observedNavigationStore = observedNavigationStore
+    }
+
+    func performNativeFormSubmission(_ plan: ComputerUseMCPBrowserStepPlanner.FormSubmission,
+        authorityDigest: String, observation: ComputerUseOwnedBrowser.AgentObservation, prompt: String,
+        operationID: String, checkCurrent: @escaping @MainActor () throws -> Void,
+        willBeginEffect: @escaping @MainActor () throws -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
+        try Task.checkCancellation(); try checkCurrent()
+        let evidence = observation.approvalPageEvidence
+        guard authorityDigest == observation.authorityDigest, operationID.utf8.count == 64,
+              operationID.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              (1...8).contains(plan.edits.count), Set(plan.edits.map(\.controlID)).count == plan.edits.count else {
+            throw ComputerUseBrowserError.formQueryUnavailable
+        }
+        let promptDigest = ComputerUseTextTaskContract.digest(prompt)
+        let fingerprint = ComputerUseTaskContract.digest([authorityDigest, promptDigest, plan.submitControlID]
+            + plan.edits.flatMap { [$0.controlID, ComputerUseTextTaskContract.digest($0.text)] })
+        let stage: NativeFormSubmissionStage
+        if let retained = nativeFormStages[operationID] {
+            guard retained.fingerprint == fingerprint else { throw ComputerUseBrowserError.observedNavigationUncertain }
+            stage = retained
+        } else {
+            guard let submitter = evidence.page.controls.first(where: { $0.id == plan.submitControlID && $0.kind == "submit" }),
+                  let form = submitter.form, form.method.lowercased() == "get",
+                  ["", "_self"].contains(form.target.lowercased()),
+                  let destination = URL(string: form.action).flatMap(ComputerUseOwnedBrowser.validatedURL),
+                  Self.sameOrigin(destination, evidence.document.committedURL) else {
+                throw ComputerUseBrowserError.formQueryUnavailable
+            }
+            for edit in plan.edits {
+                guard let control = evidence.page.controls.first(where: { $0.id == edit.controlID }),
+                      control.form?.id == form.id,
+                      ["text", "search", "email", "url", "tel", "number", "date", "time", "textarea"].contains(control.kind),
+                      !control.disabled, !control.readOnly,
+                      edit.text.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
+                    throw ComputerUseBrowserError.formQueryUnavailable
+                }
+                let target = try await browser.inspectAgentFormControl(controlID: edit.controlID, observation: observation)
+                guard ComputerUseActionSafetyPolicy.approvalReason(for: .typeText(edit.text),
+                    accessibilityContext: target.context) == nil else { throw ComputerUseBrowserError.formQueryUnavailable }
+            }
+            let submitTarget = try await browser.inspectAgentFormControl(controlID: plan.submitControlID, observation: observation)
+            guard ComputerUseActionSafetyPolicy.approvalReason(for: .click(x: 0, y: 0, button: 0, count: 1),
+                accessibilityContext: submitTarget.context,
+                verifiedSearchSubmission: submitTarget.isVerifiedSearchSubmission) == nil else {
+                throw ComputerUseBrowserError.formQueryUnavailable
+            }
+            try await browser.preflightFormQuery(controlID: plan.submitControlID, evidence: evidence)
+            try checkCurrent()
+            let target = ComputerUseBrowserTextTarget(browser: browser, document: evidence.document)
+            let editIDs = plan.edits.map(\.controlID)
+            let discovered = try await target.fields(in: form.id, page: evidence, preserving: [], selecting: editIDs)
+            let bound = try await target.bindFields(discovered, to: evidence)
+            guard bound.fields.count == editIDs.count,
+                  Set(bound.fields.map(\.control.id)) == Set(editIDs) else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+            let operations: [ComputerUseTextGoalOperation] = try plan.edits.map { edit in
+                guard let field = bound.fields.first(where: { $0.control.id == edit.controlID }) else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+                return .enterText(.init(targetID: field.editable.snapshot.targetID, mode: .replaceAll, text: edit.text))
+            }
+            let contract = try ComputerUseTextTaskContract(taskID: evidence.document.taskID,
+                prompt: prompt, fields: bound.fields.map(\.editable), operations: operations)
+            let stepDirectory = journalDirectory.appendingPathComponent("Native Form Inputs", isDirectory: true)
+                .appendingPathComponent(operationID, isDirectory: true)
+            let store = try ComputerUseTaskJournalStore(directory: stepDirectory)
+            let taskID = evidence.document.taskID
+            let box = NativeFormSubmissionStage.JournalBox()
+            box.journal = try store.load(taskID: taskID)
+            let gate = NativeFormSubmissionStage.Gate()
+            let textTask = try ComputerUseTextTask(contract: contract, recovered: box.journal,
+                read: { id in
+                    try gate.check()
+                    let value = try await target.read(targetID: id)
+                    try gate.check()
+                    return value
+                }, apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
+                applyWithIdentity: { dispatch in
+                    try gate.beforeInput()
+                    try await target.joiningCompletion { try await target.apply(dispatch) }
+                    try gate.check()
+                }, didDispatchInput: { id in
+                    try gate.check()
+                    let didDispatch = try await target.joiningCompletion { try await target.didDispatchInput(operationID: id) }
+                    try gate.check()
+                    return didDispatch
+                }, finishPendingInput: { step, id in
+                    try gate.check()
+                    guard let journal = box.journal else { throw ComputerUseTextTaskError.journalMismatch }
+                    try store.confirmPendingAttempt(journal)
+                    let finished = try await target.finishPendingChange(operationID: id)
+                    if !finished {
+                        _ = try await target.continueUnsentInput(step, operationID: id)
+                    }
+                    try gate.check()
+                }, persist: { journal in
+                    try gate.check(); try store.save(journal, replacing: box.journal); box.journal = journal
+                }, acquireExecutionLease: { try store.acquireExecution(taskID: taskID, expected: box.journal) },
+                reloadJournal: { box.journal = try store.load(taskID: taskID); return box.journal },
+                mayAct: { do { try gate.check(); return true } catch { return false } })
+            stage = NativeFormSubmissionStage(fingerprint: fingerprint, target: target, task: textTask,
+                evidence: evidence, submitterControl: submitter, submitControlID: plan.submitControlID,
+                promptDigest: promptDigest, operationID: ComputerUseTaskContract.digest([operationID, "form-navigation"]), gate: gate)
+            nativeFormStages[operationID] = stage
+        }
+        stage.gate.check = checkCurrent; stage.gate.willBeginEffect = willBeginEffect
+        defer {
+            // The retained stage outlives this call, but the live root lease
+            // and HostTools owner must not be retained through its closures.
+            stage.gate.check = { throw ComputerUseBrowserError.closed }
+            stage.gate.willBeginEffect = { throw ComputerUseBrowserError.closed }
+        }
+        do {
+            try checkCurrent()
+            if let receipt = stage.navigationReceipt {
+                nativeFormStages.removeValue(forKey: operationID)
+                return receipt
+            }
+            if stage.queryTarget == nil {
+                if !stage.inputsCompleted {
+                    try await stage.target.validateRepresentability(of: stage.task.contract)
+                    try checkCurrent()
+                    try await stage.task.run()
+                    stage.inputsCompleted = true
+                }
+                try checkCurrent()
+                // Edits change the page snapshot. Re-observe the original
+                // document after the retained input task, then let the native
+                // query adapter compare every submitted value and receipt.
+                let currentEvidence = try await browser.observePage(document: stage.evidence.document)
+                try checkCurrent()
+                guard let currentSubmitter = currentEvidence.page.controls.first(where: { $0.id == stage.submitControlID }),
+                      currentSubmitter == stage.submitterControl else {
+                    throw ComputerUseBrowserError.pageChanged
+                }
+                let continuation = try stage.task.verifiedContinuation()
+                guard continuation.taskID == stage.evidence.document.taskID else {
+                    throw ComputerUseBrowserError.formQueryUnavailable
+                }
+                stage.queryTarget = try await stage.target.prepareFormQuery(controlID: stage.submitControlID,
+                    evidence: currentEvidence, after: continuation)
+            }
+            try checkCurrent()
+            guard let query = stage.queryTarget else { throw ComputerUseBrowserError.formQueryUnavailable }
+            let receipt = try await openObservedDestination(query, promptDigest: stage.promptDigest,
+                operationID: stage.operationID, willBeginEffect: willBeginEffect)
+            stage.navigationReceipt = receipt
+            nativeFormStages.removeValue(forKey: operationID)
+            return receipt
+        } catch {
+            // Text input and form-query DOM calls can finish after cancellation.
+            // Join them before releasing this retained stage to the caller.
+            await stage.target.joinCompletion()
+            throw error
+        }
+    }
+
+    private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.scheme?.lowercased() == rhs.scheme?.lowercased() && lhs.host?.lowercased() == rhs.host?.lowercased()
+            && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80)) == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
     }
 
     func execute(taskID: String, prompt: String, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
@@ -393,6 +588,11 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try await browser.prepareFormQuery(controlID: controlID, evidence: evidence)
     }
 
+    func inspectAgentFormControl(controlID: String, observation: ComputerUseOwnedBrowser.AgentObservation) async throws
+        -> ComputerUseOwnedBrowser.AgentFormControl {
+        try await browser.inspectAgentFormControl(controlID: controlID, observation: observation)
+    }
+
     /// Called on a later run with the original stage's retained target. Only
     /// a proven-unsent plan may select a fresh page reference. Hold the same
     /// execution lease through preparation and replacement so an older runner
@@ -559,7 +759,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
     /// a stable task-step operation ID; a page reference supplies neither.
     /// This journal records only identities/status, never URLs or form values.
     func openObservedDestination(_ target: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
-                                 willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
+                                 willBeginEffect: () throws -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
         func checkOwnership() throws {
             try Task.checkCancellation()
             guard browser.contextID == target.contextID, browser.hasOwnership(taskID: target.taskID) else {
@@ -602,7 +802,7 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
                 // This throwing callback runs after DOM validation and before
                 // any WebKit load. Storage failure cannot authorize a request.
                 try save(.attempted)
-                willBeginEffect()
+                try willBeginEffect()
             })
             guard browser.observedNavigationReceipt(for: target, operationID: operationID) == receipt,
                   persisted?.statuses.first == .attempted else { throw ComputerUseBrowserError.observedNavigationUncertain }
