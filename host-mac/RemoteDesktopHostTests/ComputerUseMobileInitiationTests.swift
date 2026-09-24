@@ -2059,6 +2059,206 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try await runMCPPublicSearchProbe(usesApplePlanner: true)
     }
 
+    func testOptInMCPNativeLinkAccessibilityOnCapturedPublicPage() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MCP_NATIVE_LINK_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: compare a captured page's native link labels with installed MCP accessibility queries; no model or navigation after page load")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["MCP_NATIVE_LINK_PROBE_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+        let taskID = "mcp-native-link-probe"
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var pool: MCPClientPool?
+        let binary = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main).appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector(), started = Date()
+        var failure: Error?
+        var operations: [[String: Any]] = []
+        var report: [String: Any] = ["scope": "single owned browser page plus read-only MCP accessibility probes",
+            "modelInference": false, "computerUseModelInference": false]
+        do {
+            let manifestURL = URL(fileURLWithPath: try XCTUnwrap(environment["MCP_NATIVE_LINK_PROBE_MANIFEST"]))
+            let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL)) as? [String: Any])
+            let pageURLText = try XCTUnwrap(manifest["pageURL"] as? String)
+            let pageURL = try XCTUnwrap(URL(string: pageURLText))
+            let labelPrefix = try XCTUnwrap(manifest["labelPrefix"] as? String)
+            let verifyProductionLink = manifest["verifyProductionLink"] as? Bool ?? false
+            report["verifyProductionLink"] = verifyProductionLink
+            report["productionLookupAttempted"] = false
+            guard !labelPrefix.isEmpty else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+            report["pageURL"] = pageURL.absoluteString; report["labelPrefix"] = labelPrefix
+            let workersBefore = try inspector.matchingProcesses(for: binary).count
+            report["workersBefore"] = workersBefore
+            guard workersBefore == 0 else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+            try browser.claim(taskID: taskID)
+            let document = try await browser.navigate(taskID: taskID, operationID: "open-frozen-page", to: pageURL)
+            report["requestedURL"] = document.requestedURL.absoluteString
+            report["committedURL"] = document.committedURL.absoluteString
+            guard document.committedURL == pageURL else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: output.appendingPathComponent("browser"))
+            try await Task.sleep(for: .seconds(2))
+            let observation = try await navigation.captureAgentObservation(taskID: taskID)
+            try await browser.validatePageEvidence(observation.approvalPageEvidence)
+            let page = observation.approvalPageEvidence.page
+            report["capture"] = ["snapshotID": page.id, "sourceURL": observation.approvalPageEvidence.document.committedURL.absoluteString,
+                "textCount": page.texts.count, "linkCount": page.links.count, "containerCount": page.containers.count,
+                "truncated": page.truncated, "omittedStructure": page.omittedStructure,
+                "omittedEmbeddedContent": page.omittedEmbeddedContent]
+            report["nativePageLinks"] = page.links.map { link in
+                ["id": link.id, "label": link.label, "destination": link.destination, "textIDs": link.textIDs]
+            }
+            let selected = try XCTUnwrap(page.links.first { $0.label.hasPrefix(labelPrefix) })
+            let linkedTexts = selected.textIDs.compactMap { id in page.texts.first { $0.id == id } }
+            report["selectedNativeLink"] = ["id": selected.id, "label": selected.label,
+                "destination": selected.destination, "textIDs": selected.textIDs,
+                "linkedTextLeaves": linkedTexts.map { ["id": $0.id, "text": $0.text, "tooltip": $0.tooltip as Any? ?? NSNull()] }]
+            let compositeTitle = selected.label
+            report["productionCompositeTitleQuery"] = compositeTitle
+
+            let installation = await MacControlMCPInstaller().currentInstallation()
+            let receipt = try XCTUnwrap(installation)
+            let currentPool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mutations.json")),
+                sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                    stateDirectory: output.appendingPathComponent("helper-state")) })
+            pool = currentPool
+            _ = try await currentPool.start(binaryURL: URL(fileURLWithPath: receipt.binaryPath))
+            let available = try await currentPool.allowedTools()
+            let inspectedNames = ["get_ui_tree", "find_elements", "query_elements", "ax_tree_augmented", "get_element_attributes"]
+            let relevant = available.filter { inspectedNames.contains($0.toolName) && $0.risk == .readOnly }
+            report["toolSchemas"] = try relevant.map { tool -> [String: Any] in
+                ["name": tool.toolName, "description": tool.description,
+                    "schema": try JSONSerialization.jsonObject(with: JSONEncoder().encode(tool.inputSchema))]
+            }
+            let tree = try XCTUnwrap(relevant.first { $0.toolName == "get_ui_tree" })
+            let find = try XCTUnwrap(relevant.first { $0.toolName == "find_elements" })
+            let attributes = try XCTUnwrap(relevant.first { $0.toolName == "get_element_attributes" })
+            let pid = Int(ProcessInfo.processInfo.processIdentifier)
+            func record(_ label: String, tool: MCPAllowedTool, _ arguments: [String: MCPJSONValue]) async throws -> MCPToolResult {
+                let call = try tool.makeCall(taskID: taskID, arguments: arguments)
+                let began = Date()
+                do {
+                    let result = try await currentPool.execute(call)
+                    operations.append(["kind": label, "arguments": try JSONSerialization.jsonObject(with: JSONEncoder().encode(arguments)),
+                        "result": try JSONSerialization.jsonObject(with: JSONEncoder().encode(result)), "seconds": Date().timeIntervalSince(began)])
+                    return result
+                } catch {
+                    operations.append(["kind": label, "arguments": try JSONSerialization.jsonObject(with: JSONEncoder().encode(arguments)),
+                        "failure": String(reflecting: error), "seconds": Date().timeIntervalSince(began)])
+                    throw error
+                }
+            }
+            _ = try await record("tree", tool: tree, ["pid": .integer(pid), "max_depth": .integer(30)])
+            var titleQueries: [String] = []
+            for text in linkedTexts where !titleQueries.contains(text.text) && titleQueries.count < 3 {
+                titleQueries.append(text.text)
+            }
+            let queries: [(String, [String: MCPJSONValue])] = [("unfiltered-AXLink", ["role": .string("AXLink"), "limit": .integer(32)]),
+                ("production-composite-title", ["role": .string("AXLink"), "title": .string(compositeTitle), "limit": .integer(32)])]
+                + titleQueries.enumerated().map { index, title in
+                    ("linked-text-title-\(index + 1)", ["role": .string("AXLink"), "title": .string(title), "limit": .integer(32)])
+                }
+            var unfilteredIDs: [String] = [], filteredIDs: [String] = []
+            for (label, baseArguments) in queries {
+                var arguments = baseArguments
+                arguments["pid"] = .integer(pid); arguments["max_depth"] = .integer(30)
+                let result = try await record(label, tool: find, arguments)
+                if case .object(let object)? = result.structuredContent, case .array(let elements)? = object["elements"] {
+                    for case .object(let element) in elements {
+                        if case .string(let id)? = element["id"] {
+                            if label == "unfiltered-AXLink" {
+                                if !unfilteredIDs.contains(id) { unfilteredIDs.append(id) }
+                            } else if !filteredIDs.contains(id) { filteredIDs.append(id) }
+                        }
+                    }
+                }
+            }
+            var elementIDs: [String] = []
+            for id in filteredIDs + unfilteredIDs where !elementIDs.contains(id) { elementIDs.append(id) }
+            var exactMatches: [[String: Any]] = [], readIDs: [String] = []
+            for id in elementIDs.prefix(16) {
+                readIDs.append(id)
+                let began = Date()
+                do {
+                    let result = try await currentPool.execute(attributes.makeCall(taskID: taskID, arguments: [
+                        "element_id": .string(id), "names": .array(["AXRole", "AXTitle", "AXDescription", "AXValue", "AXURL"].map(MCPJSONValue.string))]))
+                    operations.append(["kind": "attributes", "elementID": id,
+                        "result": try JSONSerialization.jsonObject(with: JSONEncoder().encode(result)), "seconds": Date().timeIntervalSince(began)])
+                    if !result.isError, !result.wasTruncated,
+                       case .object(let root)? = result.structuredContent, case .object(let values)? = root["values"],
+                       case .string(let role)? = values["AXRole"], role == "AXLink",
+                       case .string(let title)? = values["AXTitle"], case .string(let url)? = values["AXURL"] {
+                        exactMatches.append(["elementID": id, "title": title, "url": url,
+                            "titleExactlyMatchesNativeLabel": title == selected.label,
+                            "urlExactlyMatchesNativeDestination": url == selected.destination])
+                    }
+                } catch {
+                    operations.append(["kind": "attributes", "elementID": id,
+                        "failure": String(reflecting: error), "seconds": Date().timeIntervalSince(began)])
+                    throw error
+                }
+            }
+            report["elementIDsRead"] = readIDs
+            report["exactAXLinkMatches"] = exactMatches
+            do {
+                let freshObservation = try await navigation.captureAgentObservation(taskID: taskID)
+                try await browser.validatePageEvidence(freshObservation.approvalPageEvidence)
+                let freshPage = freshObservation.approvalPageEvidence.page
+                report["freshCapture"] = ["snapshotID": freshPage.id,
+                    "sourceURL": freshObservation.approvalPageEvidence.document.committedURL.absoluteString,
+                    "matchingLinks": freshPage.links.filter {
+                        $0.label == selected.label && $0.destination == selected.destination
+                    }.map { ["id": $0.id, "label": $0.label, "destination": $0.destination, "textIDs": $0.textIDs] },
+                    "linkCount": freshPage.links.count]
+                if verifyProductionLink {
+                    let trace = MCPBrowserLoopTrace()
+                    defer { report["productionTrace"] = trace.items }
+                    report["productionFailure"] = NSNull(); report["productionResolvedURL"] = NSNull()
+                    do {
+                        let freshLink = try XCTUnwrap(freshPage.links.first {
+                            $0.label == selected.label && $0.destination == selected.destination
+                        })
+                        report["productionSelectedFreshLink"] = ["id": freshLink.id, "label": freshLink.label,
+                            "destination": freshLink.destination, "textIDs": freshLink.textIDs]
+                        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: navigation)
+                        let executor = try await MCPFirstComputerUseExecutor.load(
+                            binaryURL: URL(fileURLWithPath: receipt.binaryPath), visualFallback: MobileInitiationReadyExecutor(),
+                            clientPool: currentPool, browserStepPlanner: .init(inspectProposal: { trace.append($0) }),
+                            browserExecutorFactory: { MobileInitiationReadyExecutor() })
+                        report["productionLookupAttempted"] = true
+                        let resolved = try await executor.readBrowserLinkWithMCP(freshLink, observation: freshObservation, tools: tools)
+                        report["productionResolvedURL"] = resolved?.absoluteString as Any? ?? NSNull()
+                        XCTAssertNotNil(resolved)
+                        XCTAssertEqual(resolved?.absoluteString, freshLink.destination)
+                    } catch {
+                        report["productionFailure"] = String(reflecting: error)
+                        throw error
+                    }
+                }
+            } catch {
+                report["freshCaptureFailure"] = String(reflecting: error)
+                if verifyProductionLink { failure = error }
+            }
+            report["stage"] = "complete"
+        } catch { failure = error; report["failure"] = String(reflecting: error) }
+        await pool?.cancelAll()
+        browser.close()
+        report["operations"] = operations
+        report["failure"] = failure.map(String.init(reflecting:)) as Any? ?? NSNull()
+        report["elapsedSeconds"] = Date().timeIntervalSince(started)
+        report["workersAfterShutdown"] = try inspector.matchingProcesses(for: binary).count
+        report["mutationLedgerCreated"] = FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path)
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        if report["verifyProductionLink"] as? Bool == true {
+            XCTAssertEqual(report["productionLookupAttempted"] as? Bool, true)
+            XCTAssertNil(report["freshCaptureFailure"])
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path))
+        XCTAssertTrue(try inspector.matchingProcesses(for: binary).isEmpty)
+        if let failure { throw failure }
+    }
+
     private func runMCPPublicSearchProbe(usesApplePlanner: Bool) async throws {
         let environment = ProcessInfo.processInfo.environment
         let output = URL(fileURLWithPath: try XCTUnwrap(environment["MCP_PUBLIC_SEARCH_PROBE_DIRECTORY"]) + (usesApplePlanner ? "-apple-planner" : ""))

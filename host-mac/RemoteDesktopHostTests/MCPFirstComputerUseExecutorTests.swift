@@ -294,6 +294,290 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testOptInNativeBrowserCompositeLinkRequiresItsOwnTitleAndDestination() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: controlled native browser link label/destination matching; no model inference")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MCPCompositeLink-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><a href='/details'><span>Transit Agency</span><span>https://</span><span>example.org</span></a><a href='/neighbor'><span>Transit Agency</span><span>Hours and location</span></a>"),
+            "/details": .init(body: "<!doctype html><h1>Verified details</h1>"),
+            "/neighbor": .init(body: "<!doctype html><h1>Neighbor details</h1>"),
+            "/wrong": .init(body: "<!doctype html><h1>Wrong destination</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let start = base.appendingPathComponent("start")
+        let destination = base.appendingPathComponent("details")
+        var allowed: [MCPAllowedTool] = [try makeMailTool()]
+        for (name, properties) in [
+            ("find_elements", ["pid": MCPJSONValue.object(["type": .string("integer")]), "role": .object(["type": .string("string")]), "title": .object(["type": .string("string")]), "limit": .object(["type": .string("integer")]), "max_depth": .object(["type": .string("integer")])]),
+            ("get_element_attributes", ["element_id": .object(["type": .string("string")]),
+                "names": .object(["type": .string("array"), "items": .object(["type": .string("string")])])])
+        ] {
+            allowed.append(try .init(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1, toolName: name,
+                description: "Native link read", inputSchema: objectSchema(properties: properties, required: Array(properties.keys)),
+                risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
+        }
+        enum ReplyMode: String, Sendable { case selected, bannerBeforeLookup, wrongURL, unrelatedTitle, neighboringLink, partial }
+        for mode in [ReplyMode.selected, .bannerBeforeLookup, .wrongURL, .unrelatedTitle, .neighboringLink, .partial] {
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent(mode.rawValue + "-browser")))
+            let pid = Int(ProcessInfo.processInfo.processIdentifier)
+            let result: @Sendable ([String: MCPJSONValue]) throws -> MCPToolResult = { root in
+                try MCPToolResult(text: "", structuredContent: .object(root), isError: false, wasTruncated: false)
+            }
+            let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: [:], resultForCall: { call in
+                if call.toolName == "find_elements" {
+                    let title: String
+                    if case .string(let value)? = call.arguments["title"] { title = value } else { title = "" }
+                    let isLeafLookup = title == "Transit Agency"
+                    let rows: [MCPJSONValue]
+                    if isLeafLookup && mode != .partial {
+                        let id = mode == .neighboringLink ? "neighbor-link" : "selected-link"
+                        rows = [.object(["id": .string(id), "role": .string("AXLink")])]
+                    } else { rows = [] }
+                    return try result(["ok": .bool(true), "pid": .integer(pid), "count": .integer(rows.count),
+                        "limit_reached": .bool(isLeafLookup && mode == .partial), "elements": .array(rows)])
+                }
+                if call.toolName == "get_element_attributes" {
+                    let id: String
+                    if case .string(let value)? = call.arguments["element_id"] { id = value } else { id = "" }
+                    let title: String
+                    let url: String
+                    switch (mode, id) {
+                    case (.selected, "selected-link"), (.wrongURL, "selected-link"), (.unrelatedTitle, "selected-link"):
+                        title = mode == .unrelatedTitle ? "Unrelated policy" : "Transit Agency"
+                        url = mode == .wrongURL ? base.appendingPathComponent("wrong").absoluteString : destination.absoluteString
+                    case (.neighboringLink, "neighbor-link"):
+                        title = "Hours and location"; url = destination.absoluteString
+                    default:
+                        title = "Transit Agency"; url = destination.absoluteString
+                    }
+                    return try result(["ok": .bool(true), "element_id": .string(id),
+                        "values": .object(["AXRole": .string("AXLink"), "AXTitle": .string(title), "AXURL": .string(url)]),
+                        "unavailable": .array([])])
+                }
+                throw MCPClientError.toolFailed("Unexpected read tool: \(call.toolName)")
+            })
+            let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+            var visualCalls = 0, proposalCount = 0
+            let beforeDetails = server.count("/details"), beforeNeighbor = server.count("/neighbor"), beforeWrong = server.count("/wrong")
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent(mode.rawValue + "-executor"),
+                propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, observation in
+                    proposalCount += 1
+                    let arguments: [String: Any]
+                    switch observation {
+                    case .initial:
+                        arguments = ["action": "visit_url", "url": start.absoluteString]
+                    case .page(let page):
+                        if page.currentURL == destination {
+                            arguments = ["action": "terminate", "answer": "Verified details."]
+                        } else {
+                            let link = try XCTUnwrap(page.approvalPageEvidence.page.links.first {
+                                $0.destination == destination.absoluteString
+                            })
+                            let leaves = link.textIDs.compactMap { id in page.approvalPageEvidence.page.texts.first { $0.id == id } }
+                            XCTAssertTrue(leaves.contains { $0.text == "Transit Agency" }, "The fixture must expose its captured own-link text leaf")
+                            XCTAssertNotEqual(link.label, "Transit Agency", "The fixture must exercise a composite native link label")
+                            if mode == .bannerBeforeLookup {
+                                let web = try self.browserWebView(at: start)
+                                _ = try await web.evaluateJavaScript("const b=document.createElement('aside');b.id='harmless-banner';b.textContent='Harmless unrelated notice';document.body.prepend(b)")
+                            }
+                            guard let url = try await mcp.readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return .noProposal }
+                            arguments = ["action": "visit_url", "url": url.absoluteString]
+                        }
+                    }
+                    let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
+                    let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+                })
+            let goal = "Open \(start.absoluteString) and read the Transit Agency details page."
+            if mode == .selected || mode == .bannerBeforeLookup {
+                do {
+                    let result = try await executor.execute(taskID: "composite-\(mode.rawValue)", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                    XCTAssertEqual(result, .completed("Verified details."))
+                } catch { XCTFail("A selected own-leaf title with its exact captured destination should resolve: \(error)") }
+            } else {
+                do {
+                    _ = try await executor.execute(taskID: "composite-\(mode.rawValue)", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                    XCTFail("An unsupported AX title/destination pair must not navigate")
+                } catch {
+                    if mode == .partial {
+                        XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence)
+                    } else {
+                        XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .unsupportedAction)
+                    }
+                }
+            }
+            XCTAssertEqual(server.count("/details") - beforeDetails, mode == .selected || mode == .bannerBeforeLookup ? 1 : 0, mode.rawValue)
+            XCTAssertEqual(server.count("/neighbor") - beforeNeighbor, 0, mode.rawValue)
+            XCTAssertEqual(server.count("/wrong") - beforeWrong, 0, mode.rawValue)
+            XCTAssertEqual(visualCalls, mode == .selected || mode == .bannerBeforeLookup || mode == .partial ? 0 : 1, mode.rawValue)
+            if mode == .bannerBeforeLookup { XCTAssertEqual(proposalCount, 3, "A harmless insertion must not require an extra planner proposal") }
+            let directCalls = await pool.directCalls()
+            let queryTitles = directCalls.compactMap { call -> String? in
+                guard call.toolName == "find_elements", case .string(let title)? = call.arguments["title"] else { return nil }
+                return title
+            }
+            XCTAssertTrue(queryTitles.contains("Transit Agency"), "The fixture must exercise captured own-leaf lookup: \(queryTitles)")
+            await pool.cancelAll()
+        }
+    }
+
+    private func browserWebView(at url: URL) throws -> WKWebView {
+        func webViews(_ view: NSView) -> [WKWebView] {
+            if let webView = view as? WKWebView { return [webView] }
+            return view.subviews.flatMap(webViews)
+        }
+        return try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+    }
+
+    func testOptInNativeBrowserLeafReadRechecksCancellationAndPageBeforeDispatch() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: verify native link reads recheck host ownership after helper awaits; no model inference")
+        }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MCPLeafAwaitGuard-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><a href='/details'><span>Transit Agency</span><span>https://</span><span>example.org</span></a>"),
+            "/details": .init(body: "<!doctype html><h1>Verified details</h1>"),
+            "/wrong": .init(body: "<!doctype html><h1>Changed page</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let start = base.appendingPathComponent("start"), destination = base.appendingPathComponent("details")
+        let wrongURL = base.appendingPathComponent("wrong")
+        var allowed: [MCPAllowedTool] = [try makeMailTool()]
+        for (name, properties) in [
+            ("find_elements", ["pid": MCPJSONValue.object(["type": .string("integer")]), "role": .object(["type": .string("string")]), "title": .object(["type": .string("string")]), "limit": .object(["type": .string("integer")]), "max_depth": .object(["type": .string("integer")])]),
+            ("get_element_attributes", ["element_id": .object(["type": .string("string")]),
+                "names": .object(["type": .string("array"), "items": .object(["type": .string("string")])])])
+        ] {
+            allowed.append(try .init(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1, toolName: name,
+                description: "Native link read", inputSchema: objectSchema(properties: properties, required: Array(properties.keys)),
+                risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
+        }
+        enum Mode: String, Sendable, Equatable {
+            case cancelled, pageChanged, labelChanged, destinationChanged, replacedLink, ownerChanged
+            case bannerDuringRead, malformed, truncated, exactPartialMatch
+        }
+        for mode in [Mode.cancelled, .pageChanged, .labelChanged, .destinationChanged, .replacedLink, .ownerChanged,
+                     .bannerDuringRead, .malformed, .truncated, .exactPartialMatch] {
+            let taskID = "leaf-await-\(mode.rawValue)"
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent(mode.rawValue + "-browser")))
+            let pid = Int(ProcessInfo.processInfo.processIdentifier)
+            let gate = [.cancelled, .pageChanged, .labelChanged, .destinationChanged, .replacedLink, .ownerChanged, .bannerDuringRead].contains(mode)
+                ? ComputerUsePlanningTestGate<Void>(started: expectation(description: "leaf attributes suspended \(mode.rawValue)"),
+                    returned: expectation(description: "leaf attributes released \(mode.rawValue)")) : nil
+            let makeResult: @Sendable ([String: MCPJSONValue], Bool, Bool) throws -> MCPToolResult = { root, isError, wasTruncated in
+                try MCPToolResult(text: "", structuredContent: .object(root), isError: isError, wasTruncated: wasTruncated)
+            }
+            let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: [:], resultForCall: { call in
+                if call.toolName == "find_elements" {
+                    let title: String
+                    if case .string(let value)? = call.arguments["title"] { title = value } else { title = "" }
+                    let leafQuery = title == "Transit Agency"
+                    let rows: [MCPJSONValue] = leafQuery ? [.object(["id": .string("selected-link"), "role": .string("AXLink")])] : []
+                    return try makeResult(["ok": .bool(true), "pid": .integer(pid), "count": .integer(rows.count),
+                        "limit_reached": .bool(leafQuery && mode == .exactPartialMatch), "elements": .array(rows)], false, false)
+                }
+                if call.toolName == "get_element_attributes" {
+                    await gate?.wait()
+                    let values: [String: MCPJSONValue] = ["AXRole": .string("AXLink"), "AXTitle": .string("Transit Agency"),
+                        "AXURL": .string(destination.absoluteString)]
+                    if mode == .malformed {
+                        return try makeResult(["ok": .bool(true), "element_id": .string("selected-link"),
+                            "values": .object(["AXRole": .string("AXLink"), "AXTitle": .string("Transit Agency")]),
+                            "unavailable": .array([])], false, false)
+                    }
+                    return try makeResult(["ok": .bool(true), "element_id": .string("selected-link"), "values": .object(values),
+                        "unavailable": .array([])], false, mode == .truncated)
+                }
+                throw MCPClientError.toolFailed("Unexpected read tool: \(call.toolName)")
+            })
+            let mcp = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+            var visualCalls = 0, proposalCount = 0
+            let beforeDetails = server.count("/details"), beforeWrong = server.count("/wrong")
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent(mode.rawValue + "-executor"),
+                propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, observation in
+                    proposalCount += 1
+                    let arguments: [String: Any]
+                    switch observation {
+                    case .initial: arguments = ["action": "visit_url", "url": start.absoluteString]
+                    case .page(let page):
+                        if page.currentURL == destination { arguments = ["action": "terminate", "answer": "Verified details."] }
+                        else {
+                            let link = try XCTUnwrap(page.approvalPageEvidence.page.links.first { $0.destination == destination.absoluteString })
+                            guard let url = try await mcp.readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return .noProposal }
+                            arguments = ["action": "visit_url", "url": url.absoluteString]
+                        }
+                    }
+                    let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
+                    let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+                })
+            let goal = "Open \(start.absoluteString) and read the Transit Agency details page."
+            let run = Task {
+                try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            }
+            if let gate {
+                await fulfillment(of: [gate.started], timeout: 3)
+                switch mode {
+                case .cancelled: mcp.cancelMCPWork()
+                case .pageChanged: _ = try await browser.navigate(taskID: taskID, operationID: "change-source-mid-read", to: wrongURL)
+                case .labelChanged:
+                    let web = try browserWebView(at: start)
+                    _ = try await web.evaluateJavaScript("document.querySelector('a span').textContent='Changed label'")
+                case .destinationChanged:
+                    let web = try browserWebView(at: start)
+                    _ = try await web.evaluateJavaScript("document.querySelector('a').setAttribute('href','/wrong')")
+                case .replacedLink:
+                    let web = try browserWebView(at: start)
+                    _ = try await web.evaluateJavaScript("const a=document.querySelector('a');const b=a.cloneNode(true);a.replaceWith(b)")
+                case .ownerChanged: try browser.claim(taskID: "successor-\(taskID)")
+                case .bannerDuringRead:
+                    let web = try browserWebView(at: start)
+                    _ = try await web.evaluateJavaScript("const b=document.createElement('aside');b.id='harmless-banner';b.textContent='Harmless unrelated notice';document.body.prepend(b)")
+                default: break
+                }
+                gate.finish(())
+                await fulfillment(of: [gate.returned], timeout: 1)
+            }
+            do {
+                let result = try await run.value
+                XCTAssertTrue(mode == .exactPartialMatch || mode == .bannerDuringRead)
+                XCTAssertEqual(result, .completed("Verified details."))
+            } catch {
+                if mode == .exactPartialMatch || mode == .bannerDuringRead { XCTFail("A stable exact link remains usable: \(error)") }
+                if mode == .cancelled { XCTAssertTrue(error is CancellationError, "\(error)") }
+                if mode == .pageChanged { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
+                if mode == .labelChanged || mode == .destinationChanged || mode == .replacedLink {
+                    XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged)
+                }
+                if mode == .ownerChanged { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+                if mode == .malformed || mode == .truncated { XCTAssertTrue(error is MCPFirstComputerUseExecutor.ExecutorError, "\(error)") }
+            }
+            let succeeds = mode == .exactPartialMatch || mode == .bannerDuringRead
+            XCTAssertEqual(server.count("/details") - beforeDetails, succeeds ? 1 : 0, mode.rawValue)
+            XCTAssertEqual(server.count("/wrong") - beforeWrong, mode == .pageChanged ? 1 : 0, mode.rawValue)
+            XCTAssertEqual(visualCalls, 0, mode.rawValue)
+            if succeeds { XCTAssertEqual(proposalCount, 3, "No extra proposal should be needed for unrelated content") }
+            if mode == .ownerChanged { XCTAssertEqual(browser.taskID, "successor-\(taskID)") }
+            let readCalls = await pool.directCalls()
+            XCTAssertTrue(readCalls.contains { call in
+                call.toolName == "find_elements" && call.arguments["title"] == .string("Transit Agency")
+            }, "The guarded result must follow a captured own-leaf lookup")
+            await pool.cancelAll()
+        }
+    }
+
     func testBrowserCompletionRequiresAssessmentOfAllRemainingWork() throws {
         let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Read the store hours.")
             .answering("Anything else?", with: "Purchase a gift for me.")
@@ -5071,6 +5355,7 @@ private final class SequencedMCPPlanner: MCPProposalPlanning, @unchecked Sendabl
 private actor RecordingMCPClientPool: MCPClientPooling {
     let tools: [MCPAllowedTool]
     let resultsByTool: [String: MCPToolResult]
+    let resultForCall: (@Sendable (MCPToolCall) async throws -> MCPToolResult)?
     private var queuedResultsByTool: [String: [MCPToolResult]]
     private var recordedDirectCalls: [MCPToolCall] = []
     private var recordedApprovedCalls: [MCPToolCall] = []
@@ -5078,11 +5363,13 @@ private actor RecordingMCPClientPool: MCPClientPooling {
     init(
         tools: [MCPAllowedTool],
         resultsByTool: [String: MCPToolResult],
-        queuedResultsByTool: [String: [MCPToolResult]] = [:]
+        queuedResultsByTool: [String: [MCPToolResult]] = [:],
+        resultForCall: (@Sendable (MCPToolCall) async throws -> MCPToolResult)? = nil
     ) {
         self.tools = tools
         self.resultsByTool = resultsByTool
         self.queuedResultsByTool = queuedResultsByTool
+        self.resultForCall = resultForCall
     }
 
     func start(binaryURL: URL) async throws -> MCPProcessIdentity {
@@ -5098,6 +5385,7 @@ private actor RecordingMCPClientPool: MCPClientPooling {
 
     func execute(_ call: MCPToolCall) async throws -> MCPToolResult {
         recordedDirectCalls.append(call)
+        if let resultForCall { return try await resultForCall(call) }
         if var queued = queuedResultsByTool[call.toolName], !queued.isEmpty {
             let result = queued.removeFirst()
             queuedResultsByTool[call.toolName] = queued

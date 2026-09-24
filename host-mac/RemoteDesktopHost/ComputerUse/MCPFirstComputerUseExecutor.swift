@@ -1057,12 +1057,25 @@ final class MCPFirstComputerUseExecutor:
         let page = observation.approvalPageEvidence
         guard !link.label.isEmpty, page.page.links.filter({ $0.id == link.id }) == [link],
               let destination = URL(string: link.destination), ComputerUseOwnedBrowser.validatedURL(destination) != nil else { return nil }
+        let textsByID = Dictionary(uniqueKeysWithValues: page.page.texts.map { ($0.id, $0.text) })
+        var candidateLeaves: [(id: String, text: String)] = []
+        for textID in link.textIDs {
+            guard let text = textsByID[textID],
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !text.utf8.elementsEqual(link.label.utf8),
+                  !candidateLeaves.contains(where: { $0.text.utf8.elementsEqual(text.utf8) }) else { continue }
+            guard candidateLeaves.count < 4 else { break }
+            candidateLeaves.append((textID, text))
+        }
+        let evidenceReferences = ["link:\(link.id)"] + candidateLeaves.map { "text:\($0.id)" }
         browserStepPlanner.inspectProposal?("Native link: \(link.label), \(destination.absoluteString)")
         return try await withNewHelperGeneration { generation in
             @MainActor func check() async throws {
                 try checkGenerationCancellation(generation)
                 try tools.validateOwnedBrowserAgentMemoryObservation(observation)
-                try await tools.validateOwnedBrowserPageEvidence(page)
+                // Verify only the selected link and the exact leaf strings used
+                // for AX matching; unrelated page text may change during reading.
+                try await tools.validateOwnedBrowserAgentReadCompletion(observation, references: evidenceReferences)
                 try checkGenerationCancellation(generation)
             }
             try await check()
@@ -1073,42 +1086,61 @@ final class MCPFirstComputerUseExecutor:
                     && $0.serverID == MCPServerRegistry.macControl.serverID }
             }
             guard let find = tool("find_elements"), let read = tool("get_element_attributes") else { return nil }
-            var ids: [String] = [], discoveryIsComplete = false
-            for attempt in 0 ..< 2 {
+            var sawPartialDiscovery = false
+            @MainActor func discover(title: String) async throws -> (ids: [String], isComplete: Bool) {
+                try await check()
                 let found = try await clientPool.execute(find.makeCall(taskID: page.document.taskID, arguments: [
                     "pid": .integer(Int(ProcessInfo.processInfo.processIdentifier)), "role": .string("AXLink"),
-                    "title": .string(link.label), "limit": .integer(8), "max_depth": .integer(30)]))
+                    "title": .string(title), "limit": .integer(8), "max_depth": .integer(30)]))
                 if let inspect = browserStepPlanner.inspectProposal {
                     inspect("MCP find_elements: " + String(decoding: try JSONEncoder().encode(found), as: UTF8.self))
                 }
                 try await check()
                 let discovery = try Self.browserLinkDiscovery(found, pid: Int(ProcessInfo.processInfo.processIdentifier))
-                ids = discovery.ids; discoveryIsComplete = discovery.isComplete
-                if !ids.isEmpty { break }
-                guard discovery.isComplete else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
-                if attempt == 0 {
-                    // A first AX read can expose an empty WebKit tree while
-                    // accessibility is being activated. Retry the same read
-                    // once; no failure, partial result or mutation is retried.
-                    try await Task.sleep(for: .milliseconds(150))
-                    try await check()
-                }
+                if !discovery.isComplete { sawPartialDiscovery = true }
+                return (discovery.ids, discovery.isComplete)
             }
-            for id in ids {
-                let result = try await clientPool.execute(read.makeCall(taskID: page.document.taskID, arguments: [
-                    "element_id": .string(id), "names": .array(["AXRole", "AXTitle", "AXURL"].map(MCPJSONValue.string))]))
-                if let inspect = browserStepPlanner.inspectProposal {
-                    inspect("MCP get_element_attributes: " + String(decoding: try JSONEncoder().encode(result), as: UTF8.self))
-                }
-                try await check()
-                guard let values = try Self.browserLinkAttributes(result, elementID: id) else { continue }
-                if values["AXRole"] == .string("AXLink"), values["AXTitle"] == .string(link.label),
-                   values["AXURL"] == .string(destination.absoluteString) {
+            @MainActor func verifiesSelectedLink(ids: [String], acceptedTitles: [String]) async throws -> Bool {
+                for id in ids {
+                    try await check()
+                    let result = try await clientPool.execute(read.makeCall(taskID: page.document.taskID, arguments: [
+                        "element_id": .string(id), "names": .array(["AXRole", "AXTitle", "AXURL"].map(MCPJSONValue.string))]))
+                    if let inspect = browserStepPlanner.inspectProposal {
+                        inspect("MCP get_element_attributes: " + String(decoding: try JSONEncoder().encode(result), as: UTF8.self))
+                    }
+                    try await check()
+                    guard let values = try Self.browserLinkAttributes(result, elementID: id),
+                          values["AXRole"] == .string("AXLink"),
+                          case .string(let actualTitle)? = values["AXTitle"],
+                          case .string(let actualURL)? = values["AXURL"],
+                          actualURL.utf8.elementsEqual(destination.absoluteString.utf8),
+                          acceptedTitles.contains(where: { $0.utf8.elementsEqual(actualTitle.utf8) }) else { continue }
                     browserStepPlanner.inspectProposal?("MCP verified selected native link")
+                    return true
+                }
+                return false
+            }
+
+            var compositeDiscovery = try await discover(title: link.label)
+            if compositeDiscovery.ids.isEmpty && compositeDiscovery.isComplete {
+                // A first AX read can expose an empty WebKit tree while
+                // accessibility is being activated. Retry the same read
+                // once; no failure, partial result or mutation is retried.
+                try await Task.sleep(for: .milliseconds(150))
+                try await check()
+                compositeDiscovery = try await discover(title: link.label)
+            }
+            if try await verifiesSelectedLink(ids: compositeDiscovery.ids, acceptedTitles: [link.label]) {
+                return destination
+            }
+
+            for candidate in candidateLeaves {
+                let discovery = try await discover(title: candidate.text)
+                if try await verifiesSelectedLink(ids: discovery.ids, acceptedTitles: [link.label, candidate.text]) {
                     return destination
                 }
             }
-            guard discoveryIsComplete else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
+            guard !sawPartialDiscovery else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
             return nil
         }
     }
