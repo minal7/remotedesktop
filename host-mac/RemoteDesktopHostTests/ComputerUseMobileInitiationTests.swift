@@ -2052,6 +2052,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         let finalURL = browser?.currentDocument(taskID: prompt.id)?.committedURL
+        let browserCaptureStage = browser?.lastAgentCaptureStage
         let structuredQuestion = expectedInitialClarification ? ledger.terminalClarificationText(taskID: prompt.id) : nil
         let clarificationReference = terminal?.clarification
         await manager.shutdown()
@@ -2068,6 +2069,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             : String(reflecting: terminal)
         var report: [String: Any] = ["goal": prompt.body, "seconds": Date().timeIntervalSince(started),
             "terminal": terminalSummary, "finalURL": finalURL?.absoluteString as Any? ?? NSNull(),
+            "browserCaptureStage": browserCaptureStage as Any? ?? NSNull(),
             "requestedPaths": server.requestedPaths, "modelLaunchAttempts": launchAttempts,
             "visualInstalls": visualInstalls, "nativeInstalls": nativeInstalls,
             "maximumObservedWorkers": maximumWorkers, "workerSamples": samples,
@@ -2197,7 +2199,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(document?.committedURL, base.appendingPathComponent("details"))
         XCTAssertEqual(server.count("/index"), 1); XCTAssertEqual(server.count("/details"), 1)
         XCTAssertEqual(modelCalls, 0)
-        XCTAssertTrue(trace.items.contains("MCP verified selected native link"))
+        XCTAssertTrue(trace.items.contains("MCP verified native link destination"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.appendingPathComponent("mutations.json").path))
         XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
     }
@@ -2399,6 +2401,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             report["stage"] = "complete"
         } catch { failure = error; report["failure"] = String(reflecting: error) }
         await pool?.cancelAll()
+        report["lastAgentCaptureStage"] = browser.lastAgentCaptureStage as Any? ?? NSNull()
         browser.close()
         report["operations"] = operations
         report["failure"] = failure.map(String.init(reflecting:)) as Any? ?? NSNull()

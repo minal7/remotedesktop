@@ -8,11 +8,12 @@ Status: the first managed native-browser path is implemented, compiled and teste
 | --- | --- | --- |
 | Initial missing-user-input handoff | Implemented and compiled; five focused guards pass. Actual city03 host run publishes the question “Which city are you looking for public transit youth fare discount information in?” | Accepted only for publishing the missing-city question. No answer or Resume completion was tested. |
 | Direct-URL BART regression | Passes with the five requested facts and official source | Named direct-URL regression only. |
-| URL-free discovery | Fails with `browserChanged` after the initial search, before the first native catalogue | The earlier redundant-approval issue remains untested and unfixed. |
+| Selected-link resolution | Production exact-URL identity fix compiles; seven controlled methods pass and a no-inference actual-helper lookup passes | The helper's AXTitle matches a captured text leaf; the composite-title mismatch is covered by controlled RED→GREEN only. |
+| URL-free discovery | Latest run captures the page but the model asks permission before attempting link lookup | An earlier `browserChanged` before first catalogue was intermittent and not reproduced by this later run; it is not repaired. The redundant-approval behavior remains present. |
 | Native-function diagnostics | Qwen and Agents-A1 comparisons are rejected overall; neither interface candidate is promoted | Scoped proposals do not establish host execution or task completion. |
-| Next repair | Diagnose the initial search-to-first-native-observation lifecycle from the current discovery failure | Keep MCP/native-first routing, one inference worker and the 12 GB whole-Mac target; Jev remains parked. |
+| Next repair | Diagnose model-interface semantics; do not expand link lookup without a new observed failure | Keep MCP/native-first routing, one inference worker and the 12 GB whole-Mac target; Jev remains parked. |
 
-The source-bound results are archived in the [initial planner checkpoint](native-browser-initial-planner-results-sept24.json) and [native-function comparison](native-browser-function-interface-results-sept24.json). Earlier dated failures below remain part of the history and are not superseded by this checkpoint.
+The source-bound results are archived in the [initial planner checkpoint](native-browser-initial-planner-results-sept24.json), [native-function comparison](native-browser-function-interface-results-sept24.json), and [link-destination checkpoint](native-browser-link-destination-results-sept24.json). Earlier dated failures below remain part of the history and are not superseded by this checkpoint.
 
 ## Primary-source basis
 

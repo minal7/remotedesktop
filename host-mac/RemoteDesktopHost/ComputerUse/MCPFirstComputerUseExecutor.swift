@@ -1100,7 +1100,7 @@ final class MCPFirstComputerUseExecutor:
                 if !discovery.isComplete { sawPartialDiscovery = true }
                 return (discovery.ids, discovery.isComplete)
             }
-            @MainActor func verifiesSelectedLink(ids: [String], acceptedTitles: [String]) async throws -> Bool {
+            @MainActor func verifiesDestination(ids: [String]) async throws -> Bool {
                 for id in ids {
                     try await check()
                     let result = try await clientPool.execute(read.makeCall(taskID: page.document.taskID, arguments: [
@@ -1111,11 +1111,11 @@ final class MCPFirstComputerUseExecutor:
                     try await check()
                     guard let values = try Self.browserLinkAttributes(result, elementID: id),
                           values["AXRole"] == .string("AXLink"),
-                          case .string(let actualTitle)? = values["AXTitle"],
                           case .string(let actualURL)? = values["AXURL"],
-                          actualURL.utf8.elementsEqual(destination.absoluteString.utf8),
-                          acceptedTitles.contains(where: { $0.utf8.elementsEqual(actualTitle.utf8) }) else { continue }
-                    browserStepPlanner.inspectProposal?("MCP verified selected native link")
+                          actualURL.utf8.elementsEqual(destination.absoluteString.utf8) else { continue }
+                    // Titles help retrieve AX candidates. This operation opens
+                    // the captured URL directly and never clicks an AX node.
+                    browserStepPlanner.inspectProposal?("MCP verified native link destination")
                     return true
                 }
                 return false
@@ -1130,13 +1130,13 @@ final class MCPFirstComputerUseExecutor:
                 try await check()
                 compositeDiscovery = try await discover(title: link.label)
             }
-            if try await verifiesSelectedLink(ids: compositeDiscovery.ids, acceptedTitles: [link.label]) {
+            if try await verifiesDestination(ids: compositeDiscovery.ids) {
                 return destination
             }
 
             for candidate in candidateLeaves {
                 let discovery = try await discover(title: candidate.text)
-                if try await verifiesSelectedLink(ids: discovery.ids, acceptedTitles: [link.label, candidate.text]) {
+                if try await verifiesDestination(ids: discovery.ids) {
                     return destination
                 }
             }

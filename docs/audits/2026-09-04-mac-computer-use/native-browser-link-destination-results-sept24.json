@@ -1,0 +1,275 @@
+{
+  "title": "Native browser link destination diagnostics — September 24, 2026",
+  "scope": "Read-only evidence archive for selected-link resolution in native-first URL-free discovery. No production fix is included.",
+  "privacy": "Structured summaries only. No raw plannerTrace, model reasoning, credentials, or unfiltered helper output is archived.",
+  "captureDiagnostic": {
+    "run": "native-initial-capture-diagnostic-01",
+    "test": "ComputerUseMobileInitiationTests/testOptInMCPNativeLinkAccessibilityOnCapturedPublicPage",
+    "result": "passed",
+    "inference": false,
+    "pageURL": "https://www.bing.com/search?q=BART+youth+fare+discount+rules+ages+free+children+required+card&FORM=QBLH",
+    "existingPostNavigationWaitSeconds": 2,
+    "elapsedSeconds": 9.178358912467957,
+    "captureStage": "complete",
+    "captureComplete": true,
+    "workersBefore": 0,
+    "workersAfterShutdown": 0,
+    "capture": {
+      "snapshotID": "db3ceec16a566a7e57bdcb1a81b0e617",
+      "textCount": 94,
+      "linkCount": 40,
+      "containerCount": 164,
+      "truncated": false,
+      "omittedEmbeddedContent": true,
+      "omittedStructure": false
+    },
+    "selectedNativeLink": {
+      "reference": "l10",
+      "label": "Bay Area Rapid Transit https:// www.bart.gov › tickets › discounts",
+      "destination": "https://www.bing.com/ck/a?!&&p=bba666d82ef89252fffb0f6dcf1a35aba80593fbe4ee3bd146263debee7c56e6JmltdHM9MTc5MDIwODAwMA&ptn=3&ver=2&hsh=4&fclid=10407020-5449-617c-072a-67fe55f460f3&u=a1aHR0cHM6Ly93d3cuYmFydC5nb3YvdGlja2V0cy9kaXNjb3VudHM&ntb=1",
+      "ownTextLeaves": [
+        {
+          "reference": "t13",
+          "text": "Bay Area Rapid Transit"
+        },
+        {
+          "reference": "t14",
+          "text": "https://"
+        },
+        {
+          "reference": "t15",
+          "text": "www.bart.gov"
+        },
+        {
+          "reference": "t16",
+          "text": "› tickets ›"
+        },
+        {
+          "reference": "t17",
+          "text": "discounts"
+        }
+      ]
+    },
+    "productionCompositeTitleQuery": "Bay Area Rapid Transit https:// www.bart.gov › tickets › discounts",
+    "lookupResults": {
+      "compositeTitleMatches": "Found 0 matching elements.",
+      "ownLeafQueries": [
+        {
+          "reference": "t13",
+          "result": "Found 8 matching elements."
+        },
+        {
+          "reference": "t14",
+          "result": "Found 0 matching elements."
+        },
+        {
+          "reference": "t15",
+          "result": "Found 0 matching elements."
+        }
+      ],
+      "selectedAXRecord": {
+        "role": "AXLink",
+        "title": "Bay Area Rapid Transit",
+        "description": "Bay Area Rapid Transit",
+        "url": "https://www.bing.com/ck/a?!&&p=bba666d82ef89252fffb0f6dcf1a35aba80593fbe4ee3bd146263debee7c56e6JmltdHM9MTc5MDIwODAwMA&ptn=3&ver=2&hsh=4&fclid=10407020-5449-617c-072a-67fe55f460f3&u=a1aHR0cHM6Ly93d3cuYmFydC5nb3YvdGlja2V0cy9kaXNjb3VudHM&ntb=1",
+        "titleMatchesComposite": false,
+        "urlMatchesSelectedDestination": true
+      }
+    },
+    "interpretation": "The no-inference probe reached a complete capture. The native link label is composite, while the matching AX element exposes a shorter title and the exact selected destination URL. This diagnostic alone did not run the production lookup."
+  },
+  "liveDiscovery": {
+    "run": "native-initial-discovery-02",
+    "test": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostFindsPublicTravelWithoutURLWithManagedNativeText",
+    "result": "failed",
+    "xcresult": {
+      "failedMethods": 1,
+      "passedMethods": 0,
+      "skippedMethods": 0,
+      "exitCode": 65
+    },
+    "pageURL": "https://www.bing.com/search?q=BART+youth+fare+discount+rules+ages+free+children+required+card&FORM=QBLH",
+    "captureStage": "complete",
+    "elapsedSeconds": 45.275287,
+    "nativeTextModelUsed": true,
+    "maximumObservedWorkers": 1,
+    "visualModelLaunchAttempts": 0,
+    "visualInstallations": 0,
+    "nativeInstallations": 0,
+    "requestedPaths": [],
+    "plannerBudgets": {
+      "initialSearchInputTokens": 293,
+      "goalInterpretationInputTokens": 224,
+      "retainedPageDecisionInputTokens": 2896
+    },
+    "selectedProposal": {
+      "kind": "openLink",
+      "reference": "l11"
+    },
+    "selectedRecord": {
+      "label": "Bay Area Rapid Transit https:// www.bart.gov › tickets › discounts",
+      "destination": "https://www.bing.com/ck/a?!&&p=d4d7db6f7fb0343eff28a19aede85e20426889dc1d1fc9a94320db3f7219fd30JmltdHM9MTc5MDIwODAwMA&ptn=3&ver=2&hsh=4&fclid=11f7e024-1a9f-66d4-2cd6-f7fa1b7767e8&u=a1aHR0cHM6Ly93d3cuYmFydC5nb3YvdGlja2V0cy9kaXNjb3VudHM&ntb=1",
+      "ownTextLeaves": [
+        {
+          "reference": "t13",
+          "text": "Bay Area Rapid Transit"
+        },
+        {
+          "reference": "t14",
+          "text": "https://"
+        },
+        {
+          "reference": "t15",
+          "text": "www.bart.gov"
+        },
+        {
+          "reference": "t16",
+          "text": "› tickets ›"
+        },
+        {
+          "reference": "t17",
+          "text": "discounts"
+        }
+      ]
+    },
+    "resolverOutcome": "The exact destination was represented by an AXURL, but the AXTitle differed from the composite native label; the production resolver rejected the link. The task ended unableToComplete.",
+    "limitations": [
+      "This failure does not establish that every AX link title has this mismatch.",
+      "The earlier redundant-approval issue was not tested by this run.",
+      "No navigation effect was verified; the selected link was rejected before it could be followed."
+    ]
+  },
+  "sourceBinding": {
+    "sourceRevision": "c45f5ba9c8726b3536b385fcdb4367eb2d6e4033",
+    "sourceFileCount": 17,
+    "captureAndLiveSourceMapsEqual": true,
+    "canonicalSourceMapSHA256": "76b09c31d7fded1c2be419d211b4af6f580c19a09792e8496091a814c96badb7",
+    "testOnlyDiagnosticLines": "The captured source set includes the bounded test-only diagnostic instrumentation used by these runs."
+  },
+  "warningsAndLimits": {
+    "knownWarnings": [
+      "Existing Swift compiler warnings in test sources include Sendable conformance, actor-isolated static access, an unused local, and mutation of captured variables. They were not investigated in this diagnostic."
+    ],
+    "cleanup": "The no-inference probe observed zero workers before and after. The actual managed run observed at most one worker; this archive does not infer broader resource qualification.",
+    "destinationRegressionRED": {
+      "run": "native-link-destination-red-01",
+      "result": "compiled; expected test failure",
+      "failedMethods": 1,
+      "skippedMethods": 0,
+      "runtimeWarnings": 0,
+      "sourceFileCount": 17,
+      "canonicalSourceMapSHA256": "24407b89548f0d73cf60aa37a0579df2379544ae6e0878ca53eb8042a48cebcf",
+      "assertion": "An exact selected destination remains resolvable with a valid AXLink even if AXTitle differs: unsupportedAction",
+      "scope": "The test exercises exact destination identity with a mismatched AXTitle, a distinct neighboring destination, and an invalid-role guard. Production was unchanged for RED."
+    },
+    "nextStep": "Exact URL identity with a mismatched AXTitle is implemented, compiled and passes the controlled 7-method regression. The actual helper probe also passes, but its AXTitle matches a captured own-text leaf and therefore does not reproduce the composite-title alias case. Full URL-free discovery still stops when the model asks permission before attempting link resolution; the earlier initial-capture browserChanged failure was not reproduced here. Next checkpoint is model interface semantics. Do not expand native lookup further without a new observed failure."
+  },
+  "sourceArtifacts": {
+    "captureCommand": ".build/repair-verification/native-initial-capture-diagnostic-01-command.json",
+    "captureProbeResult": ".build/repair-verification/native-initial-capture-diagnostic-01/probe/result.json",
+    "liveCommand": ".build/repair-verification/native-initial-discovery-02-command.json",
+    "liveSummary": ".build/repair-verification/native-initial-discovery-02/result.json",
+    "liveCatalogue": ".build/repair-verification/native-initial-discovery-02/catalogue-8f548604bfdfff8f5a2d04ff18c14464.json",
+    "liveLedger": ".build/repair-verification/native-initial-discovery-02/ledger.json",
+    "destinationREDCommand": ".build/repair-verification/native-link-destination-red-01-command.json",
+    "destinationREDLog": ".build/repair-verification/native-link-destination-red-01.log",
+    "destinationGREENCommand": ".build/repair-verification/native-link-destination-green-01-command.json",
+    "destinationGREENLog": ".build/repair-verification/native-link-destination-green-01.log",
+    "liveDiscoveryAfterGREENCommand": ".build/repair-verification/native-link-destination-discovery-01-command.json",
+    "liveDiscoveryAfterGREENSummary": ".build/repair-verification/native-link-destination-discovery-01/result.json",
+    "liveDiscoveryAfterGREENLedger": ".build/repair-verification/native-link-destination-discovery-01/ledger.json",
+    "actualHelperProbeCommand": ".build/repair-verification/native-link-destination-probe-01-command.json",
+    "actualHelperProbeResult": ".build/repair-verification/native-link-destination-probe-01/probe/result.json"
+  },
+  "destinationRegressionGREEN": {
+    "run": "native-link-destination-green-01",
+    "result": "passed",
+    "passedMethods": 7,
+    "failedMethods": 0,
+    "skippedMethods": 0,
+    "runtimeWarnings": 0,
+    "sourceFileCount": 17,
+    "canonicalSourceMapSHA256": "6fbcb844bd205c5bcd74f6477bad752bbc53f924382669f42a0a1b6803899025",
+    "coverage": [
+      "MCPFirstComputerUseExecutorTests/testOptInNativeBrowserCompositeLinkResolvesCapturedDestination",
+      "MCPFirstComputerUseExecutorTests/testOptInNativeBrowserLeafReadRechecksCancellationAndPageBeforeDispatch",
+      "MCPFirstComputerUseExecutorTests/testOptInNativeBrowserLinkFailuresCannotActivateVisualProposal",
+      "MCPFirstComputerUseExecutorTests/testBrowserLinkDiscoveryRejectsInvalidRepliesInsteadOfClaimingCapabilityGap",
+      "MCPFirstComputerUseExecutorTests/testBrowserLinkAttributesRejectFailedStaleAndMalformedReplies",
+      "MCPFirstComputerUseExecutorTests/testBrowserLinkReadsPreserveValidResultsAndExplicitlyUnavailableAttributes",
+      "ComputerUseMobileInitiationTests/testNativeBrowserInitialProposalUsesOneGoalOnlyNativeRequest"
+    ],
+    "scope": "Controlled regression verifies exact captured URL identity with mismatched AXTitle while retaining invalid-role, different-destination, lifecycle and failure guards. It does not establish URL-free task completion."
+  },
+  "liveDiscoveryAfterGREEN": {
+    "run": "native-link-destination-discovery-01",
+    "test": "ComputerUseMobileInitiationTests/testOptInMCPBrowserHostFindsPublicTravelWithoutURLWithManagedNativeText",
+    "result": "failed before invoking the repaired link lookup",
+    "xcresult": {
+      "failedMethods": 1,
+      "passedMethods": 0,
+      "skippedMethods": 0,
+      "exitCode": 65
+    },
+    "sourceFileCount": 17,
+    "canonicalSourceMapSHA256": "6fbcb844bd205c5bcd74f6477bad752bbc53f924382669f42a0a1b6803899025",
+    "pageURL": "https://www.bing.com/search?q=BART+youth+fare+discount+rules+ages+free+children+required+card&FORM=QBLH",
+    "captureStage": "complete",
+    "elapsedSeconds": 59.65775203704834,
+    "initialSearchInputTokens": 293,
+    "goalInterpretationInputTokens": 224,
+    "retainedPageDecisionInputTokens": [
+      2760,
+      2589
+    ],
+    "maximumObservedWorkers": 1,
+    "visualInstallations": 0,
+    "nativeInstallations": 0,
+    "plannerOutcome": "Both retained page decisions asked permission to navigate to BART’s official website; the task ended userInterventionRequired. The model did not propose the link lookup, so this run neither passes nor falsifies the exact-URL resolver repair.",
+    "visibleRequests": [
+      {
+        "requestInputTokens": 2760,
+        "proposalText": "I need to access BART's official website (https://www.bart.gov) to find the youth fare discount information. Please approve me to navigate to their official site."
+      },
+      {
+        "requestInputTokens": 2589,
+        "proposalText": "I need to navigate to BART's official website (https://www.bart.gov) to find the youth fare discount information. Please approve me to navigate to their official site."
+      }
+    ],
+    "catalogueVariation": "The live selected catalogue differed from the earlier RED fixture/run. Do not infer that its unresolved link would have exercised the repaired resolver.",
+    "limitations": [
+      "The earlier redundant-approval issue remains present in this current run.",
+      "No successful official-site navigation or final answer occurred."
+    ]
+  },
+  "actualHelperProbe": {
+    "run": "native-link-destination-probe-01",
+    "test": "ComputerUseMobileInitiationTests/testOptInMCPNativeLinkAccessibilityOnCapturedPublicPage",
+    "result": "passed",
+    "passedMethods": 1,
+    "failedMethods": 0,
+    "skippedMethods": 0,
+    "elapsedSeconds": 10.174077987670898,
+    "captureStage": "complete",
+    "lookupAttempted": true,
+    "lookupResolved": true,
+    "resolvedExactDestination": true,
+    "workersBefore": 0,
+    "workersAfterShutdown": 0,
+    "mutationLedgerCreated": false,
+    "selectedNativeLink": {
+      "reference": "l10",
+      "label": "Bay Area Rapid Transit https:// www.bart.gov › tickets › discounts",
+      "destination": "https://www.bing.com/ck/a?!&&p=ee51af242eaa1bad50fda56caa62153f28a0deaa59bc3eea29952e8d3ffe53fbJmltdHM9MTc5MDIwODAwMA&ptn=3&ver=2&hsh=4&fclid=1a470174-e7b7-6c85-0394-16aae67c6d96&u=a1aHR0cHM6Ly93d3cuYmFydC5nb3YvdGlja2V0cy9kaXNjb3VudHM&ntb=1"
+    },
+    "matchedAX": {
+      "role": "AXLink",
+      "title": "Bay Area Rapid Transit",
+      "urlMatchesSelectedDestination": true
+    },
+    "sourceFileCount": 17,
+    "canonicalSourceMapSHA256": "6fbcb844bd205c5bcd74f6477bad752bbc53f924382669f42a0a1b6803899025",
+    "boundary": "This helper run verifies the existing native lookup regression, not the new composite-title alias case: AXTitle exactly matches a captured own text leaf here. The composite-title mismatch is shown by the earlier controlled RED→GREEN test and prior live discovery02 trace only.",
+    "warning": "The existing main-thread warning remains; this probe does not establish broader resource or full-discovery qualification."
+  }
+}

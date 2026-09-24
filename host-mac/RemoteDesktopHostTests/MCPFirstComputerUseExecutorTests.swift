@@ -294,7 +294,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testOptInNativeBrowserCompositeLinkRequiresItsOwnTitleAndDestination() async throws {
+    func testOptInNativeBrowserCompositeLinkResolvesCapturedDestination() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: controlled native browser link label/destination matching; no model inference")
         }
@@ -319,8 +319,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 description: "Native link read", inputSchema: objectSchema(properties: properties, required: Array(properties.keys)),
                 risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
         }
-        enum ReplyMode: String, Sendable { case selected, bannerBeforeLookup, wrongURL, unrelatedTitle, neighboringLink, partial }
-        for mode in [ReplyMode.selected, .bannerBeforeLookup, .wrongURL, .unrelatedTitle, .neighboringLink, .partial] {
+        enum ReplyMode: String, Sendable { case selected, bannerBeforeLookup, compositeTitle, wrongURL, unrelatedTitle, neighboringLink, wrongRole, partial }
+        for mode in [ReplyMode.selected, .bannerBeforeLookup, .compositeTitle, .wrongURL, .unrelatedTitle,
+                     .neighboringLink, .wrongRole, .partial] {
             let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
                 browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent(mode.rawValue + "-browser")))
@@ -347,16 +348,22 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     let title: String
                     let url: String
                     switch (mode, id) {
-                    case (.selected, "selected-link"), (.wrongURL, "selected-link"), (.unrelatedTitle, "selected-link"):
-                        title = mode == .unrelatedTitle ? "Unrelated policy" : "Transit Agency"
+                    case (.selected, "selected-link"), (.wrongURL, "selected-link"), (.unrelatedTitle, "selected-link"),
+                         (.compositeTitle, "selected-link"), (.wrongRole, "selected-link"):
+                        switch mode {
+                        case .unrelatedTitle: title = "Unrelated policy"
+                        case .compositeTitle: title = "Transit Agency — external destination"
+                        default: title = "Transit Agency"
+                        }
                         url = mode == .wrongURL ? base.appendingPathComponent("wrong").absoluteString : destination.absoluteString
                     case (.neighboringLink, "neighbor-link"):
-                        title = "Hours and location"; url = destination.absoluteString
+                        title = "Hours and location"; url = base.appendingPathComponent("neighbor").absoluteString
                     default:
                         title = "Transit Agency"; url = destination.absoluteString
                     }
                     return try result(["ok": .bool(true), "element_id": .string(id),
-                        "values": .object(["AXRole": .string("AXLink"), "AXTitle": .string(title), "AXURL": .string(url)]),
+                        "values": .object(["AXRole": .string(mode == .wrongRole ? "AXButton" : "AXLink"),
+                            "AXTitle": .string(title), "AXURL": .string(url)]),
                         "unavailable": .array([])])
                 }
                 throw MCPClientError.toolFailed("Unexpected read tool: \(call.toolName)")
@@ -396,15 +403,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
                 })
             let goal = "Open \(start.absoluteString) and read the Transit Agency details page."
-            if mode == .selected || mode == .bannerBeforeLookup {
+            let shouldResolve: Bool = [ReplyMode.selected, .bannerBeforeLookup, .compositeTitle, .unrelatedTitle].contains(mode)
+            if shouldResolve {
                 do {
                     let result = try await executor.execute(taskID: "composite-\(mode.rawValue)", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
                     XCTAssertEqual(result, .completed("Verified details."))
-                } catch { XCTFail("A selected own-leaf title with its exact captured destination should resolve: \(error)") }
+                } catch { XCTFail("An exact selected destination remains resolvable with a valid AXLink even if AXTitle differs: \(error)") }
             } else {
                 do {
                     _ = try await executor.execute(taskID: "composite-\(mode.rawValue)", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-                    XCTFail("An unsupported AX title/destination pair must not navigate")
+                    XCTFail("A mismatched AX role or destination must not navigate")
                 } catch {
                     if mode == .partial {
                         XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence)
@@ -413,10 +421,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     }
                 }
             }
-            XCTAssertEqual(server.count("/details") - beforeDetails, mode == .selected || mode == .bannerBeforeLookup ? 1 : 0, mode.rawValue)
+            XCTAssertEqual(server.count("/details") - beforeDetails, shouldResolve ? 1 : 0, mode.rawValue)
             XCTAssertEqual(server.count("/neighbor") - beforeNeighbor, 0, mode.rawValue)
             XCTAssertEqual(server.count("/wrong") - beforeWrong, 0, mode.rawValue)
-            XCTAssertEqual(visualCalls, mode == .selected || mode == .bannerBeforeLookup || mode == .partial ? 0 : 1, mode.rawValue)
+            XCTAssertEqual(visualCalls, shouldResolve || mode == .partial ? 0 : 1, mode.rawValue)
             if mode == .bannerBeforeLookup { XCTAssertEqual(proposalCount, 3, "A harmless insertion must not require an extra planner proposal") }
             let directCalls = await pool.directCalls()
             let queryTitles = directCalls.compactMap { call -> String? in
@@ -424,6 +432,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 return title
             }
             XCTAssertTrue(queryTitles.contains("Transit Agency"), "The fixture must exercise captured own-leaf lookup: \(queryTitles)")
+            if mode == .compositeTitle {
+                XCTAssertTrue(directCalls.contains { call in
+                    call.toolName == "get_element_attributes" && call.arguments["element_id"] == .string("selected-link")
+                })
+            }
             await pool.cancelAll()
         }
     }
