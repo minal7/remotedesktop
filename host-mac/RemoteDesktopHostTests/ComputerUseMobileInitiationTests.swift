@@ -2324,6 +2324,238 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertFalse(functionNames.contains("answer"), "The native answer function is unavailable for an action contract")
     }
 
+    func testNativeReadingBlockReplacementGroupsOnlyCompleteDirectTextLeaves() throws {
+        let source = URL(string: "https://example.org/policy")!
+        let goalText = "Read the current page and report its admission and child policy."
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: Data(), currentURL: source)
+        let plainText = "Admission is $25. 東京\nChild age 4 is free."
+        let plain = ComputerUseBrowserPageSnapshot(id: String(repeating: "a", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: plainText),
+            .init(id: "t2", containerID: "g2", text: "Sibling amount is $99.")],
+            links: [.init(id: "l1", label: "More details", destination: "https://example.org/unselected", textIDs: [], containerID: "g1")],
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g0", parentID: nil, kind: "div"),
+                .init(id: "g1", parentID: "g0", kind: "p"), .init(id: "g2", parentID: "g0", kind: "p")], omittedStructure: false)
+        let split = ComputerUseBrowserPageSnapshot(id: String(repeating: "b", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "Admission is $25. 東京"),
+            .init(id: "t2", containerID: "g1", text: "Child age 4 is free."),
+            .init(id: "t3", containerID: "g2", text: "Sibling amount is $99.")],
+            links: [.init(id: "l1", label: "More details", destination: "https://example.org/unselected", textIDs: [], containerID: "g1")],
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g0", parentID: nil, kind: "div"),
+                .init(id: "g1", parentID: "g0", kind: "p"), .init(id: "g2", parentID: "g0", kind: "p")], omittedStructure: false)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let plainContext = try planner.context(input, page: plain, wholePage: true)
+        let splitContext = try planner.context(input, page: split, wholePage: true)
+        XCTAssertEqual(plainContext.evidenceReferences["text:t1"], plainText)
+        XCTAssertNil(plainContext.evidenceReferences["group:g1"], "A single leaf keeps its ordinary exact evidence reference")
+        XCTAssertTrue(splitContext.evidenceReferences["group:g1"]?.utf8.elementsEqual(plainText.utf8) == true)
+        XCTAssertNil(splitContext.evidenceReferences["text:t1"])
+        XCTAssertNil(splitContext.evidenceReferences["text:t2"])
+        XCTAssertEqual(splitContext.evidenceReferences["text:t3"], "Sibling amount is $99.",
+            "A neighboring one-leaf paragraph with a different amount stays separate")
+        XCTAssertNil(splitContext.evidenceReferences["group:g2"])
+        let siblingClaim = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string("Sibling amount is $99."),
+            "assessment": assessmentValue([("Report the current page policy", "information", "observed", "group:g1")])])
+        XCTAssertThrowsError(try planner.decode(siblingClaim, context: splitContext)) { error in
+            XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim,
+                "A neighboring paragraph's amount is not included in the selected block")
+        }
+        XCTAssertEqual(splitContext.evidenceReferences["link:l1"], "More details")
+        XCTAssertEqual(splitContext.links["l1"]?.destination, "https://example.org/unselected")
+        XCTAssertFalse(splitContext.evidenceReferences.values.contains("https://example.org/unselected"),
+            "A reading block carries visible text, never the independent link destination")
+
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(splitContext.json.utf8)) as? [String: Any])
+        let page = try XCTUnwrap(root["page"] as? [String: Any])
+        let reading = try XCTUnwrap(page["reading"])
+        func containsGroup(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                if let block = object["g1"] as? String {
+                    return block.utf8.elementsEqual("Admission is $25. 東京\nChild age 4 is free.".utf8)
+                }
+                return object.values.contains(where: containsGroup)
+            }
+            if let array = value as? [Any] { return array.contains(where: containsGroup) }
+            return false
+        }
+        XCTAssertTrue(containsGroup(reading), "The compact tree exposes one explicit block key for the joined leaves")
+        func containsKey(_ value: Any, _ key: String) -> Bool {
+            if let object = value as? [String: Any] {
+                return object[key] != nil || object.values.contains { containsKey($0, key) }
+            }
+            if let array = value as? [Any] { return array.contains { containsKey($0, key) } }
+            return false
+        }
+        XCTAssertTrue(containsKey(reading, "l1"), "The independent link remains addressable beside its text block")
+
+        func pageFor(_ texts: [ComputerUseBrowserPageSnapshot.Text], containers: [ComputerUseBrowserPageSnapshot.Container] = [
+            .init(id: "g1", parentID: nil, kind: "p")], truncated: Bool = false,
+            omittedStructure: Bool = false, omittedEmbeddedContent: Bool = false) -> ComputerUseBrowserPageSnapshot {
+            .init(id: String(repeating: "c", count: 32), texts: texts, links: [], truncated: truncated,
+                omittedEmbeddedContent: omittedEmbeddedContent, containers: containers, omittedStructure: omittedStructure)
+        }
+        let twoLeaves = [ComputerUseBrowserPageSnapshot.Text(id: "t1", containerID: "g1", text: "One."),
+            .init(id: "t2", containerID: "g1", text: "Two.")]
+        for (label, candidate) in [
+            ("truncated", pageFor(twoLeaves, truncated: true)),
+            ("omitted structure", pageFor(twoLeaves, omittedStructure: true)),
+            ("omitted embedded content", pageFor(twoLeaves, omittedEmbeddedContent: true)),
+            ("tooltip ambiguity", pageFor([twoLeaves[0], .init(id: "t2", containerID: "g1", text: "Two.", tooltip: "More")]))
+        ] {
+            let context = try planner.context(input, page: candidate, wholePage: true)
+            XCTAssertNil(context.evidenceReferences["group:g1"], label)
+            XCTAssertNotNil(context.evidenceReferences["text:t1"], label)
+        }
+        let nine = (1...9).map { ComputerUseBrowserPageSnapshot.Text(id: "t\($0)", containerID: "g1", text: "Leaf \($0)") }
+        let tooMany = try planner.context(input, page: pageFor(nine), wholePage: true)
+        XCTAssertNil(tooMany.evidenceReferences["group:g1"], "Groups stay bounded to eight direct leaves")
+        XCTAssertEqual(tooMany.evidenceReferences.count, 10, "All ungrouped visible leaves and source remain individually addressable")
+        let oversized = pageFor([.init(id: "t1", containerID: "g1", text: String(repeating: "a", count: 1_024)),
+            .init(id: "t2", containerID: "g1", text: String(repeating: "b", count: 1_024))])
+        let oversizedContext = try planner.context(input, page: oversized, wholePage: true)
+        XCTAssertNil(oversizedContext.evidenceReferences["group:g1"], "The joined UTF-8 value may not exceed 2048 bytes")
+        XCTAssertEqual(oversizedContext.evidenceReferences["text:t1"]?.utf8.count, 1_024)
+        let genericContainer = pageFor(twoLeaves, containers: [.init(id: "g1", parentID: nil, kind: "div")])
+        let genericContext = try planner.context(input, page: genericContainer, wholePage: true)
+        XCTAssertNil(genericContext.evidenceReferences["group:g1"], "Only native p/li reading blocks are eligible")
+
+        let nestedContainers = [ComputerUseBrowserPageSnapshot.Container(id: "g1", parentID: nil, kind: "li"),
+            .init(id: "g2", parentID: "g1", kind: "p")]
+        let nestedTexts = [ComputerUseBrowserPageSnapshot.Text(id: "t1", containerID: "g1", text: "Parent one."),
+            .init(id: "t2", containerID: "g1", text: "Parent two."),
+            .init(id: "t3", containerID: "g2", text: "Nested one."),
+            .init(id: "t4", containerID: "g2", text: "Nested two.")]
+        let nested = try planner.context(input, page: pageFor(nestedTexts, containers: nestedContainers), wholePage: true)
+        XCTAssertNil(nested.evidenceReferences["group:g1"], "A parent with a child container is not replaced")
+        XCTAssertNotNil(nested.evidenceReferences["group:g2"], "An independently eligible nested leaf container may be grouped")
+        let partial = try planner.context(input, page: split, wholePage: false)
+        XCTAssertNil(partial.evidenceReferences["group:g1"], "Partial record windows preserve the existing leaf protocol")
+        XCTAssertNotNil(partial.evidenceReferences["text:t1"])
+    }
+
+    func testNativeReadingBlockProjectionFallbackRetainsLeafEvidenceAfterInterleavedOrder() throws {
+        let source = URL(string: "https://example.org/policy")!
+        let input = ComputerUseFaraModel.Input(goal: "Read the current page and report its policy.",
+            screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "f", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "First amount is $25."),
+            .init(id: "t2", containerID: "g2", text: "Sibling amount is $99."),
+            .init(id: "t3", containerID: "g1", text: "Second amount is $4.")],
+            links: [], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g0", parentID: nil, kind: "div"),
+                .init(id: "g1", parentID: "g0", kind: "p"), .init(id: "g2", parentID: "g0", kind: "p")],
+            omittedStructure: false)
+        XCTAssertTrue(page.isWellFormed)
+
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        XCTAssertEqual(context.evidenceReferences["text:t1"], "First amount is $25.")
+        XCTAssertEqual(context.evidenceReferences["text:t2"], "Sibling amount is $99.")
+        XCTAssertEqual(context.evidenceReferences["text:t3"], "Second amount is $4.")
+        XCTAssertNil(context.evidenceReferences["group:g1"],
+            "A failed tree projection must not retire the original leaf references")
+
+        let captured = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(context.json.utf8)) as? [String: Any])
+        let pageObject = try XCTUnwrap(captured["page"] as? [String: Any])
+        XCTAssertNil(pageObject["reading"], "Interleaved sibling order falls back to the named record representation")
+        let projectedTexts = try XCTUnwrap(pageObject["texts"] as? [[String: Any]])
+        XCTAssertEqual(projectedTexts.compactMap { $0["id"] as? String }, ["t1", "t2", "t3"])
+        XCTAssertFalse(context.json.contains("group:g1"),
+            "The fallback body must not publish a group reference after preserving its leaves")
+    }
+
+    func testLegacyPlannerDecodesGroupedEvidenceButNotUnselectedLinkDestination() throws {
+        let source = URL(string: "https://example.org/policy")!
+        let goalText = "Read the current page and report its policy."
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "d", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "Admission is $25."),
+            .init(id: "t2", containerID: "g1", text: "Child age 4 is free.")],
+            links: [.init(id: "l1", label: "More details", destination: "https://example.org/unselected", textIDs: [], containerID: "g1")],
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "p")], omittedStructure: false)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = try planner.context(input, page: page, wholePage: true)
+        func answer(_ text: String) -> MCPJSONValue {
+            .object(["kind": .string("answer"), "reference": .string(""), "text": .string(text),
+                "assessment": assessmentValue([("Report the policy", "information", "observed", "group:g1")])])
+        }
+        let supported = try planner.decode(answer("Admission is $25. Child age 4 is free. Source: https://example.org/policy"), context: context)
+        XCTAssertEqual(supported.assessment?.requirements.map(\.evidenceReferences), [["group:g1"]],
+            "The existing legacy decoder accepts the exact canonical group reference")
+        for (label, text, reference) in [
+            ("unselected destination", "Admission is $25. Child age 4 is free. The destination is https://example.org/unselected.", "group:g1"),
+            ("removed leaf reference", "Admission is $25.", "text:t1"),
+            ("stale group reference", "Admission is $25.", "group:g99")
+        ] {
+            let invalid = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""), "text": .string(text),
+                "assessment": assessmentValue([("Report the policy", "information", "observed", reference)])])
+            XCTAssertThrowsError(try planner.decode(invalid, context: context), label) { error in
+                XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim, label)
+            }
+        }
+    }
+
+    func testNativeToolMapsOnlyCurrentGroupedTextKeysAndKeepsSharedLinkSeparate() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let label = "Admission is $25."
+        let input = ComputerUseFaraModel.Input(goal: "Read the policy and report the admission and child policy.",
+            screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "e", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: label),
+            .init(id: "t2", containerID: "g1", text: "Child age 4 is free.")],
+            links: [.init(id: "l1", label: label, destination: "https://example.org/details", textIDs: ["t1"], containerID: "g1")],
+            truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "p")], omittedStructure: false)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let pageObject = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(context.json.utf8)) as? [String: Any])?["page"] as? [String: Any])
+        let reading = try XCTUnwrap(pageObject["reading"])
+        func containsKey(_ value: Any, _ key: String) -> Bool {
+            if let object = value as? [String: Any] {
+                return object[key] != nil || object.values.contains { containsKey($0, key) }
+            }
+            if let array = value as? [Any] { return array.contains { containsKey($0, key) } }
+            return false
+        }
+        func containsGroupText(_ value: Any) -> Bool {
+            if let object = value as? [String: Any] {
+                if let text = object["g1"] as? String {
+                    return text.utf8.elementsEqual("Admission is $25.\nChild age 4 is free.".utf8)
+                }
+                return object.values.contains(where: containsGroupText)
+            }
+            if let array = value as? [Any] { return array.contains(where: containsGroupText) }
+            return false
+        }
+        XCTAssertTrue(containsGroupText(reading))
+        XCTAssertTrue(containsKey(reading, "l1"), "A shared anchor caption remains a separate current link key")
+        XCTAssertEqual(context.evidenceReferences["group:g1"], "Admission is $25.\nChild age 4 is free.")
+        XCTAssertNil(context.evidenceReferences["text:t1"])
+        XCTAssertNil(context.evidenceReferences["text:t2"])
+        XCTAssertEqual(context.evidenceReferences["link:l1"], label)
+        XCTAssertEqual(context.links["l1"]?.destination, "https://example.org/details")
+
+        let prerequisite = try nativeStepEnvelope(#"{"kind":"continue","text":""}"#)
+        let contract = try nativeStepEnvelope(#"{"objective":"Report the admission and child policy.","constraints":[],"requirements":[{"instruction":"Report the admission and child policy.","kind":"information"}]}"#)
+        for (reference, expectedSuccess) in [("g1", true), ("group:g1", true), ("text:t1", false), ("group:g99", false)] {
+            let response = try nativeBrowserFunctionEnvelope("answer", arguments: [
+                "text": "Admission is $25. Child age 4 is free.", "evidence": ["r1": [reference]]])
+            let transport = NativeStepQueueFixtureTransport(responses: [prerequisite, contract, response, response])
+            do {
+                let plan = try await nativeStepPlanner(transport: transport).propose(context)
+                XCTAssertTrue(expectedSuccess, "Retired or stale key unexpectedly completed: \(reference)")
+                XCTAssertEqual(plan.kind, .answer)
+                XCTAssertEqual(plan.assessment?.requirements.map(\.evidenceReferences), [["group:g1"]], reference)
+            } catch {
+                XCTAssertFalse(expectedSuccess, "Current group key was rejected: \(reference), \(error)")
+                XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim, reference)
+            }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.completions, expectedSuccess ? 3 : 4, reference)
+        }
+    }
+
     func testNativeEvidenceTreeKeysMapExactlyToCurrentCanonicalReferences() async throws {
         let source = URL(string: "https://example.org/policy")!
         let goalText = "Read https://example.org/supplied and report the fee, tooltip, and link label."
@@ -2431,7 +2663,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             return try XCTUnwrap(items["pattern"] as? String)
         }
         let pattern = try evidenceItemPattern("answer")
-        XCTAssertEqual(pattern, #"^(source|((text|tooltip):)?t[0-9]+|(link:)?l[0-9]+)$"#)
+        XCTAssertEqual(pattern, #"^(source|((group:)?g[0-9]+)|((text|tooltip):)?t[0-9]+|(link:)?l[0-9]+)$"#)
         XCTAssertEqual(try evidenceItemPattern("incomplete"), pattern,
             "Optional sparse incomplete evidence uses the same reference grammar")
         let regex = try NSRegularExpression(pattern: pattern)
@@ -2439,10 +2671,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let fullRange = NSRange(value.startIndex..., in: value)
             return regex.firstMatch(in: value, range: fullRange)?.range == fullRange
         }
-        for value in ["source", "t1", "l12", "text:t1", "tooltip:t12", "link:l2"] {
+        for value in ["source", "t1", "l12", "g1", "text:t1", "tooltip:t12", "link:l2", "group:g2"] {
             XCTAssertTrue(matches(value), value)
         }
-        for value in ["link:https://example.org/", "other:t1", " t1", "t1 ", "t1\n", "text:t١", "text:fee", "l"] {
+        for value in ["link:https://example.org/", "group:https://example.org/", "other:t1", " t1", "t1 ", "t1\n", "text:t١", "group:g١", "text:fee", "l"] {
             XCTAssertFalse(matches(value), value)
         }
     }

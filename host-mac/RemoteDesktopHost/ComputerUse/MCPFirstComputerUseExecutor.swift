@@ -871,6 +871,9 @@ final class MCPFirstComputerUseExecutor:
             if let tooltip = text.tooltip { nativeReferences["tooltip:\(text.id)"] = tooltip }
         }
         for link in page.links { nativeReferences["link:\(link.id)"] = link.label }
+        nativeReferences.merge(try ComputerUseMCPBrowserStepPlanner.currentNativeReadingBlockEvidence(for: page)) {
+            _, current in current
+        }
         let selected = Set(assessment.requirements.flatMap(\.evidenceReferences))
         guard context.evidenceReferences["source"] == observation.currentURL.absoluteString else {
             throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim

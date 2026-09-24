@@ -2006,15 +2006,50 @@ enum ComputerUseBrowserDOM {
             if (command === 'validatePageReadEvidence') {
               const refs = args.references;
               if (!Array.isArray(refs) || refs.length < 1 || refs.length > 64 || new Set(refs).size !== refs.length
-                  || refs.some(ref => typeof ref !== 'string' || !/^(source|text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*)$/.test(ref))) return reply('unsupported');
+                  || refs.some(ref => typeof ref !== 'string' || !/^(source|text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*|group:g[1-9][0-9]*)$/.test(ref))) return reply('unsupported');
               if (typeof args.expectedURL !== 'string' || doc.URL !== args.expectedURL || lastPageSnapshot.url !== args.expectedURL) return reply('stale');
               const samePath = (before, after) => Array.isArray(before) && Array.isArray(after) && before.length === after.length
                 && before.every((item,index) => item.element === after[index].element && item.kind === after[index].kind);
               const currentTextFor = previous => Array.from(textBindings.values()).find(item => item.element === previous.element);
               const currentLinkFor = previous => Array.from(links.values()).find(item => item.element === previous.element);
+              const completeBlock = content => content && content.truncated === false && content.omittedStructure === false
+                && content.omittedEmbeddedContent === false;
+              const validateGroup = id => {
+                const original = lastPageSnapshot.reading;
+                if (!completeBlock(original) || !completeBlock(content)) return false;
+                const originalContainer = original.containers?.find(item => item.id === id);
+                const originalBinding = lastPageSnapshot.containers?.get(id);
+                if (!originalContainer || !['p','li'].includes(originalContainer.kind) || !originalBinding?.element?.isConnected) return false;
+                if (original.containers.some(item => item.parentID === id)) return false;
+                const originalMembers = original.texts.filter(item => item.containerID === id);
+                if (originalMembers.length < 2 || originalMembers.length > 8
+                    || originalMembers.some(item => typeof item.text !== 'string' || item.tooltip != null)) return false;
+                const joined = originalMembers.map(item => item.text).join('\n');
+                if (encoder.encode(joined).length > 2048) return false;
+                const currentContainerEntry = Array.from(containers.entries()).find(([, binding]) => binding.element === originalBinding.element);
+                if (!currentContainerEntry) return false;
+                const [currentID, currentBinding] = currentContainerEntry;
+                const currentContainer = content.containers?.find(item => item.id === currentID);
+                if (!currentContainer || currentContainer.kind !== originalContainer.kind || currentBinding.element !== originalBinding.element
+                    || content.containers.some(item => item.parentID === currentID)) return false;
+                const currentMembers = content.texts.filter(item => item.containerID === currentID);
+                if (currentMembers.length !== originalMembers.length
+                    || currentMembers.some(item => typeof item.text !== 'string' || item.tooltip != null)) return false;
+                for (let index = 0; index < originalMembers.length; index++) {
+                  const before = lastPageSnapshot.texts?.get(originalMembers[index].id);
+                  const after = textBindings.get(currentMembers[index].id);
+                  if (!before || !after || before.element !== after.element || before.text !== after.text
+                      || before.tooltip !== after.tooltip || !samePath(before.ancestry, after.ancestry)) return false;
+                }
+                return currentMembers.map(item => item.text).join('\n') === joined;
+              };
               for (const ref of refs) {
                 if (ref === 'source') continue;
                 const separator = ref.indexOf(':'), kind = ref.slice(0, separator), id = ref.slice(separator + 1);
+                if (kind === 'group') {
+                  if (!validateGroup(id)) return reply('stale-read-evidence');
+                  continue;
+                }
                 if (kind === 'text' || kind === 'tooltip') {
                   const previous = lastPageSnapshot.texts?.get(id), current = previous && currentTextFor(previous);
                   if (!previous || !current || previous.text !== current.text || previous.tooltip !== current.tooltip
@@ -2444,7 +2479,7 @@ enum ComputerUseBrowserDOM {
           }
           const id = nonce();
           formQueries.clear();
-          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, agentState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers, texts:textBindings};
+          lastPageSnapshot = {id, documentID, serialized, reading:content, includeControlState, scopedControlIDs, agentState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers, texts:textBindings};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

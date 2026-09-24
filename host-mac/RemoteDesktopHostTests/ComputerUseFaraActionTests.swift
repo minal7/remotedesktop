@@ -4424,6 +4424,80 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInNativeReadCompletionValidatesWholeGroupFreshness() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: grouped native read evidence in a real owned browser; no inference")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><html><body><main><p id='block'><span id='one'>First fact.</span><span id='two'>Second fact.</span></p>
+            <a id='details' href='/details'>Details</a><aside id='banner'>Banner</aside></main></body></html>
+            """), "/details": .init(body: "Details")])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "read-group-freshness")
+        var retainedWindow: NSWindow?
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] {
+            if let web = view as? WKWebView { return [web] }
+            return view.subviews.flatMap(webViews)
+        }
+        let cases: [(String, String?, Bool)] = [
+            ("unchanged", nil, true),
+            ("unrelated-banner", "document.body.prepend(Object.assign(document.createElement('aside'),{textContent:'New banner'}))", true),
+            ("new-leaf", "document.getElementById('block').append(document.createTextNode(' New fact.'))", false),
+            ("reordered-leaves", "const p=document.getElementById('block');p.insertBefore(p.lastElementChild,p.firstElementChild)", false),
+            ("changed-selected-leaf", "document.getElementById('one').firstChild.nodeValue='Changed fact.'", false),
+            ("replaced-container", "const p=document.getElementById('block');p.replaceWith(p.cloneNode(true))", false),
+            ("nested-container", "document.getElementById('block').append(Object.assign(document.createElement('section'),{textContent:'Nested fact.'}))", false),
+            ("new-tooltip", "document.getElementById('one').title='New tooltip'", false),
+            ("unselected-link-change", "document.getElementById('details').href='/changed'", true),
+        ]
+        for (name, mutation, allowed) in cases {
+            var stage = "navigate"
+            do {
+                let document = try await browser.navigate(taskID: "read-group-freshness", operationID: name, to: base.appendingPathComponent("page"))
+                stage = "window"
+                try requireSameNativeWindow(&retainedWindow)
+                stage = "capture"
+                let observation = try await browser.captureAgentObservation(document: document)
+                stage = "capture assertions"
+                let page = observation.approvalPageEvidence.page
+                let paragraph = try XCTUnwrap(page.containers.first { $0.kind == "p" })
+                let members = page.texts.filter { $0.containerID == paragraph.id }
+                XCTAssertEqual(members.map(\.text), ["First fact.", "Second fact."])
+                XCTAssertFalse(page.truncated || page.omittedStructure || page.omittedEmbeddedContent)
+                let group = "group:\(paragraph.id)"
+                let link = try XCTUnwrap(page.links.first { $0.label == "Details" })
+                let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == document.committedURL })
+                stage = "mutation"
+                if let mutation { _ = try await web.evaluateJavaScript("(function(){ \(mutation); return true; })()") }
+                stage = "validation"
+                do {
+                    try await browser.validateAgentReadCompletion(observation, references: [group])
+                    XCTAssertTrue(allowed, "Changed grouped content was admitted: \(name)")
+                } catch {
+                    if allowed { XCTFail("Unrelated or unselected changes must preserve this group: \(name): \(error)") }
+                    else { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, name) }
+                }
+                if name == "unselected-link-change" {
+                    stage = "selected link validation"
+                    do {
+                        try await browser.validateAgentReadCompletion(observation, references: [group, "link:\(link.id)"])
+                        XCTFail("A selected link with a changed destination must fail independently of the group")
+                    } catch {
+                        XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged)
+                    }
+                }
+            } catch {
+                XCTFail("Group case \(name) failed during \(stage): \(String(reflecting: error))")
+                return
+            }
+        }
+        XCTAssertEqual(server.count("/details"), 0); XCTAssertEqual(server.count("/changed"), 0)
+    }
+
+    @MainActor
     func testOptInNativeReadCompletionRejectsInvalidSelectedReferences() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: selected read-reference validation on real native records")

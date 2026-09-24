@@ -848,7 +848,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         try validateAgentMemoryObservation(observation)
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
         guard (1...64).contains(references.count), Set(references).count == references.count,
-              references.allSatisfy({ $0 == "source" || $0.range(of: #"^(text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*)$"#, options: .regularExpression) != nil }) else {
+              references.allSatisfy({ $0 == "source" || $0.range(of: #"^(text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*|group:g[1-9][0-9]*)$"#, options: .regularExpression) != nil }) else {
             throw ComputerUseBrowserError.pageEvidenceUnavailable
         }
         agentOperationInProgress = true

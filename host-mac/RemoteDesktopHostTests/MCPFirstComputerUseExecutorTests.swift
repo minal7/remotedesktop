@@ -665,14 +665,27 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     func testOptInMCPNativeAnswerSurvivesUnrelatedPrependedBannerWithoutReplanning() async throws {
+        try await runMCPNativeAnswerSurvivesBanner(groupedEvidence: false)
+    }
+
+    func testOptInMCPNativeGroupedAnswerRetainsExactBlockThroughReadCompletion() async throws {
+        try await runMCPNativeAnswerSurvivesBanner(groupedEvidence: true)
+    }
+
+    private func runMCPNativeAnswerSurvivesBanner(groupedEvidence: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: real owned browser and production MCP completion admission; no inference")
         }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
         defer { NSApp.setActivationPolicy(previousPolicy) }
-        let policyText = "Returns are accepted up to 48 hours before the performance."
+        let policyText = groupedEvidence
+            ? "Returns are accepted up to\n48 hours\nbefore the performance."
+            : "Returns are accepted up to 48 hours before the performance."
+        let policyHTML = groupedEvidence
+            ? "<p id='policy'><span>Returns are accepted up to </span><a href='/details'>48 hours</a><span> before the performance.</span></p>"
+            : "<p id='policy'>\(policyText)</p>"
         let server = try OwnedBrowserHTTPFixture(routes: ["/policy": .init(body: """
-            <!doctype html><html><body><h1>Ticket policy</h1><p id='policy'>\(policyText)</p>
+            <!doctype html><html><body><h1>Ticket policy</h1>\(policyHTML)
             <script>document.addEventListener('click',()=>fetch('/clicked'));document.addEventListener('input',()=>fetch('/edited'))</script>
             </body></html>
             """), "/clicked": .init(body: "clicked"), "/edited": .init(body: "edited")])
@@ -699,7 +712,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
         let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: [:])
         let route = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
-        let native = BannerNativeBrowserStepPlanner(web: web, policyText: policyText, sourceURL: url)
+        let native = BannerNativeBrowserStepPlanner(web: web, policyText: policyText, sourceURL: url, evidencePrefix: groupedEvidence ? "group:" : "text:")
         let fallback = StubVisualExecutor()
         var visualCalls = 0
         let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
@@ -5248,10 +5261,11 @@ private final class BannerNativeBrowserStepPlanner: ComputerUseNativeBrowserStep
     let web: WKWebView
     let policyText: String
     let sourceURL: URL
+    let evidencePrefix: String
     private(set) var calls = 0
 
-    init(web: WKWebView, policyText: String, sourceURL: URL) {
-        self.web = web; self.policyText = policyText; self.sourceURL = sourceURL
+    init(web: WKWebView, policyText: String, sourceURL: URL, evidencePrefix: String = "text:") {
+        self.web = web; self.policyText = policyText; self.sourceURL = sourceURL; self.evidencePrefix = evidencePrefix
     }
 
     func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
@@ -5260,9 +5274,16 @@ private final class BannerNativeBrowserStepPlanner: ComputerUseNativeBrowserStep
         XCTAssertEqual(context.evidenceReferences["source"], sourceURL.absoluteString)
         XCTAssertFalse(context.evidenceReferences.values.contains("Harmless cookie notice"))
         let references = context.evidenceReferences.filter {
-            $0.key.hasPrefix("text:") && $0.value.utf8.elementsEqual(policyText.utf8)
+            $0.key.hasPrefix(evidencePrefix) && $0.value.utf8.elementsEqual(policyText.utf8)
         }.keys.sorted()
         XCTAssertEqual(references.count, 1)
+        if evidencePrefix == "group:" {
+            let inlineLink = try XCTUnwrap(context.links.first(where: { $0.value.label == "48 hours" }))
+            XCTAssertEqual(context.evidenceReferences["link:\(inlineLink.key)"], "48 hours",
+                "The paragraph's inline link remains independently addressable")
+            XCTAssertFalse(context.evidenceReferences.values.contains(inlineLink.value.destination),
+                "Group evidence contains visible text, never the link destination")
+        }
         let reference = try XCTUnwrap(references.first)
         let value = MCPJSONValue.object([
             "kind": .string("answer"), "reference": .string(""), "text": .string(policyText),
