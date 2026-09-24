@@ -516,7 +516,25 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
                 clarifiedGoal: session.clarifiedGoal)
-            let planned = try await nextProposal(input, observation: .page(observation), tools: tools)
+            let planned: PlannedProposal
+            do {
+                planned = try await nextProposal(input, observation: .page(observation), tools: tools)
+            } catch ComputerUseBrowserError.pageChanged {
+                // The native planner may finish after its read-only page has
+                // changed. No proposal escaped this boundary, so discard it
+                // without adding history or feedback and plan from fresh data.
+                try Task.checkCancellation(); try lease.assertOwnership()
+                session.staleProposals += 1
+                guard session.staleProposals <= 3 else {
+                    return .userInterventionRequired("I couldn't verify a browser action after several fresh observations. Complete this step in the browser, then choose Resume.")
+                }
+                do { observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID, preserving: observation) }
+                catch ComputerUseBrowserError.authenticationRequired {
+                    return .userInterventionRequired("Finish signing in in the browser, then choose Resume.")
+                }
+                try Task.checkCancellation(); try lease.assertOwnership()
+                continue
+            }
             let proposal = planned.proposal
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.

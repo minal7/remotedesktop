@@ -75,6 +75,227 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(factoryCalls, 1); XCTAssertEqual(visualCalls, 0); XCTAssertEqual(server.count("/page"), 1)
     }
 
+    func testNativePlannerRedirectReplansBeforeAcceptingItsStaleProposal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: local WKWebView client redirect during a gated native planner; no model inference")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativePlannerRedirect-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><h1>Starting page</h1><script>window.followRedirect = () => location.replace('/landing');</script>"),
+            "/landing": .init(body: "<!doctype html><h1>Landing page is current</h1><p>Fresh destination content.</p>"),
+            "/must-not-open": .init(body: "<h1>Stale proposal was dispatched</h1>")
+        ])
+        let base = try await server.start(); defer { server.stop() }
+        let startURL = base.appendingPathComponent("start")
+        let forbiddenURL = base.appendingPathComponent("must-not-open")
+        let goal = "Read \(startURL.absoluteString), then compare it with \(forbiddenURL.absoluteString), and ask me which city to use."
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let plannerStarted = expectation(description: "native page planner entered")
+        let plannerReturned = expectation(description: "native page planner returned")
+        let gate = ComputerUsePlanningTestGate<Bool>(started: plannerStarted, returned: plannerReturned)
+        defer { gate.finish(true) }
+        let nativePlanner = RedirectBlockingNativeBrowserPlanner(gate: gate)
+        let stepPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativePlanner })
+        var plannerCallbackURLs: [URL?] = [], plannerCallbackHistoryCounts: [Int] = []
+        var returnedPlans = 0, visualCalls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("executor"),
+            propose: { _ in visualCalls += 1; XCTFail("A native page planner must not request visual fallback"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { input, observation in
+                if case .initial = observation {
+                    returnedPlans += 1
+                    let body: [String: Any] = ["name": "computer_use", "arguments": ["action": "visit_url", "url": startURL.absoluteString]]
+                    let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+                }
+                plannerCallbackURLs.append(input.currentURL)
+                plannerCallbackHistoryCounts.append(input.history.count)
+                let (plan, context) = try await stepPlanner.next(input, observation: observation)
+                returnedPlans += 1
+                let arguments: [String: Any]
+                switch plan.kind {
+                case .openLink:
+                    arguments = ["action": "visit_url", "url": try XCTUnwrap(context.userURLs[plan.reference]).absoluteString]
+                case .askUser:
+                    arguments = ["action": "ask_user_question", "question": plan.text]
+                default: throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+                }
+                let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
+                let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
+                return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+            })
+
+        let execution = Task {
+            try await executor.execute(taskID: "redirect-root", prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        }
+        defer { execution.cancel() }
+        await fulfillment(of: [plannerStarted], timeout: 5)
+        func webViews(in view: NSView) -> [WKWebView] {
+            if let webView = view as? WKWebView { return [webView] }
+            return view.subviews.flatMap(webViews)
+        }
+        let webView = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == startURL })
+        _ = try await webView.evaluateJavaScript("window.followRedirect()")
+        let landingURL = base.appendingPathComponent("landing")
+        let redirectDeadline = ContinuousClock.now + .seconds(5)
+        while (webView.url != landingURL || webView.isLoading) && ContinuousClock.now < redirectDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard webView.url == landingURL, !webView.isLoading else {
+            gate.finish(true)
+            XCTFail("The client redirect must finish while native planning is blocked")
+            return
+        }
+        let committed = try await browser.acquireObservedDocument(taskID: "redirect-root")
+        XCTAssertEqual(committed.committedURL, landingURL)
+        XCTAssertTrue(browser.validate(committed))
+        gate.finish(true)
+
+        do {
+            let result = try await execution.value
+            XCTAssertEqual(result, .clarificationRequired("The landing page is current; which city should I use?"))
+        } catch {
+            XCTFail("A stale native proposal must trigger a fresh observation and replan: \(error)")
+        }
+        await fulfillment(of: [plannerReturned], timeout: 5)
+        let nativePlannerCalls = await nativePlanner.callCount
+        XCTAssertEqual(nativePlannerCalls, 2, "The changed page must be captured and planned again")
+        XCTAssertEqual(returnedPlans, 3, "The initial navigation, discarded stale decision, and fresh decision should each return")
+        XCTAssertEqual(plannerCallbackURLs, [startURL, landingURL], "The stale result must be discarded and replanned against the committed destination")
+        XCTAssertEqual(plannerCallbackHistoryCounts, [1, 1], "The discarded stale decision must not enter model history")
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(server.count("/must-not-open"), 0, "The stale link proposal must never dispatch")
+        XCTAssertEqual(server.count("/landing"), 1)
+        XCTAssertEqual(browser.taskID, "redirect-root", "Replanning must retain the original browser owner")
+    }
+
+    func testNativePlannerPageChangedRecoveryPreservesRetryAndInterruptionGuards() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: local native-planner recovery guards; no model inference")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativePlannerRecoveryGuards-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func redirectPage(_ destination: String) -> OwnedBrowserHTTPFixture.Response {
+            .init(body: "<!doctype html><h1>Observed page</h1><script>window.followRedirect=()=>location.replace('\(destination)')</script>")
+        }
+        let routes: [String: OwnedBrowserHTTPFixture.Response] = [
+            "/cap-0": redirectPage("/cap-1"), "/cap-1": redirectPage("/cap-2"),
+            "/cap-2": redirectPage("/cap-3"), "/cap-3": redirectPage("/cap-4"),
+            "/cancel-start": redirectPage("/next"), "/pause-start": redirectPage("/next"),
+            "/replace-start": redirectPage("/next"), "/auth-start": redirectPage("/login"),
+            "/next": .init(body: "<!doctype html><h1>Fresh page</h1>"),
+            "/login": .init(body: "<!doctype html><h1>Sign in</h1><input type='password'>"),
+            "/must-not-open": .init(body: "<h1>Stale proposal dispatched</h1>")
+        ]
+        let server = try OwnedBrowserHTTPFixture(routes: routes); defer { server.stop() }
+        let base = try await server.start()
+        var mayAct = true
+        let browser = ComputerUseOwnedBrowser(mayAct: { mayAct }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { mayAct },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+
+        func runScenario(_ name: String, startPath: String, destinations: [String], interruption: String) async throws {
+            mayAct = true
+            let taskID = "recovery-\(name)"
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "seed", to: base.appendingPathComponent(startPath))
+            let gates = destinations.enumerated().map { index, _ in
+                ComputerUsePlanningTestGate<Bool>(started: expectation(description: "\(name) native planner \(index + 1) started"),
+                    returned: expectation(description: "\(name) native planner \(index + 1) returned"))
+            }
+            let nativePlanner = GatedPageChangedNativeBrowserPlanner(gates: gates)
+            let stepPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativePlanner })
+            var historyCounts: [Int] = [], visualCalls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("executor-\(name)"),
+                propose: { _ in visualCalls += 1; XCTFail("Native planning failures cannot request visual fallback"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { input, observation in
+                    guard case .page = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    historyCounts.append(input.history.count)
+                    _ = try await stepPlanner.next(input, observation: observation)
+                    XCTFail("The injected planner always rejects its stale observation")
+                    return .noProposal
+                })
+            let execution = Task {
+                try await executor.execute(taskID: taskID, prompt: "Read this page.", trustedUserPrompt: "Read this page.", tools: tools, progress: { _ in })
+            }
+            do {
+                for index in destinations.indices {
+                    await fulfillment(of: [gates[index].started], timeout: 5)
+                    let currentPath = index == 0 ? startPath : destinations[index - 1]
+                    func webViews(in view: NSView) -> [WKWebView] {
+                        if let webView = view as? WKWebView { return [webView] }
+                        return view.subviews.flatMap(webViews)
+                    }
+                    let currentURL = base.appendingPathComponent(currentPath)
+                    guard let webView = NSApp.windows.compactMap(\.contentView).flatMap(webViews).first(where: { $0.url == currentURL }) else {
+                        XCTFail("Missing local browser page \(currentPath)")
+                        throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+                    }
+                    _ = try await webView.evaluateJavaScript("window.followRedirect()")
+                    let destinationURL = base.appendingPathComponent(destinations[index])
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while (webView.url != destinationURL || webView.isLoading) && ContinuousClock.now < deadline {
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    guard webView.url == destinationURL, !webView.isLoading else {
+                        XCTFail("Local page redirect did not finish at \(destinations[index])")
+                        throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+                    }
+                    if interruption == "cancel" { execution.cancel() }
+                    if interruption == "pause" { mayAct = false; browser.prepareForUserControl(taskID: taskID) }
+                    if interruption == "replace" { try browser.claim(taskID: "successor-\(name)") }
+                    gates[index].finish(true)
+                }
+                var result: ComputerUseExecutionResult?, failure: Error?
+                do { result = try await execution.value } catch { failure = error }
+                await fulfillment(of: gates.map(\.returned), timeout: 5)
+                try await waitForAvailablePlanningWorker(.shared)
+                let plannerCalls = await nativePlanner.callCount
+                XCTAssertEqual(visualCalls, 0)
+                if interruption == "budget" {
+                    guard case .userInterventionRequired = result else { return XCTFail("The fourth stale plan must stop for user intervention") }
+                    XCTAssertNil(failure)
+                    XCTAssertEqual(plannerCalls, 4)
+                    XCTAssertEqual(historyCounts, [0, 0, 0, 0], "Rejected page decisions must not enter model history")
+                    XCTAssertEqual(server.count("/must-not-open"), 0)
+                } else if interruption == "cancel" {
+                    XCTAssertTrue(failure is CancellationError)
+                    XCTAssertEqual(plannerCalls, 1)
+                    XCTAssertEqual(historyCounts, [0])
+                } else if interruption == "pause" {
+                    XCTAssertTrue(failure is ComputerUseHostTools.ToolError)
+                    XCTAssertEqual(failure?.localizedDescription, "AI Computer Use is paused.")
+                    XCTAssertEqual(plannerCalls, 1)
+                } else if interruption == "replace" {
+                    XCTAssertEqual(failure as? ComputerUseBrowserError, .ownershipLost)
+                    XCTAssertEqual(plannerCalls, 1)
+                } else {
+                    XCTAssertEqual(result, .userInterventionRequired("Finish signing in in the browser, then choose Resume."))
+                    XCTAssertNil(failure)
+                    XCTAssertEqual(plannerCalls, 1)
+                }
+            } catch {
+                execution.cancel(); gates.forEach { $0.finish(true) }
+                _ = await execution.result
+                await fulfillment(of: gates.map(\.returned), timeout: 5)
+                try await waitForAvailablePlanningWorker(.shared)
+                throw error
+            }
+        }
+
+        _ = try await runScenario("budget", startPath: "/cap-0", destinations: ["/cap-1", "/cap-2", "/cap-3", "/cap-4"], interruption: "budget")
+        _ = try await runScenario("cancel", startPath: "/cancel-start", destinations: ["/next"], interruption: "cancel")
+        _ = try await runScenario("pause", startPath: "/pause-start", destinations: ["/next"], interruption: "pause")
+        _ = try await runScenario("replace", startPath: "/replace-start", destinations: ["/next"], interruption: "replace")
+        _ = try await runScenario("auth", startPath: "/auth-start", destinations: ["/login"], interruption: "auth")
+    }
+
     func testOptInManagedNativeBrowserStepFromFrozenPublicRecords() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_NATIVE_BROWSER_STEP"] == "1" else { throw XCTSkip("Opt-in: one saved public page, actual managed text model, no browser effects") }
@@ -4532,6 +4753,39 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             modelVariant: .pro4B,
             modelDirectory: "/test/OS-Atlas-Pro-4B",
             installedAt: Date(timeIntervalSince1970: 0))
+    }
+}
+
+private actor RedirectBlockingNativeBrowserPlanner: ComputerUseNativeBrowserStepPlanning {
+    private let gate: ComputerUsePlanningTestGate<Bool>
+    private(set) var callCount = 0
+
+    init(gate: ComputerUsePlanningTestGate<Bool>) { self.gate = gate }
+
+    func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
+        callCount += 1
+        if callCount == 1 {
+            _ = await gate.wait()
+            guard let reference = context.userURLs.first(where: { $0.value.path == "/must-not-open" })?.key else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
+            }
+            return .init(kind: .openLink, reference: reference, text: "")
+        }
+        return .init(kind: .askUser, reference: "", text: "The landing page is current; which city should I use?")
+    }
+}
+
+private actor GatedPageChangedNativeBrowserPlanner: ComputerUseNativeBrowserStepPlanning {
+    private let gates: [ComputerUsePlanningTestGate<Bool>]
+    private(set) var callCount = 0
+
+    init(gates: [ComputerUsePlanningTestGate<Bool>]) { self.gates = gates }
+
+    func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
+        let index = callCount
+        callCount += 1
+        if gates.indices.contains(index) { _ = await gates[index].wait() }
+        throw ComputerUseBrowserError.pageChanged
     }
 }
 
