@@ -270,15 +270,21 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
             requirementProperties[requirement.id] = requirement.kind == .information ? infoRequirement : actionRequirement
         }
         let requirementMap = object(requirementProperties)
-        var kinds = ["search", "openLink", "answer", "askUser", "wait", "visualFallback", "incomplete"]
-        if context.isPartialRecordView {
-            kinds.removeAll { $0 == "answer" || $0 == "visualFallback" }
-            if !context.navigation.isEmpty { kinds.append("inspectRecords") }
+        func stepSchema(kinds: [String], references: [String], text: [String: Any] = ["type": "string"]) -> [String: Any] {
+            object(["requirements": requirementMap,
+                "kind": ["type": "string", "enum": kinds],
+                "reference": ["type": "string", "enum": references], "text": text])
         }
-        let references = [""] + context.userURLs.keys.sorted() + context.links.keys.sorted()
-            + (context.isPartialRecordView ? context.navigation.keys.sorted() : [])
-        let schema = object(["requirements": requirementMap,
-            "kind": ["type": "string", "enum": kinds], "reference": ["type": "string", "enum": references], "text": ["type": "string"]])
+        var nonReferenceKinds = ["search", "answer", "askUser", "wait", "visualFallback", "incomplete"]
+        if context.isPartialRecordView { nonReferenceKinds.removeAll { $0 == "answer" || $0 == "visualFallback" } }
+        var alternatives = [stepSchema(kinds: nonReferenceKinds, references: [""])]
+        let linkReferences = context.userURLs.keys.sorted() + context.links.keys.sorted()
+        if !linkReferences.isEmpty { alternatives.append(stepSchema(kinds: ["openLink"], references: linkReferences)) }
+        let navigationReferences = context.isPartialRecordView ? context.navigation.keys.sorted() : []
+        if !navigationReferences.isEmpty {
+            alternatives.append(stepSchema(kinds: ["inspectRecords"], references: navigationReferences, text: ["type": "string", "enum": [""]]))
+        }
+        let schema: [String: Any] = ["oneOf": alternatives]
         let pageInstructions: String
         let pageUsesNamedRecords = context.isPartialRecordView || Self.usesNamedRecordReading(context.json)
         if context.isPartialRecordView {

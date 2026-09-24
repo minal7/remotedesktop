@@ -937,6 +937,86 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(purchase.evidence, "")
     }
 
+    func testRetainedBrowserSchemaMatchesDecoderReferenceScopes() async throws {
+        let source = URL(string: "https://example.org/current")!
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Read https://example.org/supplied and find the policy details.")
+        let l1 = ComputerUseBrowserPageSnapshot.Link(id: "l1", label: "Primary policy",
+            destination: "https://example.org/policy", textIDs: ["t1"], containerID: "g1")
+        let l2 = ComputerUseBrowserPageSnapshot.Link(id: "l2", label: "Additional policy",
+            destination: "https://example.org/more", textIDs: [], containerID: "g1")
+        let fullContext = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
+            userURLs: ["user-url-1": URL(string: "https://example.org/supplied")!], links: ["l1": l1, "l2": l2],
+            evidenceReferences: ["source": source.absoluteString, "text:t1": "Policy details."], userGoal: goal)
+        let (_, windows, _) = try nativeRecordWindowContexts()
+        let partialContext = try XCTUnwrap(windows.first)
+        let emptyGoal = try ComputerUseUnresolvedTextGoal(userRequest: "Read the current policy details.")
+        let emptyContext = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
+            userURLs: [:], links: [:], evidenceReferences: ["source": source.absoluteString], userGoal: emptyGoal)
+
+        let contract = #"{"objective":"Read the policy details.","constraints":[],"requirements":[{"instruction":"Read the policy details.","kind":"information"}]}"#
+        let search = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"search","reference":"","text":"official policy details"}"#
+        func retainedSchema(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> [String: Any] {
+            let transport = NativeStepQueueFixtureTransport(responses: [
+                try nativeStepEnvelope(contract), try nativeStepEnvelope(search)])
+            let planner = try nativeStepPlanner(transport: transport)
+            let plan = try await planner.propose(context)
+            XCTAssertEqual(plan.kind, .search)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.completions, 2)
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[1]) as? [String: Any])
+            let format = try XCTUnwrap(request["response_format"] as? [String: Any])
+            let jsonSchema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+            XCTAssertEqual(jsonSchema["name"] as? String, "browser_retained_step")
+            return try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        }
+        func assertSchema(_ schema: [String: Any], nonReferenceKinds: Set<String>,
+                          openLinkReferences: Set<String>?, inspectReferences: Set<String>?) throws {
+            let branches = schema["oneOf"] as? [[String: Any]] ?? [schema]
+            XCTAssertNotNil(schema["oneOf"], "The retained-step request must use complete oneOf alternatives")
+            let expectedCount = 1 + (openLinkReferences == nil ? 0 : 1) + (inspectReferences == nil ? 0 : 1)
+            XCTAssertEqual(branches.count, expectedCount)
+            var requirementGrammar: Data?
+            for branch in branches {
+                XCTAssertEqual(branch["type"] as? String, "object")
+                XCTAssertEqual(branch["additionalProperties"] as? Bool, false)
+                guard let properties = branch["properties"] as? [String: Any],
+                      Set(properties.keys) == Set(["requirements", "kind", "reference", "text"]),
+                      Set(branch["required"] as? [String] ?? []) == Set(properties.keys),
+                      let kinds = (properties["kind"] as? [String: Any])?["enum"] as? [String],
+                      let references = (properties["reference"] as? [String: Any])?["enum"] as? [String],
+                      let textSchema = properties["text"] as? [String: Any],
+                      let grammar = properties["requirements"] else {
+                    XCTFail("Each alternative must be a complete four-field schema object")
+                    continue
+                }
+                let kindSet = Set(kinds), referenceSet = Set(references)
+                if kindSet == nonReferenceKinds {
+                    XCTAssertEqual(referenceSet, [""])
+                } else if kindSet == ["openLink"] {
+                    XCTAssertEqual(referenceSet, openLinkReferences ?? [])
+                } else if kindSet == ["inspectRecords"] {
+                    XCTAssertEqual(referenceSet, inspectReferences ?? [])
+                    XCTAssertEqual(textSchema["enum"] as? [String], [""])
+                } else {
+                    XCTFail("Unexpected or mixed reference class: kinds=\(kinds), references=\(references)")
+                }
+                let data = try JSONSerialization.data(withJSONObject: grammar, options: [.sortedKeys])
+                if let requirementGrammar { XCTAssertEqual(data, requirementGrammar) }
+                else { requirementGrammar = data }
+            }
+        }
+
+        try assertSchema(await retainedSchema(fullContext),
+            nonReferenceKinds: ["search", "answer", "askUser", "wait", "visualFallback", "incomplete"],
+            openLinkReferences: ["user-url-1", "l1", "l2"], inspectReferences: nil)
+        try assertSchema(await retainedSchema(partialContext),
+            nonReferenceKinds: ["search", "askUser", "wait", "incomplete"],
+            openLinkReferences: ["l1"], inspectReferences: ["records-next"])
+        try assertSchema(await retainedSchema(emptyContext),
+            nonReferenceKinds: ["search", "answer", "askUser", "wait", "visualFallback", "incomplete"],
+            openLinkReferences: nil, inspectReferences: nil)
+    }
+
     func testNativeBrowserUsesNamedRecordWindowAfterWholePageTokenOverflow() async throws {
         let (context, windows, source) = try nativeRecordWindowContexts()
         let contract = #"{"objective":"Read the fee details and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
@@ -1882,6 +1962,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             publicCase: "missing-city", useNativeText: true, expectedInitialClarification: true)
     }
 
+    func testOptInMCPBrowserHostResumesCityClarificationWithManagedNativeText() async throws {
+        try await runMCPBrowserHostWithoutInstalledModelPackage(
+            publicCase: "missing-city-resume", useNativeText: true, expectedInitialClarification: true,
+            clarificationAnswer: "San Francisco — BART.")
+    }
+
     func testBrowserAssessmentRequiresGroundedObservedInformationForAnswer() throws {
         let planner = ComputerUseMCPBrowserStepPlanner()
         let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
@@ -1951,7 +2037,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     private func runMCPBrowserHostWithoutInstalledModelPackage(publicCase: String?, useNativeText: Bool = false,
-                                                               expectedInitialClarification: Bool = false) async throws {
+                                                               expectedInitialClarification: Bool = false,
+                                                               clarificationAnswer: String? = nil) async throws {
         var publicGoal: String?, expectedPatterns: [String] = [], questionPatterns: [String] = [], expectedHost: String?
         if let publicCase {
             guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
@@ -1964,7 +2051,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             if expectedInitialClarification {
                 questionPatterns = try XCTUnwrap(task["questionPatterns"] as? [String])
                 XCTAssertFalse(questionPatterns.isEmpty)
-            } else {
+            }
+            if !expectedInitialClarification || clarificationAnswer != nil {
                 expectedPatterns = try XCTUnwrap(task["expectedPatterns"] as? [String])
                 expectedHost = try XCTUnwrap(task["expectedHost"] as? String)
                 XCTAssertFalse(expectedPatterns.isEmpty)
@@ -2047,22 +2135,60 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         var terminal: ComputerUseTaskUpdate?
         for _ in 0 ..< 600 {
+            if clarificationAnswer != nil && Date().timeIntervalSince(started) >= 75 { break }
             terminal = await channel.taskUpdates().first { $0.taskID == prompt.id && $0.outcome != nil }
             if terminal != nil { break }
             try await Task.sleep(for: .milliseconds(100))
         }
+        let firstTerminal = terminal
+        let firstQuestion = expectedInitialClarification ? ledger.terminalClarificationText(taskID: prompt.id) : nil
+        let initialURL = browser?.currentDocument(taskID: prompt.id)?.committedURL
+        let initialCatalogueCount = (try? FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("catalogue-") }.count) ?? 0
+        let initialTrace = plannerTrace.items
+        let originalBrowserTaskID = browser?.taskID
+        let initialNativeStepCount = initialTrace.filter { $0.contains("Native text step:") }.count
+        var answerEnvelope: ComputerUseEnvelope?
+        var answerConstructionFailure: String?
+        if let clarificationAnswer, let reference = firstTerminal?.clarification {
+            do {
+                let request = try RemoteDesktopHost.ComputerUsePromptRequest.answering(reference, text: clarificationAnswer)
+                let sent = ComputerUseEnvelope(id: "mcp-browser-city-answer-" + UUID().uuidString,
+                    senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456", sessionID: "SESSION-1",
+                    kind: .prompt, body: try request.encodedBody())
+                answerEnvelope = sent
+                XCTAssertTrue(manager.handle(sent, channel: channel))
+                terminal = nil
+                for _ in 0 ..< 600 {
+                    if Date().timeIntervalSince(started) >= 75 { break }
+                    terminal = await channel.taskUpdates().first { $0.taskID == sent.id && $0.outcome != nil }
+                    if terminal != nil { break }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+            } catch {
+                answerConstructionFailure = String(reflecting: error)
+            }
+        }
         let finalURL = browser?.currentDocument(taskID: prompt.id)?.committedURL
+        let finalBrowserTaskID = browser?.taskID
         let browserCaptureStage = browser?.lastAgentCaptureStage
-        let structuredQuestion = expectedInitialClarification ? ledger.terminalClarificationText(taskID: prompt.id) : nil
-        let clarificationReference = terminal?.clarification
+        let structuredQuestion = firstQuestion
+        let clarificationReference = firstTerminal?.clarification
         await manager.shutdown()
         if expectedInitialClarification { browser?.close() }
         await modelRuntime.shutdown()
         monitor.cancel(); try await monitor.value
         let visualInstalls = await visual.installCallCount(), nativeInstalls = await native.installCallCount()
         let launchAttempts = await launchGuard.calls
-        let initialPlannerCalls = plannerTrace.items.filter { $0.contains("Native text initial step:") }.count
-        let terminalSummary: Any = expectedInitialClarification
+        let initialPlannerCalls = initialTrace.filter { $0.contains("Native text initial step:") }.count
+        let totalPlannerCalls = plannerTrace.items.filter { item in
+            guard let data = item.data(using: .utf8),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let request = record["request"] as? String,
+                  let requestData = request.data(using: .utf8) else { return false }
+            return (try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]) != nil
+        }.count
+        let terminalSummary: Any = expectedInitialClarification && clarificationAnswer == nil
             ? ["outcome": terminal?.outcome?.rawValue ?? "missing",
                "clarificationPresent": clarificationReference != nil,
                "clarificationTaskIDMatchesPrompt": clarificationReference?.taskID == prompt.id]
@@ -2077,16 +2203,28 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "usesNativeTextModel": useNativeText,
             "expectedInitialClarification": expectedInitialClarification,
             "initialNativePlannerCalls": initialPlannerCalls,
+            "initialStagePlannerCalls": initialPlannerCalls,
+            "totalPlannerCalls": totalPlannerCalls,
+            "finalBrowserTaskID": finalBrowserTaskID as Any? ?? NSNull(),
             "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; isolated transport, ledger and browser; " + (useNativeText ? "verified installed native text model and shared managed runtime; missing visual model receipt" : "missing model receipts and rejecting model launcher")]
+        if let answerConstructionFailure { report["answerConstructionFailure"] = answerConstructionFailure }
+        report["resumeDeadlineExceeded"] = clarificationAnswer != nil && terminal == nil && Date().timeIntervalSince(started) >= 75
         if expectedInitialClarification {
             report["clarification"] = ["present": clarificationReference != nil,
                 "taskIDMatchesPrompt": clarificationReference?.taskID == prompt.id,
                 "question": structuredQuestion as Any? ?? NSNull()]
         }
+        if let answerEnvelope {
+            let decoded = try RemoteDesktopHost.ComputerUsePromptRequest.decodeBody(answerEnvelope.body)
+            report["clarificationAnswer"] = ["taskID": answerEnvelope.id, "prompt": decoded.prompt,
+                "referenceTaskID": decoded.clarification?.taskID as Any? ?? NSNull(),
+                "sentAnswer": ["question": firstQuestion as Any? ?? NSNull(), "answer": decoded.prompt,
+                    "referenceTaskID": decoded.clarification?.taskID as Any? ?? NSNull()]]
+        }
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
         if expectedInitialClarification {
-            XCTAssertEqual(terminal?.outcome, .userInterventionRequired)
+            XCTAssertEqual(firstTerminal?.outcome, .userInterventionRequired)
             let clarification = try XCTUnwrap(clarificationReference)
             XCTAssertEqual(clarification.taskID, prompt.id)
             let question = try XCTUnwrap(structuredQuestion)
@@ -2095,15 +2233,62 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
             XCTAssertFalse(question.range(of: #"(?i)(permission|allow).{0,40}(navigate|open|click|search)"#, options: .regularExpression) != nil,
                 "Clarify the missing city rather than asking permission to navigate")
-            XCTAssertNil(finalURL)
+            XCTAssertNil(initialURL)
             XCTAssertNil(browser?.currentDocument(taskID: prompt.id))
             XCTAssertTrue(server.requestedPaths.isEmpty)
-            let catalogueFiles = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
-                .filter { $0.lastPathComponent.hasPrefix("catalogue-") }
-            XCTAssertTrue(catalogueFiles.isEmpty, "The initial clarification must precede page catalogue capture")
+            XCTAssertEqual(initialCatalogueCount, 0, "The initial clarification must precede page catalogue capture")
             XCTAssertEqual(initialPlannerCalls, 1, "Initial clarification should use one local native text planner proposal")
-            XCTAssertFalse(plannerTrace.items.contains { $0.contains("Native text step:") },
+            XCTAssertEqual(initialNativeStepCount, 0)
+            XCTAssertFalse(initialTrace.contains { $0.contains("Native text step:") },
                 "A missing-city clarification must not start a native page step")
+            if clarificationAnswer != nil { XCTAssertNil(answerConstructionFailure) }
+            if let answerEnvelope {
+                let decoded = try RemoteDesktopHost.ComputerUsePromptRequest.decodeBody(answerEnvelope.body)
+                XCTAssertEqual(decoded.prompt, clarificationAnswer)
+                XCTAssertEqual(decoded.clarification, clarification)
+                XCTAssertNotEqual(answerEnvelope.id, prompt.id)
+                XCTAssertEqual(terminal?.taskID, answerEnvelope.id)
+                XCTAssertEqual(terminal?.outcome, .taskCompleted)
+                for pattern in expectedPatterns {
+                    XCTAssertNotNil(terminal?.text.range(of: pattern, options: .regularExpression), "Missing expected fact: \(pattern)")
+                }
+                XCTAssertEqual(finalURL?.host, expectedHost)
+                XCTAssertTrue(server.requestedPaths.isEmpty)
+                XCTAssertEqual(originalBrowserTaskID, prompt.id, "The answer must resume the original owned browser task")
+                XCTAssertEqual(finalBrowserTaskID, prompt.id, "The resumed browser must retain its root task ownership")
+                let continuationRetainedAnswer = plannerTrace.items.contains { item in
+                    guard let recordData = item.data(using: .utf8),
+                          let record = try? JSONSerialization.jsonObject(with: recordData) as? [String: Any],
+                          let requestText = record["request"] as? String,
+                          let requestData = requestText.data(using: .utf8),
+                          let request = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+                          let messages = request["messages"] as? [[String: Any]],
+                          let userContent = messages.first(where: { $0["role"] as? String == "user" })?["content"] as? String,
+                          let contextData = userContent.data(using: .utf8),
+                          let context = try? JSONSerialization.jsonObject(with: contextData) as? [String: Any],
+                          let originalGoal = context["goal"] as? String,
+                          let clarifications = context["clarifications"] as? [[String: Any]],
+                          let clarification = clarifications.first,
+                          let answer = clarification["answer"] as? String,
+                          let question = clarification["question"] as? String,
+                          let expectedQuestion = structuredQuestion else { return false }
+                    return originalGoal.utf8.elementsEqual(prompt.body.utf8)
+                        && answer.utf8.elementsEqual((clarificationAnswer ?? "").utf8)
+                        && question.utf8.elementsEqual(expectedQuestion.utf8)
+                }
+                XCTAssertTrue(continuationRetainedAnswer,
+                    "The captured continuation planner request must preserve the original goal and ordered exact question/answer")
+                XCTAssertTrue(plannerTrace.items.contains { $0.contains("Native text step:") },
+                    "A valid city answer must continue browser research")
+                let catalogueFiles = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
+                    .filter { $0.lastPathComponent.hasPrefix("catalogue-") }
+                XCTAssertFalse(catalogueFiles.isEmpty, "Resumed research should capture an official page catalogue")
+                XCTAssertTrue(catalogueFiles.contains { path in
+                    guard let data = try? Data(contentsOf: path), let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let source = json["sourceURL"] as? String, let host = URL(string: source)?.host else { return false }
+                    return host == expectedHost
+                }, "The completed research must capture the expected official host")
+            }
         } else if publicGoal != nil {
             XCTAssertEqual(terminal?.outcome, .taskCompleted)
             for pattern in expectedPatterns {
