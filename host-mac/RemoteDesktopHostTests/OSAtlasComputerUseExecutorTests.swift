@@ -10891,7 +10891,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertFalse(arguments.contains("--models-preset"))
         XCTAssertTrue(arguments.contains("--no-mmproj"))
         XCTAssertTrue(arguments.contains("--offline"))
-        for (flag, value) in [("--host", "127.0.0.1"), ("--ctx-size", "4096"),
+        for (flag, value) in [("--host", "127.0.0.1"), ("--ctx-size", "6144"),
                               ("--parallel", "1"), ("--reasoning-budget", "512"),
                               ("--threads", "4"), ("--threads-batch", "4"),
                               ("--poll", "0"), ("--poll-batch", "0"),

@@ -6,15 +6,19 @@ Status: the first managed native-browser path is implemented, compiled and teste
 
 | Checkpoint | Result | Acceptance boundary |
 | --- | --- | --- |
-| Current production | Original 4096 application state at `6cb24b8` restored; rebuild and three focused checks pass | No application change from the capacity experiment is retained. |
-| Missing-user-input handoff | City question and accepted answer remain bound to the original goal and browser owner | Named question/continuation mechanics only. |
-| Native discovery | Original partial-window function interface follows a verified link to official BART | Final answer still fails capacity. |
-| Measured capacity | Parity-checked reconstruction: full page 3061/3008 input allowance; first window 3265/3264 | Reconstructed from saved history/capture; rejected requests were not directly logged. |
-| Larger-context experiment | 6144 passes 17 focused methods; live city task fails after 74.441s/five completions, still on Bing | Rejected and reverted. Full-page JSON interface attempted an answer, then planner timed out; no official-page dispatch or task completion. |
-| Model comparison | Earlier Fara native-function pair matches two scoped choices | No model promotion or composed Fara qualification. |
-| Next repair | Compare one consistent native function interface across actual search/official-page captures and ask-before-open control | Preserve complete goals/evidence; qualify live workflows before accepting a context or model change. |
+| Current working candidate | One native function interface for whole and partial page decisions; shared 6144 native context; 26 final-source focused tests pass | Installed app unchanged. No general production qualification. |
+| Evidence contract | Exact displayed tN/lN aliases map to existing current references; duplicate aliases and unknown refs reject; grammar restricts ID syntax | Syntax/reference admission is not semantic proof. |
+| Corrected saved-page answer | Actual managed Qwen completes the BART case in 23.35s, two calls, correct facts and refs, no internal IDs in prose | Saved page with replayed goal interpretation; no page effects. First request/call equal the preceding failure. |
+| Live city-resume | Latest 120s diagnostic fails after 92.78s/nine calls, following verified Clipper and BART links | Final empty redirect response has no API tool call; no final BART capture or task completion. Neither harness deadline expired. |
+| Earlier live failures | 75s stops before terminal; first 120s diagnostic rejects bare evidence IDs after 86.79s | Historical failures remain recorded; none relabeled as success. |
+| Model comparison | Same-capture Qwen/Fara native function probes; Qwen warrants this integration experiment; Fara source-page call remains invalid | No global model promotion or exclusion of Fara's visual browser role. |
+| Next repair | Distinguish transient-page readiness from the runtime/model's empty response | No inferred visual capability gap, site heuristics, automatic retry expansion or OS-scope expansion. |
 
-The [capacity archive](native-browser-capacity-results-sept24.json) retains exact request bodies, token counts, source bindings, failed export harness attempt, candidate RED→GREEN, live failure and restored build. A unary-container compression candidate still exceeded the allowance and was not implemented. The [partial-tool archive](native-browser-partial-tools-results-sept24.json) retains the previous native navigation repair; the [prerequisite archive](native-browser-prerequisite-results-sept24.json) retains the separate passing direct-URL BART control. These results diagnose an interface-dependent failure and do not establish general completion, provider login, OS capability or 12 GB whole-Mac memory/heat qualification. Native tools remain first, only one model worker may run, and Jev stays parked.
+The [unified native-tool archive](native-browser-unified-tools-results-sept24.json) records request bodies, response hashes and call-only projections, source hashes, failed and passing builds, and scoped semantic review without model reasoning. The current 26-test build and managed answer run share all 18 recorded source hashes. The final live run uses the same candidate. The model worker remains serial, uses four threads, and the successful saved-page test peaks at 3,410,739,200 sampled bytes before clean exit; the 12 GB whole-Mac memory/heat target remains unqualified.
+
+The [pinned runtime schema review](native-browser-schema-research-sept24.md) supports an anchored evidence-ID pattern on supported native-template grammar paths. The host still validates exact current refs, claim literals, completion, freshness, cancellation and ownership. A required-tool request nevertheless produced an empty API response during the latest live redirect; causal attribution to template/parser/model behavior remains open. Do not treat source-level grammar support as proof of universal output correctness.
+
+Earlier context-only and partial-tool experiments below remain historical. The [capacity archive](native-browser-capacity-results-sept24.json) retains the rejected 6144-only candidate and restored baseline; the new candidate couples the budget with a consistent function interface. Provider login, general goal coverage, native Mac tasks and release readiness remain open. Native tools stay first and Jev stays parked.
 
 ## Primary-source basis
 

@@ -64,6 +64,7 @@ struct OSAtlasLlamaRuntimeInputs: Equatable, Sendable {
 /// checksum and executable trust remain the installer's responsibility.
 struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
     static let modelAlias = "native-form-planner-v2"
+    static let contextTokens = 6_144
     let modelURL: URL
     let llamaServerURL: URL
 
@@ -731,7 +732,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--host", Self.host, "--port", String(port),
                 "--api-key-file", authenticationFile.fileURL.path,
                 "--offline", "--no-ui", "--no-mmproj", "--log-disable",
-                "--parallel", "1", "--ctx-size", "4096", "--cache-ram", "0",
+                "--parallel", "1", "--ctx-size", String(ComputerUseNativeTextRuntimeInputs.contextTokens), "--cache-ram", "0",
                 "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
                 "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
                 "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
