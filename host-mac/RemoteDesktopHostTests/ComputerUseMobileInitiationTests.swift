@@ -23,6 +23,26 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let context: ComputerUseMCPBrowserStepPlanner.Context
     }
 
+    private struct NativeGoalReplayDescriptor {
+        let requestPath: String
+        let requestSHA256: String
+        let request: Data
+        let responsePath: String
+        let responseSHA256: String
+        let response: Data
+        let inputTokens: Int
+    }
+
+    private struct NativeGoalReplayResult {
+        let contract: ComputerUseBrowserIntentContract
+        let requestPath: String
+        let responsePath: String
+        let requestSHA256: String
+        let responseSHA256: String
+        let inputTokens: Int
+        let placeholderPlan: ComputerUseMCPBrowserStepPlanner.Plan
+    }
+
     func testOptInNativeBrowserPlannerFactoryFailureDoesNotRequestVisualControl() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native browser owner and failing planner factory; no inference") }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativePlannerFailure-" + UUID().uuidString)
@@ -59,7 +79,16 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_MANAGED_NATIVE_BROWSER_STEP"] == "1" else { throw XCTSkip("Opt-in: one saved public page, actual managed text model, no browser effects") }
         let frozen = try frozenNativeBrowserExchangeCase(environment: environment)
-        let caseID = frozen.caseID, goal = frozen.goal, input = frozen.input, context = frozen.context
+        let caseID = frozen.caseID, goal = frozen.goal, input = frozen.input
+        var context = frozen.context
+        let replay: NativeGoalReplayResult?
+        if let descriptorPath = environment["NATIVE_READING_GOAL_REPLAY"] {
+            let descriptor = try nativeGoalReplayDescriptor(path: descriptorPath)
+            let result = try await replayGoalContract(descriptor, context: context)
+            replay = result
+            context.retainedContract = result.contract
+        } else { replay = nil }
+        let preparedContext = context
         let hash = frozen.captureSHA256
         let installation = await ComputerUseInstaller.nativeText().currentInstallation()
         let receipt = try XCTUnwrap(installation)
@@ -90,11 +119,24 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         })
         let start = Date()
         var report: [String: Any] = ["case": caseID, "goal": goal, "expectedDisposition": frozen.disposition,
-            "captureSHA256": hash, "scope": "managed-frozen-native-step-no-effects", "input": context.json]
+            "captureSHA256": hash,
+            "scope": replay == nil ? "managed-frozen-native-step-no-effects" : "managed-frozen-step-with-replayed-candidate-intent-no-effects",
+            "input": preparedContext.json]
+        if let replay {
+            report["wholeMacQualified"] = false
+            report["goalReplay"] = ["descriptorPath": environment["NATIVE_READING_GOAL_REPLAY" ] ?? "",
+                "requestPath": replay.requestPath, "requestSHA256": replay.requestSHA256,
+                "responsePath": replay.responsePath,
+                "responseSHA256": replay.responseSHA256, "diagnosticInputTokens": replay.inputTokens,
+                "fixtureCompletions": 2, "placeholderPlanKind": replay.placeholderPlan.kind.rawValue,
+                "contract": ["goal": replay.contract.goal.userTurns, "objective": replay.contract.objective, "constraints": replay.contract.constraints,
+                    "requirements": replay.contract.requirements.map { ["id": $0.id, "instruction": $0.instruction, "kind": $0.kind.rawValue] }]]
+        }
         var failure: Error?
         do {
-            let plan = try await ComputerUsePlanningWorker().perform(timeout: 45) { try await planner.propose(context) }
+            let plan = try await ComputerUsePlanningWorker().perform(timeout: 45) { try await planner.propose(preparedContext) }
             report["kind"] = plan.kind.rawValue; report["text"] = plan.text; report["reference"] = plan.reference
+            if let replay { XCTAssertEqual(plan.retainedContract, replay.contract) }
             if let contract = plan.retainedContract {
                 report["retainedGoalContract"] = ["goal": contract.goal.userTurns,
                     "objective": contract.objective, "constraints": contract.constraints,
@@ -136,10 +178,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         sampler.cancel(); let samples = await sampler.value
         report["elapsedSeconds"] = Date().timeIntervalSince(start); report["peakSampledWorkerBytes"] = samples.peak
         report["maximumWorkers"] = samples.workers; report["exchanges"] = trace.items
+        report["realManagedPageExchangeCount"] = trace.items.count
         if failure == nil {
-            XCTAssertTrue([2, 3].contains(trace.items.count), "A fresh proposal uses goal interpretation, page decision, and at most one evidence correction")
-            if trace.items.count == 3 {
-                XCTAssertTrue(trace.items[2].localizedCaseInsensitiveContains("selected"),
+            XCTAssertTrue((replay == nil ? [2, 3] : [1, 2]).contains(trace.items.count),
+                "Replay reuses the candidate interpretation; the managed worker performs one page step and at most one evidence correction")
+            if trace.items.count == (replay == nil ? 3 : 2) {
+                XCTAssertTrue(trace.items.last?.localizedCaseInsensitiveContains("selected") == true,
                               "A correction request must explain the evidence validation failure")
             }
         }
@@ -149,6 +193,38 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .withoutOverwriting)
         XCTAssertTrue(exited); XCTAssertLessThanOrEqual(samples.workers, 1); XCTAssertLessThanOrEqual(samples.peak, 4 * 1_024 * 1_024 * 1_024)
         if let failure { throw failure }
+    }
+
+    func testOptInNativeGoalReplayRejectsMismatchedRequestAndMalformedResponse() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let descriptorPath = environment["NATIVE_READING_GOAL_REPLAY"] else {
+            throw XCTSkip("Opt-in: local replay descriptor required; no model loading or inference")
+        }
+        let descriptor = try nativeGoalReplayDescriptor(path: descriptorPath)
+        let frozen = try frozenNativeBrowserExchangeCase(environment: environment)
+        let context = frozen.context
+        var mismatched = context
+        mismatched.userGoal = try ComputerUseUnresolvedTextGoal(userRequest: "A different browser goal.")
+        do {
+            _ = try await replayGoalContract(descriptor, context: mismatched)
+            XCTFail("A saved request for another goal must be rejected before any real runtime is prepared")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .browserChanged)
+        }
+
+        let malformedResponse = try JSONSerialization.data(withJSONObject: [
+            "model": ComputerUseNativeTextRuntimeInputs.modelAlias, "choices": [],
+        ], options: [.sortedKeys])
+        let malformed = NativeGoalReplayDescriptor(requestPath: descriptor.requestPath,
+            requestSHA256: descriptor.requestSHA256, request: descriptor.request,
+            responsePath: "<in-memory malformed response>", responseSHA256: Self.sha256(malformedResponse),
+            response: malformedResponse, inputTokens: descriptor.inputTokens)
+        do {
+            _ = try await replayGoalContract(malformed, context: context)
+            XCTFail("A malformed candidate envelope must fail production decoding before real runtime preparation")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse)
+        }
     }
 
     // Diagnostic compatibility only: makeRequest/decode retain the earlier
@@ -301,6 +377,76 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         return .init(caseID: caseID, cataloguePath: cataloguePath, oraclePath: oraclePath,
             captureSHA256: hash, goal: goal, url: url, disposition: disposition,
             patterns: patterns, input: input, context: context)
+    }
+
+    private func nativeGoalReplayDescriptor(path: String) throws -> NativeGoalReplayDescriptor {
+        let descriptorData = try Data(contentsOf: URL(fileURLWithPath: path))
+        guard descriptorData.count <= 16 * 1024,
+              let object = try JSONSerialization.jsonObject(with: descriptorData) as? [String: Any],
+              Set(object.keys) == Set(["requestPath", "requestSHA256", "responsePath", "responseSHA256", "inputTokens"]),
+              let requestPath = object["requestPath"] as? String,
+              let requestSHA256 = object["requestSHA256"] as? String,
+              let responsePath = object["responsePath"] as? String,
+              let responseSHA256 = object["responseSHA256"] as? String,
+              let inputTokens = object["inputTokens"] as? Int, (1...3008).contains(inputTokens) else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        let request = try Data(contentsOf: URL(fileURLWithPath: requestPath))
+        let response = try Data(contentsOf: URL(fileURLWithPath: responsePath))
+        guard !request.isEmpty, request.count <= 64 * 1024, !response.isEmpty, response.count <= 64 * 1024,
+              Self.sha256(request) == requestSHA256, Self.sha256(response) == responseSHA256 else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        return .init(requestPath: requestPath, requestSHA256: requestSHA256, request: request,
+            responsePath: responsePath, responseSHA256: responseSHA256, response: response, inputTokens: inputTokens)
+    }
+
+    private func replayGoalContract(_ descriptor: NativeGoalReplayDescriptor,
+                                    context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> NativeGoalReplayResult {
+        guard let goal = context.userGoal else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+        let alias = ComputerUseNativeTextRuntimeInputs.modelAlias
+        let provisionalCount: Int = {
+            guard let envelope = try? JSONSerialization.jsonObject(with: descriptor.response) as? [String: Any],
+                  let choices = envelope["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String,
+                  let data = content.data(using: .utf8),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let requirements = root["requirements"] as? [Any] else { return 1 }
+            return min(8, max(1, requirements.count))
+        }()
+        var placeholderStates: [String: Any] = [:]
+        for index in 1...provisionalCount {
+            placeholderStates["r\(index)"] = ["state": "pending", "evidence": [String]() ]
+        }
+        let placeholderValue: [String: Any] = ["requirements": placeholderStates, "kind": "incomplete",
+            "reference": "", "text": "Diagnostic placeholder only; no page decision or effects were made."]
+        let placeholderData = try JSONSerialization.data(withJSONObject: placeholderValue, options: [.sortedKeys])
+        let placeholder = try nativeStepEnvelope(String(decoding: placeholderData, as: UTF8.self), modelAlias: alias)
+        let transport = NativeStepQueueFixtureTransport(responses: [descriptor.response, placeholder],
+            tokenCount: descriptor.inputTokens, expectedFirstRequest: descriptor.request)
+        let planner = try nativeStepPlanner(transport: transport, modelAlias: alias)
+        let plan = try await planner.propose(context)
+        let calls = await transport.snapshot()
+        guard calls.requests.count == 2, calls.requests[0].elementsEqual(descriptor.request),
+              calls.completions == 2, plan.kind == .incomplete,
+              plan.assessment?.requirements.allSatisfy({ $0.state == .pending && $0.evidenceReferences.isEmpty }) == true else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        var placeholderAccepted = true
+        do {
+            try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+                plan: plan, goal: goal, hasPageObservation: true)
+        } catch { placeholderAccepted = false }
+        guard !placeholderAccepted else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+        guard let contract = plan.retainedContract,
+              contract.requirements.map(\.id) == (1...provisionalCount).map({ "r\($0)" }) else {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
+        return .init(contract: contract, requestPath: descriptor.requestPath, responsePath: descriptor.responsePath,
+            requestSHA256: descriptor.requestSHA256, responseSHA256: descriptor.responseSHA256,
+            inputTokens: descriptor.inputTokens,
+            placeholderPlan: plan)
     }
 
     private func writeExchangeArtifact(_ data: Data, to path: String) throws {
@@ -633,8 +779,9 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let contractResponse = #"{"objective":"Report the return fee and deadline.","constraints":[],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Report the return deadline.","kind":"information"}]}"#
         let unsupported = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The flat return fee is $25. Returns are accepted up to 48 hours before the performance."}"#
         let corrected = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t2"]}},"kind":"answer","reference":"","text":"The flat return fee is $25. Returns are accepted up to 48 hours before the performance."}"#
+        // Exercise the retained planner's existing maximum accepted input-token count.
         let transport = NativeStepQueueFixtureTransport(responses: [
-            try nativeStepEnvelope(contractResponse), try nativeStepEnvelope(unsupported), try nativeStepEnvelope(corrected)])
+            try nativeStepEnvelope(contractResponse), try nativeStepEnvelope(unsupported), try nativeStepEnvelope(corrected)], tokenCount: 3008)
         let planner = try nativeStepPlanner(transport: transport)
         let plan = try await planner.propose(context)
         XCTAssertEqual(plan.kind, .answer)
@@ -660,10 +807,29 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                        try JSONSerialization.data(withJSONObject: try XCTUnwrap(thirdUser["goalContract"]), options: [.sortedKeys]))
         XCTAssertEqual(try JSONSerialization.data(withJSONObject: try XCTUnwrap(secondUser["page"]), options: [.sortedKeys]),
                        try JSONSerialization.data(withJSONObject: try XCTUnwrap(thirdUser["page"]), options: [.sortedKeys]))
-        XCTAssertEqual(thirdUser["rejectedProposal"] as? String, unsupported)
+        var retainedBase = thirdUser
+        retainedBase.removeValue(forKey: "rejectedProposal")
+        retainedBase.removeValue(forKey: "validationFeedback")
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: secondUser, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: retainedBase, options: [.sortedKeys]),
+                       "A correction keeps the entire original goal, contract, page, and browser context")
+        let originalCandidate = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(unsupported.utf8)) as? [String: Any])
+        let retainedCandidate = try XCTUnwrap(thirdUser["rejectedProposal"] as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: retainedCandidate, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: originalCandidate, options: [.sortedKeys]))
+        XCTAssertEqual(retainedCandidate["kind"] as? String, "answer")
+        XCTAssertEqual(retainedCandidate["reference"] as? String, "")
+        XCTAssertEqual(retainedCandidate["text"] as? String,
+                       "The flat return fee is $25. Returns are accepted up to 48 hours before the performance.")
+        let thirdRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        let thirdMessages = try XCTUnwrap(thirdRequest["messages"] as? [[String: String]])
+        let thirdUserText = try XCTUnwrap(thirdMessages.last?["content"])
+        XCTAssertLessThanOrEqual(thirdUserText.utf8.count, 48 * 1024)
         let feedback = try XCTUnwrap(thirdUser["validationFeedback"] as? String)
         XCTAssertTrue(feedback.localizedCaseInsensitiveContains("selected"))
         XCTAssertTrue(feedback.localizedCaseInsensitiveContains("evidence"))
+        XCTAssertTrue(feedback.contains("48"), "Correction feedback should identify the unsupported scalar found by validation")
+        XCTAssertFalse(feedback.contains("25"), "Correction feedback should not label a selected, supported scalar as missing")
         XCTAssertFalse(feedback.localizedCaseInsensitiveContains("oracle"))
     }
 
@@ -783,8 +949,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             bearerToken: "fixture-token-value", modelAlias: modelAlias), transport: transport)
     }
 
-    private func nativeStepEnvelope(_ content: String) throws -> Data {
-        try JSONSerialization.data(withJSONObject: ["model":"fixture-model", "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":content]]]], options: [.sortedKeys])
+    private func nativeStepEnvelope(_ content: String, modelAlias: String = "fixture-model") throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["model":modelAlias, "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":content]]]], options: [.sortedKeys])
     }
 
     private func nativeAssessmentObject(_ state: String = "pending", evidence: String = "") -> [String: Any] {
@@ -4003,20 +4169,26 @@ private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
     let tokenCount: Int
     let cancelAfterCount: Int
     let cancelAfterCompletion: Int
+    let expectedFirstRequest: Data?
     private var responseIndex = 0
     private var counts = 0
     private var completions = 0
     private var requests: [Data] = []
 
     init(responses: [Data], tokenCount: Int = 100, cancelAfterCount: Int = 0,
-         cancelAfterCompletion: Int = 0) {
+         cancelAfterCompletion: Int = 0, expectedFirstRequest: Data? = nil) {
         self.responses = responses; self.tokenCount = tokenCount
         self.cancelAfterCount = cancelAfterCount; self.cancelAfterCompletion = cancelAfterCompletion
+        self.expectedFirstRequest = expectedFirstRequest
     }
 
     func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
         counts += 1
-        requests.append(completionRequest.httpBody ?? Data())
+        let body = completionRequest.httpBody ?? Data()
+        requests.append(body)
+        if counts == 1, let expectedFirstRequest, !body.elementsEqual(expectedFirstRequest) {
+            throw ComputerUseFaraBrowserExecutor.Failure.browserChanged
+        }
         if counts == cancelAfterCount { withUnsafeCurrentTask { $0?.cancel() } }
         return tokenCount
     }

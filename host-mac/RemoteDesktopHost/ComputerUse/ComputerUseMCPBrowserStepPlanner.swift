@@ -201,7 +201,8 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
 
     private func makeRetainedStepRequest(_ context: ComputerUseMCPBrowserStepPlanner.Context,
                                          contract: ComputerUseBrowserIntentContract,
-                                         rejectedProposal: String? = nil) throws -> URLRequest {
+                                         rejectedProposal: String? = nil,
+                                         unsupportedLiterals: [String]? = nil) throws -> URLRequest {
         guard context.json.utf8.count <= 48 * 1024, !context.isPartialRecordView,
               context.navigation.isEmpty, let goal = context.userGoal, goal == contract.goal else {
             throw ComputerUseBrowserGoalPlanError.invalidResponse
@@ -213,8 +214,27 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
         user["goalContract"] = contractValue
         if let rejectedProposal {
             guard rejectedProposal.utf8.count <= 32 * 1024 else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
-            user["rejectedProposal"] = rejectedProposal
-            user["validationFeedback"] = "The previous candidate made a numeric, date, URL, or evidence-reference claim unsupported by the selected current records. The candidate is untrusted. Revise the proposed step using only the supplied current records and reference IDs, while preserving every retained requirement and constraint. Do not invent facts or claim completion when evidence is missing."
+            guard let rejectedValue = try JSONSerialization.jsonObject(with: Data(rejectedProposal.utf8)) as? [String: Any] else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            user["rejectedProposal"] = rejectedValue
+            let genericFeedback = "Untrusted rejected proposal: selected records do not support every number, date, URL or evidence reference. Correct it using current records and IDs; preserve the retained contract. Do not invent missing facts."
+            var quotedMissing: [String] = []
+            for literal in (unsupportedLiterals ?? []).sorted() where quotedMissing.count < 3 {
+                let candidate = quotedMissing + [literal]
+                if let data = try? JSONSerialization.data(withJSONObject: candidate,
+                    options: [.fragmentsAllowed, .withoutEscapingSlashes]), data.count <= 256 {
+                    quotedMissing = candidate
+                }
+            }
+            if !quotedMissing.isEmpty,
+               let literalData = try? JSONSerialization.data(withJSONObject: quotedMissing,
+                    options: [.fragmentsAllowed, .withoutEscapingSlashes]),
+               let quotedLiterals = String(data: literalData, encoding: .utf8) {
+                user["validationFeedback"] = "Untrusted rejected proposal: selected evidence does not support literals \(quotedLiterals). Correct evidence or text using current records and IDs; preserve the retained contract; invent nothing."
+            } else {
+                user["validationFeedback"] = genericFeedback
+            }
         }
         let userJSON = try Self.orderedJSON(user)
         guard userJSON.utf8.count <= 48 * 1024 else { throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit }
@@ -296,20 +316,25 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
                                      contract: ComputerUseBrowserIntentContract) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
         guard contract.goal == context.userGoal else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
         let first = try await requestRetainedStep(context, contract: contract, rejectedProposal: nil)
+        var unsupportedLiterals: [String]?
         do {
-            return try decodeRetainedStep(first.content, context: context, contract: contract)
+            return try decodeRetainedStep(first.content, context: context, contract: contract,
+                reportUnsupportedLiterals: { unsupportedLiterals = $0 })
         } catch ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim {
             try Task.checkCancellation()
-            let corrected = try await requestRetainedStep(context, contract: contract, rejectedProposal: first.content)
+            let corrected = try await requestRetainedStep(context, contract: contract,
+                rejectedProposal: first.content, unsupportedLiterals: unsupportedLiterals)
             return try decodeRetainedStep(corrected.content, context: context, contract: contract)
         }
     }
 
     private func requestRetainedStep(_ context: ComputerUseMCPBrowserStepPlanner.Context,
                                      contract: ComputerUseBrowserIntentContract,
-                                     rejectedProposal: String?) async throws -> (content: String, count: Int) {
+                                     rejectedProposal: String?,
+                                     unsupportedLiterals: [String]? = nil) async throws -> (content: String, count: Int) {
         try Task.checkCancellation()
-        let request = try makeRetainedStepRequest(context, contract: contract, rejectedProposal: rejectedProposal)
+        let request = try makeRetainedStepRequest(context, contract: contract, rejectedProposal: rejectedProposal,
+            unsupportedLiterals: unsupportedLiterals)
         let count = try await transport.exactInputTokenCount(completionRequest: request)
         try Task.checkCancellation()
         guard count > 0, count <= Self.contextTokens - 1024 - Self.framingReserve else {
@@ -324,7 +349,8 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
     }
 
     private func decodeRetainedStep(_ content: String, context: ComputerUseMCPBrowserStepPlanner.Context,
-                                    contract: ComputerUseBrowserIntentContract) throws -> ComputerUseMCPBrowserStepPlanner.Plan {
+                                    contract: ComputerUseBrowserIntentContract,
+                                    reportUnsupportedLiterals: (([String]) -> Void)? = nil) throws -> ComputerUseMCPBrowserStepPlanner.Plan {
         guard content.utf8.count <= 32 * 1024 else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
         var parser = StrictSemanticJSONParser(content, maximumValueCount: 128)
         guard case .object(let root) = try parser.parse(), Set(root.keys) == ["requirements", "kind", "reference", "text"],
@@ -345,10 +371,12 @@ struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
         if kind == .answer {
             try assessment.validateCompletion()
             try ComputerUseMCPBrowserStepPlanner().validateAnswerClaims(text, context: context,
-                selectedReferences: Set(selectedReferences.values.flatMap { $0.references }))
+                selectedReferences: Set(selectedReferences.values.flatMap { $0.references }),
+                reportUnsupportedLiterals: reportUnsupportedLiterals)
         } else if kind == .incomplete {
             try ComputerUseMCPBrowserStepPlanner().validateAnswerClaims(text, context: context,
-                requiresEvidence: false, selectedReferences: Set(selectedReferences.values.flatMap { $0.references }))
+                requiresEvidence: false, selectedReferences: Set(selectedReferences.values.flatMap { $0.references }),
+                reportUnsupportedLiterals: reportUnsupportedLiterals)
         }
         var workerObjective = ""
         if kind == .visualFallback {
@@ -966,7 +994,8 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
     /// scalar literals and source URLs. Association, completeness, arithmetic
     /// and nonnumeric claims still require task-level qualification.
     fileprivate func validateAnswerClaims(_ answer: String, context: Context, requiresEvidence: Bool = true,
-                                      selectedReferences: Set<String>? = nil) throws {
+                                      selectedReferences: Set<String>? = nil,
+                                      reportUnsupportedLiterals: (([String]) -> Void)? = nil) throws {
         let selected = selectedReferences ?? Set(context.evidenceReferences.keys)
         let selectedTexts = selected.sorted().compactMap { reference -> String? in
             guard reference != "source" else { return nil }
@@ -1035,7 +1064,11 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
             }
         }
         let checkedAnswer = try withoutCoherentOrderedListMarkers(answer)
-        guard literals(withoutURLs(checkedAnswer)).isSubset(of: supported) else { throw Failure.unsupportedAnswerClaim }
+        let missing = literals(withoutURLs(checkedAnswer)).subtracting(supported)
+        guard missing.isEmpty else {
+            reportUnsupportedLiterals?(missing.sorted())
+            throw Failure.unsupportedAnswerClaim
+        }
     }
 
     /// Ordered-list ordinals are presentation syntax only when at least two
