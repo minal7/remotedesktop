@@ -2,6 +2,18 @@
 
 Status: the first managed native-browser path is implemented, compiled and tested, with scoped information-case acceptance. General model and production qualification remain open. Browser work is the first implementation milestone; native macOS work should reuse the same delegation/result contract later. Multiple local models are allowed initially, with one active inference operation at a time. Consolidation follows working workflows.
 
+## September 24 checkpoint
+
+| Checkpoint | Result | Acceptance boundary |
+| --- | --- | --- |
+| Initial missing-user-input handoff | Implemented and compiled; five focused guards pass. Actual city03 host run publishes the question “Which city are you looking for public transit youth fare discount information in?” | Accepted only for publishing the missing-city question. No answer or Resume completion was tested. |
+| Direct-URL BART regression | Passes with the five requested facts and official source | Named direct-URL regression only. |
+| URL-free discovery | Fails with `browserChanged` after the initial search, before the first native catalogue | The earlier redundant-approval issue remains untested and unfixed. |
+| Native-function diagnostics | Qwen and Agents-A1 comparisons are rejected overall; neither interface candidate is promoted | Scoped proposals do not establish host execution or task completion. |
+| Next repair | Diagnose the initial search-to-first-native-observation lifecycle from the current discovery failure | Keep MCP/native-first routing, one inference worker and the 12 GB whole-Mac target; Jev remains parked. |
+
+The source-bound results are archived in the [initial planner checkpoint](native-browser-initial-planner-results-sept24.json) and [native-function comparison](native-browser-function-interface-results-sept24.json). Earlier dated failures below remain part of the history and are not superseded by this checkpoint.
+
 ## Primary-source basis
 
 1. [OpenAI Agents SDK: agent orchestration](https://openai.github.io/openai-agents-python/multi_agent/) describes a manager that retains the conversation and final answer while calling specialists as tools. This fits bounded delegation better than handing away ownership of the conversation.

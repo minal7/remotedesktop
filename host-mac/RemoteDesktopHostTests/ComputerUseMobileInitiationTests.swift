@@ -1646,10 +1646,93 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(try ComputerUseMCPBrowserStepPlanner().decode(proposal, context: context).kind, .answer)
     }
 
+    func testNativeBrowserInitialProposalUsesOneGoalOnlyNativeRequest() async throws {
+        let original = "Find the youth fare discount for my city."
+        let question = "Which city should I check?"
+        let accepted = "Check the city I specify; do not guess from the page."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering(question, with: accepted)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), clarifiedGoal: goal)
+        let plannerFactory = ComputerUseMCPBrowserStepPlanner()
+        let context = try plannerFactory.context(input, page: nil, wholePage: true)
+        let ask = #"{"kind":"askUser","reference":"","text":"Which city do you mean?"}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(ask)])
+        let planner = try nativeStepPlanner(transport: transport)
+        let plan = try await planner.propose(context)
+        XCTAssertEqual(plan.kind, .askUser)
+        XCTAssertEqual(plan.text, "Which city do you mean?")
+        XCTAssertNil(plan.assessment)
+        XCTAssertNil(plan.retainedContract)
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.counts, 1)
+        XCTAssertEqual(calls.completions, 1)
+        let requestData = try XCTUnwrap(calls.requests.first)
+        let user = try nativeStepUserObject(requestData)
+        let expectedUser = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(context.json.utf8)) as? [String: Any])
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: user, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: expectedUser, options: [.sortedKeys]))
+        XCTAssertEqual(user["goal"] as? String, original)
+        XCTAssertEqual(user["clarifications"] as? [[String: String]],
+                       [["question": question, "answer": accepted]])
+        XCTAssertNil(user["page"])
+        XCTAssertNil(user["availableRecordViews"])
+        XCTAssertNil(user["goalContract"])
+
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
+        let responseFormat = try XCTUnwrap(request["response_format"] as? [String: Any])
+        let jsonSchema = try XCTUnwrap(responseFormat["json_schema"] as? [String: Any])
+        XCTAssertEqual(jsonSchema["name"] as? String, "browser_initial_step")
+        XCTAssertEqual(request["max_tokens"] as? Int, 1024)
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        let schemaProperties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        XCTAssertEqual(Set(schemaProperties.keys), Set(["kind", "reference", "text"]))
+        let textSchema = try XCTUnwrap(schemaProperties["text"] as? [String: Any])
+        XCTAssertNil(textSchema["maxLength"])
+
+        let unsupported = NativeStepQueueFixtureTransport(
+            responses: [try nativeStepEnvelope(#"{"kind":"answer","reference":"","text":"The discount is available."}"#)])
+        let malformedPlanner = try nativeStepPlanner(transport: unsupported)
+        do {
+            _ = try await malformedPlanner.propose(context)
+            XCTFail("The initial page-free planner cannot claim an answer")
+        } catch {
+            XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unknownProposal)
+        }
+        let rejected = await unsupported.snapshot()
+        XCTAssertEqual(rejected.counts, 1)
+        XCTAssertEqual(rejected.completions, 1)
+    }
+
+    func testNativeBrowserInitialObservationRejectsPageOnlyAndMalformedProposals() throws {
+        let original = "Find the youth fare discount for my city."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering(
+            "Which official source?", with: "Use https://example.org/transit.")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(
+            .init(goal: original, screenshotPNG: Data(), clarifiedGoal: goal), page: nil, wholePage: true)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let invalid: [(String, MCPJSONValue)] = [
+            ("answer", .object(["kind": .string("answer"), "reference": .string(""), "text": .string("Completed.")])),
+            ("visualFallback", .object(["kind": .string("visualFallback"), "reference": .string(""), "text": .string("Inspect the page.")])),
+            ("wait", .object(["kind": .string("wait"), "reference": .string(""), "text": .string("")])),
+            ("inspectRecords", .object(["kind": .string("inspectRecords"), "reference": .string("records-next"), "text": .string("")])),
+            ("unknown URL", .object(["kind": .string("openLink"), "reference": .string("user-url-2"), "text": .string("")])),
+            ("nonempty link text", .object(["kind": .string("openLink"), "reference": .string("user-url-1"), "text": .string("extra query")])),
+            ("empty question", .object(["kind": .string("askUser"), "reference": .string(""), "text": .string(" \n ")])),
+            ("assistant assessment", .object(["kind": .string("askUser"), "reference": .string(""), "text": .string("Which city?"),
+                "assessment": assessmentValue([("Find the fare", "information", "observed", "text:t1")])]))
+        ]
+        for (name, proposal) in invalid {
+            XCTAssertThrowsError(try planner.decode(proposal, context: context), name)
+        }
+    }
+
     func testBrowserAssessmentSchemaRequiresObservationBeforeObservedEvidence() throws {
         let planner = ComputerUseMCPBrowserStepPlanner()
-        let initialInput = ComputerUseFaraModel.Input(goal: "Open https://example.org/policy and report the fee.", screenshotPNG: Data())
-        let initial = try planner.context(initialInput, page: nil, wholePage: true)
+        let original = "Open https://example.org/policy and report the fee."
+        let question = "Which official source should I use?"
+        let answer = "Use https://example.org/policy as the official source."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering(question, with: answer)
+        let initial = try planner.context(
+            .init(goal: original, screenshotPNG: Data(), clarifiedGoal: goal), page: nil, wholePage: true)
         let loaded = try nativeStepContext()
 
         func object(_ value: MCPJSONValue?) throws -> [String: MCPJSONValue] {
@@ -1660,23 +1743,48 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             guard case .array(let values)? = value else { throw AppleFoundationMCPPlannerError.unknownProposal }
             return values
         }
-        func requirementSchema(_ context: ComputerUseMCPBrowserStepPlanner.Context) throws -> [String: MCPJSONValue] {
-            let rootProperties = try object(try object(context.schema)["properties"])
-            let assessment = try object(rootProperties["assessment"])
-            let assessmentProperties = try object(assessment["properties"])
-            let requirements = try object(assessmentProperties["requirements"])
-            let item = try object(requirements["items"])
-            return try object(item["properties"])
+
+        XCTAssertTrue(initial.isInitialObservation)
+        XCTAssertTrue(initial.navigation.isEmpty)
+        XCTAssertNil(initial.retainedContract)
+        XCTAssertEqual(initial.userURLs["user-url-1"], URL(string: "https://example.org/policy"))
+        let initialRoot = try object(initial.schema)
+        let initialProperties = try object(initialRoot["properties"])
+        XCTAssertEqual(Set(initialProperties.keys), Set(["kind", "reference", "text"]))
+        let initialKinds = try array(try object(initialProperties["kind"])["enum"])
+        XCTAssertEqual(Set(initialKinds.compactMap { if case .string(let value) = $0 { return value }; return nil }),
+                       Set(["search", "openLink", "askUser", "incomplete"]))
+        let initialReferences = try array(try object(initialProperties["reference"])["enum"])
+        XCTAssertEqual(Set(initialReferences.compactMap { if case .string(let value) = $0 { return value }; return nil }),
+                       Set(["", "user-url-1"]))
+        let initialUser = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(initial.json.utf8)) as? [String: Any])
+        XCTAssertEqual(initialUser["goal"] as? String, original)
+        XCTAssertNil(initialUser["page"])
+        XCTAssertNil(initialUser["availableRecordViews"])
+        XCTAssertEqual(try XCTUnwrap(initialUser["clarifications"] as? [[String: String]]),
+                       [["question": question, "answer": answer]])
+
+        for (kind, reference, text) in [("askUser", "", "Which city?"),
+                                         ("search", "", "public transit fare"),
+                                         ("openLink", "user-url-1", ""),
+                                         ("incomplete", "", "The source is unavailable.")] {
+            let proposal = MCPJSONValue.object(["kind": .string(kind), "reference": .string(reference), "text": .string(text)])
+            let plan = try planner.decode(proposal, context: initial)
+            XCTAssertEqual(plan.kind.rawValue, kind)
+            XCTAssertEqual(plan.reference, reference)
+            XCTAssertEqual(plan.text, text)
+            XCTAssertNil(plan.assessment)
+            XCTAssertNil(plan.retainedContract)
         }
-        let initialFields = try requirementSchema(initial)
-        let initialStates = try array(try object(initialFields["state"])["enum"])
-        XCTAssertEqual(initialStates, [.string("pending"), .string("needsUser")])
-        XCTAssertEqual(try array(try object(initialFields["evidence"])["enum"]), [.string("")])
-        let loadedFields = try requirementSchema(loaded)
-        let loadedStates = try array(try object(loadedFields["state"])["enum"])
+
+        XCTAssertFalse(loaded.isInitialObservation)
+        let loadedRoot = try object(loaded.schema)
+        let loadedProperties = try object(loadedRoot["properties"])
+        let loadedFields = try object(try object(try object(loadedProperties["assessment"])["properties"])["requirements"])
+        let itemProperties = try object(try object(loadedFields["items"])["properties"])
+        let loadedStates = try array(try object(itemProperties["state"])["enum"])
         XCTAssertTrue(loadedStates.contains(.string("observed")))
-        let loadedEvidence = try object(loadedFields["evidence"])
-        let choices = try array(loadedEvidence["enum"])
+        let choices = try array(try object(itemProperties["evidence"])["enum"])
         XCTAssertTrue(choices.contains(.string("source")))
         XCTAssertTrue(choices.contains(.string("text:t1")))
         XCTAssertTrue(choices.contains(.string("link:l1")))
@@ -1685,7 +1793,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "text": .string(""), "assessment": assessmentValue([("Read this source", "information", "observed",
                 "https://example.org/policy")])])
         XCTAssertThrowsError(try planner.decode(fabricated, context: initial)) {
-            XCTAssertEqual($0 as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim)
+            XCTAssertEqual($0 as? AppleFoundationMCPPlannerError, .unknownProposal)
         }
     }
 
@@ -1769,6 +1877,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: "search", useNativeText: true)
     }
 
+    func testOptInMCPBrowserHostAsksCityBeforePublicSearchWithManagedNativeText() async throws {
+        try await runMCPBrowserHostWithoutInstalledModelPackage(
+            publicCase: "missing-city", useNativeText: true, expectedInitialClarification: true)
+    }
+
     func testBrowserAssessmentRequiresGroundedObservedInformationForAnswer() throws {
         let planner = ComputerUseMCPBrowserStepPlanner()
         let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]),
@@ -1837,8 +1950,9 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(web.url, url)
     }
 
-    private func runMCPBrowserHostWithoutInstalledModelPackage(publicCase: String?, useNativeText: Bool = false) async throws {
-        var publicGoal: String?, expectedPatterns: [String] = [], expectedHost: String?
+    private func runMCPBrowserHostWithoutInstalledModelPackage(publicCase: String?, useNativeText: Bool = false,
+                                                               expectedInitialClarification: Bool = false) async throws {
+        var publicGoal: String?, expectedPatterns: [String] = [], questionPatterns: [String] = [], expectedHost: String?
         if let publicCase {
             guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_PUBLIC"] == "1" else {
                 throw XCTSkip("Opt-in: frozen real public task through the default host, without model packages")
@@ -1847,9 +1961,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: manifestPath))) as? [String: Any])
             let task = try XCTUnwrap(manifest[publicCase] as? [String: Any])
             publicGoal = try XCTUnwrap(task["goal"] as? String)
-            expectedPatterns = try XCTUnwrap(task["expectedPatterns"] as? [String])
-            expectedHost = try XCTUnwrap(task["expectedHost"] as? String)
-            XCTAssertFalse(expectedPatterns.isEmpty)
+            if expectedInitialClarification {
+                questionPatterns = try XCTUnwrap(task["questionPatterns"] as? [String])
+                XCTAssertFalse(questionPatterns.isEmpty)
+            } else {
+                expectedPatterns = try XCTUnwrap(task["expectedPatterns"] as? [String])
+                expectedHost = try XCTUnwrap(task["expectedHost"] as? String)
+                XCTAssertFalse(expectedPatterns.isEmpty)
+            }
         }
         guard ProcessInfo.processInfo.environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
             throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
@@ -1884,6 +2003,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             inspectExchange = nil
         }
         var browser: ComputerUseOwnedBrowser?
+        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json"))
         let manager = HostComputerUseManager(injector: InputInjector(), installer: visual,
             nativeTextInstaller: native,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
@@ -1901,7 +2021,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     try JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
                         .write(to: output.appendingPathComponent("catalogue-\(snapshot.id).json"), options: .atomic)
                 }, inspectExchange: inspectExchange),
-            taskLedger: ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json")),
+            taskLedger: ledger,
             browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
                 return .init(browser: owned, journalDirectory: output.appendingPathComponent("browser"))
@@ -1932,36 +2052,73 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         let finalURL = browser?.currentDocument(taskID: prompt.id)?.committedURL
+        let structuredQuestion = expectedInitialClarification ? ledger.terminalClarificationText(taskID: prompt.id) : nil
+        let clarificationReference = terminal?.clarification
         await manager.shutdown()
+        if expectedInitialClarification { browser?.close() }
         await modelRuntime.shutdown()
         monitor.cancel(); try await monitor.value
         let visualInstalls = await visual.installCallCount(), nativeInstalls = await native.installCallCount()
         let launchAttempts = await launchGuard.calls
-        let report: [String: Any] = ["goal": prompt.body, "seconds": Date().timeIntervalSince(started),
-            "terminal": String(reflecting: terminal), "finalURL": finalURL?.absoluteString as Any? ?? NSNull(),
+        let initialPlannerCalls = plannerTrace.items.filter { $0.contains("Native text initial step:") }.count
+        let terminalSummary: Any = expectedInitialClarification
+            ? ["outcome": terminal?.outcome?.rawValue ?? "missing",
+               "clarificationPresent": clarificationReference != nil,
+               "clarificationTaskIDMatchesPrompt": clarificationReference?.taskID == prompt.id]
+            : String(reflecting: terminal)
+        var report: [String: Any] = ["goal": prompt.body, "seconds": Date().timeIntervalSince(started),
+            "terminal": terminalSummary, "finalURL": finalURL?.absoluteString as Any? ?? NSNull(),
             "requestedPaths": server.requestedPaths, "modelLaunchAttempts": launchAttempts,
             "visualInstalls": visualInstalls, "nativeInstalls": nativeInstalls,
             "maximumObservedWorkers": maximumWorkers, "workerSamples": samples,
             "plannerTrace": plannerTrace.items,
             "usesNativeTextModel": useNativeText,
+            "expectedInitialClarification": expectedInitialClarification,
+            "initialNativePlannerCalls": initialPlannerCalls,
             "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; isolated transport, ledger and browser; " + (useNativeText ? "verified installed native text model and shared managed runtime; missing visual model receipt" : "missing model receipts and rejecting model launcher")]
+        if expectedInitialClarification {
+            report["clarification"] = ["present": clarificationReference != nil,
+                "taskIDMatchesPrompt": clarificationReference?.taskID == prompt.id,
+                "question": structuredQuestion as Any? ?? NSNull()]
+        }
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
-        XCTAssertEqual(terminal?.outcome, .taskCompleted)
-        if publicGoal != nil {
+        if expectedInitialClarification {
+            XCTAssertEqual(terminal?.outcome, .userInterventionRequired)
+            let clarification = try XCTUnwrap(clarificationReference)
+            XCTAssertEqual(clarification.taskID, prompt.id)
+            let question = try XCTUnwrap(structuredQuestion)
+            for pattern in questionPatterns {
+                XCTAssertNotNil(question.range(of: pattern, options: .regularExpression), "Question should request the missing city: \(pattern)")
+            }
+            XCTAssertFalse(question.range(of: #"(?i)(permission|allow).{0,40}(navigate|open|click|search)"#, options: .regularExpression) != nil,
+                "Clarify the missing city rather than asking permission to navigate")
+            XCTAssertNil(finalURL)
+            XCTAssertNil(browser?.currentDocument(taskID: prompt.id))
+            XCTAssertTrue(server.requestedPaths.isEmpty)
+            let catalogueFiles = try FileManager.default.contentsOfDirectory(at: output, includingPropertiesForKeys: nil)
+                .filter { $0.lastPathComponent.hasPrefix("catalogue-") }
+            XCTAssertTrue(catalogueFiles.isEmpty, "The initial clarification must precede page catalogue capture")
+            XCTAssertEqual(initialPlannerCalls, 1, "Initial clarification should use one local native text planner proposal")
+            XCTAssertFalse(plannerTrace.items.contains { $0.contains("Native text step:") },
+                "A missing-city clarification must not start a native page step")
+        } else if publicGoal != nil {
+            XCTAssertEqual(terminal?.outcome, .taskCompleted)
             for pattern in expectedPatterns {
                 XCTAssertNotNil(terminal?.text.range(of: pattern, options: .regularExpression), "Missing expected fact: \(pattern)")
             }
             XCTAssertEqual(finalURL?.host, expectedHost)
             XCTAssertTrue(server.requestedPaths.isEmpty)
         } else {
+            XCTAssertEqual(terminal?.outcome, .taskCompleted)
             XCTAssertTrue(terminal?.text.contains("21:45") == true || terminal?.text.range(of: #"(?i)9:45\s*p\.?m"#, options: .regularExpression) != nil)
             XCTAssertNotNil(terminal?.text.replacingOccurrences(of: "*", with: "").range(of: #"(?i)platform\s*[:#-]?\s*6\b"#, options: .regularExpression))
             XCTAssertEqual(finalURL, base.appendingPathComponent("details"))
             XCTAssertEqual(server.count("/index"), 1); XCTAssertEqual(server.count("/details"), 1)
         }
         XCTAssertEqual(visualInstalls + nativeInstalls + launchAttempts, 0)
-        XCTAssertGreaterThan(samples, 0); XCTAssertEqual(maximumWorkers, useNativeText ? 1 : 0)
+        XCTAssertGreaterThan(samples, 0)
+        XCTAssertEqual(maximumWorkers, useNativeText ? 1 : 0)
         XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
     }
 
