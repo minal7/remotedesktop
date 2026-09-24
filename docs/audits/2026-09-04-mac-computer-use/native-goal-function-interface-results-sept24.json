@@ -2,7 +2,7 @@
   "name": "native-goal-function-interface-results-sept24",
   "status": "rejected-interface-experiment",
   "date": "2026-09-24",
-  "result": "The strict native function made structural schema markers visible in the rendered prompt, as expected, but did not improve goal interpretation. Both interfaces misclassified the explicit supplied-URL visit as unsupported. The function interface also misclassified the Apollo 11 search-and-report information outcome as an unsupported action. Both fail the frozen external oracle. Do not run negative follow-ups 03/04; skip them because the paired functional comparison failed.",
+  "result": "The JSON-schema/native-function interface change failed with Qwen and with the smaller LFM model. Both Qwen outputs marked the explicit supplied URL unsupported; its function output also misclassified search/report as an unsupported action. LFM JSON output likewise marked opening the URL unsupported, moved the search/report request into constraints instead of retaining a valid information requirement, and invented a “report only the heading” constraint. LFM native-function arguments were malformed against the production schema and Swift decoding contract: the URL action omitted expectedEffect, and the information object omitted instruction/kind. Both models fail the frozen external oracle; no Swift decoder replay or host execution was attempted. Negative purchase/edit follow-ups remain skipped.",
   "scope": {
     "offSourceOnly": true,
     "appOrTrackedSourceChanged": false,
@@ -1609,5 +1609,360 @@
     "Structural marker presence shows template prompt visibility, not model comprehension.",
     "No semantic prompt alternatives, retries, host actions, or application acceptance were tested.",
     "A future interface change needs a new hypothesis and new paired evaluation; this result rejects this interface change as a fix for the observed unsupported-URL classification."
-  ]
+  ],
+  "modelComparisonLFM": {
+    "status": "completed-failed-semantic-acceptance",
+    "model": {
+      "name": "Liquid LFM2.5-2.6B Q6_K",
+      "path": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/lfm-model-q6/LFM2.5-2.6B-Q6_K.gguf",
+      "bytes": 2221615104,
+      "sha256": "2e74b1a0979a4a1936a408445147d103b8f15b2e2ec31c65fa0166f9069c250d",
+      "alias": "native-form-planner-v2",
+      "runtimePath": "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server",
+      "runtimeSHA256": "d61fc3653600f0fb0c3933e7478cf1671b0f862915dc362a90821ce4c166538a",
+      "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+      "embeddedTemplate": "LFM model embedded Python-style template via /apply-template; no external template supplied"
+    },
+    "sourcePin": {
+      "sourceFile": ".build/repair-verification/lfm-native-planner-probe/source-pins.json",
+      "sha256": "c076c4739bd0fcda32176737445eaab8906fe6ba4c911e823156fb0628fb023a",
+      "model": {
+        "repository": "LiquidAI/LFM2.5-2.6B",
+        "revision": "654f9463ce32b05d0429d76fe1f580b27d4c1ac0",
+        "quantRepository": "LiquidAI/LFM2.5-2.6B-GGUF",
+        "quantRevision": "84022ce711b28455e8c4fc364ce68c00cf995875",
+        "file": "LFM2.5-2.6B-Q6_K.gguf",
+        "bytes": 2221615104,
+        "sha256": "2e74b1a0979a4a1936a408445147d103b8f15b2e2ec31c65fa0166f9069c250d",
+        "artifactURL": "https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/84022ce711b28455e8c4fc364ce68c00cf995875/LFM2.5-2.6B-Q6_K.gguf",
+        "license": "LFM Open License v1.0 (custom; not Apache-2.0)",
+        "licenseLimitation": "Commercial use is subject to the license's annual revenue threshold of USD 10 million; see exact license before distribution.",
+        "licenseURL": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/blob/654f9463ce32b05d0429d76fe1f580b27d4c1ac0/LICENSE",
+        "templateURL": "https://huggingface.co/LiquidAI/LFM2.5-2.6B/blob/654f9463ce32b05d0429d76fe1f580b27d4c1ac0/chat_template.jinja"
+      }
+    },
+    "comparisonControls": {
+      "requestBodiesIdenticalToQwenPair": true,
+      "requestHashes": [
+        "7459a333141608386b3997fce6032571f8189572c77e28300d30f9f477f3d851",
+        "be7990be01058161a9b6b94dea2a4a92c25eb202f37e48df733140c5037dc743"
+      ],
+      "samplerAndLimitsSameAsQwenPair": true,
+      "oracleSuppliedToModel": false,
+      "functionDescription": "Return the goal interpretation.",
+      "noPromptRewrite": true
+    },
+    "commands": {
+      "recordFile": "executed-command-lfm-paired.json",
+      "recordSHA256": "a8d242331f67baeba29114b9f8639cab5097256bd2accad44afdc8357a9e0eb5",
+      "record": {
+        "executionState": "finished",
+        "args": [
+          "python3",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-function-interface-sept24/run-lfm-goal-interface-6144.py",
+          "--requests",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-function-interface-sept24/01-current-json-schema.json",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-function-interface-sept24/02-native-function.json",
+          "--output",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-function-interface-sept24/run-lfm-paired",
+          "--run",
+          "--model",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/lfm-model-q6/LFM2.5-2.6B-Q6_K.gguf"
+        ],
+        "sourceFreezeSHA256": "bbf57a418264677fe163a7e802471f5064465573288cdb2eb25ee53b71ab578e",
+        "manifestSHA256": "bc76504a54971ab3332ccd77f6115b60d7e62852c5d347dab199b28f1016f087",
+        "restoredModelSHA256": "2e74b1a0979a4a1936a408445147d103b8f15b2e2ec31c65fa0166f9069c250d",
+        "restoredModelBytes": 2221615104,
+        "all17SourceHashesMatchBefore": true,
+        "headBefore": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+        "cleanBefore": true,
+        "exitCode": 0,
+        "all17SourceHashesMatchAfter": true,
+        "headAfter": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+        "cleanAfter": true
+      },
+      "launchArguments": [
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server",
+        "--model",
+        "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/lfm-model-q6/LFM2.5-2.6B-Q6_K.gguf",
+        "--alias",
+        "native-form-planner-v2",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "57913",
+        "--api-key-file",
+        "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-function-interface-sept24/run-lfm-paired/temporary-api-key",
+        "--offline",
+        "--no-ui",
+        "--no-mmproj",
+        "--log-disable",
+        "--parallel",
+        "1",
+        "--ctx-size",
+        "6144",
+        "--cache-ram",
+        "0",
+        "--threads",
+        "4",
+        "--threads-batch",
+        "4",
+        "--poll",
+        "0",
+        "--poll-batch",
+        "0",
+        "--n-gpu-layers",
+        "99",
+        "--jinja",
+        "--reasoning",
+        "on",
+        "--reasoning-budget",
+        "512"
+      ]
+    },
+    "sourceFreeze": {
+      "file": "lfm-source-freeze.json",
+      "sha256": "bbf57a418264677fe163a7e802471f5064465573288cdb2eb25ee53b71ab578e",
+      "head": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+      "cleanBeforeAndAfter": true,
+      "sameHeadBeforeAndAfter": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+      "trackedSourceCount": 17,
+      "all17TrackedSourceHashesMatchedBeforeAndAfter": true,
+      "exactFreeze": {
+        "head": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+        "workingTreeClean": true,
+        "sourceSHA256": {
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "654cb6453c668e29b8eec6bfb6943d7cd0808e2b463730958856239edefd4d4f",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "5dfb23de8bf7cfa82aa072d630768e92cf0d63f179c928a30d84654d42dc087e",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "1064e588595f1e0e052e595cb7cd77b4773f330d43904b75b8b6955a8a467fb1",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "e6b442932ed6699da50ba71d3a528f96c5687b2dece0dfa0f022d1182cc52ce7",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+          "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+          "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+          "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "02a49485e2fa02008b716b6a0e3af30363402f86b4a6174054070861718b46eb",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "8f0a406b1f3eacebedd3de3a296abcaf20c112ad157226200d69ea47d515d623",
+          "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+          "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+        },
+        "same17AppAndTestSourcesAsManagedE2E03": true
+      }
+    },
+    "preflight": {
+      "structuralSchemaMarkerPresence": {
+        "request-01": {
+          "oneOf": false,
+          "additionalProperties": false,
+          "maxItems": false,
+          "interpretGoal": false
+        },
+        "request-02": {
+          "oneOf": true,
+          "additionalProperties": true,
+          "maxItems": true,
+          "interpretGoal": true
+        }
+      },
+      "tokenCounts": {
+        "request-01-preflight": 305,
+        "request-01-usage": 306,
+        "request-02-preflight": 645,
+        "request-02-usage": 646
+      },
+      "tokenCountNote": "Preflight and completion usage differ by one token for each request (305/306 and 645/646); both measurements are retained separately."
+    },
+    "results": {
+      "request01JsonSchema": {
+        "finishReason": "stop",
+        "seconds": 2.5588799590041162,
+        "structuredOutput": {
+          "objective": "Open http://127.0.0.1:63833/index, search for Apollo 11, and report the heading from the resulting page",
+          "constraints": [
+            "Use the Search field on the opened page to look up Apollo 11",
+            "Report only the heading from the resulting page"
+          ],
+          "requirements": [
+            {
+              "instruction": "Open the supplied URL http://127.0.0.1:63833/index",
+              "kind": "action",
+              "expectedEffect": {
+                "type": "unsupported"
+              }
+            }
+          ]
+        },
+        "oracle": "FAIL: explicit URL visit is unsupported; search/report are placed only in invented constraints, without a retained information requirement; “report only the heading” is invented."
+      },
+      "request02NativeFunction": {
+        "finishReason": "tool_calls",
+        "seconds": 2.5867830839997623,
+        "safeParsedArguments": {
+          "objective": "Open http://127.0.0.1:63833/index and search for Apollo 11, then report the heading from the resulting page",
+          "constraints": [],
+          "requirements": [
+            {
+              "instruction": "Open the provided URL and navigate to its Search field to look up Apollo 11",
+              "kind": "action"
+            },
+            {
+              "information": "Report the heading from the resulting page after searching for Apollo 11"
+            }
+          ]
+        },
+        "codeReview": "Invalid against the production schema and Swift decoding contract: first requirement lacks expectedEffect; second object lacks instruction and kind. No Swift decoder replay was run.",
+        "oracle": "FAIL: function output does not provide a valid expectedEffect for the explicit URL visit; arguments are structurally malformed against the production schema."
+      },
+      "safeResponseReviews": [
+        {
+          "file": "request-01-visible-response-review.json",
+          "sha256": "9003b391b7d546fb5c7f796cda4180717fb537f7834cda6e44a37d84690ec321",
+          "sanitizedResponse": {
+            "model": "native-form-planner-v2",
+            "responseErrorPresent": false,
+            "usage": {
+              "completion_tokens": 212,
+              "prompt_tokens": 306,
+              "total_tokens": 518,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 306,
+              "prompt_ms": 322.552,
+              "prompt_per_token_ms": 1.0540915032679739,
+              "prompt_per_second": 948.6842431607926,
+              "predicted_n": 212,
+              "predicted_ms": 2233.728,
+              "predicted_per_token_ms": 10.53645283018868,
+              "predicted_per_second": 94.90860122629076
+            },
+            "choices": [
+              {
+                "finish_reason": "stop",
+                "message": {
+                  "role": "assistant",
+                  "structuredContent": {
+                    "objective": "Open http://127.0.0.1:63833/index, search for Apollo 11, and report the heading from the resulting page",
+                    "constraints": [
+                      "Use the Search field on the opened page to look up Apollo 11",
+                      "Report only the heading from the resulting page"
+                    ],
+                    "requirements": [
+                      {
+                        "instruction": "Open the supplied URL http://127.0.0.1:63833/index",
+                        "kind": "action",
+                        "expectedEffect": {
+                          "type": "unsupported"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "file": "request-02-visible-response-review.json",
+          "sha256": "df0da885c677bc7ca74a9f056a9fe48915c099f2fb4d7b796b684d2c3aea73c8",
+          "sanitizedResponse": {
+            "model": "native-form-planner-v2",
+            "responseErrorPresent": false,
+            "usage": {
+              "completion_tokens": 208,
+              "prompt_tokens": 646,
+              "total_tokens": 854,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            },
+            "timings": {
+              "cache_n": 0,
+              "prompt_n": 646,
+              "prompt_ms": 527.85,
+              "prompt_per_token_ms": 0.8171052631578948,
+              "prompt_per_second": 1223.8325281803543,
+              "predicted_n": 208,
+              "predicted_ms": 2054.393,
+              "predicted_per_token_ms": 9.876889423076923,
+              "predicted_per_second": 101.24645089814851
+            },
+            "choices": [
+              {
+                "finish_reason": "tool_calls",
+                "message": {
+                  "role": "assistant",
+                  "contentUTF8Bytes": 0,
+                  "toolCalls": [
+                    {
+                      "name": "interpretGoal",
+                      "structuredArguments": {
+                        "objective": "Open http://127.0.0.1:63833/index and search for Apollo 11, then report the heading from the resulting page",
+                        "constraints": [],
+                        "requirements": [
+                          {
+                            "instruction": "Open the provided URL and navigate to its Search field to look up Apollo 11",
+                            "kind": "action"
+                          },
+                          {
+                            "information": "Report the heading from the resulting page after searching for Apollo 11"
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "allInputsFit": true
+    },
+    "resourceResults": {
+      "workerWallSeconds": 5.9391743339947425,
+      "workerMemorySamples": 51,
+      "peakSampledProcessMemoryBytes": 2471526400,
+      "peakNamedWorkerCount": 1,
+      "workerExited": true,
+      "exitCode": 0,
+      "temporaryCredentialRemoved": true,
+      "unauthenticatedRequestRejected": true
+    },
+    "sourceSafety": {
+      "noAppSourceChanged": true,
+      "all17TrackedSourceHashesMatchBeforeAfter": true,
+      "workingTreeCleanBeforeAfter": true,
+      "head": "c7a1189a4fd7f5b8639fbf2eb2b2a25c369cab4e",
+      "modelFileCleanupState": "Root removed only the freshly restored LFM weights after archival; cleanup record confirms file absent and no workers remain. Historical LFM metadata and artifacts remain."
+    },
+    "disposition": "Do not promote LFM or native-function interface for this goal-contract path. Do not run negative requests 03/04; no form-action choice was tested.",
+    "cleanup": {
+      "recordFile": ".build/repair-verification/native-goal-function-interface-sept24/lfm-cleanup.json",
+      "recordSHA256": "a395aaa21a901cd55efdb40adadefc29d8503ba6cfaa0262ec2fcce9e175934d",
+      "record": {
+        "removedOnlyTaskRestoredModel": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/lfm-model-q6/LFM2.5-2.6B-Q6_K.gguf",
+        "bytesFreed": 2221615104,
+        "previousVerifiedSHA256": "2e74b1a0979a4a1936a408445147d103b8f15b2e2ec31c65fa0166f9069c250d",
+        "reason": "Model-only candidate screen failed; no current follow-up requires these weights. Preserve pinned source, requests, and structured results.",
+        "remainingWorkers": [],
+        "fileAbsent": true
+      },
+      "cleanupScope": "Only the freshly restored LFM weights were removed; pinned metadata and historical LFM artifacts remain."
+    },
+    "preparationManifest": {
+      "file": ".build/repair-verification/native-goal-function-interface-sept24/manifest-lfm.json",
+      "sha256": "bc76504a54971ab3332ccd77f6115b60d7e62852c5d347dab199b28f1016f087",
+      "modelInitiallyAbsent": true,
+      "restoredPinnedModelBeforeExecution": true
+    }
+  },
+  "nextWorkDirection": "Review the existing verified native form receipt connection to final admission against the frozen matching-heading/no-search case. This checks evidence linkage; receipt linkage alone does not resolve natural-language goal coverage."
 }
