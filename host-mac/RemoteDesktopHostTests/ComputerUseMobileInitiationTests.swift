@@ -1367,6 +1367,21 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             XCTAssertEqual(jsonSchema["name"] as? String, "browser_retained_step")
             return try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
         }
+        func partialNativeTools(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> [[String: Any]] {
+            let transport = NativeStepQueueFixtureTransport(responses: [
+                try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+                try nativeStepEnvelope(contract),
+                try nativeBrowserFunctionEnvelope("search", argumentsJSON: #"{"text":"official policy details"}"#)])
+            let planner = try nativeStepPlanner(transport: transport)
+            let plan = try await planner.propose(context)
+            XCTAssertEqual(plan.kind, .search)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.completions, 3)
+            let request = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+            XCTAssertNil(request["response_format"])
+            XCTAssertEqual(request["tool_choice"] as? String, "required")
+            return try XCTUnwrap(request["tools"] as? [[String: Any]])
+        }
         func assertSchema(_ schema: [String: Any], nonReferenceKinds: Set<String>,
                           openLinkReferences: Set<String>?, inspectReferences: Set<String>?) throws {
             let branches = schema["oneOf"] as? [[String: Any]] ?? [schema]
@@ -1407,9 +1422,18 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try assertSchema(await retainedSchema(fullContext),
             nonReferenceKinds: ["search", "answer", "askUser", "wait", "visualFallback", "incomplete"],
             openLinkReferences: ["user-url-1", "l1", "l2"], inspectReferences: nil)
-        try assertSchema(await retainedSchema(partialContext),
-            nonReferenceKinds: ["search", "askUser", "wait", "incomplete"],
-            openLinkReferences: ["l1"], inspectReferences: ["records-next"])
+        let partialTools = try await partialNativeTools(partialContext)
+        let partialFunctions = try partialTools.map { tool -> (String, [String: Any]) in
+            let function = try XCTUnwrap(tool["function"] as? [String: Any])
+            return (try XCTUnwrap(function["name"] as? String), try XCTUnwrap(function["parameters"] as? [String: Any]))
+        }
+        XCTAssertEqual(Set(partialFunctions.map { $0.0 }), Set(["openLink", "search", "askUser", "wait", "inspectRecords", "incomplete"]))
+        let partialOpenLink = try XCTUnwrap(partialFunctions.first { $0.0 == "openLink" }?.1)
+        let partialOpenLinkProperties = try XCTUnwrap(partialOpenLink["properties"] as? [String: Any])
+        XCTAssertEqual((partialOpenLinkProperties["reference"] as? [String: Any])?["enum"] as? [String], ["l1"])
+        let partialInspect = try XCTUnwrap(partialFunctions.first { $0.0 == "inspectRecords" }?.1)
+        let partialInspectProperties = try XCTUnwrap(partialInspect["properties"] as? [String: Any])
+        XCTAssertEqual((partialInspectProperties["reference"] as? [String: Any])?["enum"] as? [String], ["records-next"])
         try assertSchema(await retainedSchema(emptyContext),
             nonReferenceKinds: ["search", "answer", "askUser", "wait", "visualFallback", "incomplete"],
             openLinkReferences: nil, inspectReferences: nil)
@@ -1418,10 +1442,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     func testNativeBrowserUsesNamedRecordWindowAfterWholePageTokenOverflow() async throws {
         let (context, windows, source) = try nativeRecordWindowContexts()
         let contract = #"{"objective":"Read the fee details and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
-        let openDetails = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l1","text":""}"#
+        let openDetails = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
         let transport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
-            try nativeStepEnvelope(contract), try nativeStepEnvelope(openDetails)],
+            try nativeStepEnvelope(contract), openDetails],
             tokenCounts: [100, 100, 3718, 2820])
         let planner = try nativeStepPlanner(transport: transport)
 
@@ -1436,7 +1460,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "The over-budget whole-page request is tokenized but never sent for completion")
 
         let wholeUser = try nativeStepUserObject(calls.requests[2])
-        let windowUser = try nativeStepUserObject(calls.requests[3])
+        let windowUser = try nativeBrowserCapturedObject(calls.requests[3])
         let wholeContract = try XCTUnwrap(wholeUser["goalContract"] as? [String: Any])
         let windowContract = try XCTUnwrap(windowUser["goalContract"] as? [String: Any])
         XCTAssertEqual(try JSONSerialization.data(withJSONObject: wholeContract, options: [.sortedKeys]),
@@ -1455,11 +1479,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     func testNativeBrowserConsumesRecordInspectionWithoutRepeatingGoal() async throws {
         let (whole, windows, source) = try nativeRecordWindowContexts()
         let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
-        let inspectNext = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-next","text":""}"#
-        let openLaterLink = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l2","text":""}"#
+        let inspectNext = try nativeBrowserFunctionEnvelope("inspectRecords", argumentsJSON: #"{"reference":"records-next"}"#)
+        let openLaterLink = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l2"}"#)
         let transport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
-            try nativeStepEnvelope(contract), try nativeStepEnvelope(inspectNext), try nativeStepEnvelope(openLaterLink)],
+            try nativeStepEnvelope(contract), inspectNext, openLaterLink],
             tokenCounts: [100, 100, 3718, 2820, 2820])
         let planner = try nativeStepPlanner(transport: transport)
 
@@ -1472,8 +1496,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(calls.counts, 5); XCTAssertEqual(calls.completions, 4,
             "The inspection step is consumed internally, followed by a decision on the next window")
         XCTAssertEqual(calls.requests.count, 5, "Goal interpretation occurs once after the prerequisite check")
-        let firstUser = try nativeStepUserObject(calls.requests[3])
-        let laterUser = try nativeStepUserObject(calls.requests[4])
+        let firstUser = try nativeBrowserCapturedObject(calls.requests[3])
+        let laterUser = try nativeBrowserCapturedObject(calls.requests[4])
         let firstContract = try XCTUnwrap(firstUser["goalContract"] as? [String: Any])
         let laterContract = try XCTUnwrap(laterUser["goalContract"] as? [String: Any])
         XCTAssertEqual(try JSONSerialization.data(withJSONObject: firstContract, options: [.sortedKeys]),
@@ -1488,22 +1512,221 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertFalse((laterPage["links"] as? [[String: Any]])?.contains { $0["id"] as? String == "l1" } == true)
     }
 
+    func testNativeBrowserPartialWindowUsesScopedFunctionCallAdapter() async throws {
+        let original = "Read the page and report the final fee. Purchase tickets only after I approve."
+        let clarification = "San Francisco — BART."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+            .answering("Which city should I check?", with: clarification)
+        let (whole, _, source) = try nativeRecordWindowContexts(goal: goal)
+        let contract = #"{"objective":"Read the BART fee and report it; purchase only after approval.","constraints":["Purchase tickets only after I approve."],"requirements":[{"instruction":"Report the final fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action"}]}"#
+        let openLink = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(contract),
+            openLink], tokenCounts: [100, 100, 3_718, 2_820])
+        let planner = try nativeStepPlanner(transport: transport)
+
+        let plan = try await planner.propose(whole)
+        XCTAssertEqual(plan.kind, .openLink)
+        XCTAssertEqual(plan.reference, "l1")
+        XCTAssertEqual(plan.retainedContract?.requirements.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(plan.retainedContract?.requirements.map(\.instruction), [
+            "Report the final fee.", "Purchase tickets only after user approval."])
+        XCTAssertEqual(plan.retainedContract?.requirements.map(\.kind), [.information, .action])
+        XCTAssertEqual(plan.assessment?.requirements.map(\.state), [.pending, .pending])
+        XCTAssertEqual(plan.assessment?.requirements.map(\.evidence), ["", ""])
+        XCTAssertEqual(plan.assessment?.requirements.map(\.evidenceReferences), [[], []])
+
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.counts, 4)
+        XCTAssertEqual(calls.completions, 3, "The partial-window native function adapter makes one model call")
+        let fullPageRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        XCTAssertNotNil(fullPageRequest["response_format"], "The overflowing full-page JSON-schema request remains unchanged")
+        let fullPageFormat = try XCTUnwrap(fullPageRequest["response_format"] as? [String: Any])
+        let fullPageSchema = try XCTUnwrap(fullPageFormat["json_schema"] as? [String: Any])
+        XCTAssertEqual(fullPageSchema["name"] as? String, "browser_retained_step")
+
+        let partialRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[3]) as? [String: Any])
+        XCTAssertEqual(partialRequest["max_tokens"] as? Int, 768)
+        XCTAssertEqual(partialRequest["tool_choice"] as? String, "required")
+        XCTAssertEqual(partialRequest["parallel_tool_calls"] as? Bool, false)
+        XCTAssertNil(partialRequest["response_format"])
+        let messages = try XCTUnwrap(partialRequest["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.compactMap { $0["role"] as? String }, ["system", "user", "assistant", "tool"])
+        let trustedGoal = try XCTUnwrap(messages[1]["content"] as? String)
+        let trustedObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(trustedGoal.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(trustedObject.keys), Set(["goal", "clarifications"]))
+        XCTAssertEqual(trustedObject["goal"] as? String, original)
+        let clarificationPairs = try XCTUnwrap(trustedObject["clarifications"] as? [[String: String]])
+        XCTAssertEqual(clarificationPairs.count, 1)
+        XCTAssertEqual(clarificationPairs[0]["question"], "Which city should I check?")
+        XCTAssertTrue(clarificationPairs[0]["answer"]?.utf8.elementsEqual(clarification.utf8) == true)
+
+        let captureCalls = try XCTUnwrap(messages[2]["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(captureCalls.count, 1)
+        let captureCall = try XCTUnwrap(captureCalls.first)
+        XCTAssertEqual(captureCall["id"] as? String, "capture-native-browser-ed")
+        let captureFunction = try XCTUnwrap(captureCall["function"] as? [String: Any])
+        XCTAssertEqual(captureFunction["name"] as? String, "captureNativeBrowser")
+        let captureArguments = try XCTUnwrap(captureFunction["arguments"] as? [String: Any])
+        XCTAssertTrue(captureArguments.isEmpty)
+        let captureMessageID = try XCTUnwrap(messages[3]["tool_call_id"] as? String)
+        XCTAssertEqual(captureMessageID, captureCall["id"] as? String)
+        let capturedText = try XCTUnwrap(messages[3]["content"] as? String)
+        let captured = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capturedText.utf8)) as? [String: Any])
+        XCTAssertNotNil(captured["goalContract"])
+        XCTAssertNotNil(captured["page"])
+        XCTAssertNotNil(captured["history"])
+        XCTAssertNil(captured["goal"])
+        XCTAssertNil(captured["clarifications"])
+        XCTAssertNil(captured["userTurns"])
+        let capturedPage = try XCTUnwrap(captured["page"] as? [String: Any])
+        XCTAssertEqual(capturedPage["url"] as? String, source.absoluteString)
+        let capturedLinks = try XCTUnwrap(capturedPage["links"] as? [[String: Any]])
+        XCTAssertTrue(capturedLinks.contains { $0["id"] as? String == "l1" })
+        XCTAssertFalse(capturedLinks.contains { $0["id"] as? String == "l2" })
+
+        let tools = try XCTUnwrap(partialRequest["tools"] as? [[String: Any]])
+        let functions = try tools.map { tool -> (String, [String: Any]) in
+            let function = try XCTUnwrap(tool["function"] as? [String: Any])
+            return (try XCTUnwrap(function["name"] as? String), try XCTUnwrap(function["parameters"] as? [String: Any]))
+        }
+        let functionNames = functions.map { $0.0 }
+        XCTAssertEqual(Set(functionNames), Set(["openLink", "search", "askUser", "wait", "inspectRecords", "incomplete"]))
+        XCTAssertFalse(functionNames.contains("answer"))
+        XCTAssertFalse(functionNames.contains("visualFallback"))
+        let openLinkTool = try XCTUnwrap(functions.first { $0.0 == "openLink" }?.1)
+        let openLinkProperties = try XCTUnwrap(openLinkTool["properties"] as? [String: Any])
+        XCTAssertEqual((openLinkProperties["reference"] as? [String: Any])?["enum"] as? [String], ["l1"])
+        let inspectTool = try XCTUnwrap(functions.first { $0.0 == "inspectRecords" }?.1)
+        let inspectProperties = try XCTUnwrap(inspectTool["properties"] as? [String: Any])
+        XCTAssertEqual((inspectProperties["reference"] as? [String: Any])?["enum"] as? [String], ["records-next"])
+    }
+
+    func testNativeBrowserPartialFunctionCallRejectsMalformedAndOutOfScopeCalls() async throws {
+        let partial = try await nativePartialWindowWithRetainedContract()
+        let valid = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
+        let duplicateOuterText = String(decoding: valid, as: UTF8.self).replacingOccurrences(
+            of: #""model":"fixture-model""#,
+            with: #""model":"fixture-model","model":"fixture-model""#)
+        let oversizedArguments = #"{"text":""# + String(repeating: "x", count: 8_193) + #""}"#
+        let rejected: [(String, Data)] = [
+            ("duplicate argument key", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1","reference":"l1"}"#)),
+            ("duplicate outer key", Data(duplicateOuterText.utf8)),
+            ("malformed arguments", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: "{")),
+            ("truncated envelope", Data(valid.dropLast(4))),
+            ("wrong model", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, modelAlias: "other-model")),
+            ("refusal", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, refusal: "No")),
+            ("error envelope", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, includeError: true)),
+            ("invalid finish", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, finishReason: "length")),
+            ("legacy call", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, legacyFunctionCall: true)),
+            ("parallel calls", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, repeatedCall: true)),
+            ("unknown call", try nativeBrowserFunctionEnvelope("click", argumentsJSON: #"{"reference":"l1"}"#)),
+            ("answer is unavailable", try nativeBrowserFunctionEnvelope("answer", argumentsJSON: #"{"text":"The fee is $25."}"#)),
+            ("visual fallback is unavailable", try nativeBrowserFunctionEnvelope("visualFallback", argumentsJSON: #"{"text":"Read the fee."}"#)),
+            ("invisible link", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l2"}"#)),
+            ("cross-window reference", try nativeBrowserFunctionEnvelope("inspectRecords", argumentsJSON: #"{"reference":"records-previous"}"#)),
+            ("extra argument", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1","text":"query"}"#)),
+            ("wrong argument type", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":1}"#)),
+            ("blank search", try nativeBrowserFunctionEnvelope("search", argumentsJSON: #"{"text":"  "}"#)),
+            ("wrong text type", try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":false}"#)),
+            ("blank question", try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"\n  "}"#)),
+            ("oversized question text", try nativeBrowserFunctionEnvelope("askUser",
+                argumentsJSON: String(decoding: try JSONSerialization.data(withJSONObject: ["text": String(repeating: "q", count: 1_025)], options: [.sortedKeys]), as: UTF8.self))),
+            ("empty call id", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, callID: "")),
+            ("oversized call id", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, callID: String(repeating: "i", count: 129))),
+            ("oversized arguments", try nativeBrowserFunctionEnvelope("search", argumentsJSON: oversizedArguments)),
+            ("oversized content", try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#, content: String(repeating: "c", count: 8_193))),
+            ("legacy JSON-content proposal", try nativeStepEnvelope(#"{"kind":"openLink","reference":"l1","text":""}"#))
+        ]
+        for (caseName, response) in rejected {
+            let transport = NativeStepQueueFixtureTransport(responses: [response])
+            let planner = try nativeStepPlanner(transport: transport)
+            do {
+                _ = try await planner.propose(partial)
+                XCTFail("Rejected partial native call was accepted: \(caseName)")
+            } catch {
+                XCTAssertFalse(error is CancellationError, caseName)
+            }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 1, caseName)
+            XCTAssertEqual(calls.completions, 1, caseName)
+        }
+
+        let globalPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: []))
+        XCTAssertThrowsError(try globalPlanner.decode(valid, context: nativeStepContext()),
+            "The whole-page JSON content decoder must not accept a native function call")
+    }
+
+    func testNativeBrowserPartialFunctionCallWaitAskUserAndBudgets() async throws {
+        let partial = try await nativePartialWindowWithRetainedContract()
+        let longQuestion = String(repeating: "q", count: 1_024)
+        let longQuestionArguments = try JSONSerialization.data(withJSONObject: ["text": longQuestion], options: [.sortedKeys])
+        for (name, arguments, expectedKind, expectedText) in [
+            ("wait", "{}", ComputerUseMCPBrowserStepPlanner.Plan.Kind.wait, ""),
+            ("askUser", String(decoding: longQuestionArguments, as: UTF8.self), .askUser, longQuestion)
+        ] {
+            let response = try nativeBrowserFunctionEnvelope(name, argumentsJSON: arguments,
+                finishReason: name == "wait" ? "stop" : "tool_calls")
+            let transport = NativeStepQueueFixtureTransport(responses: [response], tokenCount: 3_264)
+            let plan = try await nativeStepPlanner(transport: transport).propose(partial)
+            XCTAssertEqual(plan.kind, expectedKind)
+            XCTAssertEqual(plan.text, expectedText)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, 1)
+        }
+
+        let successCalls: [(String, Int, Int)] = [("stop", 1, 1), ("tool_calls", 1, 1)]
+        for (finishReason, expectedCount, expectedCompletion) in successCalls {
+            let response = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#,
+                finishReason: finishReason)
+            let transport = NativeStepQueueFixtureTransport(responses: [response], tokenCount: 3_264)
+            let plan = try await nativeStepPlanner(transport: transport).propose(partial)
+            XCTAssertEqual(plan.kind, .openLink)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, expectedCount); XCTAssertEqual(calls.completions, expectedCompletion)
+        }
+
+        for (tokens, accepted, expectedCompletions) in [(0, false, 0), (3_264, true, 1), (3_265, false, 0)] {
+            let response = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
+            let transport = NativeStepQueueFixtureTransport(responses: [response], tokenCount: tokens)
+            do { _ = try await nativeStepPlanner(transport: transport).propose(partial); XCTAssertTrue(accepted) }
+            catch { XCTAssertFalse(accepted); XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .contextLimit) }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, expectedCompletions)
+        }
+
+        for (cancelAfterCount, cancelAfterCompletion, expectedCompletions) in [(1, 0, 0), (0, 1, 1)] {
+            let response = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
+            let transport = NativeStepQueueFixtureTransport(responses: [response], tokenCount: 100,
+                cancelAfterCount: cancelAfterCount, cancelAfterCompletion: cancelAfterCompletion)
+            let planner = try nativeStepPlanner(transport: transport)
+            let didCancel = await Task { () -> Bool in
+                do { _ = try await planner.propose(partial); return false }
+                catch { return error is CancellationError }
+            }.value
+            XCTAssertTrue(didCancel)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, expectedCompletions)
+        }
+    }
+
     func testNativeBrowserRejectsCompletionOrHandoffFromPartialRecordWindow() async throws {
         let (whole, _, _) = try nativeRecordWindowContexts()
         let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
-        let cases: [(String, String)] = [
-            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The final fee is supported."}"#, "Partial-window answers cannot certify completion"),
-            (#"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"visualFallback","reference":"","text":"Read the missing fee."}"#, "Partial records do not prove a visual capability gap")
+        let cases: [(Data, String)] = [
+            (try nativeBrowserFunctionEnvelope("answer", argumentsJSON: #"{"text":"The final fee is supported."}"#), "Partial-window answers cannot certify completion"),
+            (try nativeBrowserFunctionEnvelope("visualFallback", argumentsJSON: #"{"text":"Read the missing fee."}"#), "Partial records do not prove a visual capability gap")
         ]
         for (step, message) in cases {
             let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
-                try nativeStepEnvelope(contract), try nativeStepEnvelope(step)], tokenCounts: [100, 100, 3718, 2820])
+                try nativeStepEnvelope(contract), step], tokenCounts: [100, 100, 3718, 2820])
             let planner = try nativeStepPlanner(transport: transport)
             do {
                 _ = try await planner.propose(whole)
                 XCTFail(message)
             } catch {
-                XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence, message)
+                XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse, message)
             }
             let calls = await transport.snapshot()
             XCTAssertEqual(calls.tokenCounts, [100, 100, 3718, 2820])
@@ -1511,9 +1734,9 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 "Reject only after validating the proposed decision, without another model call")
         }
 
-        let invisibleLink = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"openLink","reference":"l2","text":""}"#
+        let invisibleLink = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l2"}"#)
         let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
-            try nativeStepEnvelope(contract), try nativeStepEnvelope(invisibleLink)], tokenCounts: [100, 100, 3718, 2820])
+            try nativeStepEnvelope(contract), invisibleLink], tokenCounts: [100, 100, 3718, 2820])
         let planner = try nativeStepPlanner(transport: transport)
         do { _ = try await planner.propose(whole); XCTFail("A later-window link cannot be used before its records are selected") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse) }
@@ -1525,8 +1748,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     func testNativeRecordWindowTraversalBoundsBudgetRetriesAndCancellation() async throws {
         let (whole, _, _) = try nativeRecordWindowContexts()
         let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
-        let next = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-next","text":""}"#
-        let previous = #"{"requirements":{"r1":{"state":"pending","evidence":[]}},"kind":"inspectRecords","reference":"records-previous","text":""}"#
+        let next = try nativeBrowserFunctionEnvelope("inspectRecords", argumentsJSON: #"{"reference":"records-next"}"#)
+        let previous = try nativeBrowserFunctionEnvelope("inspectRecords", argumentsJSON: #"{"reference":"records-previous"}"#)
         let prerequisite = try nativeStepEnvelope(#"{"kind":"continue","text":""}"#)
 
         // A first-page answer with an unsupported amount may receive its one
@@ -1547,7 +1770,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
 
         let overBudgetWindow = NativeStepQueueFixtureTransport(
-            responses: [prerequisite, try nativeStepEnvelope(contract), try nativeStepEnvelope(next)], tokenCounts: [100, 100, 3718, 2820, 3718])
+            responses: [prerequisite, try nativeStepEnvelope(contract), next], tokenCounts: [100, 100, 3718, 2820, 3718])
         let overBudgetPlanner = try nativeStepPlanner(transport: overBudgetWindow)
         do { _ = try await overBudgetPlanner.propose(whole); XCTFail("An oversized named window must stop traversal") }
         catch { XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .contextLimit) }
@@ -1556,8 +1779,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(overBudgetCalls.counts, 5); XCTAssertEqual(overBudgetCalls.completions, 3)
 
         let repeated = NativeStepQueueFixtureTransport(responses: [
-            prerequisite, try nativeStepEnvelope(contract), try nativeStepEnvelope(next), try nativeStepEnvelope(previous),
-            try nativeStepEnvelope(next), try nativeStepEnvelope(previous), try nativeStepEnvelope(next)],
+            prerequisite, try nativeStepEnvelope(contract), next, previous, next, previous, next],
             tokenCounts: [100, 100, 3718, 2820, 2820, 2820, 2820])
         let repeatedPlanner = try nativeStepPlanner(transport: repeated)
         do { _ = try await repeatedPlanner.propose(whole); XCTFail("Repeated record traversal must terminate") }
@@ -1567,7 +1789,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "The fixture traverses 0→1→0→1, then rejects a third visit to window 0")
         XCTAssertEqual(repeatedCalls.counts, 7)
 
-        let cancelled = NativeStepQueueFixtureTransport(responses: [prerequisite, try nativeStepEnvelope(contract), try nativeStepEnvelope(next)],
+        let cancelled = NativeStepQueueFixtureTransport(responses: [prerequisite, try nativeStepEnvelope(contract), next],
             cancelAfterCompletion: 3, tokenCounts: [100, 100, 3718, 2820])
         let cancelledPlanner = try nativeStepPlanner(transport: cancelled)
         let didCancel = await Task { () -> Bool in
@@ -1585,7 +1807,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             screenshotPNG: Data(), currentURL: URL(string: "https://example.org/policy")), page: page, wholePage: true)
     }
 
-    private func nativeRecordWindowContexts() throws -> (whole: ComputerUseMCPBrowserStepPlanner.Context,
+    private func nativeRecordWindowContexts(goal: ComputerUseUnresolvedTextGoal? = nil) throws -> (whole: ComputerUseMCPBrowserStepPlanner.Context,
                                                             windows: [ComputerUseMCPBrowserStepPlanner.Context],
                                                             source: URL) {
         let source = URL(string: "https://example.org/records")!
@@ -1599,8 +1821,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 .init(id: "l2", label: "Other records", destination: "https://example.org/other", textIDs: ["t33"], containerID: "g1")
             ], truncated: false, omittedEmbeddedContent: false,
             containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
-        let input = ComputerUseFaraModel.Input(goal: "Read the page and report the final fee.",
-            screenshotPNG: Data(), currentURL: source)
+        let input: ComputerUseFaraModel.Input
+        if let goal {
+            input = .init(goal: goal.userTurns[0], screenshotPNG: Data(), currentURL: source, clarifiedGoal: goal)
+        } else {
+            input = .init(goal: "Read the page and report the final fee.", screenshotPNG: Data(), currentURL: source)
+        }
         let planner = ComputerUseMCPBrowserStepPlanner()
         let whole = try planner.context(input, page: page, wholePage: true)
         let bounded = try planner.context(input, page: page)
@@ -1625,6 +1851,50 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
 
     private func nativeStepEnvelope(_ content: String, modelAlias: String = "fixture-model") throws -> Data {
         try JSONSerialization.data(withJSONObject: ["model":modelAlias, "choices":[["finish_reason":"stop", "message":["role":"assistant", "content":content]]]], options: [.sortedKeys])
+    }
+
+    private func nativePartialWindowWithRetainedContract() async throws -> ComputerUseMCPBrowserStepPlanner.Context {
+        let (_, windows, _) = try nativeRecordWindowContexts()
+        let partial = try XCTUnwrap(windows.first)
+        let contract = #"{"objective":"Read the page and report the final fee.","constraints":[],"requirements":[{"instruction":"Report the final fee.","kind":"information"}]}"#
+        let setup = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#), try nativeStepEnvelope(contract),
+            try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)])
+        let plan = try await nativeStepPlanner(transport: setup).propose(partial)
+        var retained = partial
+        retained.retainedContract = try XCTUnwrap(plan.retainedContract)
+        return retained
+    }
+
+    private func nativeBrowserCapturedObject(_ requestData: Data) throws -> [String: Any] {
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestData) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let assistant = try XCTUnwrap(messages.first { $0["role"] as? String == "assistant" })
+        let calls = try XCTUnwrap(assistant["tool_calls"] as? [[String: Any]])
+        let call = try XCTUnwrap(calls.first { ($0["function"] as? [String: Any])?["name"] as? String == "captureNativeBrowser" })
+        let callID = try XCTUnwrap(call["id"] as? String)
+        let tool = try XCTUnwrap(messages.first {
+            $0["role"] as? String == "tool" && $0["tool_call_id"] as? String == callID
+        })
+        let content = try XCTUnwrap(tool["content"] as? String)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any])
+    }
+
+    private func nativeBrowserFunctionEnvelope(_ name: String, argumentsJSON: String,
+                                               modelAlias: String = "fixture-model",
+                                               finishReason: String = "tool_calls", callID: String = "test-call-1",
+                                               content: Any = NSNull(), refusal: String? = nil,
+                                               legacyFunctionCall: Bool = false, repeatedCall: Bool = false,
+                                               includeError: Bool = false) throws -> Data {
+        let call: [String: Any] = ["id": callID, "type": "function",
+            "function": ["name": name, "arguments": argumentsJSON]]
+        var message: [String: Any] = ["role": "assistant", "content": content,
+            "tool_calls": repeatedCall ? [call, call] : [call]]
+        if let refusal { message["refusal"] = refusal }
+        if legacyFunctionCall { message["function_call"] = ["name": name, "arguments": argumentsJSON] }
+        var root: [String: Any] = ["model": modelAlias, "choices": [["finish_reason": finishReason, "message": message]]]
+        if includeError { root["error"] = ["message": "fixture error"] }
+        return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
     }
 
     private func nativeAssessmentObject(_ state: String = "pending", evidence: String = "") -> [String: Any] {
