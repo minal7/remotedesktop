@@ -1101,6 +1101,16 @@ final class MCPFirstComputerUseExecutor:
             references: selected.sorted())
     }
 
+    static func localFileToolPlan(_ plan: ComputerUseMCPBrowserStepPlanner.Plan,
+                                  rootTaskID: String, sessionIdentity: String) throws -> ComputerUseFaraBrowserExecutor.ToolPlan? {
+        guard plan.kind == .localFileOperation else { return nil }
+        guard let operation = plan.localFileOperation,
+              (1...256).contains(rootTaskID.utf8.count), (1...256).contains(sessionIdentity.utf8.count) else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
+        return .localFileOperation(operation, rootTaskID: rootTaskID, sessionIdentity: sessionIdentity)
+    }
+
     private func proposeBrowserToolStep(_ input: ComputerUseFaraModel.Input,
         observation: ComputerUseFaraBrowserExecutor.ToolObservation,
         rootTaskID: String,
@@ -1217,9 +1227,13 @@ final class MCPFirstComputerUseExecutor:
             }
             return .nativeFormSubmission(plan: submission, authorityDigest: page.authorityDigest)
         }
+        if let fileToolPlan = try Self.localFileToolPlan(plan, rootTaskID: rootTaskID,
+            sessionIdentity: currentSessionIdentity) {
+            return fileToolPlan
+        }
         let arguments: [String: Any]
         switch plan.kind {
-        case .nativeFormSubmission: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        case .nativeFormSubmission, .localFileOperation: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         case .inspectRecords: throw AppleFoundationMCPPlannerError.unknownProposal
         case .visualFallback:
             guard let assessment = plan.assessment else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }

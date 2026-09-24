@@ -20,6 +20,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         case proposal(ComputerUseFaraModel.Proposal)
         case nativeReadCompletion(MCPFirstComputerUseExecutor.NativeReadCompletion)
         case nativeFormSubmission(plan: ComputerUseMCPBrowserStepPlanner.FormSubmission, authorityDigest: String)
+        case localFileOperation(ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation, rootTaskID: String, sessionIdentity: String)
         case handoff(ComputerUseFaraModel.WorkerDirective)
         case noProposal
     }
@@ -310,6 +311,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     // Visual answer review is read-only. A form effect can
                     // only be proposed by the native whole-task planner.
                     throw Failure.unsupportedAction
+                case .localFileOperation:
+                    throw Failure.unsupportedAction
                 default: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
                 }
                 return .proposal(PlannedProposal(proposal: try Self.readOnlyToolProposal(reviewedProposal), nativeReadCompletion: nil))
@@ -325,6 +328,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 case .nativeFormSubmission(let plan, let authorityDigest):
                     guard case .page = observation else { throw Failure.unsupportedAction }
                     return .nativeFormSubmission(plan: plan, authorityDigest: authorityDigest)
+                case .localFileOperation:
+                    throw Failure.unsupportedAction
                 case .handoff(let directive):
                     guard input.surface == .browser else { throw Failure.unsupportedAction }
                     try directive.validate()

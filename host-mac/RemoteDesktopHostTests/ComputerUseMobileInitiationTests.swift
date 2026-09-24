@@ -2279,6 +2279,110 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertNil(plan.assessment)
     }
 
+    func testNativeDirectFilePlannerProjectsMetadataAndDecodesTypedCatalogQuery() async throws {
+        let first = localFileCandidate(id: "deck-a", name: "Quarterly deck.pptx", ext: "pptx")
+        let second = localFileCandidate(id: "sheet-b", name: "Budget.xlsx", ext: "xlsx")
+        let page = ComputerUseLocalFileCatalog.Page(candidates: [first, second], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: true, hasMissingSortValues: false)
+        let context = try nativeLocalFileContext(query: .init(), page: page)
+        let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending", "cursor": ""
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .listFiles(let query, nil)? = plan.localFileOperation else {
+            return XCTFail("Expected a typed list-files operation")
+        }
+        XCTAssertEqual(query, .init(fileKind: .presentation, sort: .init(field: .modifiedAt, direction: .descending)))
+        XCTAssertNil(plan.directCompletion, "Catalog operations are not upload or completion evidence")
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let capture = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+        XCTAssertTrue(capture.contains("Quarterly deck.pptx"))
+        XCTAssertFalse(capture.contains("/Users/"), "No raw local path may enter planner context")
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let selectFile = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "selectFile" })
+        let parameters = try XCTUnwrap((selectFile["function"] as? [String: Any])?["parameters"] as? [String: Any])
+        let candidateID = try XCTUnwrap((parameters["properties"] as? [String: Any])?["candidateID"] as? [String: Any])
+        XCTAssertEqual(candidateID["enum"] as? [String], ["deck-a", "sheet-b"])
+    }
+
+    func testNativeDirectFilePlannerSelectsOnlyOfferedCandidateAndBuildsScopedToolPlan() async throws {
+        let candidate = localFileCandidate(id: "deck-current", name: "Recent presentation.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [candidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false))
+        let response = try nativeBrowserFunctionEnvelope("selectFile", arguments: ["candidateID": "deck-current"])
+        var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [response]))
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .selectFile("deck-current")? = plan.localFileOperation else {
+            return XCTFail("Expected the exact host-offered candidate")
+        }
+        XCTAssertNil(plan.directCompletion, "A selected file does not mean that Drive received it")
+        let hostPlan = try XCTUnwrap(MCPFirstComputerUseExecutor.localFileToolPlan(plan,
+            rootTaskID: "root-task", sessionIdentity: "owned-session"))
+        guard case .localFileOperation(.selectFile("deck-current"), let taskID, let sessionID) = hostPlan else {
+            return XCTFail("Expected a task/session-scoped local-file ToolPlan")
+        }
+        XCTAssertEqual(taskID, "root-task")
+        XCTAssertEqual(sessionID, "owned-session")
+    }
+
+    func testNativeDirectFilePlannerAsksForExactOfferedChoicesAndRejectsUnboundChoices() async throws {
+        let a = localFileCandidate(id: "deck-a", name: "Presentation A.pptx", ext: "pptx")
+        let b = localFileCandidate(id: "deck-b", name: "Presentation B.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [a, b], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: true, hasMissingSortValues: false))
+        let ask = try nativeBrowserFunctionEnvelope("askFile", arguments: [
+            "question": "Which presentation should I upload?", "candidateIDs": ["deck-a", "deck-b"]
+        ])
+        var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [ask]))
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .askFile(let question, let ids)? = plan.localFileOperation else {
+            return XCTFail("Expected a user-choice request for current candidates")
+        }
+        XCTAssertEqual(question, "Which presentation should I upload?")
+        XCTAssertEqual(ids, ["deck-a", "deck-b"])
+        XCTAssertNil(plan.directCompletion)
+
+    }
+
+    func testNativeDirectFilePlannerRejectsUnboundCatalogOperations() async throws {
+        let a = localFileCandidate(id: "deck-a", name: "Presentation A.pptx", ext: "pptx")
+        let b = localFileCandidate(id: "deck-b", name: "Presentation B.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [a, b], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false))
+        let invalidArguments: [[String: Any]] = [
+            ["question": " \n ", "candidateIDs": ["deck-a", "deck-b"]],
+            ["question": "Which file?", "candidateIDs": ["deck-a", "foreign-id"]]
+        ]
+        for arguments in invalidArguments {
+            let malformed = try nativeBrowserFunctionEnvelope("askFile", arguments: arguments)
+            var invalidPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [malformed]))
+            invalidPlanner.usesDirectActionPlanning = true
+            do {
+                _ = try await invalidPlanner.propose(context)
+                XCTFail("Unbound/blank askFile choices must be rejected")
+            } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+        }
+
+        let cursorContext = try nativeLocalFileContext(query: .init(), page: .init(candidates: [a, b],
+            isComplete: false, nextCursor: "cursor-live", hasTiedSortValues: false, hasMissingSortValues: false))
+        let changedQuery = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending", "cursor": "cursor-live"
+        ])
+        var cursorPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [changedQuery]))
+        cursorPlanner.usesDirectActionPlanning = true
+        do {
+            _ = try await cursorPlanner.propose(cursorContext)
+            XCTFail("A cursor cannot be reused with a changed catalog query")
+        } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+    }
+
     func testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall() async throws {
         let fixture = try nativeDirectGoalEffectsContext()
         let answer = try nativeBrowserFunctionEnvelope("answer", arguments: [
@@ -3564,6 +3668,28 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         for value in ["link:https://example.org/", "group:https://example.org/", "other:t1", " t1", "t1 ", "t1\n", "text:t١", "group:g١", "text:fee", "l"] {
             XCTAssertFalse(matches(value), value)
         }
+    }
+
+    private func localFileCandidate(id: String, name: String, ext: String) -> ComputerUseLocalFileCatalog.Candidate {
+        .init(id: id, displayName: name, contentTypeIdentifier: nil, fileExtension: ext, byteCount: 4096,
+            modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+    }
+
+    private func nativeLocalFileContext(query: ComputerUseLocalFileCatalog.Query,
+        page: ComputerUseLocalFileCatalog.Page) throws -> ComputerUseMCPBrowserStepPlanner.Context {
+        var input = ComputerUseFaraModel.Input(goal: "Upload the most recent presentation from Downloads to my default Google Drive account.",
+            screenshotPNG: Data(), currentURL: URL(string: "https://drive.google.com/drive/my-drive"))
+        input.localFileCatalog = .init(query: query, page: page)
+        var context = try ComputerUseMCPBrowserStepPlanner().context(input,
+            page: compactReadingPage(text: "Google Drive upload page is open.", label: "Google Drive"), wholePage: true)
+        let currentURL = try XCTUnwrap(input.currentURL)
+        let taskID = "native-local-file-planner-task"
+        let contextID = "native-local-file-planner-document"
+        context.currentDocument = ComputerUseBrowserDocument(contextID: contextID, taskID: taskID, generation: 1,
+            operationID: ComputerUseTaskContract.digest([taskID, "current-page"]),
+            requestedURL: currentURL, committedURL: currentURL, source: .activePageObservation)
+        context.sessionIdentity = ComputerUseTaskContract.digest([contextID, taskID, "owned-session"])
+        return context
     }
 
     private func nativeStepContext() throws -> ComputerUseMCPBrowserStepPlanner.Context {
