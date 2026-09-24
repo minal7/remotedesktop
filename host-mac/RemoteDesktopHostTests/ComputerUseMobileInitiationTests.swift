@@ -95,6 +95,13 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         do {
             let plan = try await ComputerUsePlanningWorker().perform(timeout: 45) { try await planner.propose(context) }
             report["kind"] = plan.kind.rawValue; report["text"] = plan.text; report["reference"] = plan.reference
+            if let contract = plan.retainedContract {
+                report["retainedGoalContract"] = ["goal": contract.goal.userTurns,
+                    "objective": contract.objective, "constraints": contract.constraints,
+                    "requirements": contract.requirements.map { ["id": $0.id, "instruction": $0.instruction, "kind": $0.kind.rawValue] }]
+            } else {
+                XCTFail("A successful managed native browser proposal must carry its retained goal contract")
+            }
             if let assessment = plan.assessment {
                 report["assessment"] = ["objective": assessment.objective, "constraints": assessment.constraints,
                     "workerObjective": assessment.workerObjective,
@@ -111,6 +118,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 do {
                     try MCPFirstComputerUseExecutor.validateBrowserCompletion(
                         plan: plan, goal: input.validatedBrowserGoal(), hasPageObservation: true)
+                    XCTFail("A remaining action must not pass host completion")
                     report["hostCompletionAccepted"] = true
                 } catch {
                     report["hostCompletionAccepted"] = false
@@ -128,6 +136,13 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         sampler.cancel(); let samples = await sampler.value
         report["elapsedSeconds"] = Date().timeIntervalSince(start); report["peakSampledWorkerBytes"] = samples.peak
         report["maximumWorkers"] = samples.workers; report["exchanges"] = trace.items
+        if failure == nil {
+            XCTAssertTrue([2, 3].contains(trace.items.count), "A fresh proposal uses goal interpretation, page decision, and at most one evidence correction")
+            if trace.items.count == 3 {
+                XCTAssertTrue(trace.items[2].localizedCaseInsensitiveContains("selected"),
+                              "A correction request must explain the evidence validation failure")
+            }
+        }
         let exited = try inspector.matchingProcesses(for: inputs.llamaServerURL).isEmpty
         report["workerExited"] = exited
         let reportURL = URL(fileURLWithPath: try XCTUnwrap(environment["NATIVE_READING_REPORT"]))
@@ -136,6 +151,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         if let failure { throw failure }
     }
 
+    // Diagnostic compatibility only: makeRequest/decode retain the earlier
+    // monolithic wire format for captured exchange replay; production propose
+    // uses separate goal interpretation and retained page-decision requests.
+    // Diagnostic compatibility only: this exports/replays the previous
+    // monolithic makeRequest/decode exchange, not production propose parity.
     func testOptInFrozenNativeBrowserExchangeExportAndReplay() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_NATIVE_BROWSER_EXCHANGE_HARNESS"] == "1" else {
@@ -374,25 +394,381 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     func testNativeTextBrowserTokenLimitAndCancellationPreventOrDiscardInference() async throws {
-        let context = try nativeStepContext(), response = try nativeStepEnvelope(#"{"kind":"answer","reference":"","text":"The fee is $25.","assessment":{"objective":"Report the policy fee","constraints":"None.","workerObjective":"","requirements":[{"instruction":"Report the observed fee","kind":"information","state":"observed","evidence":"link:l1"}]}}"#)
-        for (tokens, accepted) in [(0, false), (3_264, true), (3_265, false)] {
-            let transport = NativeStepFixtureTransport(response: response, tokens: tokens)
+        let context = try nativeStepContext()
+        let contract = try nativeStepEnvelope(#"{"objective":"Report the fee.","constraints":[],"requirements":[{"instruction":"Report the fee.","kind":"information"}]}"#)
+        let step = try nativeStepEnvelope(#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The fee is $25."}"#)
+        for (tokens, accepted) in [(0, false), (3_008, true), (3_009, false)] {
+            let transport = NativeStepQueueFixtureTransport(responses: [contract, step], tokenCount: tokens)
             let planner = try nativeStepPlanner(transport: transport)
             do { _ = try await planner.propose(context); XCTAssertTrue(accepted) }
             catch { XCTAssertFalse(accepted); XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .contextLimit) }
-            let calls = await transport.calls
-            XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, accepted ? 1 : 0)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, accepted ? 2 : 1); XCTAssertEqual(calls.completions, accepted ? 2 : 0)
         }
-        for afterCompletion in [false, true] {
-            let transport = NativeStepFixtureTransport(response: response, cancelAfterCount: !afterCompletion, cancelAfterCompletion: afterCompletion)
+        for cancellation in [(count: 1, completion: 0), (count: 0, completion: 1), (count: 0, completion: 2)] {
+            let transport = NativeStepQueueFixtureTransport(responses: [contract, step],
+                cancelAfterCount: cancellation.count, cancelAfterCompletion: cancellation.completion)
             let planner = try nativeStepPlanner(transport: transport)
             let cancelled = await Task { () -> Bool in
                 do { _ = try await planner.propose(context); return false } catch { return error is CancellationError }
             }.value
             XCTAssertTrue(cancelled)
-            let calls = await transport.calls
-            XCTAssertEqual(calls.counts, 1); XCTAssertEqual(calls.completions, afterCompletion ? 1 : 0)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, cancellation.count > 0 ? 1 : cancellation.completion == 1 ? 1 : 2)
+            XCTAssertEqual(calls.completions, cancellation.completion)
         }
+    }
+
+    func testBrowserCompletionRequiresSelectedEvidence() throws {
+        let source = URL(string: "https://example.org/policy")!
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "f", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "The flat return fee is $25."),
+            .init(id: "t2", containerID: "g1", text: "Returns are accepted up to 48 hours before the performance.")],
+            links: [], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(
+            goal: "Read the policy and report its fee and deadline with the source URL.",
+            screenshotPNG: Data(), currentURL: source)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = try planner.context(input, page: page, wholePage: true)
+        let answer = "The flat return fee is $25. Returns are accepted up to 48 hours before the performance. Source: \(source.absoluteString)"
+
+        let unselectedDeadline = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string(answer), "assessment": assessmentValue([
+                ("Report the flat return fee", "information", "observed", "text:t1"),
+                ("Report the return deadline", "information", "observed", "source"),
+                ("Include the policy source URL", "information", "observed", "source")])])
+        XCTAssertThrowsError(try planner.decode(unselectedDeadline, context: context)) {
+            XCTAssertEqual($0 as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim)
+        }
+
+        let selectedFacts = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string(answer), "assessment": assessmentValue([
+                ("Report the flat return fee", "information", "observed", "text:t1"),
+                ("Report the return deadline", "information", "observed", "text:t2"),
+                ("Include the policy source URL", "information", "observed", "source")])])
+        XCTAssertEqual(try planner.decode(selectedFacts, context: context).kind, .answer)
+    }
+
+    func testSelectedBrowserRecordCarriesCapturedSourceButNotUnselectedLink() throws {
+        let source = URL(string: "https://example.org/policy")!
+        let unselectedDestination = URL(string: "https://example.org/other-policy")!
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "a", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "The return fee is $25."),
+            .init(id: "t2", containerID: "g1", text: "Other policy details.")],
+            links: [.init(id: "l1", label: "Other policy", destination: unselectedDestination.absoluteString,
+                          textIDs: ["t2"], containerID: "g1")], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let input = ComputerUseFaraModel.Input(goal: "Read the fee and include its source URL.",
+            screenshotPNG: Data(), currentURL: source)
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = try planner.context(input, page: page, wholePage: true)
+        let observedFee = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string("The return fee is $25. Source: \(source.absoluteString)"),
+            "assessment": assessmentValue([
+                ("Report the return fee", "information", "observed", "text:t1"),
+                ("Include the current source URL", "information", "observed", "text:t1")])])
+        XCTAssertEqual(try planner.decode(observedFee, context: context).kind, .answer,
+                       "Selecting a current-page record carries its captured source provenance")
+
+        let unselectedURL = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string("The return fee is $25. Source: \(unselectedDestination.absoluteString)"),
+            "assessment": assessmentValue([
+                ("Report the return fee", "information", "observed", "text:t1"),
+                ("Include the current source URL", "information", "observed", "text:t1")])])
+        XCTAssertThrowsError(try planner.decode(unselectedURL, context: context))
+
+        let sourceOnlyFact = MCPJSONValue.object(["kind": .string("answer"), "reference": .string(""),
+            "text": .string("The return fee is $25."),
+            "assessment": assessmentValue([("Report the return fee", "information", "observed", "source")])])
+        XCTAssertThrowsError(try planner.decode(sourceOnlyFact, context: context),
+                             "A source reference cannot substantiate an unselected page fact")
+    }
+
+    func testBrowserAnswerNumberedListMarkersDoNotHideUnsupportedScalars() throws {
+        let selectedText = "The fee is $25. The deadline is 48 hours."
+        let context = ComputerUseMCPBrowserStepPlanner.Context(json: "{}", schema: .object([:]), userURLs: [:], links: [:],
+            answerTexts: [selectedText], evidenceReferences: ["text:t1": selectedText])
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        func answer(_ text: String) -> MCPJSONValue {
+            .object(["kind": .string("answer"), "reference": .string(""), "text": .string(text),
+                "assessment": assessmentValue([("Report the fee and deadline", "information", "observed", "text:t1")])])
+        }
+        for list in [
+            "Here are the requested facts:\n\n1. Fee: $25.\n\n2. Deadline: 48 hours.",
+            "Here are the requested facts:\n\n1) Fee: $25.\n2) Deadline: 48 hours.",
+            "Here are the requested facts:\n\n  1. Fee: $25.\n  2. Deadline: 48 hours."
+        ] {
+            XCTAssertEqual(try planner.decode(answer(list), context: context).kind, .answer, list)
+        }
+
+        for unsupported in [
+            "1. Fee: $25.\n\n2. Deadline: 99 hours.",
+            "1. Fee: $25.\n2. Deadline: 48 hours.\nThe policy also allows 3 changes.",
+            "42. Fee: $25.",
+            "```\n1. Fee: $25.\n2. Deadline: 48 hours.\n```",
+            "~~~\n1. Fee: $25.\n2. Deadline: 48 hours.\n~~~",
+            "7.0 hours is the deadline.",
+            "$99 is the fee.",
+            "-3 days are allowed.",
+            "10% discount applies."
+        ] {
+            XCTAssertThrowsError(try planner.decode(answer(unsupported), context: context), unsupported)
+        }
+    }
+
+    func testRetainedBrowserIncompleteAllowsSupportedPartialResult() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Read the return fee and add it to Notes after I approve."
+        let question = "Would you like me to add this fee to Notes?"
+        let answer = "Yes, add it only after I approve."
+        let clarifiedGoal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering(question, with: answer)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source,
+            clarifiedGoal: clarifiedGoal)
+        let page = compactReadingPage(text: "The return fee is $25.", label: "The return fee is $25.")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let goalContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action"}]}"#
+        let partial = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"pending","evidence":[]}},"kind":"incomplete","reference":"","text":"The return fee is $25. Source: https://example.org/policy. The Notes action remains unfinished."}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(goalContract), try nativeStepEnvelope(partial)])
+        let planner = try nativeStepPlanner(transport: transport)
+        let plan = try await planner.propose(context)
+        XCTAssertEqual(plan.kind, .incomplete)
+        let action = try XCTUnwrap(plan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(action.state, .pending)
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+            plan: plan, goal: clarifiedGoal, hasPageObservation: true))
+    }
+
+    func testNativeBrowserReusesOnlyExactClarifiedGoalContract() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Open \(source.absoluteString) and report the return fee."
+        let page = compactReadingPage(text: "The return fee is $25.", label: "The return fee is $25.")
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let informationGoal = #"{"objective":"Report the return fee.","constraints":[],"requirements":[{"instruction":"Report the return fee.","kind":"information"}]}"#
+        let answer = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The return fee is $25."}"#
+        let initialTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(informationGoal), try nativeStepEnvelope(answer)])
+        let planner = try nativeStepPlanner(transport: initialTransport)
+        let first = try await planner.propose(context)
+        let retained = try XCTUnwrap(first.retainedContract)
+
+        var sameGoalContext = context
+        sameGoalContext.retainedContract = retained
+        let reusedTransport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(answer)])
+        let reusedPlanner = try nativeStepPlanner(transport: reusedTransport)
+        let reused = try await reusedPlanner.propose(sameGoalContext)
+        XCTAssertEqual(reused.retainedContract, retained)
+        let reusedCalls = await reusedTransport.snapshot()
+        XCTAssertEqual(reusedCalls.counts, 1); XCTAssertEqual(reusedCalls.completions, 1)
+
+        let question = "May I add the fee to Notes?"
+        let accepted = "Yes, add it only after I approve."
+        let changedGoal = try ComputerUseUnresolvedTextGoal(userRequest: original).answering(question, with: accepted)
+        let changedInput = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source,
+            clarifiedGoal: changedGoal)
+        var changedContext = try ComputerUseMCPBrowserStepPlanner().context(changedInput, page: page, wholePage: true)
+        changedContext.retainedContract = retained
+        let changedContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action"}]}"#
+        let needsApproval = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"needsUser","evidence":[]}},"kind":"askUser","reference":"","text":"Do you approve adding the fee to Notes?"}"#
+        let changedTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(changedContract), try nativeStepEnvelope(needsApproval)])
+        let changedPlanner = try nativeStepPlanner(transport: changedTransport)
+        let changed = try await changedPlanner.propose(changedContext)
+        XCTAssertEqual(changed.kind, .askUser)
+        XCTAssertEqual(changed.retainedContract?.goal, changedGoal)
+        XCTAssertNotEqual(changed.retainedContract, retained)
+        let changedCalls = await changedTransport.snapshot()
+        XCTAssertEqual(changedCalls.counts, 2); XCTAssertEqual(changedCalls.completions, 2)
+        let goalRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: changedCalls.requests[0]) as? [String: Any])
+        let goalMessages = try XCTUnwrap(goalRequest["messages"] as? [[String: String]])
+        XCTAssertTrue(try XCTUnwrap(goalMessages.last?["content"]).contains(accepted))
+    }
+
+    func testRetainedBrowserRejectsDroppedIDsObservedActionsPendingAnswersAndBadEvidence() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Read the fee and purchase tickets only after approval."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source,
+            clarifiedGoal: goal)
+        let page = compactReadingPage(text: "The fee is $25.", label: "The fee is $25.")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let contract = #"{"objective":"Read the fee and preserve the purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Purchase tickets after approval.","kind":"action"}]}"#
+        let malformedSteps: [(String, Bool)] = [
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"askUser","reference":"","text":"Approve?"}"#, false),
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t1"]}},"kind":"askUser","reference":"","text":"Approve?"}"#, false),
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"pending","evidence":[]}},"kind":"answer","reference":"","text":"The fee is $25."}"#, false),
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t999"]},"r2":{"state":"pending","evidence":[]}},"kind":"askUser","reference":"","text":"Approve?"}"#, true),
+            (#"{"requirements":{"r1":{"state":"observed","evidence":["text:t1","text:t1"]},"r2":{"state":"pending","evidence":[]}},"kind":"askUser","reference":"","text":"Approve?"}"#, true)
+        ]
+        for (step, retryableEvidenceError) in malformedSteps {
+            let responses = [try nativeStepEnvelope(contract), try nativeStepEnvelope(step)]
+                + (retryableEvidenceError ? [try nativeStepEnvelope(step)] : [])
+            let transport = NativeStepQueueFixtureTransport(responses: responses)
+            let planner = try nativeStepPlanner(transport: transport)
+            do {
+                _ = try await planner.propose(context)
+                XCTFail("Malformed retained state was accepted: \(step)")
+            } catch {
+                if retryableEvidenceError {
+                    XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim)
+                }
+            }
+            let calls = await transport.snapshot()
+            let expectedCalls = retryableEvidenceError ? 3 : 2
+            XCTAssertEqual(calls.counts, expectedCalls); XCTAssertEqual(calls.completions, expectedCalls)
+        }
+    }
+
+    func testRetainedBrowserCorrectsUnsupportedEvidenceOnceWithoutReinterpretingGoal() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Read the return fee and deadline."
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "c", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "The flat return fee is $25."),
+            .init(id: "t2", containerID: "g1", text: "Returns are accepted up to 48 hours before the performance.")],
+            links: [], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let contractResponse = #"{"objective":"Report the return fee and deadline.","constraints":[],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Report the return deadline.","kind":"information"}]}"#
+        let unsupported = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"The flat return fee is $25. Returns are accepted up to 48 hours before the performance."}"#
+        let corrected = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t2"]}},"kind":"answer","reference":"","text":"The flat return fee is $25. Returns are accepted up to 48 hours before the performance."}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(contractResponse), try nativeStepEnvelope(unsupported), try nativeStepEnvelope(corrected)])
+        let planner = try nativeStepPlanner(transport: transport)
+        let plan = try await planner.propose(context)
+        XCTAssertEqual(plan.kind, .answer)
+        let contract = try XCTUnwrap(plan.retainedContract)
+        XCTAssertEqual(contract.goal.userTurns, [original])
+        XCTAssertEqual(contract.requirements.map(\.id), ["r1", "r2"])
+        XCTAssertEqual(contract.requirements.map(\.instruction), ["Report the return fee.", "Report the return deadline."])
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.counts, 3); XCTAssertEqual(calls.completions, 3); XCTAssertEqual(calls.requests.count, 3)
+        func userObject(at index: Int) throws -> [String: Any] {
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[index]) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
+            let content = try XCTUnwrap(messages.last?["content"])
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any])
+        }
+        let firstUser = try userObject(at: 0)
+        let secondUser = try userObject(at: 1)
+        let thirdUser = try userObject(at: 2)
+        XCTAssertTrue(try XCTUnwrap(firstUser["goal"] as? String).contains(original))
+        XCTAssertEqual(secondUser["goal" ] as? String, original)
+        XCTAssertEqual(thirdUser["goal"] as? String, original)
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: try XCTUnwrap(secondUser["goalContract"]), options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: try XCTUnwrap(thirdUser["goalContract"]), options: [.sortedKeys]))
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: try XCTUnwrap(secondUser["page"]), options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: try XCTUnwrap(thirdUser["page"]), options: [.sortedKeys]))
+        XCTAssertEqual(thirdUser["rejectedProposal"] as? String, unsupported)
+        let feedback = try XCTUnwrap(thirdUser["validationFeedback"] as? String)
+        XCTAssertTrue(feedback.localizedCaseInsensitiveContains("selected"))
+        XCTAssertTrue(feedback.localizedCaseInsensitiveContains("evidence"))
+        XCTAssertFalse(feedback.localizedCaseInsensitiveContains("oracle"))
+    }
+
+    func testRetainedBrowserEvidenceCorrectionStopsAfterOneRetryAndOnCancellation() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Read the fee and deadline."
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "d", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "The fee is $25."),
+            .init(id: "t2", containerID: "g1", text: "The deadline is 48 hours.")],
+            links: [], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let infoContract = #"{"objective":"Report the fee and deadline.","constraints":[],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Report the deadline.","kind":"information"}]}"#
+        let unsupported = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"observed","evidence":["text:t1"]}},"kind":"answer","reference":"","text":"Fee $25; deadline 48 hours."}"#
+        let repeated = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(infoContract), try nativeStepEnvelope(unsupported), try nativeStepEnvelope(unsupported),
+            try nativeStepEnvelope(unsupported)])
+        let planner = try nativeStepPlanner(transport: repeated)
+        do { _ = try await planner.propose(context); XCTFail("Two unsupported evidence proposals must stop") }
+        catch { XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .unsupportedAnswerClaim) }
+        let repeatedCalls = await repeated.snapshot()
+        XCTAssertEqual(repeatedCalls.counts, 3); XCTAssertEqual(repeatedCalls.completions, 3,
+            "The host permits exactly one correction and never makes a fourth completion")
+
+        let actionContract = #"{"objective":"Preserve purchase action.","constraints":["Only after approval."],"requirements":[{"instruction":"Purchase tickets after approval.","kind":"action"}]}"#
+        let observedAction = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]}},"kind":"incomplete","reference":"","text":"The action is complete."}"#
+        let actionTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(actionContract), try nativeStepEnvelope(observedAction), try nativeStepEnvelope(observedAction)])
+        let actionPlanner = try nativeStepPlanner(transport: actionTransport)
+        do { _ = try await actionPlanner.propose(context); XCTFail("An observed action must fail without a repair retry") }
+        catch { XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence) }
+        let actionCalls = await actionTransport.snapshot()
+        XCTAssertEqual(actionCalls.counts, 2); XCTAssertEqual(actionCalls.completions, 2)
+
+        let cancelled = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(infoContract), try nativeStepEnvelope(unsupported), try nativeStepEnvelope(unsupported)],
+            cancelAfterCompletion: 2)
+        let cancelledPlanner = try nativeStepPlanner(transport: cancelled)
+        let cancellationResult = await Task { () -> Bool in
+            do { _ = try await cancelledPlanner.propose(context); return false }
+            catch { return error is CancellationError }
+        }.value
+        XCTAssertTrue(cancellationResult)
+        let cancelledCalls = await cancelled.snapshot()
+        XCTAssertEqual(cancelledCalls.counts, 2); XCTAssertEqual(cancelledCalls.completions, 2)
+    }
+
+    func testNativeBrowserSeparatesGoalInterpretationFromPageDecision() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Open \(source.absoluteString) and report the return fee."
+        let question = "Do you also want me to purchase tickets?"
+        let acceptedAnswer = "Yes, purchase tickets only after I approve."
+        let clarifiedGoal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+            .answering(question, with: acceptedAnswer)
+        let page = compactReadingPage(text: "The return fee is $25.", label: "The return fee is $25.")
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source,
+            clarifiedGoal: clarifiedGoal)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let goalContract = #"{"objective":"Report the return fee and preserve the conditional purchase request.","constraints":["Purchase only after user approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action"}]}"#
+        let pageStep = #"{"requirements":{"r1":{"state":"observed","evidence":["text:t1"]},"r2":{"state":"needsUser","evidence":[]}},"kind":"askUser","reference":"","text":"Which tickets should I purchase, and do you approve?"}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(goalContract), try nativeStepEnvelope(pageStep)])
+        let planner = try nativeStepPlanner(transport: transport)
+
+        let plan: ComputerUseMCPBrowserStepPlanner.Plan
+        do {
+            plan = try await planner.propose(context)
+        } catch {
+            let calls = await transport.snapshot()
+            XCTFail("Expected goal interpretation followed by a page decision; completions=\(calls.completions), error=\(error)")
+            XCTAssertEqual(calls.completions, 2)
+            return
+        }
+
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.counts, 2)
+        XCTAssertEqual(calls.completions, 2)
+        XCTAssertEqual(calls.requests.count, 2)
+        let firstBody = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[0]) as? [String: Any])
+        let firstMessages = try XCTUnwrap(firstBody["messages"] as? [[String: String]])
+        let firstUser = try XCTUnwrap(firstMessages.last?["content"])
+        XCTAssertTrue(firstUser.contains(original))
+        XCTAssertTrue(firstUser.contains(question))
+        XCTAssertTrue(firstUser.contains(acceptedAnswer))
+        for field in ["\"page\"", "\"history\"", "\"expected\""] {
+            XCTAssertFalse(firstUser.contains(field), "Goal interpretation must not receive page/history/oracle fields")
+        }
+
+        let secondBody = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[1]) as? [String: Any])
+        let secondMessages = try XCTUnwrap(secondBody["messages"] as? [[String: String]])
+        let secondUser = try XCTUnwrap(secondMessages.last?["content"])
+        XCTAssertTrue(secondUser.contains("r1")); XCTAssertTrue(secondUser.contains("r2"))
+        XCTAssertTrue(secondUser.contains("Report the return fee."))
+        XCTAssertTrue(secondUser.contains("Purchase tickets only after user approval."))
+        XCTAssertTrue(secondUser.contains("The return fee is $25."))
+        XCTAssertEqual(plan.kind, .askUser)
+        let requirements = try XCTUnwrap(plan.assessment?.requirements)
+        XCTAssertEqual(requirements.count, 2)
+        let fee = try XCTUnwrap(requirements.first { $0.instruction == "Report the return fee." })
+        XCTAssertEqual(fee.kind, .information); XCTAssertEqual(fee.state, .observed)
+        XCTAssertEqual(fee.evidence, "The return fee is $25.")
+        let purchase = try XCTUnwrap(requirements.first { $0.instruction == "Purchase tickets only after user approval." })
+        XCTAssertEqual(purchase.kind, .action); XCTAssertEqual(purchase.state, .needsUser)
+        XCTAssertEqual(purchase.evidence, "")
     }
 
     private func nativeStepContext() throws -> ComputerUseMCPBrowserStepPlanner.Context {
@@ -417,17 +793,21 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     private func nativeProposal(_ kind: String, _ reference: String = "", _ text: String = "",
+                                evidenceReferences selectedEvidence: [String]? = nil,
                                 context: ComputerUseMCPBrowserStepPlanner.Context) -> MCPJSONValue {
         let isAnswer = kind == "answer"
-        let evidence = context.evidenceReferences.keys.sorted().first ?? ""
-        let requirementState = isAnswer && !evidence.isEmpty ? "observed" : "pending"
+        let supplied = selectedEvidence ?? [context.evidenceReferences.keys.sorted().first ?? ""]
+        let selected = supplied.filter { context.evidenceReferences[$0] != nil && !$0.isEmpty }
+        let requirementState = isAnswer && !selected.isEmpty ? "observed" : "pending"
         let workerObjective = kind == "visualFallback" ? "Complete the missing browser interaction" : ""
         let requirementKind = "information"
         let assessment = MCPJSONValue.object(["objective": .string("Complete the full user goal"),
             "constraints": .string("Preserve all user constraints."), "workerObjective": .string(workerObjective),
-            "requirements": .array([.object(["instruction": .string("Complete the requested outcome"),
-                "kind": .string(requirementKind), "state": .string(requirementState),
-                "evidence": .string(requirementState == "observed" ? evidence : "")])])])
+            "requirements": .array((selected.isEmpty ? [""] : selected).enumerated().map { index, evidence in
+                .object(["instruction": .string("Complete the requested outcome \(index + 1)"),
+                    "kind": .string(requirementKind), "state": .string(requirementState),
+                    "evidence": .string(requirementState == "observed" ? evidence : "")])
+            })])
         return .object(["kind": .string(kind), "reference": .string(reference), "text": .string(text),
             "assessment": assessment])
     }
@@ -761,10 +1141,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 "Website tooltip: Sep 1, 2026 at 2:35 AM PDT",
                 "Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.", "29 February 2024"],
                 sources: ["https://example.org/releases/tag/2.102.0"]))
-        for answer in ["Release 2.102.0, published 2026-09-01.", "Date: 2024-02-29.",
-                       "Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.",
-                       "Source: [Release](https://example.org/releases/tag/2.102.0)"] {
-            XCTAssertEqual(try planner.decode(nativeProposal("answer", "", answer, context: context), context: context).text, answer)
+        let answers: [(String, [String])] = [
+            ("Release 2.102.0, published 2026-09-01.", ["text:t1", "text:t2"]),
+            ("Date: 2024-02-29.", ["text:t4"]),
+            ("Departure: 21:45. Platform: 6. Price: $15.50. Discount: 10%.", ["text:t3"]),
+            ("Source: [Release](https://example.org/releases/tag/2.102.0)", ["source"])]
+        for (answer, references) in answers {
+            XCTAssertEqual(try planner.decode(nativeProposal("answer", "", answer,
+                evidenceReferences: references, context: context), context: context).text, answer)
         }
     }
 
@@ -3606,4 +3990,47 @@ private actor NativeStepFixtureTransport: ComputerUseTextModelTransport {
         if cancelAfterCompletion { withUnsafeCurrentTask { $0?.cancel() } }
         return response
     }
+}
+
+private actor NativeStepQueueFixtureTransport: ComputerUseTextModelTransport {
+    struct Snapshot: Sendable {
+        let counts: Int
+        let completions: Int
+        let requests: [Data]
+    }
+
+    let responses: [Data]
+    let tokenCount: Int
+    let cancelAfterCount: Int
+    let cancelAfterCompletion: Int
+    private var responseIndex = 0
+    private var counts = 0
+    private var completions = 0
+    private var requests: [Data] = []
+
+    init(responses: [Data], tokenCount: Int = 100, cancelAfterCount: Int = 0,
+         cancelAfterCompletion: Int = 0) {
+        self.responses = responses; self.tokenCount = tokenCount
+        self.cancelAfterCount = cancelAfterCount; self.cancelAfterCompletion = cancelAfterCompletion
+    }
+
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int {
+        counts += 1
+        requests.append(completionRequest.httpBody ?? Data())
+        if counts == cancelAfterCount { withUnsafeCurrentTask { $0?.cancel() } }
+        return tokenCount
+    }
+
+    func complete(request: URLRequest) async throws -> Data {
+        guard responses.indices.contains(responseIndex) else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
+        }
+        let response = responses[responseIndex]
+        responseIndex += 1
+        completions += 1
+        if completions == cancelAfterCompletion { withUnsafeCurrentTask { $0?.cancel() } }
+        return response
+    }
+
+    func snapshot() -> Snapshot { .init(counts: counts, completions: completions, requests: requests) }
 }

@@ -311,6 +311,7 @@ final class MCPFirstComputerUseExecutor:
     private var pendingApprovalDigest: String?
     private var retainedFallback: (taskID: String, promptDigest: String)?
     private var retainedNativeFailure: Error?
+    private var retainedBrowserIntentContract: (rootTaskID: String, contract: ComputerUseBrowserIntentContract)?
     private let documentPlanner: ComputerUseMCPDocumentPlanner
     private final class DocumentRun {
         let prompt: String
@@ -552,6 +553,7 @@ final class MCPFirstComputerUseExecutor:
         retainedNativeFailure = nil
         retainedBrowserExecutor = nil
         retainedUsesBrowser = false
+        retainedBrowserIntentContract = nil
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -774,6 +776,9 @@ final class MCPFirstComputerUseExecutor:
             // new request ID before that continuation can perform any work.
             retainedFallback = (taskID, digest)
         }
+        if retainedBrowserIntentContract?.contract.goal != goal {
+            retainedBrowserIntentContract = nil
+        }
         if let tools = browserTools {
             return try await withBrowserToolProposals(taskID: originatingTaskID, tools: tools) {
                 try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
@@ -830,24 +835,67 @@ final class MCPFirstComputerUseExecutor:
         browserTools = tools
         let rootID = tools.ownedBrowserTaskID(forExecution: taskID)
         return try await tools.withOwnedBrowserToolProposals(taskID: rootID, propose: { [self] input, observation in
-            try await proposeBrowserToolStep(input, observation: observation, tools: tools)
+            try await proposeBrowserToolStep(input, observation: observation, rootTaskID: rootID, tools: tools)
         }, operation: operation)
     }
 
     private func proposeBrowserToolStep(_ input: ComputerUseFaraModel.Input,
         observation: ComputerUseFaraBrowserExecutor.ToolObservation,
+        rootTaskID: String,
         tools: ComputerUseHostTools) async throws -> ComputerUseFaraBrowserExecutor.ToolPlan {
         try checkExecutionCancellation()
+        guard observation.taskID == rootTaskID else {
+            throw ExecutorError.taskChanged
+        }
+        let goal = try input.validatedBrowserGoal()
+        let matchingContract: ComputerUseBrowserIntentContract?
+        if let retained = retainedBrowserIntentContract,
+           retained.rootTaskID == rootTaskID, retained.contract.goal == goal {
+            matchingContract = retained.contract
+        } else {
+            // A changed task or accepted-goal revision must not reuse clauses
+            // from the previous immutable interpretation.
+            retainedBrowserIntentContract = nil
+            matchingContract = nil
+        }
         let available = try await clientPool.allowedTools()
         try checkExecutionCancellation()
+        guard observation.taskID == rootTaskID else {
+            throw ExecutorError.taskChanged
+        }
         guard ["find_elements", "get_element_attributes"].allSatisfy({ name in
             available.contains { $0.toolName == name && $0.risk == .readOnly && $0.serverID == MCPServerRegistry.macControl.serverID }
         }) else { return .noProposal }
         let browserPlanner = browserStepPlanner
         // A host context/schema limit is an integration failure, not evidence
         // that Mac tools cannot handle this task. It must not activate vision.
-        let (plan, context) = try await browserPlanner.next(input, observation: observation)
+        let (plan, context) = try await browserPlanner.next(input, observation: observation,
+            retainedContract: matchingContract)
         try checkExecutionCancellation()
+        guard observation.taskID == rootTaskID else {
+            throw ExecutorError.taskChanged
+        }
+        switch observation {
+        case .initial(let initial): try tools.validateOwnedBrowserInitialAgentObservation(initial)
+        case .page(let page): try tools.validateOwnedBrowserAgentMemoryObservation(page)
+        }
+        if let returnedContract = plan.retainedContract {
+            guard returnedContract.goal == goal else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+            if let matchingContract {
+                guard returnedContract == matchingContract else {
+                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                }
+            } else {
+                retainedBrowserIntentContract = (rootTaskID, returnedContract)
+            }
+        } else if matchingContract != nil {
+            // Once the managed local planner establishes an immutable intent,
+            // a later planner step cannot silently drop it. Initial Apple
+            // navigation may precede the managed local page planner.
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
         let arguments: [String: Any]
         switch plan.kind {
         case .inspectRecords: throw AppleFoundationMCPPlannerError.unknownProposal
