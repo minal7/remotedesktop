@@ -43,6 +43,24 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let placeholderPlan: ComputerUseMCPBrowserStepPlanner.Plan
     }
 
+    private struct ManagedNativeModelCandidateDescriptor: Decodable {
+        let label: String
+        let modelPath: String
+        let modelSHA256: String
+        let modelBytes: Int64
+    }
+
+    private struct ManagedNativeModelCandidate {
+        let descriptor: ManagedNativeModelCandidateDescriptor
+        let inputs: ComputerUseNativeTextRuntimeInputs
+    }
+
+    private enum ManagedNativeModelCandidateError: Error {
+        case invalidDescriptor
+        case invalidModelFile
+        case modelHashMismatch
+    }
+
     func testOptInNativeBrowserPlannerFactoryFailureDoesNotRequestVisualControl() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: native browser owner and failing planner factory; no inference") }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativePlannerFailure-" + UUID().uuidString)
@@ -314,8 +332,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let installation = await ComputerUseInstaller.nativeText().currentInstallation()
         let receipt = try XCTUnwrap(installation)
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
-        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
+        let installedInputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
             runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+        let candidate = try environment["NATIVE_READING_MODEL_CANDIDATE"].map {
+            try managedNativeModelCandidate(descriptorPath: $0, llamaServerURL: installedInputs.llamaServerURL)
+        }
+        let inputs = candidate?.inputs ?? installedInputs
         let runtime = OSAtlasLlamaRuntime(), trace = MCPBrowserLoopTrace()
         let inspector = DarwinOSAtlasProcessInspector()
         XCTAssertTrue(try inspector.matchingProcesses(for: inputs.llamaServerURL).isEmpty)
@@ -335,7 +357,8 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             return (peak, workers)
         }
         let planner = ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, runtime: runtime, inspectExchange: { request, response, tokens in
-            let record: [String: Any] = ["request": String(decoding: request, as: UTF8.self), "response": String(decoding: response, as: UTF8.self), "inputTokens": tokens]
+            let record: [String: Any] = ["request": String(decoding: request, as: UTF8.self),
+                "response": Self.safeNativeResponseProjection(response), "inputTokens": tokens]
             if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) { trace.append(String(decoding: data, as: UTF8.self)) }
         })
         let start = Date()
@@ -343,13 +366,19 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "captureSHA256": hash,
             "scope": replay == nil ? "managed-frozen-native-step-no-effects" : "managed-frozen-step-with-replayed-candidate-intent-no-effects",
             "input": preparedContext.json]
+        if let candidate {
+            report["candidateModel"] = ["label": candidate.descriptor.label,
+                "modelPath": candidate.descriptor.modelPath,
+                "modelSHA256": candidate.descriptor.modelSHA256,
+                "modelBytes": candidate.descriptor.modelBytes]
+        }
         if let replay {
             report["wholeMacQualified"] = false
             report["goalReplay"] = ["descriptorPath": environment["NATIVE_READING_GOAL_REPLAY" ] ?? "",
                 "requestPath": replay.requestPath, "requestSHA256": replay.requestSHA256,
                 "responsePath": replay.responsePath,
                 "responseSHA256": replay.responseSHA256, "diagnosticInputTokens": replay.inputTokens,
-                "fixtureCompletions": 2, "placeholderPlanKind": replay.placeholderPlan.kind.rawValue,
+                "fixtureCompletions": 3, "placeholderPlanKind": replay.placeholderPlan.kind.rawValue,
                 "contract": ["goal": replay.contract.goal.userTurns, "objective": replay.contract.objective, "constraints": replay.contract.constraints,
                     "requirements": replay.contract.requirements.map { ["id": $0.id, "instruction": $0.instruction, "kind": $0.kind.rawValue] }]]
         }
@@ -414,6 +443,72 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: reportURL, options: .withoutOverwriting)
         XCTAssertTrue(exited); XCTAssertLessThanOrEqual(samples.workers, 1); XCTAssertLessThanOrEqual(samples.peak, 4 * 1_024 * 1_024 * 1_024)
         if let failure { throw failure }
+    }
+
+    func testManagedNativeModelCandidateAcceptsPinnedLocalFixtureAndUsesSignedRuntime() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateValid-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = directory.appendingPathComponent("fixture.gguf")
+        let payload = Data("small pinned model fixture".utf8)
+        try payload.write(to: model)
+        let descriptorPath = try writeManagedNativeModelCandidateDescriptor(directory: directory,
+            label: "fixture-model", modelPath: model.path, modelSHA256: Self.sha256(payload), modelBytes: payload.count)
+        let signedRuntime = directory.appendingPathComponent("signed-runtime/llama-server")
+        let candidate = try managedNativeModelCandidate(descriptorPath: descriptorPath, llamaServerURL: signedRuntime)
+        XCTAssertEqual(candidate.descriptor.label, "fixture-model")
+        XCTAssertEqual(candidate.descriptor.modelPath, model.path)
+        XCTAssertEqual(candidate.descriptor.modelSHA256, Self.sha256(payload))
+        XCTAssertEqual(candidate.descriptor.modelBytes, Int64(payload.count))
+        XCTAssertEqual(candidate.inputs.modelURL, model.standardizedFileURL)
+        XCTAssertEqual(candidate.inputs.expectedModelFileName, model.lastPathComponent)
+        XCTAssertEqual(candidate.inputs.llamaServerURL, signedRuntime.standardizedFileURL,
+            "Candidate selection must retain the installed signed runtime executable")
+    }
+
+    func testManagedNativeModelCandidateRejectsByteAndHashMismatch() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateMismatch-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = directory.appendingPathComponent("fixture.gguf")
+        let payload = Data("fixture bytes".utf8)
+        try payload.write(to: model)
+        let wrongHash = String(repeating: "0", count: 64)
+        for (name, hash, bytes) in [("bytes", Self.sha256(payload), payload.count + 1),
+                                    ("hash", wrongHash, payload.count)] {
+            let descriptorPath = try writeManagedNativeModelCandidateDescriptor(directory: directory,
+                label: name, modelPath: model.path, modelSHA256: hash, modelBytes: bytes)
+            XCTAssertThrowsError(try managedNativeModelCandidate(descriptorPath: descriptorPath,
+                llamaServerURL: directory.appendingPathComponent("llama-server")), name)
+        }
+    }
+
+    func testManagedNativeModelCandidateRejectsMalformedDescriptors() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateMalformed-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let model = directory.appendingPathComponent("fixture.gguf")
+        let payload = Data("fixture bytes".utf8)
+        try payload.write(to: model)
+        let valid: [String: Any] = ["label": "fixture", "modelPath": model.path,
+            "modelSHA256": Self.sha256(payload), "modelBytes": payload.count]
+        let cases: [(String, [String: Any])] = [
+            ("extra key", valid.merging(["extra": true]) { _, new in new }),
+            ("relative model path", ["label": "fixture", "modelPath": "fixture.gguf",
+                "modelSHA256": Self.sha256(payload), "modelBytes": payload.count]),
+            ("uppercase digest", ["label": "fixture", "modelPath": model.path,
+                "modelSHA256": Self.sha256(payload).uppercased(), "modelBytes": payload.count]),
+            ("zero byte count", ["label": "fixture", "modelPath": model.path,
+                "modelSHA256": Self.sha256(payload), "modelBytes": 0]),
+            ("boolean byte count", ["label": "fixture", "modelPath": model.path,
+                "modelSHA256": Self.sha256(payload), "modelBytes": true])
+        ]
+        for (name, object) in cases {
+            let descriptorPath = directory.appendingPathComponent("\(name.replacingOccurrences(of: " ", with: "-" )).json")
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: descriptorPath)
+            XCTAssertThrowsError(try managedNativeModelCandidate(descriptorPath: descriptorPath.path,
+                llamaServerURL: directory.appendingPathComponent("llama-server")), name)
+        }
     }
 
     func testOptInNativeGoalReplayRejectsMismatchedRequestAndMalformedResponse() async throws {
@@ -598,6 +693,106 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         return .init(caseID: caseID, cataloguePath: cataloguePath, oraclePath: oraclePath,
             captureSHA256: hash, goal: goal, url: url, disposition: disposition,
             patterns: patterns, input: input, context: context)
+    }
+
+    private func managedNativeModelCandidate(descriptorPath: String,
+                                             llamaServerURL: URL) throws -> ManagedNativeModelCandidate {
+        let descriptorFile = try FileHandle(forReadingFrom: URL(fileURLWithPath: descriptorPath))
+        let descriptorData: Data
+        do {
+            guard let boundedData = try descriptorFile.read(upToCount: 4 * 1024 + 1), boundedData.count <= 4 * 1024 else {
+                try? descriptorFile.close()
+                throw ManagedNativeModelCandidateError.invalidDescriptor
+            }
+            descriptorData = boundedData
+            try descriptorFile.close()
+        } catch {
+            try? descriptorFile.close()
+            throw error
+        }
+        let expectedKeys = Set(["label", "modelPath", "modelSHA256", "modelBytes"])
+        guard let object = try JSONSerialization.jsonObject(with: descriptorData) as? [String: Any],
+              Set(object.keys) == expectedKeys else {
+            throw ManagedNativeModelCandidateError.invalidDescriptor
+        }
+        let descriptor = try JSONDecoder().decode(ManagedNativeModelCandidateDescriptor.self, from: descriptorData)
+        let digestBytes = Array(descriptor.modelSHA256.utf8)
+        guard !descriptor.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              (descriptor.modelPath as NSString).isAbsolutePath,
+              digestBytes.count == 64,
+              digestBytes.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              descriptor.modelBytes > 0, descriptor.modelBytes <= Int64(Int.max) else {
+            throw ManagedNativeModelCandidateError.invalidDescriptor
+        }
+        let modelURL = URL(fileURLWithPath: descriptor.modelPath).standardizedFileURL
+        let values = try modelURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        guard values.isRegularFile == true, values.isSymbolicLink != true,
+              Int64(values.fileSize ?? -1) == descriptor.modelBytes else {
+            throw ManagedNativeModelCandidateError.invalidModelFile
+        }
+        let file = try FileHandle(forReadingFrom: modelURL)
+        defer { try? file.close() }
+        var hasher = SHA256()
+        while let chunk = try file.read(upToCount: 1_048_576), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        let actualHash = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        guard actualHash == descriptor.modelSHA256 else { throw ManagedNativeModelCandidateError.modelHashMismatch }
+        return ManagedNativeModelCandidate(descriptor: descriptor,
+            inputs: ComputerUseNativeTextRuntimeInputs(modelURL: modelURL, llamaServerURL: llamaServerURL,
+                expectedModelFileName: modelURL.lastPathComponent))
+    }
+
+    private nonisolated static func safeNativeResponseProjection(_ responseData: Data) -> [String: Any] {
+        guard let root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            return ["responseUTF8Bytes": responseData.count]
+        }
+        var result: [String: Any] = [:]
+        if let model = root["model"] { result["model"] = model }
+        if let usage = root["usage"] { result["usage"] = usage }
+        let choices = root["choices"] as? [[String: Any]] ?? []
+        result["choices"] = choices.map { choice -> [String: Any] in
+            var projected: [String: Any] = [:]
+            if let finishReason = choice["finish_reason"] { projected["finish_reason"] = finishReason }
+            if let message = choice["message"] as? [String: Any] {
+                var projectedMessage: [String: Any] = [:]
+                if let content = message["content"] as? String {
+                    let contentData = Data(content.utf8)
+                    if let value = try? JSONSerialization.jsonObject(with: contentData),
+                       value is [String: Any] || value is [Any] {
+                        projectedMessage["content"] = value
+                    } else {
+                        projectedMessage["contentUTF8Bytes"] = contentData.count
+                    }
+                }
+                if let calls = message["tool_calls"] as? [[String: Any]] {
+                    projectedMessage["tool_calls"] = calls.compactMap { call -> [String: Any]? in
+                        guard let function = call["function"] as? [String: Any],
+                              let name = function["name"] as? String else { return nil }
+                        var safeFunction: [String: Any] = ["name": name]
+                        if let rawArguments = function["arguments"] as? String {
+                            safeFunction["arguments"] = rawArguments
+                        } else if let arguments = function["arguments"] {
+                            safeFunction["arguments"] = arguments
+                        }
+                        return ["function": safeFunction]
+                    }
+                }
+                projected["message"] = projectedMessage
+            }
+            return projected
+        }
+        return result
+    }
+
+    private func writeManagedNativeModelCandidateDescriptor(directory: URL, label: String,
+                                                              modelPath: String, modelSHA256: String,
+                                                              modelBytes: Int) throws -> String {
+        let url = directory.appendingPathComponent("candidate-\(UUID().uuidString).json")
+        let data = try JSONSerialization.data(withJSONObject: ["label": label, "modelPath": modelPath,
+            "modelSHA256": modelSHA256, "modelBytes": modelBytes], options: [.sortedKeys])
+        try data.write(to: url, options: .withoutOverwriting)
+        return url.path
     }
 
     private func nativeGoalReplayDescriptor(path: String) throws -> NativeGoalReplayDescriptor {

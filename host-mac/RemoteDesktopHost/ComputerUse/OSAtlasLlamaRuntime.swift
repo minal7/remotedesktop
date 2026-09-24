@@ -67,10 +67,13 @@ struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
     static let contextTokens = 6_144
     let modelURL: URL
     let llamaServerURL: URL
+    let expectedModelFileName: String
 
-    init(modelURL: URL, llamaServerURL: URL) {
+    init(modelURL: URL, llamaServerURL: URL,
+         expectedModelFileName: String = "Qwen3.5-4B-Q4_K_M.gguf") {
         self.modelURL = modelURL.standardizedFileURL
         self.llamaServerURL = llamaServerURL.standardizedFileURL
+        self.expectedModelFileName = expectedModelFileName
     }
 }
 
@@ -2561,7 +2564,7 @@ actor OSAtlasLlamaRuntime {
 
     private static func validateNativeTextInputs(_ inputs: ComputerUseNativeTextRuntimeInputs) throws {
         try validateSemanticModelURL(inputs.modelURL)
-        guard inputs.modelURL.lastPathComponent == "Qwen3.5-4B-Q4_K_M.gguf",
+        guard inputs.modelURL.lastPathComponent == inputs.expectedModelFileName,
               inputs.llamaServerURL.isFileURL,
               inputs.llamaServerURL.lastPathComponent == "llama-server",
               !inputs.llamaServerURL.path.contains("\0") else {

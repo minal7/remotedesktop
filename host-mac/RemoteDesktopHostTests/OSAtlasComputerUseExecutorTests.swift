@@ -11129,6 +11129,51 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         catch is CancellationError {}
     }
 
+    func testNativeTextExpectedModelFilenameKeepsDefaultAndAllowsExplicitCandidate() async throws {
+        let modelURL = URL(fileURLWithPath: "/models/Agents-A1-4B-Q4_K_M.gguf")
+        let llamaServerURL = nativeTextInputs.llamaServerURL
+
+        let defaultEvents = RuntimeEventLog()
+        let defaultLauncher = FakeLlamaLauncher(events: defaultEvents)
+        let defaultRuntime = textRuntime(defaultLauncher, transports: FakeTransportMaker(events: defaultEvents))
+        do {
+            _ = try await defaultRuntime.activateNativeText(ComputerUseNativeTextRuntimeInputs(
+                modelURL: modelURL, llamaServerURL: llamaServerURL))
+            XCTFail("The default installed Qwen filename must remain the only implicit accepted model")
+        } catch let error as OSAtlasLlamaRuntimeError {
+            XCTAssertEqual(error, .invalidLocalInstallation)
+        }
+        let defaultLaunches = await defaultLauncher.configurations()
+        XCTAssertTrue(defaultLaunches.isEmpty, "Default filename mismatch must fail before launching")
+        await defaultRuntime.shutdown()
+
+        let candidateEvents = RuntimeEventLog()
+        let candidateLauncher = FakeLlamaLauncher(events: candidateEvents)
+        let candidateRuntime = textRuntime(candidateLauncher, transports: FakeTransportMaker(events: candidateEvents))
+        let candidate = ComputerUseNativeTextRuntimeInputs(modelURL: modelURL, llamaServerURL: llamaServerURL,
+            expectedModelFileName: "Agents-A1-4B-Q4_K_M.gguf")
+        _ = try await candidateRuntime.activateNativeText(candidate)
+        let candidateLaunches = await candidateLauncher.configurations()
+        XCTAssertEqual(candidateLaunches.count, 1, "An explicitly pinned matching filename must pass validation and reach the launcher")
+        XCTAssertEqual(candidateLaunches.first?.modelFirstSplitURL.lastPathComponent, "Agents-A1-4B-Q4_K_M.gguf")
+        await candidateRuntime.shutdown()
+
+        let mismatchEvents = RuntimeEventLog()
+        let mismatchLauncher = FakeLlamaLauncher(events: mismatchEvents)
+        let mismatchRuntime = textRuntime(mismatchLauncher, transports: FakeTransportMaker(events: mismatchEvents))
+        let mismatch = ComputerUseNativeTextRuntimeInputs(modelURL: modelURL, llamaServerURL: llamaServerURL,
+            expectedModelFileName: "Other-Model.gguf")
+        do {
+            _ = try await mismatchRuntime.activateNativeText(mismatch)
+            XCTFail("An explicit expected-name mismatch must still be rejected")
+        } catch let error as OSAtlasLlamaRuntimeError {
+            XCTAssertEqual(error, .invalidLocalInstallation)
+        }
+        let mismatchLaunches = await mismatchLauncher.configurations()
+        XCTAssertTrue(mismatchLaunches.isEmpty, "Expected-name mismatch must not invoke the launcher")
+        await mismatchRuntime.shutdown()
+    }
+
     func testNativeTextFailedReadinessRemovesPrivateCredentialAndRejectsUnknownModel() async throws {
         let events = RuntimeEventLog()
         let launcher = FakeLlamaLauncher(events: events)
