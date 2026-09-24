@@ -52,6 +52,10 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
     Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.
     """
 
+    private static let prerequisiteInstructions = """
+    Interpret only the original user goal and ordered accepted answers. Decide whether a user-only prerequisite is missing before meaningful research can begin. Return kind=askUser with one concise necessary question when such input is missing; otherwise return kind=continue with empty text. Researchable facts and ordinary navigation do not require permission. A user condition to wait for approval before a later action does not prevent research that can happen before that action. A current page may resolve a request that refers to that page, but page availability does not supply unstated user-specific information. Preserve the goal's requested outcomes. Return only the strict JSON schema.
+    """
+
     private static let retainedStepInstructions = """
     Plan one read-only native-browser step. Input contains the complete original goal, accepted answers, native context, and a provisional goal contract. The original user goal/answers remain authoritative; the contract is an interpretation, not added authority. Preserve its objective, constraints, and every requirement exactly. Stable rN IDs follow requirement array order; retain each instruction/kind and update only its state/evidence.
 
@@ -211,6 +215,57 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
             "required": ["objective", "constraints", "requirements"]]
         return try makeNativeRequest(system: Self.goalInstructions, user: user, schema: schema,
             schemaName: "browser_goal_contract", outputTokens: 1024)
+    }
+
+    private func prerequisiteQuestion(for goal: ComputerUseUnresolvedTextGoal) async throws -> String? {
+        try Task.checkCancellation()
+        guard let originalGoal = goal.userTurns.first else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+        let user = try Self.orderedJSON(["goal": originalGoal,
+            "clarifications": goal.clarificationContext,
+            "hasCurrentPage": true])
+        guard user.utf8.count <= 48 * 1_024 else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
+        }
+        let askUser: [String: Any] = ["type": "object", "additionalProperties": false,
+            "properties": ["kind": ["type": "string", "enum": ["askUser"]],
+                "text": ["type": "string", "minLength": 1]],
+            "required": ["kind", "text"]]
+        let continueResearch: [String: Any] = ["type": "object", "additionalProperties": false,
+            "properties": ["kind": ["type": "string", "enum": ["continue"]],
+                "text": ["type": "string", "enum": [""]]],
+            "required": ["kind", "text"]]
+        let schema: [String: Any] = ["oneOf": [askUser, continueResearch]]
+        let request = try makeNativeRequest(system: Self.prerequisiteInstructions, user: user,
+            schema: schema, schemaName: "browser_prerequisite", outputTokens: Self.outputTokens)
+        try Task.checkCancellation()
+        let count = try await transport.exactInputTokenCount(completionRequest: request)
+        try Task.checkCancellation()
+        guard count > 0, count <= Self.contextTokens - Self.outputTokens - Self.framingReserve else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
+        }
+        let data = try await transport.complete(request: request)
+        try Task.checkCancellation()
+        if let body = request.httpBody { inspectExchange?(body, data, count) }
+        let content = try ComputerUseBrowserModelResponse.content(data, modelAlias: connection.modelAlias)
+        guard content.utf8.count <= 16 * 1_024 else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+        var parser = StrictSemanticJSONParser(content, maximumValueCount: 4)
+        guard case .object(let root) = try parser.parse(), Set(root.keys) == ["kind", "text"],
+              case .string(let kind)? = root["kind"], case .string(let text)? = root["text"] else {
+            throw ComputerUseBrowserGoalPlanError.invalidResponse
+        }
+        switch kind {
+        case "askUser":
+            guard (1...1_024).contains(text.utf8.count),
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            return text
+        case "continue":
+            guard text.isEmpty else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+            return nil
+        default:
+            throw ComputerUseBrowserGoalPlanError.invalidResponse
+        }
     }
 
     private func makeRetainedStepRequest(_ context: ComputerUseMCPBrowserStepPlanner.Context,
@@ -525,7 +580,12 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
         if context.isInitialObservation { return try await proposeInitialStep(context) }
         let contract: ComputerUseBrowserIntentContract
         if let retained = context.retainedContract, retained.goal == goal { contract = retained }
-        else { contract = try await interpret(goal) }
+        else {
+            if let question = try await prerequisiteQuestion(for: goal) {
+                return .init(kind: .askUser, reference: "", text: question)
+            }
+            contract = try await interpret(goal)
+        }
         try Task.checkCancellation()
         if context.isPartialRecordView {
             let windows = context.windows.isEmpty ? [context] : context.windows
