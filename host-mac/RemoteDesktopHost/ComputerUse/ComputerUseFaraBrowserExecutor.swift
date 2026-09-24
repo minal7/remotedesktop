@@ -89,6 +89,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var terminal: ComputerUseExecutionResult?
         var approval: PendingApproval?
         var pendingNativeFormSubmission: PendingNativeFormSubmission?
+        var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
         var isStarting = false
         init(taskID: String, goal: String, browserIdentity: String, journal: ComputerUseTaskJournal) {
             self.taskID = taskID; self.goal = goal; self.browserIdentity = browserIdentity; self.journal = journal
@@ -154,6 +155,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             session.executionTaskID = taskID
             session.answerOriginID = originatingTaskID
             session.clarifiedGoal = goal
+            session.observedNativeGETSubmissions.removeAll()
             session.userResponse = answer
             session.question = nil
         }
@@ -541,7 +543,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 history: Array(session.history.suffix(20)), currentURL: observation.currentURL, pageReading: session.pageReading,
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
-                clarifiedGoal: session.clarifiedGoal)
+                clarifiedGoal: session.clarifiedGoal,
+                observedNativeGETSubmissions: session.observedNativeGETSubmissions)
             let plannedStep: PlannedStep
             if let pending = session.pendingNativeFormSubmission {
                 plannedStep = .nativeFormSubmission(plan: pending.plan, authorityDigest: pending.authorityDigest)
@@ -604,6 +607,27 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 // Resume then receives the cached receipt rather than planning
                 // or dispatching this form again.
                 observation = try await tools.captureOwnedBrowserAgentObservation(taskID: taskID)
+                try Task.checkCancellation(); try lease.assertOwnership()
+                guard session.browserIdentity == observation.sessionIdentity,
+                      tools.matchesOwnedBrowserAgentSession(taskID: taskID, identity: session.browserIdentity),
+                      pending.observation.sessionIdentity == session.browserIdentity,
+                      pending.observation.approvalPageEvidence.document.taskID == taskID,
+                      pending.observation.approvalPageEvidence.document.contextID == observation.approvalPageEvidence.document.contextID,
+                      pending.observation.currentURL == pending.observation.approvalPageEvidence.document.committedURL,
+                      receipt.document.taskID == taskID,
+                      receipt.document.contextID == observation.approvalPageEvidence.document.contextID,
+                      receipt.document.operationID == ComputerUseTaskContract.digest([pending.operationID, "form-navigation"]) else {
+                    throw Failure.browserChanged
+                }
+                if !session.observedNativeGETSubmissions.contains(where: { $0.operationID == pending.operationID }) {
+                    let goal = try session.clarifiedGoal ?? ComputerUseUnresolvedTextGoal(userRequest: session.goal)
+                    session.observedNativeGETSubmissions.append(.init(taskID: taskID,
+                        goalDigest: ComputerUseTaskContract.digest([goal.taskIdentityText]),
+                        sessionIdentity: session.browserIdentity, operationID: pending.operationID,
+                        submitControlID: pending.plan.submitControlID, edits: pending.plan.edits,
+                        sourceURL: pending.observation.currentURL.absoluteString, receipt: receipt,
+                        capturedURLAfterSubmission: observation.currentURL.absoluteString))
+                }
                 session.pendingNativeFormSubmission = nil
                 let priorUserResponse = session.userResponse
                 let priorActionError = session.actionError

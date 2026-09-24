@@ -3,6 +3,20 @@ import Foundation
 import FoundationModels
 #endif
 
+/// Same-scope host evidence that a native GET form submission executed; this
+/// does not establish that the original goal is complete.
+struct ComputerUseObservedNativeGETSubmission: Sendable, Equatable {
+    let taskID: String
+    let goalDigest: String
+    let sessionIdentity: String
+    let operationID: String
+    let submitControlID: String
+    let edits: [ComputerUseMCPBrowserStepPlanner.FormSubmission.Edit]
+    let sourceURL: String
+    let receipt: ComputerUseBrowserNavigationReceipt
+    let capturedURLAfterSubmission: String
+}
+
 struct ComputerUseBrowserIntentContract: Sendable, Equatable {
     struct Requirement: Sendable, Equatable {
         enum Kind: String, Sendable { case information, action }
@@ -1442,7 +1456,20 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
         if case .page(let current) = observation {
             // This identity check binds page records, evidence IDs, and source to one capture.
             guard current.currentURL == input.currentURL else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+            let goal = try input.validatedBrowserGoal()
+            let document = current.approvalPageEvidence.document
+            let goalDigest = ComputerUseTaskContract.digest([goal.taskIdentityText])
+            guard input.observedNativeGETSubmissions.count <= 64,
+                  input.observedNativeGETSubmissions.allSatisfy({ $0.taskID == document.taskID
+                      && $0.goalDigest == goalDigest && $0.sessionIdentity == current.sessionIdentity
+                      && $0.receipt.document.taskID == document.taskID
+                      && $0.receipt.document.contextID == document.contextID }) else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
             return try context(input, page: current.approvalPageEvidence.page, wholePage: wholePage)
+        }
+        guard input.observedNativeGETSubmissions.isEmpty else {
+            throw ComputerUseBrowserGoalPlanError.invalidResponse
         }
         return try context(input, page: nil, wholePage: wholePage)
     }
@@ -1555,6 +1582,16 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
                 "history": input.history.map { ["proposal": $0.response, "sourceURL": $0.currentURL?.absoluteString as Any? ?? NSNull(),
                     "userResponse": $0.userResponse as Any? ?? NSNull(), "actionError": $0.actionError as Any? ?? NSNull()] },
                 "userResponse": input.userResponse as Any? ?? NSNull(), "actionError": input.actionError as Any? ?? NSNull()]
+            if !input.observedNativeGETSubmissions.isEmpty {
+                object["observedGETSubmissions"] = input.observedNativeGETSubmissions.map { submission in
+                    ["operationID": submission.operationID, "submitControlID": submission.submitControlID,
+                     "edits": submission.edits.map { ["controlID": $0.controlID, "text": $0.text] },
+                     "sourceURL": submission.sourceURL,
+                     "requestedURL": submission.receipt.document.requestedURL.absoluteString,
+                     "committedURL": submission.receipt.document.committedURL.absoluteString,
+                     "capturedURLAfterSubmission": submission.capturedURLAfterSubmission] as [String: Any]
+                }
+            }
             if !initialObservation {
                 object["page"] = page.data
                 object["availableRecordViews"] = page.navigation.keys.sorted()

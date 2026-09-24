@@ -123,6 +123,9 @@ enum ComputerUseFaraModel {
         var browserWorkerDirective: WorkerDirective? = nil
         /// Candidate completion returned by a specialist for native review.
         var specialistCompletion: String? = nil
+        /// Host-retained receipts for native GET submissions; serialized only
+        /// into the native planner context, never treated as semantic success.
+        var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
 
         func validatedBrowserGoal() throws -> ComputerUseUnresolvedTextGoal {
             guard surface == .browser else { throw OSAtlasLlamaRuntimeError.invalidResponse }
@@ -140,7 +143,7 @@ enum ComputerUseFaraModel {
             let states = [focusedTextState] + history.flatMap { [$0.focusedTextState, $0.resultObservation?.focusedTextState] }
             if surface == .desktop {
                 guard currentURL == nil, pageReading == nil, userResponse == nil, observedPage == nil, clarifiedGoal == nil,
-                      browserWorkerDirective == nil, specialistCompletion == nil,
+                      browserWorkerDirective == nil, specialistCompletion == nil, observedNativeGETSubmissions.isEmpty,
                       history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
                         && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
