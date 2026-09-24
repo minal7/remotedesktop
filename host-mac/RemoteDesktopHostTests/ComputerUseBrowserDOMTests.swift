@@ -63,6 +63,124 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         }
     }
 
+    func testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>button{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10} input{display:none}</style>
+            <button id='upload-trigger' onclick="document.querySelector('#upload').click(); fetch('/clicked')">Choose file</button>
+            <input id='upload' type='file' onchange="fetch('/upload',{method:'POST',body:this.files[0]})">
+        """, presentsWindow: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("reviewed.pptx")
+        let expectedBytes = Data([0, 1, 2, 3, 17, 31, 64, 127, 128, 254, 255])
+        try expectedBytes.write(to: fileURL)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first { $0.displayName == "reviewed.pptx" })
+        let observation = try await fixture.browser.captureAgentObservation(document: fixture.document)
+        let triggerControlID = try XCTUnwrap(observation.approvalPageEvidence.page.controls.first(where: { $0.label == "Choose file" })?.id)
+        XCTAssertEqual(observation.approvalPageEvidence.page.controls.first(where: { $0.id == triggerControlID })?.kind, "submit")
+        var resolverCalls = 0
+        var effectHookCalls = 0
+        try await fixture.browser.selectLocalFile(taskID: "fixture", triggerControlID: triggerControlID, observation: observation,
+                                                  operationID: "fixture-upload", resolve: {
+            resolverCalls += 1
+            return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+        }, willBeginEffect: { effectHookCalls += 1 })
+        try await fixture.wait { fixture.server.count("/upload") == 1 }
+        XCTAssertEqual(fixture.server.requestBody(for: "/upload"), expectedBytes)
+        XCTAssertEqual(resolverCalls, 1)
+        XCTAssertEqual(effectHookCalls, 1)
+        XCTAssertEqual(fixture.server.count("/upload"), 1)
+    }
+
+    func testOwnedBrowserOrdinaryButtonClickCannotReleaseLocalFile() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>button{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10} input{display:none}</style>
+            <button id='upload-trigger' onclick="document.querySelector('#upload').click(); fetch('/clicked')">Choose file</button>
+            <input id='upload' type='file' onchange="fetch('/upload',{method:'POST',body:this.files[0]})">
+        """, presentsWindow: true)
+        defer { fixture.close() }
+        let observation = try await fixture.browser.captureAgentObservation(document: fixture.document)
+        let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: 45, y: 40))
+        let maybeTarget = try await fixture.browser.inspectAgentTarget(action, observation: observation)
+        let target = try XCTUnwrap(maybeTarget)
+        try await fixture.browser.performAgentInput(action, observation: observation, target: target)
+        try await fixture.wait { fixture.server.count("/clicked") == 1 }
+        XCTAssertEqual(fixture.server.count("/upload"), 0)
+    }
+
+    func testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>button{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10} input{display:none}</style>
+            <button id='upload-trigger'>Choose file</button><input id='upload' type='file' style='display:none'>
+        """, presentsWindow: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("reviewed.pptx")
+        try Data("fixture".utf8).write(to: fileURL)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first)
+        let observation = try await fixture.browser.captureAgentObservation(document: fixture.document)
+        let triggerControlID = try XCTUnwrap(observation.approvalPageEvidence.page.controls.first(where: { $0.label == "Choose file" })?.id)
+        _ = try await fixture.browser.navigate(taskID: "fixture", operationID: "replace", to: fixture.document.committedURL)
+        var resolverCalls = 0
+        do {
+            try await fixture.browser.selectLocalFile(taskID: "fixture", triggerControlID: triggerControlID, observation: observation,
+                                                      operationID: "stale-upload", resolve: {
+                resolverCalls += 1
+                return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+            }, willBeginEffect: {})
+            XCTFail("A stale trigger observation cannot select a local file")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .pageChanged)
+        }
+        XCTAssertEqual(resolverCalls, 0)
+        XCTAssertEqual(fixture.server.count("/upload"), 0)
+    }
+
+    func testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed() async throws {
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let fixture = try await DOMFixture(body: """
+            <style>button{position:fixed;left:20px;top:20px;width:320px;height:44px;z-index:10}</style>
+            <button id='upload-trigger' onclick="fetch('/clicked')">Choose file</button>
+        """, presentsWindow: true)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { fixture.close(); try? FileManager.default.removeItem(at: directory) }
+        let fileURL = directory.appendingPathComponent("reviewed.pptx")
+        try Data("fixture".utf8).write(to: fileURL)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "fixture", approvedDirectory: directory)
+        let candidate = try XCTUnwrap(catalog.discover().candidates.first)
+        let observation = try await fixture.browser.captureAgentObservation(document: fixture.document)
+        let triggerControlID = try XCTUnwrap(observation.approvalPageEvidence.page.controls.first(where: { $0.label == "Choose file" })?.id)
+        var resolverCalls = 0
+        do {
+            try await fixture.browser.selectLocalFile(taskID: "fixture", triggerControlID: triggerControlID, observation: observation,
+                                                      operationID: "no-picker", resolve: {
+                resolverCalls += 1
+                return try catalog.resolve(candidateID: candidate.id, taskID: "fixture")
+            }, willBeginEffect: {})
+            XCTFail("A button without a chooser must not count as file selection")
+        } catch let error as ComputerUseBrowserError {
+            XCTAssertEqual(error, .fileSelectionUnavailable)
+        }
+        XCTAssertEqual(resolverCalls, 0)
+        XCTAssertEqual(fixture.server.count("/clicked"), 1)
+    }
+
     func testOwnedBrowserFileSelectionRejectsReplacedCatalogCandidateOnce() async throws {
         let previousPolicy = NSApp.activationPolicy()
         NSApp.setActivationPolicy(.accessory)

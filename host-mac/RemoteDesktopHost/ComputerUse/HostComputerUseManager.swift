@@ -1453,6 +1453,19 @@ final class ComputerUseHostTools {
         try await browserNavigationTask.validateAgentTarget(target)
     }
 
+    func selectOwnedBrowserLocalFile(taskID: String, triggerControlID: String,
+                                     observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
+                                     resolve: @escaping @MainActor () throws -> URL,
+                                     willBeginEffect: () throws -> Void = {}) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try await browserNavigationTask.selectLocalFile(taskID: taskID, triggerControlID: triggerControlID,
+            observation: observation, operationID: operationID, resolve: resolve, willBeginEffect: willBeginEffect)
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+    }
+
     func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
                                       target: ComputerUseOwnedBrowser.AgentTarget? = nil,
                                       willBeginEffect: () throws -> Void) async throws {

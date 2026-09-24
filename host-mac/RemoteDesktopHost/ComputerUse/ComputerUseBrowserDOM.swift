@@ -545,6 +545,8 @@ struct ComputerUseBrowserDOMReply: Decodable {
     var agentTargetContext: String? = nil
     var agentTargetSearchLabel: String? = nil
     var agentTargetNavigationKind: String? = nil
+    var agentTargetPointX: Double? = nil
+    var agentTargetPointY: Double? = nil
     let scroll: ComputerUseBrowserViewportScrollReceipt?
     let formQuery: ComputerUseBrowserFormQuery?
     let formStateProof: ComputerUseBrowserFormStateProof.Reply?
@@ -2305,7 +2307,7 @@ enum ComputerUseBrowserDOM {
                           && agentElementStateMatches(lastPageSnapshot.agentState,agentState,field.element)) searchLabel = field.metadata.label;
                     }
                   }
-                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+(binding.metadata.label.trim() || (kind === 'file' ? 'File upload control' : '')),agentTargetSearchLabel:searchLabel};
+                  return {...reply('agent-target'),agentTargetID:id,agentTargetContext:role+' • '+(binding.metadata.label.trim() || (kind === 'file' ? 'File upload control' : '')),agentTargetSearchLabel:searchLabel,agentTargetPointX:pointX,agentTargetPointY:pointY};
                 }
                 for (const [id,binding] of links) if (binding.element === hit) {
                   const previous = Array.from(lastPageSnapshot.links).find(([key,item]) => item.element === binding.element);

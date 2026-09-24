@@ -574,6 +574,15 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try await browser.validateAgentTarget(target)
     }
 
+    func selectLocalFile(taskID: String, triggerControlID: String, observation: ComputerUseOwnedBrowser.AgentObservation,
+                         operationID: String? = nil, resolve: @escaping @MainActor () throws -> URL,
+                         willBeginEffect: () throws -> Void = {}) async throws {
+        try Task.checkCancellation()
+        try await browser.selectLocalFile(taskID: taskID, triggerControlID: triggerControlID, observation: observation,
+            operationID: operationID, resolve: resolve, willBeginEffect: willBeginEffect)
+        try Task.checkCancellation()
+    }
+
     func performAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
                            target: ComputerUseOwnedBrowser.AgentTarget? = nil,
                            willBeginEffect: () throws -> Void) async throws {

@@ -4355,12 +4355,14 @@ final class OwnedBrowserHTTPFixture: @unchecked Sendable {
     private let lock = NSLock()
     private let routes: [String: Response]
     private var requests: [String] = []
+    private var requestBodies: [String: Data] = [:]
     private var active: [NWConnection] = []
     private var held: [(NWConnection, Data)] = []
     private var readyReported = false
     var requestCount: Int { lock.withLock { requests.count } }
     var requestedPaths: [String] { lock.withLock { requests } }
     func count(_ path: String) -> Int { lock.withLock { requests.filter { $0 == path }.count } }
+    func requestBody(for path: String) -> Data? { lock.withLock { requestBodies[path] } }
 
     init(routes: [String: Response] = [:]) throws {
         self.routes = routes
@@ -4398,19 +4400,44 @@ final class OwnedBrowserHTTPFixture: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] chunk, _, complete, error in
             guard let self, error == nil else { connection.cancel(); return }
             let accumulated = data + (chunk ?? Data())
-            guard accumulated.count <= 8_192 else { connection.cancel(); return }
-            guard accumulated.range(of: Data("\r\n\r\n".utf8)) != nil else {
+            guard accumulated.count <= 16_384,
+                  let headerRange = accumulated.range(of: Data("\r\n\r\n".utf8)) else {
+                if complete || accumulated.count > 16_384 { connection.cancel() } else { self.receive(connection, data: accumulated) }
+                return
+            }
+            let headerData = accumulated[..<headerRange.lowerBound]
+            guard let text = String(data: headerData, encoding: .utf8),
+                  let line = text.components(separatedBy: "\r\n").first else { connection.cancel(); return }
+            let fields = line.split(separator: " ")
+            guard fields.count == 3, fields[0] == "GET" || fields[0] == "POST" else { connection.cancel(); return }
+            let method = String(fields[0]), requestTarget = String(fields[1])
+            let headers = text.components(separatedBy: "\r\n").dropFirst()
+            let contentLengthHeaders = headers.filter { header in
+                let pair = header.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                return pair.first?.trimmingCharacters(in: .whitespaces).lowercased() == "content-length"
+            }
+            guard !headers.contains(where: { $0.lowercased().hasPrefix("transfer-encoding:") }),
+                  (method == "POST" ? contentLengthHeaders.count == 1 : contentLengthHeaders.count <= 1) else { connection.cancel(); return }
+            let contentLength: Int
+            if let header = contentLengthHeaders.first {
+                let pair = header.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+                guard pair.count == 2, pair[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length",
+                      let parsed = Int(pair[1].trimmingCharacters(in: .whitespaces)) else { connection.cancel(); return }
+                contentLength = parsed
+            } else { contentLength = 0 }
+            guard contentLength >= 0, contentLength <= 8_192 else { connection.cancel(); return }
+            let bodyStart = headerRange.upperBound
+            guard accumulated.count >= bodyStart + contentLength else {
                 if complete { connection.cancel() } else { self.receive(connection, data: accumulated) }
                 return
             }
-            guard let text = String(data: accumulated, encoding: .utf8),
-                  let line = text.components(separatedBy: "\r\n").first else { connection.cancel(); return }
-            let fields = line.split(separator: " ")
-            guard fields.count == 3, fields[0] == "GET" else { connection.cancel(); return }
-            let path = String(fields[1])
-            let response = self.routes[path] ?? Response()
+            let body = Data(accumulated[bodyStart..<(bodyStart + contentLength)])
+            let path = requestTarget.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? requestTarget
+            let route = method == "POST" ? path : requestTarget
+            let response = self.routes[route] ?? Response()
             self.lock.withLock {
-                self.requests.append(path)
+                self.requests.append(requestTarget)
+                if method == "POST" { self.requestBodies[path] = body }
                 if response.held { self.held.append((connection, response.bytes)) }
             }
             if !response.held { Self.send(response.bytes, on: connection) }

@@ -1,0 +1,294 @@
+{
+  "schemaVersion": 1,
+  "status": "native-picker-implemented-compiled-component-tested; full-file-transfer-not-accepted",
+  "scope": "Host resolves a current observed control ID to a native click and binds one catalog resolver to the resulting main-frame WebKit panel. Native event, callback, and actual POST bytes exercised without model inference. File assignment alone is not remote-upload success.",
+  "checkpoints": [
+    {
+      "name": "native-hidden-file-selection-red01",
+      "note": "Compiler failure: tests referenced fileprivate evidence; corrected to existing public approvalPageEvidence accessor.",
+      "exitCode": 65,
+      "testIDs": [
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserOrdinaryButtonClickCannotReleaseLocalFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed"
+      ],
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "testFailures": [],
+      "compilerErrors": 5,
+      "compilerWarnings": 12,
+      "errors": [
+        {
+          "issueType": "Uncategorized",
+          "message": "Testing cancelled because the build failed."
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Error",
+          "message": "'evidence' is inaccessible due to 'fileprivate' protection level",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift#EndingColumnNumber=57&EndingLineNumber=83&StartingColumnNumber=57&StartingLineNumber=83&Timestamp=811985602.326316"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Error",
+          "message": "'evidence' is inaccessible due to 'fileprivate' protection level",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift#EndingColumnNumber=35&EndingLineNumber=84&StartingColumnNumber=35&StartingLineNumber=84&Timestamp=811985602.326316"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Error",
+          "message": "'evidence' is inaccessible due to 'fileprivate' protection level",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift#EndingColumnNumber=57&EndingLineNumber=134&StartingColumnNumber=57&StartingLineNumber=134&Timestamp=811985602.326316"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Error",
+          "message": "'evidence' is inaccessible due to 'fileprivate' protection level",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift#EndingColumnNumber=57&EndingLineNumber=167&StartingColumnNumber=57&StartingLineNumber=167&Timestamp=811985602.326316"
+        }
+      ],
+      "sourceAudit": {
+        "sourceCount": 22,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "4bd56a3c30a8ad332b140060b3ceb48dd0f6a37b94e1bc184fd0fbace989d66e",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "d4f810d35d670a738b54e5dd8a79bb8bc63579c278186af25b4c7edce3bdd5a6",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "cb826c9cc621b68927db29c3dc9df6ca5f1ced5569a528c47b42be0e5e64da4b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "5d0868c8d5511950a4a52bb26dc0a28216ba457ab9143a75b84d3fdf5bdbd381",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "c9639ab2f4b9c573a6b9e21ab7a880e9ec9e0fee0b920576460196f100e58aaa",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "f0f634b490b6e0ae0f5394b1def968502f3ade61187674759295a0cde8305eb9",
+        "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "521926cda18d9c022d6d6f640b73276aab465b408ed16cd4cd2ae4faec8226b5",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "runnerSHA256": "35256db8a5b2b42b42581d7dd36f27edaa0ccdb2bc242ae329dfe70e13892a31",
+      "commandRecord": ".build/repair-verification/native-hidden-file-selection-red01-command.json",
+      "resultBundle": ".build/repair-verification/native-hidden-file-selection-red01.xcresult"
+    },
+    {
+      "name": "native-hidden-file-selection-red02",
+      "note": "One ordinary-click regression passes, three failures: unimplemented selection behavior plus incorrect positive fixture assertion (bare HTML button defaults to submit). Fixture assertion corrected without changing HTML.",
+      "exitCode": 65,
+      "testIDs": [
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserOrdinaryButtonClickCannotReleaseLocalFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed"
+      ],
+      "passed": 1,
+      "failed": 3,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "testFailures": [
+        {
+          "failureText": "XCTAssertEqual failed: (\"fileSelectionUnavailable\") is not equal to (\"pageChanged\")",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 1,
+          "testIdentifierString": "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving",
+          "testName": "testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving()"
+        },
+        {
+          "failureText": "XCTAssertEqual failed: (\"Optional(\"submit\")\") is not equal to (\"Optional(\"button\")\")",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 2,
+          "testIdentifierString": "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes",
+          "testName": "testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes()"
+        },
+        {
+          "failureText": "XCTAssertEqual failed: (\"0\") is not equal to (\"1\")",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 3,
+          "testIdentifierString": "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed",
+          "testName": "testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed()"
+        }
+      ],
+      "compilerErrors": 0,
+      "compilerWarnings": 21,
+      "errors": [],
+      "sourceAudit": {
+        "sourceCount": 22,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "4bd56a3c30a8ad332b140060b3ceb48dd0f6a37b94e1bc184fd0fbace989d66e",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "d4f810d35d670a738b54e5dd8a79bb8bc63579c278186af25b4c7edce3bdd5a6",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "cb826c9cc621b68927db29c3dc9df6ca5f1ced5569a528c47b42be0e5e64da4b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "5d0868c8d5511950a4a52bb26dc0a28216ba457ab9143a75b84d3fdf5bdbd381",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "4da06dac15f0c721173ef2c753863833c30c539942e79d5d8cdbaf29b40496d8",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "f0f634b490b6e0ae0f5394b1def968502f3ade61187674759295a0cde8305eb9",
+        "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "4de0aa312c312904d36fc7e0273fa13cbdb3040c1bf248abc58de602944747f7",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "runnerSHA256": "5af038aad2a4c0449174aac7950e248e11d0614fd86fbc8b2cb85191eceef486",
+      "commandRecord": ".build/repair-verification/native-hidden-file-selection-red02-command.json",
+      "resultBundle": ".build/repair-verification/native-hidden-file-selection-red02.xcresult"
+    },
+    {
+      "name": "native-hidden-file-selection-green01",
+      "note": "Compiler failure: explicit self required in native dispatch closure. No tests executed.",
+      "exitCode": 65,
+      "testIDs": [
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserOrdinaryButtonClickCannotReleaseLocalFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileInputReceivesOneResolvedFileOnce",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileInputWithoutSelectionDoesNotReceiveAFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionIsInvalidatedByDocumentNavigation",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionRejectsReplacedCatalogCandidateOnce",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionIsInvalidatedByUserControlTakeover"
+      ],
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "testFailures": [],
+      "compilerErrors": 2,
+      "compilerWarnings": 2,
+      "errors": [
+        {
+          "issueType": "Uncategorized",
+          "message": "Testing cancelled because the build failed."
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Error",
+          "message": "Reference to property 'oneUseFileSelection' in closure requires explicit use of 'self' to make capture semantics explicit",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift#EndingColumnNumber=24&EndingLineNumber=1633&StartingColumnNumber=24&StartingLineNumber=1633&Timestamp=811986051.610515"
+        }
+      ],
+      "sourceAudit": {
+        "sourceCount": 22,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "d4f810d35d670a738b54e5dd8a79bb8bc63579c278186af25b4c7edce3bdd5a6",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "cb826c9cc621b68927db29c3dc9df6ca5f1ced5569a528c47b42be0e5e64da4b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "f5700f586ab479fb98c016bb1bc4367d05f7df7e74c6f099b45121382aecdcc4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "f61d3f0afffcfbec1df99acedc9b7ab766b198581ffc5b101dcdd60b2a79fb41",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "f0f634b490b6e0ae0f5394b1def968502f3ade61187674759295a0cde8305eb9",
+        "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "422c5a70b1490a595fe7b91b94fb26f92cffd87d1c0d525a1a6a0274713c9239",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "runnerSHA256": "ff1546f1f5fbc258cdd64777248a19c48e5669506be79547671fe04f94899c27",
+      "commandRecord": ".build/repair-verification/native-hidden-file-selection-green01-command.json",
+      "resultBundle": ".build/repair-verification/native-hidden-file-selection-green01.xcresult"
+    },
+    {
+      "name": "native-hidden-file-selection-green02",
+      "note": "Nine tests pass: native observed button triggers hidden input; exact eleven binary bytes reach local POST endpoint once; no chooser, stale document, ordinary click and earlier visible-input regressions. No model or remote upload.",
+      "exitCode": 0,
+      "testIDs": [
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionUsesObservedButtonAndPostsExactBytes",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserOrdinaryButtonClickCannotReleaseLocalFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitFileSelectionRejectsStaleTriggerBeforeResolving",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserExplicitSelectionWithoutChooserFailsClosed",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileInputReceivesOneResolvedFileOnce",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileInputWithoutSelectionDoesNotReceiveAFile",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionIsInvalidatedByDocumentNavigation",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionRejectsReplacedCatalogCandidateOnce",
+        "ComputerUseBrowserDOMTests/testOwnedBrowserFileSelectionIsInvalidatedByUserControlTakeover"
+      ],
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "testFailures": [],
+      "compilerErrors": 0,
+      "compilerWarnings": 28,
+      "errors": [],
+      "sourceAudit": {
+        "sourceCount": 22,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "d4f810d35d670a738b54e5dd8a79bb8bc63579c278186af25b4c7edce3bdd5a6",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "cb826c9cc621b68927db29c3dc9df6ca5f1ced5569a528c47b42be0e5e64da4b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "f61d3f0afffcfbec1df99acedc9b7ab766b198581ffc5b101dcdd60b2a79fb41",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "f0f634b490b6e0ae0f5394b1def968502f3ade61187674759295a0cde8305eb9",
+        "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "422c5a70b1490a595fe7b91b94fb26f92cffd87d1c0d525a1a6a0274713c9239",
+        "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "runnerSHA256": "1dd1eecc1ab7e66df15c2e5e2059521b1827e72892e1516ac2fbf70fc69cc5dc",
+      "commandRecord": ".build/repair-verification/native-hidden-file-selection-green02-command.json",
+      "resultBundle": ".build/repair-verification/native-hidden-file-selection-green02.xcresult"
+    }
+  ],
+  "limits": [
+    "Real local-model selection/clarification/upload workflow not run",
+    "Only main-frame WebKit open-panel callbacks",
+    "Supported visible file, button, aria-button and submit without form owner; nine-test batch directly exercised visible file and bare unowned submit, not every kind",
+    "Default authenticated Drive session not established; owned data store remains ephemeral",
+    "No final semantic upload-completion proof or real Drive readback",
+    "No email attachment workflow"
+  ]
+}

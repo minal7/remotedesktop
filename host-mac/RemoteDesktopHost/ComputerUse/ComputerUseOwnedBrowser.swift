@@ -663,6 +663,59 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         var taskID: String { session.taskID }
     }
 
+    /// Selects one host-resolved file only after the exact observed main-frame
+    /// button click invokes WebKit's file-panel callback. Supplying a file is
+    /// not evidence that a remote upload succeeded.
+    func selectLocalFile(
+        taskID: String,
+        triggerControlID: String,
+        observation: AgentObservation,
+        operationID: String? = nil,
+        resolve: @escaping @MainActor () throws -> URL,
+        willBeginEffect: () throws -> Void = {}
+    ) async throws {
+        try validateAgentSession(observation)
+        let triggers = observation.evidence.page.controls.filter { $0.id == triggerControlID && !$0.disabled }
+        guard taskID == observation.evidence.document.taskID, triggers.count == 1,
+              let trigger = triggers.first else { throw ComputerUseBrowserError.pageChanged }
+        let usesVisibleInput = trigger.kind == "file"
+        let usesButtonTrigger = trigger.kind == "button" || trigger.kind == "aria-button"
+            || (trigger.kind == "submit" && trigger.form == nil)
+        guard usesVisibleInput || usesButtonTrigger else { throw ComputerUseBrowserError.pageChanged }
+        guard let target = try await inspectAgentTarget(controlID: triggerControlID, observation: observation),
+              target.navigation == nil, target.elementID == triggerControlID,
+              case .pointer(.leftClick, _) = target.proposal else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        if usesVisibleInput {
+            guard target.context.hasPrefix("AXFileUpload • ") else { throw ComputerUseBrowserError.pageChanged }
+        } else {
+            guard target.context.hasPrefix("AXButton • ") else { throw ComputerUseBrowserError.pageChanged }
+        }
+        guard let view = browser, !Task.isCancelled, self.browser === view,
+              hasOwnership(taskID: taskID), validate(observation.evidence.document),
+              observation.evidence.document.generation == generation else {
+            throw ComputerUseBrowserError.fileSelectionUnavailable
+        }
+        if usesVisibleInput {
+            try armOneUseFileSelection(taskID: taskID, evidence: observation.evidence, resolve: resolve)
+        } else {
+            oneUseFileSelection = OneUseFileSelection(evidence: observation.evidence, browserSessionID: browserSessionID,
+                ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch, triggerControlID: triggerControlID, resolve: resolve)
+            pendingFilePanelDispatch = nil
+            completedFilePanelDispatch = nil
+        }
+        do {
+            try await performAgentInput(target.proposal, observation: observation, operationID: operationID,
+                target: target, willBeginEffect: willBeginEffect)
+        } catch {
+            if oneUseFileSelection?.evidence.document == observation.evidence.document { oneUseFileSelection = nil }
+            pendingFilePanelDispatch = nil
+            completedFilePanelDispatch = nil
+            throw error
+        }
+    }
+
     /// Arms a single host-resolved file for a visible main-frame file input
     /// in the exact current page. This first slice does not support hidden
     /// picker triggers. The callback supplies a file to the page; it is not
@@ -682,7 +735,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             throw ComputerUseBrowserError.fileSelectionUnavailable
         }
         oneUseFileSelection = OneUseFileSelection(evidence: evidence, browserSessionID: browserSessionID,
-            ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch, resolve: resolve)
+            ownershipEpoch: ownershipEpoch, takeoverEpoch: takeoverEpoch, triggerControlID: nil, resolve: resolve)
         pendingFilePanelDispatch = nil
         completedFilePanelDispatch = nil
     }
@@ -1215,6 +1268,41 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         }
     }
 
+    /// Resolve an observed control ref to a host-validated native click target.
+    /// The model supplies only the ID; the host obtains the point from DOM layout.
+    func inspectAgentTarget(controlID: String, observation: AgentObservation) async throws -> AgentTarget? {
+        try Task.checkCancellation()
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        agentOperationInProgress = true
+        defer { agentOperationInProgress = false }
+        try validateAgentSession(observation)
+        guard observation.evidence.page.controls.filter({ $0.id == controlID && !$0.disabled }).count == 1,
+              controlID.utf8.count <= 65,
+              let viewport = observation.evidence.page.viewport, viewport.isWellFormed else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let resolved = try await callDOM(.agentTarget, arguments: [
+            "documentID": observation.evidence.documentID, "snapshotID": observation.evidence.page.id,
+            "controlID": controlID
+        ], document: observation.evidence.document)
+        lastAgentTargetStatus = resolved.status
+        try Task.checkCancellation()
+        try validateAgentSession(observation)
+        guard resolved.status == "agent-target", resolved.documentID == observation.evidence.documentID,
+              resolved.agentTargetID == controlID,
+              let x = resolved.agentTargetPointX, let y = resolved.agentTargetPointY,
+              x.isFinite, y.isFinite, x >= 0, y >= 0, x < viewport.width, y < viewport.height else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+        let point = ComputerUseFaraAction.Point(x: x / viewport.width * 1000, y: y / viewport.height * 1000)
+        let action = ComputerUseFaraAction.pointer(.leftClick, point)
+        guard let target = try await readAgentTarget(action, observation: observation),
+              target.elementID == controlID else { throw ComputerUseBrowserError.pageChanged }
+        try Task.checkCancellation()
+        try validateAgentSession(observation)
+        return target
+    }
+
     func inspectAgentTarget(_ action: ComputerUseFaraAction, observation: AgentObservation) async throws -> AgentTarget? {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
         agentOperationInProgress = true
@@ -1395,9 +1483,17 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         // animation; it is not input-location authority by itself.
         let inspectedTarget = try await readAgentTarget(action, observation: observation)
         try check()
+        let hasFileSelection = hasOneUseFileSelection(for: observation)
         if inspectedTarget?.context.hasPrefix("AXFileUpload • ") == true {
+            guard case .pointer(.leftClick, _) = action, hasFileSelection,
+                  oneUseFileSelection?.triggerControlID == nil else {
+                throw ComputerUseBrowserError.fileSelectionUnavailable
+            }
+        }
+        if let triggerControlID = oneUseFileSelection?.triggerControlID, hasFileSelection {
             guard case .pointer(.leftClick, _) = action,
-                  hasOneUseFileSelection(for: observation) else {
+                  inspectedTarget?.elementID == triggerControlID,
+                  inspectedTarget?.context.hasPrefix("AXButton • ") == true else {
                 throw ComputerUseBrowserError.fileSelectionUnavailable
             }
         }
@@ -1534,7 +1630,9 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
             }
             dispatch = {
                 self.agentPointer = point
-                if inspectedTarget?.context.hasPrefix("AXFileUpload • ") == true {
+                if inspectedTarget?.context.hasPrefix("AXFileUpload • ") == true
+                    || (self.oneUseFileSelection?.triggerControlID == inspectedTarget?.elementID
+                        && inspectedTarget?.context.hasPrefix("AXButton • ") == true) {
                     panelDispatchID = try self.beginFilePanelDispatch(for: observation)
                 }
                 window.sendEvent(down)
@@ -1635,6 +1733,7 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         let browserSessionID: UUID
         let ownershipEpoch: UUID
         let takeoverEpoch: UUID
+        let triggerControlID: String?
         let resolve: @MainActor () throws -> URL
     }
     private struct FilePanelDispatch {
