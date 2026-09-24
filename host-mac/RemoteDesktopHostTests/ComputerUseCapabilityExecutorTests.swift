@@ -424,6 +424,19 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         XCTAssertEqual(desktop.cancellations, 1)
     }
 
+    func testPauseAndStopMCPCallsForwardSeparatelyToDesktop() async throws {
+        let desktop = RoutingDesktopFixture()
+        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+            desktopFactory: { _ in desktop })
+        _ = try await executor.execute(taskID: "pause-forward", prompt: "Open an app.",
+            trustedUserPrompt: "Open an app.", tools: tools(), progress: { _ in })
+        executor.pauseMCPWork()
+        XCTAssertEqual(desktop.pauses, 1)
+        XCTAssertEqual(desktop.cancellations, 0)
+        executor.cancelMCPWork()
+        XCTAssertEqual(desktop.cancellations, 1)
+    }
+
     func testConcurrentTaskIsRejectedAndCancelledNativeResultCannotComplete() async throws {
         var pending: CheckedContinuation<ComputerUseExecutionResult?, Never>?
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
@@ -450,8 +463,10 @@ private final class RoutingDesktopFixture: ComputerUseExecuting, MCPApprovalCont
     let isReady = true
     let runtimeName = "fixture"
     var cancellations = 0
+    var pauses = 0
     var result: ComputerUseExecutionResult = .completed("fixture")
     func cancelMCPWork() { cancellations += 1 }
+    func pauseMCPWork() { pauses += 1 }
     func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
                               progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
         throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation

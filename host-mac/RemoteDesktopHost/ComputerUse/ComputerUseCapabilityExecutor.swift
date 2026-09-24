@@ -418,6 +418,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     func cancelMCPWork() {
         (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
     }
+
+    func pauseMCPWork() {
+        (desktop as? any MCPApprovalContinuing)?.pauseMCPWork()
+    }
 }
 
 /// Defers the expensive visual model until a structured route actually needs

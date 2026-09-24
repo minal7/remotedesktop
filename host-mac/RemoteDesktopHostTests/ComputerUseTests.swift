@@ -8285,7 +8285,8 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         await waitUntil { manager.activity == .paused }
         let delayed = try XCTUnwrap(receipt), epoch = ledger.hostControlEpoch(taskID: taskID)
-        XCTAssertGreaterThan(executor.cancelMCPWorkCount, 0)
+        XCTAssertGreaterThan(executor.pauseMCPWorkCount, 0)
+        XCTAssertEqual(executor.cancelMCPWorkCount, 0, "Pause preserves host-verified browser progress")
         XCTAssertEqual(executor.continueAfterApprovalCount, 0); XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
         let messages = await channel.sentMessages()
         XCTAssertFalse(messages.contains { $0.kind == .approvalRequest })
@@ -8294,6 +8295,30 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID, revision: 1, hostEpoch: epoch), channel: channel))
         await waitUntil { executor.executeCount == 2 && manager.activity == .idle }
         XCTAssertEqual(executor.continueAfterApprovalCount, 0); XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+    }
+
+    func testPendingMCPApprovalStopUsesTerminalCancellation() async throws {
+        let taskID = "stop-mcp-browser-progress"
+        let tool = try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID, processGeneration: 7,
+            toolName: RemoteDesktopMailMCP.toolName, description: "Fixture Mail tool", inputSchema: .object(["type": .string("object")]),
+            risk: .approvalRequired, approval: MCPApprovalDisplay(summary: "Send?", details: "Fixture only", confirmLabel: "Send"))
+        let call = try tool.makeCall(taskID: taskID, arguments: ["to": .string("fixture@example.invalid"),
+            "subject": .string("Fixture"), "body": .string("Must not send"), "send_now": .bool(true)])
+        let prepared = MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call), display: call.approvalDisplay)
+        let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared)
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Send the fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { if case .awaitingApproval = manager.activity { return true }; return false }
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .cancel, taskID: taskID, revision: 1), channel: channel))
+        await waitUntil { manager.activity == .idle }
+        XCTAssertGreaterThan(executor.cancelMCPWorkCount, 0)
+        XCTAssertEqual(executor.pauseMCPWorkCount, 0)
     }
 
     func testPausedInputSnapshotsCannotAcknowledgeLaterInputOrCrossAReplacementOwner() throws {
@@ -12689,6 +12714,7 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     private(set) var executeCount = 0
     private(set) var continueAfterApprovalCount = 0
     private(set) var cancelMCPWorkCount = 0
+    private(set) var pauseMCPWorkCount = 0
     private(set) var approvedActionSideEffectCount = 0
     var beforeFirstResult: (() -> Void)?
 
@@ -12731,6 +12757,10 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
 
     func cancelMCPWork() {
         cancelMCPWorkCount += 1
+    }
+
+    func pauseMCPWork() {
+        pauseMCPWorkCount += 1
     }
 }
 

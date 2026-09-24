@@ -975,7 +975,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let page = compactReadingPage(text: "PAGE_ONLY_SECRET: return fee is $25", label: "Return fee")
         let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
         let proceed = #"{"kind":"continue","text":""}"#
-        let contract = #"{"objective":"Report the return fee and preserve the ticket purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets for the selected performance after approval.","kind":"action"}]}"#
+        let contract = #"{"objective":"Report the return fee and preserve the ticket purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets for the selected performance after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let askUser = try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Do you approve purchasing tickets for Friday evening?"}"#)
         let transport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(proceed), try nativeStepEnvelope(contract), askUser])
         let planner = try nativeStepPlanner(transport: transport)
@@ -1038,7 +1038,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let changedInput = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source, clarifiedGoal: changedGoal)
         var changedContext = try ComputerUseMCPBrowserStepPlanner().context(changedInput, page: page, wholePage: true)
         changedContext.retainedContract = retained
-        let changedContract = #"{"objective":"Report the return fee and preserve the ticket purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets for the selected performance after approval.","kind":"action"}]}"#
+        let changedContract = #"{"objective":"Report the return fee and preserve the ticket purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets for the selected performance after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let changedTransport = NativeStepQueueFixtureTransport(responses: [try nativeStepEnvelope(proceed), try nativeStepEnvelope(changedContract), askUser])
         let changedPlanner = try nativeStepPlanner(transport: changedTransport)
         let changed = try await changedPlanner.propose(changedContext)
@@ -1286,7 +1286,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             clarifiedGoal: clarifiedGoal)
         let page = compactReadingPage(text: "The return fee is $25.", label: "The return fee is $25.")
         let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
-        let goalContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action"}]}"#
+        let goalContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let partial = try nativeBrowserFunctionEnvelope("incomplete", arguments: [
             "text": "The return fee is $25. Source: https://example.org/policy. The Notes action remains unfinished.",
             "evidence": ["r1": ["text:t1"]]])
@@ -1332,7 +1332,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             clarifiedGoal: changedGoal)
         var changedContext = try ComputerUseMCPBrowserStepPlanner().context(changedInput, page: page, wholePage: true)
         changedContext.retainedContract = retained
-        let changedContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action"}]}"#
+        let changedContract = #"{"objective":"Report the fee and preserve the Notes action.","constraints":["Only add it after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let needsApproval = try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Do you approve adding the fee to Notes?"}"#)
         let changedTransport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
@@ -1360,7 +1360,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             clarifiedGoal: goal)
         let page = compactReadingPage(text: "The fee is $25.", label: "The fee is $25.")
         let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
-        let contract = #"{"objective":"Read the fee and preserve the purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Purchase tickets after approval.","kind":"action"}]}"#
+        let contract = #"{"objective":"Read the fee and preserve the purchase action.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Purchase tickets after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let prerequisite = try nativeStepEnvelope(#"{"kind":"continue","text":""}"#)
         let contractResponse = try nativeStepEnvelope(contract)
 
@@ -1589,7 +1589,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let mixedInput = ComputerUseFaraModel.Input(goal: mixedGoalText, screenshotPNG: Data(), currentURL: source,
             clarifiedGoal: mixedGoal)
         let mixedContext = try ComputerUseMCPBrowserStepPlanner().context(mixedInput, page: page, wholePage: true)
-        let actionContract = #"{"objective":"Report the fee and preserve purchase after approval.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Purchase tickets after approval.","kind":"action"}]}"#
+        let actionContract = #"{"objective":"Report the fee and preserve purchase after approval.","constraints":["Purchase only after approval."],"requirements":[{"instruction":"Report the fee.","kind":"information"},{"instruction":"Purchase tickets after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let observedActionAttempt = try nativeBrowserFunctionEnvelope("answer", arguments: ["text": "The fee is $25; the action is complete.",
             "evidence": ["r1": ["text:t1"], "r2": ["text:t1"]]])
         let actionTransport = NativeStepQueueFixtureTransport(responses: [prerequisite,
@@ -1628,7 +1628,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: source,
             clarifiedGoal: clarifiedGoal)
         let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
-        let goalContract = #"{"objective":"Report the return fee and preserve the conditional purchase request.","constraints":["Purchase only after user approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action"}]}"#
+        let goalContract = #"{"objective":"Report the return fee and preserve the conditional purchase request.","constraints":["Purchase only after user approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let askUser = try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Which tickets should I purchase, and do you approve?"}"#)
         let transport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
@@ -1665,11 +1665,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertTrue((trustedUser["clarifications"] as? [[String: String]])?.first?["answer"]?.utf8.elementsEqual(acceptedAnswer.utf8) == true)
         let capture = try nativeBrowserCapturedObject(calls.requests[2])
         let contract = try XCTUnwrap(capture["goalContract"] as? [String: Any])
-        let rawRequirements = try XCTUnwrap(contract["requirements"] as? [[String: String]])
-        XCTAssertEqual(rawRequirements.map { $0["id"] ?? "" }, ["r1", "r2"])
-        XCTAssertEqual(rawRequirements.map { $0["instruction"] ?? "" }, [
+        let rawRequirements = try XCTUnwrap(contract["requirements"] as? [[String: Any]])
+        XCTAssertEqual(rawRequirements.map { $0["id"] as? String ?? "" }, ["r1", "r2"])
+        XCTAssertEqual(rawRequirements.map { $0["instruction"] as? String ?? "" }, [
             "Report the return fee.", "Purchase tickets only after user approval."])
-        XCTAssertEqual(rawRequirements.map { $0["kind"] ?? "" }, ["information", "action"])
+        XCTAssertEqual(rawRequirements.map { $0["kind"] as? String ?? "" }, ["information", "action"])
+        XCTAssertEqual(rawRequirements[1]["expectedEffect"] as? [String: String], ["type": "unsupported"])
         XCTAssertTrue(String(decoding: calls.requests[2], as: UTF8.self).contains("The return fee is $25."))
         let decisionRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
         XCTAssertNil(decisionRequest["response_format"])
@@ -1692,6 +1693,276 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(purchase.kind, .action)
         XCTAssertEqual(purchase.state, .pending)
         XCTAssertEqual(purchase.evidence, "")
+    }
+
+    func testNativeBrowserRetainsTypedOpenURLWithoutClaimingCompletion() async throws {
+        let current = URL(string: "https://example.org/start")!
+        let source = URL(string: "https://example.org/policy")!
+        let original = "Open \(source.absoluteString) and report its current heading."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: current,
+            clarifiedGoal: goal)
+        let page = compactReadingPage(text: "Starting page heading", label: "Starting page heading")
+        let planner = ComputerUseMCPBrowserStepPlanner()
+        let context = try planner.context(input, page: page, wholePage: true)
+        let goalContract = #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open https://example.org/policy.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy"}},{"instruction":"Report its heading.","kind":"information"}]}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(goalContract),
+            try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"user-url-1"}"#)
+        ])
+
+        let plan: ComputerUseMCPBrowserStepPlanner.Plan
+        do {
+            plan = try await nativeStepPlanner(transport: transport).propose(context)
+        } catch {
+            let calls = await transport.snapshot()
+            XCTFail("The typed openURL requirement must survive goal interpretation and remain pending; completions=\(calls.completions), error=\(error)")
+            XCTAssertEqual(calls.completions, 2, "The current strict contract parser rejects expectedEffect before proposing a step")
+            return
+        }
+
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 3)
+        XCTAssertEqual(plan.kind, .openLink)
+        XCTAssertEqual(plan.reference, "user-url-1")
+        let decision = try nativeBrowserCapturedObject(calls.requests[2])
+        let contract = try XCTUnwrap(decision["goalContract"] as? [String: Any])
+        let requirements = try XCTUnwrap(contract["requirements"] as? [[String: Any]])
+        let openRequirement = try XCTUnwrap(requirements.first { $0["kind"] as? String == "action" })
+        let expectedEffect = try XCTUnwrap(openRequirement["expectedEffect"] as? [String: String])
+        XCTAssertEqual(expectedEffect["type"], "openURL")
+        XCTAssertEqual(expectedEffect["url"], source.absoluteString)
+        let decisionRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        let decisionTools = try XCTUnwrap(decisionRequest["tools"] as? [[String: Any]])
+        let decisionNames = Set(try decisionTools.map { tool -> String in
+            let function = try XCTUnwrap(tool["function"] as? [String: Any])
+            return try XCTUnwrap(function["name"] as? String)
+        })
+        XCTAssertFalse(decisionNames.contains("answer"), "An unverified openURL action cannot be completed with an answer")
+        XCTAssertEqual(plan.assessment?.requirements.map(\.state), [.pending, .pending],
+            "A planner proposal alone is not a host-verified navigation receipt")
+    }
+
+    func testNativeBrowserRejectsMalformedOrUnrequestedOpenURLEffects() async throws {
+        let current = URL(string: "https://example.org/start")!
+        let supplied = URL(string: "https://example.org/policy")!
+        let original = "Open \(supplied.absoluteString) and report its current heading."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: current,
+            clarifiedGoal: goal)
+        let page = compactReadingPage(text: "Starting page heading", label: "Starting page heading")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let prerequisite = try nativeStepEnvelope(#"{"kind":"continue","text":""}"#)
+        let malformedContracts = [
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy","extra":true}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open another source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/not-requested"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action"},{"instruction":"Report its heading.","kind":"information"}]}"#
+        ]
+        for contract in malformedContracts {
+            let transport = NativeStepQueueFixtureTransport(responses: [prerequisite, try nativeStepEnvelope(contract)])
+            do {
+                _ = try await nativeStepPlanner(transport: transport).propose(context)
+                XCTFail("Malformed or unrequested openURL effects must not enter a retained contract")
+            } catch {
+                XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse)
+            }
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.completions, 2)
+            XCTAssertEqual(calls.counts, 2)
+        }
+    }
+
+    func testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/start": .init(body: "<!doctype html><h1>Start</h1>"),
+            "/policy": .init(body: "<!doctype html><h1>Policy heading</h1><p>The current rule is public.</p>"),
+            "/other": .init(body: "<!doctype html><h1>Other heading</h1>")
+        ])
+        let base = try await server.start(); defer { server.stop() }
+        let startURL = base.appendingPathComponent("start")
+        let sourceURL = base.appendingPathComponent("policy")
+        let otherURL = base.appendingPathComponent("other")
+        let taskID = "typed-open-url-" + UUID().uuidString
+        let goalText = "Open \(sourceURL.absoluteString), then report the current page heading."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText)
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: taskID)
+        let startDocument = try await browser.navigate(taskID: taskID, operationID: "start", to: startURL)
+        let startObservation = try await browser.captureAgentObservation(document: startDocument)
+        let startInput = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: startObservation.png,
+            currentURL: startURL, clarifiedGoal: goal)
+        let contractObject: [String: Any] = ["objective": "Open the requested source and report the current page heading.",
+            "constraints": [], "requirements": [
+                ["instruction": "Open the supplied policy page.", "kind": "action",
+                    "expectedEffect": ["type": "openURL", "url": sourceURL.absoluteString]],
+                ["instruction": "Report the current page heading.", "kind": "information"]
+            ]]
+        let contract = String(decoding: try JSONSerialization.data(withJSONObject: contractObject,
+            options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        let firstTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(contract),
+            try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"user-url-1"}"#)
+        ])
+        let firstPlanner = try nativeStepPlanner(transport: firstTransport)
+        let browserPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { firstPlanner })
+        let (navigationPlan, startContext) = try await browserPlanner.next(startInput,
+            observation: .page(startObservation), retainedVisits: [startDocument])
+        XCTAssertEqual(navigationPlan.kind, .openLink)
+        XCTAssertEqual(navigationPlan.reference, "user-url-1")
+        let retainedContract = try XCTUnwrap(navigationPlan.retainedContract)
+        let initialAction = try XCTUnwrap(navigationPlan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(initialAction.state, .pending)
+        XCTAssertNil(initialAction.navigationProof)
+        XCTAssertEqual(startContext.retainedVisits, [startDocument])
+
+        let policyDocument = try await browser.navigate(taskID: taskID, operationID: "requested-policy", to: sourceURL)
+        let policyObservation = try await browser.captureAgentObservation(document: policyDocument)
+        let policyInput = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: policyObservation.png,
+            currentURL: sourceURL, clarifiedGoal: goal)
+        let heading = try XCTUnwrap(policyObservation.approvalPageEvidence.page.texts.first {
+            $0.text.contains("Policy heading")
+        })
+        let answerArgs = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "text": "Policy heading", "evidence": ["r2": [heading.id]]
+        ], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        let exactTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("answer", argumentsJSON: answerArgs)
+        ])
+        let exactPlanner = try nativeStepPlanner(transport: exactTransport)
+        let exactBrowserPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { exactPlanner })
+        let (answerPlan, verifiedContext) = try await exactBrowserPlanner.next(policyInput,
+            observation: .page(policyObservation), retainedContract: retainedContract,
+            retainedVisits: [startDocument, policyDocument])
+        XCTAssertEqual(answerPlan.kind, .answer)
+        XCTAssertEqual(answerPlan.text, "Policy heading")
+        XCTAssertEqual(verifiedContext.currentDocument, policyDocument)
+        let completedAction = try XCTUnwrap(answerPlan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(completedAction.state, .observed)
+        XCTAssertEqual(completedAction.navigationProof, policyDocument)
+        let exactCalls = await exactTransport.snapshot()
+        XCTAssertEqual(exactCalls.completions, 1)
+
+        let noProofTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Should I continue?"}"#)
+        ])
+        let noProofNative = try nativeStepPlanner(transport: noProofTransport)
+        let noProofPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { noProofNative })
+        let (noProofPlan, _) = try await noProofPlanner.next(policyInput,
+            observation: .page(policyObservation), retainedContract: retainedContract,
+            retainedVisits: [startDocument])
+        XCTAssertEqual(noProofPlan.kind, .askUser)
+        let pendingWithoutVisit = try XCTUnwrap(noProofPlan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(pendingWithoutVisit.state, .pending)
+        XCTAssertNil(pendingWithoutVisit.navigationProof)
+        let noProofCalls = await noProofTransport.snapshot()
+        let noProofRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: noProofCalls.requests[0]) as? [String: Any])
+        let noProofNames = Set(try XCTUnwrap(noProofRequest["tools"] as? [[String: Any]]).map { tool -> String in
+            let function = try XCTUnwrap(tool["function"] as? [String: Any])
+            return try XCTUnwrap(function["name"] as? String)
+        })
+        XCTAssertFalse(noProofNames.contains("answer"))
+
+        let wrongDocument = try await browser.navigate(taskID: taskID, operationID: "wrong-policy", to: otherURL)
+        let wrongObservation = try await browser.captureAgentObservation(document: wrongDocument)
+        let wrongInput = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: wrongObservation.png,
+            currentURL: otherURL, clarifiedGoal: goal)
+        let wrongTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Should I continue?"}"#)
+        ])
+        let wrongNative = try nativeStepPlanner(transport: wrongTransport)
+        let wrongPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { wrongNative })
+        let (wrongPlan, _) = try await wrongPlanner.next(wrongInput,
+            observation: .page(wrongObservation), retainedContract: retainedContract,
+            retainedVisits: [startDocument, wrongDocument])
+        XCTAssertEqual(wrongPlan.kind, .askUser)
+        let wrongAction = try XCTUnwrap(wrongPlan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(wrongAction.state, .pending)
+        XCTAssertNil(wrongAction.navigationProof)
+
+        let otherHeading = try XCTUnwrap(wrongObservation.approvalPageEvidence.page.texts.first {
+            $0.text.contains("Other heading")
+        })
+        // This fixture isolates prior navigation proof from current-page evidence;
+        // it does not claim that the later page is semantically tied to the user's source.
+        let historicalAnswerArgs = String(decoding: try JSONSerialization.data(withJSONObject: [
+            "text": "Other heading", "evidence": ["r2": [otherHeading.id]]
+        ], options: [.sortedKeys, .withoutEscapingSlashes]), as: UTF8.self)
+        let historicalTransport = NativeStepQueueFixtureTransport(responses: [
+            try nativeBrowserFunctionEnvelope("answer", argumentsJSON: historicalAnswerArgs)
+        ])
+        let historicalNative = try nativeStepPlanner(transport: historicalTransport)
+        let historicalPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { historicalNative })
+        let (historicalPlan, historicalContext) = try await historicalPlanner.next(wrongInput,
+            observation: .page(wrongObservation), retainedContract: retainedContract,
+            retainedVisits: [startDocument, policyDocument, wrongDocument])
+        XCTAssertEqual(historicalPlan.kind, .answer)
+        XCTAssertEqual(historicalPlan.text, "Other heading")
+        XCTAssertEqual(historicalContext.evidenceReferences["text:\(otherHeading.id)"], otherHeading.text)
+        let historicalAction = try XCTUnwrap(historicalPlan.assessment?.requirements.first { $0.kind == .action })
+        XCTAssertEqual(historicalAction.state, .observed)
+        XCTAssertEqual(historicalAction.navigationProof, policyDocument,
+            "The earlier requested URL receipt stays distinct from evidence on the current page")
+
+        let foreignBrowser = ComputerUseOwnedBrowser(mayAct: { true }); defer { foreignBrowser.close() }
+        let foreignTaskID = taskID + "-foreign"
+        try foreignBrowser.claim(taskID: foreignTaskID)
+        let foreignDocument = try await foreignBrowser.navigate(taskID: foreignTaskID,
+            operationID: "foreign-policy", to: sourceURL)
+        let foreignNative = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: []))
+        let foreignPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { foreignNative })
+        do {
+            _ = try await foreignPlanner.next(policyInput, observation: .page(policyObservation),
+                retainedContract: retainedContract, retainedVisits: [foreignDocument])
+            XCTFail("A navigation document from another task/context cannot satisfy the openURL effect")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .browserChanged)
+        }
+        let firstCalls = await firstTransport.snapshot()
+        let wrongCalls = await wrongTransport.snapshot()
+        XCTAssertEqual(firstCalls.completions, 3)
+        XCTAssertEqual(wrongCalls.completions, 1)
+    }
+
+    func testNativeBrowserKeepsPurchaseAndEditPendingAfterVerifiedVisit() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/page": .init(body: "<!doctype html><h1>Policy heading</h1>")
+        ])
+        let pageURL = try await server.start().appendingPathComponent("page"); defer { server.stop() }
+        let taskID = "unsupported-actions-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: taskID)
+        let document = try await browser.navigate(taskID: taskID, operationID: "open-page", to: pageURL)
+        let observation = try await browser.captureAgentObservation(document: document)
+        let goalText = "Report the page heading. Purchase tickets only after I approve, and change the document title only after I confirm; leave that edit unsaved."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: goalText)
+        let input = ComputerUseFaraModel.Input(goal: goalText, screenshotPNG: observation.png,
+            currentURL: pageURL, clarifiedGoal: goal)
+        let contract = #"{"objective":"Report the heading and preserve the requested actions.","constraints":["Purchase tickets only after I approve.","Leave the title edit unsaved."],"requirements":[{"instruction":"Report the page heading.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action","expectedEffect":{"type":"unsupported"}},{"instruction":"Change the document title only after confirmation and leave it unsaved.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(contract),
+            try nativeBrowserFunctionEnvelope("askUser", argumentsJSON: #"{"text":"Do you approve the requested changes?"}"#)
+        ])
+        let native = try nativeStepPlanner(transport: transport)
+        let planner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { native })
+        let (plan, context) = try await planner.next(input, observation: .page(observation),
+            retainedVisits: [document])
+        XCTAssertEqual(plan.kind, .askUser)
+        XCTAssertEqual(context.retainedVisits, [document])
+        let purchase = try XCTUnwrap(plan.assessment?.requirements.first { $0.instruction.contains("Purchase tickets") })
+        let edit = try XCTUnwrap(plan.assessment?.requirements.first { $0.instruction.contains("Change the document title") })
+        XCTAssertEqual(purchase.state, .pending); XCTAssertNil(purchase.navigationProof)
+        XCTAssertEqual(edit.state, .pending); XCTAssertNil(edit.navigationProof)
+        let calls = await transport.snapshot()
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: calls.requests[2]) as? [String: Any])
+        let tools = try XCTUnwrap(request["tools"] as? [[String: Any]])
+        XCTAssertFalse(tools.contains { ($0["function"] as? [String: Any])?["name"] as? String == "answer" })
     }
 
     func testRetainedBrowserSchemaMatchesDecoderReferenceScopes() async throws {
@@ -1956,7 +2227,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let mixedInput = ComputerUseFaraModel.Input(goal: mixedGoalText, screenshotPNG: Data(), currentURL: source,
             clarifiedGoal: mixedGoal)
         let mixedContext = try ComputerUseMCPBrowserStepPlanner().context(mixedInput, page: page, wholePage: true)
-        let mixedContract = #"{"objective":"Report the return fee and preserve the Notes action.","constraints":["Only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action"}]}"#
+        let mixedContract = #"{"objective":"Report the return fee and preserve the Notes action.","constraints":["Only after approval."],"requirements":[{"instruction":"Report the return fee.","kind":"information"},{"instruction":"Add the fee to Notes after approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let mixedTransport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#), try nativeStepEnvelope(mixedContract),
             try nativeBrowserFunctionEnvelope("search", argumentsJSON: #"{"text":"official return fee policy"}"#)])
@@ -2051,7 +2322,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
             .answering("Which city should I check?", with: clarification)
         let (whole, windows, source) = try nativeRecordWindowContexts(goal: goal)
-        let contract = #"{"objective":"Read the BART fee and report it; purchase only after approval.","constraints":["Purchase tickets only after I approve."],"requirements":[{"instruction":"Report the final fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action"}]}"#
+        let contract = #"{"objective":"Read the BART fee and report it; purchase only after approval.","constraints":["Purchase tickets only after I approve."],"requirements":[{"instruction":"Report the final fee.","kind":"information"},{"instruction":"Purchase tickets only after user approval.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let openLink = try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"l1"}"#)
         let wholePageTokenCount = ComputerUseLocalTextBrowserStepPlanner.contextTokens
             - 1_024 - ComputerUseLocalTextBrowserStepPlanner.framingReserve + 1
@@ -2414,7 +2685,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             XCTAssertNotNil(correctedCapture["validationFeedback"])
         }
 
-        let actionContract = #"{"objective":"Report the fee and perform the requested account change.","constraints":[],"requirements":[{"instruction":"Report the current fee.","kind":"information"},{"instruction":"Change the account setting.","kind":"action"}]}"#
+        let actionContract = #"{"objective":"Report the fee and perform the requested account change.","constraints":[],"requirements":[{"instruction":"Report the current fee.","kind":"information"},{"instruction":"Change the account setting.","kind":"action","expectedEffect":{"type":"unsupported"}}]}"#
         let actionTransport = NativeStepQueueFixtureTransport(responses: [
             prerequisite, try nativeStepEnvelope(actionContract),
             try nativeBrowserFunctionEnvelope("answer", argumentsJSON: validArguments)

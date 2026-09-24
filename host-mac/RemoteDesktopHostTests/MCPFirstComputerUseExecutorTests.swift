@@ -672,6 +672,92 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try await runMCPNativeAnswerSurvivesBanner(groupedEvidence: true)
     }
 
+    func testOptInMCPNativeTypedOpenURLReceiptCompletesFromCurrentPage() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: real MCPFirst, owned browser navigation receipt, and native read completion; scripted local model transport")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let heading = "Apollo 11 Mission Record: Eagle Landing"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/target": .init(body: "<!doctype html><html><body><h1>\(heading)</h1></body></html>")
+        ])
+        let url = try await server.start().appendingPathComponent("target"); defer { server.stop() }
+        let goal = "Open \(url.absoluteString) and report the page heading."
+        let taskID = "mcp-native-open-url-receipt-" + UUID().uuidString
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(taskID)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+
+        var allowed = [try makeMailTool()]
+        for (name, properties) in [
+            ("find_elements", ["pid": MCPJSONValue.object(["type": .string("integer")]),
+                "role": .object(["type": .string("string")]), "title": .object(["type": .string("string")]),
+                "limit": .object(["type": .string("integer")]), "max_depth": .object(["type": .string("integer")])]),
+            ("get_element_attributes", ["element_id": .object(["type": .string("string")]),
+                "names": .object(["type": .string("array"), "items": .object(["type": .string("string")])])])
+        ] {
+            allowed.append(try .init(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1,
+                toolName: name, description: "Native browser read", inputSchema: objectSchema(properties: properties,
+                    required: Array(properties.keys)), risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
+        }
+        let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: [:])
+        let route = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
+
+        func response(_ message: [String: Any], finish: String = "stop") throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["model": "fixture-model",
+                "choices": [["finish_reason": finish, "message": message]]], options: [.sortedKeys])
+        }
+        let initial = try response(["role": "assistant",
+            "content": #"{"kind":"openLink","reference":"user-url-1","text":""}"#])
+        let prerequisite = try response(["role": "assistant", "content": #"{"kind":"continue","text":""}"#])
+        let contractJSON = try JSONSerialization.data(withJSONObject: ["objective": "Open the requested source and report its heading.",
+            "constraints": [], "requirements": [
+                ["instruction": "Open \(url.absoluteString).", "kind": "action",
+                    "expectedEffect": ["type": "openURL", "url": url.absoluteString]],
+                ["instruction": "Report the page heading.", "kind": "information"]
+            ]], options: [.sortedKeys, .withoutEscapingSlashes])
+        let contract = try response(["role": "assistant", "content": String(decoding: contractJSON, as: UTF8.self)])
+        let answer = try response(["role": "assistant", "content": NSNull(), "tool_calls": [[
+            "id": "current-answer", "type": "function", "function": ["name": "answer",
+                "arguments": #"{"text":"Apollo 11 Mission Record: Eagle Landing","evidence":{"r2":["text:t1"]}}"#]
+        ]]], finish: "tool_calls")
+        let transport = MCPNativeReceiptFixtureTransport(responses: [initial, prerequisite, contract, answer])
+        let native = try ComputerUseLocalTextBrowserStepPlanner(connection: .init(
+            baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:54321")), bearerToken: "fixture-token-value",
+            modelAlias: "fixture-model"), transport: transport)
+        let browserPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { native })
+        let fallback = StubVisualExecutor(); var visualCalls = 0
+        let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"), propose: { _ in
+            visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+        })
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: route, clientPool: pool, browserStepPlanner: browserPlanner,
+            browserExecutorFactory: { fara })
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed(heading))
+        let modelCompletions = await transport.completionCount()
+        XCTAssertEqual(modelCompletions, 4,
+            "The full route must interpret the task, open the supplied URL, read the resulting page, and complete through the native parser")
+        XCTAssertEqual(route.requests.count, 1)
+        XCTAssertEqual(browser.taskID, taskID)
+        XCTAssertEqual(browser.currentDocument(taskID: taskID)?.committedURL, url)
+        XCTAssertEqual(server.count("/target"), 1)
+        XCTAssertEqual(visualCalls, 0); XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"),
+            includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        let rootID = ComputerUseTaskContract.digest(["fara-browser-session-v1", taskID])
+        let root = try XCTUnwrap(journals.first { $0.taskID == rootID })
+        XCTAssertEqual(root.statuses, [.verified])
+        XCTAssertEqual(root.stepIDs.last, "model-assessed-completion")
+    }
+
     private func runMCPNativeAnswerSurvivesBanner(groupedEvidence: Bool) async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
             throw XCTSkip("Opt-in: real owned browser and production MCP completion admission; no inference")
@@ -5310,6 +5396,19 @@ private final class BannerNativeBrowserStepPlanner: ComputerUseNativeBrowserStep
         XCTAssertEqual(web.url, sourceURL)
         return plan
     }
+}
+
+private actor MCPNativeReceiptFixtureTransport: ComputerUseTextModelTransport {
+    private let responses: [Data]
+    private var index = 0
+    init(responses: [Data]) { self.responses = responses }
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { 128 }
+    func complete(request: URLRequest) async throws -> Data {
+        guard responses.indices.contains(index) else { throw AppleFoundationMCPPlannerError.noProposal }
+        defer { index += 1 }
+        return responses[index]
+    }
+    func completionCount() -> Int { index }
 }
 
 private final class BrowserRouteMCPPlanner: MCPProposalPlanning, @unchecked Sendable {

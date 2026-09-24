@@ -48,9 +48,13 @@ protocol MCPApprovalContinuing: AnyObject {
     /// is asynchronous, but is bound to the captured process generation so a
     /// delayed cleanup can never stop a newer resumed run.
     func cancelMCPWork()
+    /// Invalidates a paused run while retaining host-verified browser progress.
+    /// Legacy executors fall back to their existing cancellation behavior.
+    func pauseMCPWork()
 }
 
 extension MCPApprovalContinuing {
+    func pauseMCPWork() { cancelMCPWork() }
     func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? { nil }
     func continueApprovedActionPlan(
         taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
@@ -326,6 +330,13 @@ final class MCPFirstComputerUseExecutor:
     private var retainedFallback: (taskID: String, promptDigest: String)?
     private var retainedNativeFailure: Error?
     private var retainedBrowserIntentContract: (rootTaskID: String, contract: ComputerUseBrowserIntentContract)?
+    private struct RetainedBrowserVisits {
+        let rootTaskID: String
+        let goal: ComputerUseUnresolvedTextGoal
+        let sessionIdentity: String
+        var documents: [ComputerUseBrowserDocument]
+    }
+    private var retainedBrowserVisits: RetainedBrowserVisits?
     private let documentPlanner: ComputerUseMCPDocumentPlanner
     private final class DocumentRun {
         let prompt: String
@@ -568,6 +579,7 @@ final class MCPFirstComputerUseExecutor:
         retainedBrowserExecutor = nil
         retainedUsesBrowser = false
         retainedBrowserIntentContract = nil
+        retainedBrowserVisits = nil
         pendingApprovalState = nil
         pendingApprovalDigest = nil
 
@@ -792,6 +804,7 @@ final class MCPFirstComputerUseExecutor:
         }
         if retainedBrowserIntentContract?.contract.goal != goal {
             retainedBrowserIntentContract = nil
+            retainedBrowserVisits = nil
         }
         if let tools = browserTools {
             return try await withBrowserToolProposals(taskID: originatingTaskID, tools: tools) {
@@ -857,14 +870,32 @@ final class MCPFirstComputerUseExecutor:
         plan: ComputerUseMCPBrowserStepPlanner.Plan,
         context: ComputerUseMCPBrowserStepPlanner.Context,
         observation: ComputerUseOwnedBrowser.AgentObservation,
-        proposal: ComputerUseFaraModel.Proposal
+        proposal: ComputerUseFaraModel.Proposal,
+        rootTaskID: String,
+        retainedVisits: RetainedBrowserVisits?
     ) throws -> NativeReadCompletion {
         guard plan.kind == .answer, !context.isPartialRecordView,
-              let assessment = plan.assessment,
-              assessment.requirements.allSatisfy({ $0.kind == .information && $0.state == .observed && !$0.evidenceReferences.isEmpty }) else {
+              let assessment = plan.assessment else {
             throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         }
         let page = observation.approvalPageEvidence.page
+        let currentDocument = observation.approvalPageEvidence.document
+        guard currentDocument.taskID == rootTaskID,
+              context.evidenceReferences["source"] == observation.currentURL.absoluteString else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+        }
+        let contract = plan.retainedContract ?? context.retainedContract
+        if let contract {
+            guard contract.goal == context.userGoal,
+                  contract.requirements.count == assessment.requirements.count,
+                  context.currentDocument == currentDocument else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+        } else if assessment.requirements.contains(where: { $0.kind != .information }) {
+            // Legacy callers without a retained intent contract may still
+            // complete information-only tasks, but cannot assert effects.
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
         var nativeReferences = ["source": observation.currentURL.absoluteString]
         for text in page.texts {
             nativeReferences["text:\(text.id)"] = text.text
@@ -874,9 +905,53 @@ final class MCPFirstComputerUseExecutor:
         nativeReferences.merge(try ComputerUseMCPBrowserStepPlanner.currentNativeReadingBlockEvidence(for: page)) {
             _, current in current
         }
-        let selected = Set(assessment.requirements.flatMap(\.evidenceReferences))
-        guard context.evidenceReferences["source"] == observation.currentURL.absoluteString else {
-            throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+        var selected = Set<String>()
+        if let contract {
+            for (contractRequirement, assessmentRequirement) in zip(contract.requirements, assessment.requirements) {
+                guard contractRequirement.kind.rawValue == assessmentRequirement.kind.rawValue,
+                      contractRequirement.instruction.utf8.elementsEqual(assessmentRequirement.instruction.utf8) else {
+                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                }
+                switch contractRequirement.kind {
+                case .information:
+                    guard assessmentRequirement.state == .observed,
+                          !assessmentRequirement.evidenceReferences.isEmpty,
+                          assessmentRequirement.navigationProof == nil else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                    }
+                    selected.formUnion(assessmentRequirement.evidenceReferences)
+                case .action:
+                    guard assessmentRequirement.state == .observed,
+                          assessmentRequirement.evidenceReferences.isEmpty,
+                          assessmentRequirement.evidence.isEmpty,
+                          let proof = assessmentRequirement.navigationProof,
+                          let expectedEffect = contractRequirement.expectedEffect,
+                          case .openURL(let expectedURL) = expectedEffect,
+                          expectedURL.utf8.elementsEqual(proof.requestedURL.absoluteString.utf8),
+                          proof.source == .automationNavigation,
+                          proof.taskID == rootTaskID,
+                          proof.contextID == currentDocument.contextID,
+                          let visitScope = retainedVisits,
+                          visitScope.rootTaskID == rootTaskID,
+                          visitScope.goal == contract.goal,
+                          visitScope.sessionIdentity == observation.sessionIdentity,
+                          context.retainedVisits.count <= 64,
+                          context.retainedVisits == visitScope.documents,
+                          visitScope.documents.contains(proof) else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                    }
+                }
+            }
+        } else {
+            guard assessment.requirements.allSatisfy({ $0.kind == .information && $0.state == .observed && !$0.evidenceReferences.isEmpty }) else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+            selected.formUnion(assessment.requirements.flatMap(\.evidenceReferences))
+        }
+        if selected.isEmpty {
+            // Even action-only completion remains bound to a live current
+            // source observation, rather than bypassing freshness checks.
+            selected.insert("source")
         }
         for reference in selected {
             guard let contextValue = context.evidenceReferences[reference],
@@ -885,7 +960,7 @@ final class MCPFirstComputerUseExecutor:
                 throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
             }
         }
-        for requirement in assessment.requirements {
+        for requirement in assessment.requirements where requirement.kind == .information {
             let selectedEvidence = requirement.evidenceReferences.compactMap { context.evidenceReferences[$0] }.joined(separator: "\n")
             guard selectedEvidence.utf8.elementsEqual(requirement.evidence.utf8) else {
                 throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
@@ -904,6 +979,51 @@ final class MCPFirstComputerUseExecutor:
             throw ExecutorError.taskChanged
         }
         let goal = try input.validatedBrowserGoal()
+        let currentSessionIdentity: String
+        switch observation {
+        case .initial(let initial):
+            try tools.validateOwnedBrowserInitialAgentObservation(initial)
+            currentSessionIdentity = initial.sessionIdentity
+        case .page(let page):
+            try tools.validateOwnedBrowserAgentMemoryObservation(page)
+            guard page.approvalPageEvidence.document.taskID == rootTaskID,
+                  input.currentURL == page.currentURL else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+            currentSessionIdentity = page.sessionIdentity
+        }
+        let changedSession = retainedBrowserVisits != nil
+            && retainedBrowserVisits?.sessionIdentity != currentSessionIdentity
+        if retainedBrowserVisits?.rootTaskID != rootTaskID
+            || retainedBrowserVisits?.goal != goal
+            || retainedBrowserVisits?.sessionIdentity != currentSessionIdentity {
+            retainedBrowserVisits = RetainedBrowserVisits(rootTaskID: rootTaskID, goal: goal,
+                sessionIdentity: currentSessionIdentity, documents: [])
+            if changedSession || retainedBrowserIntentContract?.rootTaskID != rootTaskID
+                || retainedBrowserIntentContract?.contract.goal != goal {
+                retainedBrowserIntentContract = nil
+            }
+        }
+        if case .page(let page) = observation {
+            let document = page.approvalPageEvidence.document
+            guard document.contextID.isEmpty == false,
+                  document.taskID == rootTaskID,
+                  document.committedURL == page.currentURL else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
+            if document.source == .automationNavigation,
+               var retained = retainedBrowserVisits,
+               retained.rootTaskID == rootTaskID,
+               retained.goal == goal,
+               retained.sessionIdentity == currentSessionIdentity,
+               !retained.documents.contains(document) {
+                retained.documents.append(document)
+                if retained.documents.count > 64 {
+                    retained.documents.removeFirst(retained.documents.count - 64)
+                }
+                retainedBrowserVisits = retained
+            }
+        }
         let matchingContract: ComputerUseBrowserIntentContract?
         if let retained = retainedBrowserIntentContract,
            retained.rootTaskID == rootTaskID, retained.contract.goal == goal {
@@ -912,6 +1032,9 @@ final class MCPFirstComputerUseExecutor:
             // A changed task or accepted-goal revision must not reuse clauses
             // from the previous immutable interpretation.
             retainedBrowserIntentContract = nil
+            if retainedBrowserVisits?.rootTaskID != rootTaskID || retainedBrowserVisits?.goal != goal {
+                retainedBrowserVisits = nil
+            }
             matchingContract = nil
         }
         let available = try await clientPool.allowedTools()
@@ -922,11 +1045,16 @@ final class MCPFirstComputerUseExecutor:
         guard ["find_elements", "get_element_attributes"].allSatisfy({ name in
             available.contains { $0.toolName == name && $0.risk == .readOnly && $0.serverID == MCPServerRegistry.macControl.serverID }
         }) else { return .noProposal }
+        switch observation {
+        case .initial(let initial): try tools.validateOwnedBrowserInitialAgentObservation(initial)
+        case .page(let page): try tools.validateOwnedBrowserAgentMemoryObservation(page)
+        }
         let browserPlanner = browserStepPlanner
         // A host context/schema limit is an integration failure, not evidence
         // that Mac tools cannot handle this task. It must not activate vision.
         let (plan, context) = try await browserPlanner.next(input, observation: observation,
-            retainedContract: matchingContract)
+            retainedContract: matchingContract,
+            retainedVisits: retainedBrowserVisits?.documents ?? [])
         try checkExecutionCancellation()
         guard observation.taskID == rootTaskID else {
             throw ExecutorError.taskChanged
@@ -996,7 +1124,8 @@ final class MCPFirstComputerUseExecutor:
         let proposal = try ComputerUseFaraModel.Proposal(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
         if plan.kind == .answer, case .page(let page) = observation {
             return .nativeReadCompletion(try Self.nativeReadCompletion(plan: plan, context: context,
-                observation: page, proposal: proposal))
+                observation: page, proposal: proposal, rootTaskID: rootTaskID,
+                retainedVisits: retainedBrowserVisits))
         }
         return .proposal(proposal)
     }
@@ -1156,9 +1285,21 @@ final class MCPFirstComputerUseExecutor:
     }
 
     func cancelMCPWork() {
-        // Stop also invalidates a helper start that has not returned its
-        // generation yet, including when no helper is currently published.
+        cancelMCPWork(clearBrowserProgress: true)
+    }
+
+    func pauseMCPWork() {
+        cancelMCPWork(clearBrowserProgress: false)
+    }
+
+    private func cancelMCPWork(clearBrowserProgress: Bool) {
+        // Invalidate a helper start that has not returned its generation yet,
+        // including when no helper is currently published.
         cancellationEpoch &+= 1
+        if clearBrowserProgress {
+            retainedBrowserVisits = nil
+            retainedBrowserIntentContract = nil
+        }
         let generation = activeProcessGeneration
         activeProcessGeneration = nil
         pendingApprovalState = nil

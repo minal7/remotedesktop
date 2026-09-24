@@ -5680,12 +5680,12 @@ final class HostComputerUseManager: ObservableObject {
         pausedExecution = context
         currentExecution = nil
         pendingApproval = nil
-        cancelApprovalIfNeeded(invalidatedApproval)
+        cancelApprovalIfNeeded(invalidatedApproval, preservingBrowserProgress: true)
         approvalDeliveryTask?.cancel()
         approvalDeliveryTask = nil
         currentExecutionToken = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
+        cancelActiveMCPWork(preservingBrowserProgress: true)
         executionTask?.cancel()
         activity = .paused
         sendUserInterventionStatus(
@@ -5878,7 +5878,7 @@ final class HostComputerUseManager: ObservableObject {
             // Direct input can close the gate synchronously before its
             // MainActor lifecycle callback arrives. That close owns the race:
             // keep the held task resumable and never execute the approval.
-            cancelApprovalIfNeeded(pendingApproval)
+            cancelApprovalIfNeeded(pendingApproval, preservingBrowserProgress: true)
             pauseForLocalIntervention(pendingApproval.context,
                 guidance: Self.admissionGuidance(admission))
             return
@@ -5936,7 +5936,7 @@ final class HostComputerUseManager: ObservableObject {
             && response.appliedControlRevision == expectedRevision
     }
 
-    private func cancelApprovalIfNeeded(_ approval: PendingApproval?) {
+    private func cancelApprovalIfNeeded(_ approval: PendingApproval?, preservingBrowserProgress: Bool = false) {
         guard let approval else { return }
         switch approval.operation {
         case .visual(let token, _, _):
@@ -5944,7 +5944,8 @@ final class HostComputerUseManager: ObservableObject {
         case .mcp:
             guard let continuation =
                     executor as? any MCPApprovalContinuing else { return }
-            continuation.cancelMCPWork()
+            if preservingBrowserProgress { continuation.pauseMCPWork() }
+            else { continuation.cancelMCPWork() }
         }
     }
 
@@ -5989,9 +5990,10 @@ final class HostComputerUseManager: ObservableObject {
     /// task cancellation can race an immediate Resume. MCPFirst binds the
     /// asynchronous stop to that captured generation, so stale cleanup cannot
     /// terminate the generation started by the resumed task.
-    private func cancelActiveMCPWork() {
+    private func cancelActiveMCPWork(preservingBrowserProgress: Bool = false) {
         guard let continuation = executor as? any MCPApprovalContinuing else { return }
-        continuation.cancelMCPWork()
+        if preservingBrowserProgress { continuation.pauseMCPWork() }
+        else { continuation.cancelMCPWork() }
     }
 
     private func finishApprovedActionFailure(
@@ -7710,7 +7712,7 @@ final class HostComputerUseManager: ObservableObject {
             context: approval.context,
             operation: approval.operation)
         guard actionGate.beginApprovalWait() else {
-            cancelApprovalIfNeeded(approval)
+            cancelApprovalIfNeeded(approval, preservingBrowserProgress: true)
             pauseForLocalIntervention(approval.context)
             return
         }
