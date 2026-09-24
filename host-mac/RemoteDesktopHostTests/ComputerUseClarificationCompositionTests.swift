@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import WebKit
 import XCTest
 @testable import RemoteDesktopHost
 @testable import RemoteDesktopClientCore
@@ -709,6 +710,218 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         try await runShippedClientTLSLoginWorkflow(stopAtLogin: true)
     }
 
+    func testOptInShippedClientManagedBrowserHandsOffPublicGitHubLoginAndStops() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MANAGED_PUBLIC_LOGIN_HANDOFF"] == "1" else {
+            throw XCTSkip("Opt-in: actual managed native planner, owned browser, and shipped TLS client on public login page")
+        }
+        let output = URL(fileURLWithPath: try XCTUnwrap(environment["MANAGED_PUBLIC_LOGIN_HANDOFF_DIRECTORY"]))
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let started = Date()
+        let overallDeadline = ContinuousClock.now + .seconds(80)
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+
+        let runtimeURL = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+            .appendingPathComponent("llama-server")
+        let inspector = DarwinOSAtlasProcessInspector()
+        XCTAssertTrue(try inspector.matchingProcesses(for: runtimeURL).isEmpty)
+        let nativeInstaller = ComputerUseInstaller.nativeText()
+        let installedNativeReceipt = await nativeInstaller.currentInstallation()
+        let nativeReceipt = try XCTUnwrap(installedNativeReceipt,
+            "The test uses the already-installed, verified native text model")
+        let helperInstaller = MacControlMCPInstaller()
+        let installedHelperReceipt = await helperInstaller.currentInstallation()
+        let helperReceipt = try XCTUnwrap(installedHelperReceipt,
+            "The test requires the already-installed MacControl helper and never installs it")
+        _ = nativeReceipt
+        _ = helperReceipt
+        let runtime = OSAtlasLlamaRuntime.shared
+        let visualLoader = OSAtlasVisualExecutorLoader(runtime: runtime,
+            faraJournalDirectory: output.appendingPathComponent("visual-journal"))
+
+        let hostID = UUID().uuidString, clientID = UUID().uuidString
+        let sessionID = UUID().uuidString, pairingCode = "842193"
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let pendingStore = CompositionPendingStore()
+        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json"))
+        let trace = CompositionManagedLoginTrace()
+        var ownedBrowser: ComputerUseOwnedBrowser?
+        let visualInstaller = CompositionUnavailableVisualInstaller()
+        let manager = HostComputerUseManager(injector: InputInjector(),
+            installer: visualInstaller, nativeTextInstaller: nativeInstaller,
+            macControlInstaller: helperInstaller, visualExecutorLoader: visualLoader,
+            mcpBrowserStepPlanner: ComputerUseMCPBrowserStepPlanner(inspectExchange: { request, response, _ in
+                _ = request // Page-bearing request bytes are deliberately not retained.
+                trace.record(response: response)
+            }), taskLedger: ledger,
+            browserNavigationFactory: { mayAct in
+                let browser = ComputerUseOwnedBrowser(presentsWindow: true, mayAct: mayAct)
+                ownedBrowser = browser
+                return .init(browser: browser, journalDirectory: output.appendingPathComponent("browser"))
+            }, allowsExternalServices: true, channelFactory: { _ in channel })
+        let key = Data(repeating: 0x6D, count: 32)
+        let broker = LocalComputerUseBrokerServer(
+            credential: try RemoteDesktopHost.LocalComputerUseCredential(rawKey: key),
+            hostID: hostID, channel: channel,
+            authorizePeer: { peer in manager.authorizePeer(senderID: peer); return true },
+            revokePeer: { _ in manager.revokePeerAuthorization() })
+        let port = try await broker.start()
+        defer { broker.stop() }
+        let clientChannel = RemoteDesktopClientCore.LocalComputerUseBrokerClient(
+            endpoint: .init(host: "127.0.0.1", port: port),
+            credential: try RemoteDesktopClientCore.LocalComputerUseCredential(rawKey: key),
+            pairingCode: pairingCode, sessionID: sessionID, senderID: clientID, targetID: hostID)
+        let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID,
+            sessionID: sessionID, pendingStore: pendingStore, channel: clientChannel,
+            promptRefreshInterval: .seconds(600))
+        let goal = "Open https://github.com/login so I can sign in to access my private repositories. Hand control to me for sign-in. Do not type or submit anything."
+        let expectedLoginGuidance = "Finish signing in in the browser, then choose Resume."
+        var failure: Error?
+        var maximumWorkers = 0
+        var workerSamples = 0
+        var peakWorkerMemoryBytes: UInt64 = 0
+        var terminalAtHandoff: String?
+        var authenticationHandoffObserved = false
+        var browserURLAtHandoff: String?
+        var stage = "setup"
+        var clientStateAtHandoff: String?
+        var hostActivityAtHandoff: String?
+        var browserTaskMatchesPrompt: Bool?
+        var interventionGuidanceAtHandoff: String?
+
+        func visibleBrowserURL() -> String? {
+            guard ownedBrowser?.isFrontmostWindow == true else { return nil }
+            func webViews(in view: NSView) -> [WKWebView] {
+                (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews(in:))
+            }
+            let visible = NSApp.windows.filter(\.isVisible).compactMap(\.contentView).flatMap(webViews(in:))
+            guard visible.count == 1, let url = visible[0].url,
+                  let scheme = url.scheme, let host = url.host else { return nil }
+            return "\(scheme)://\(host)\(url.path)"
+        }
+
+        func sampleWorkers() throws {
+            let count = try inspector.matchingProcesses(for: runtimeURL).count
+            maximumWorkers = max(maximumWorkers, count)
+            workerSamples += 1
+            for process in try inspector.matchingProcesses(for: runtimeURL) {
+                if let snapshot = try? OSAtlasProcessTreeController().snapshot(rootProcess: process) {
+                    peakWorkerMemoryBytes = max(peakWorkerMemoryBytes, snapshot.aggregateResidentMemoryBytes)
+                }
+            }
+            if count > 1 || peakWorkerMemoryBytes > 4 * 1_024 * 1_024 * 1_024 { manager.stop() }
+        }
+        func waitUntil(_ stage: String, deadline: ContinuousClock.Instant,
+                       _ condition: () async -> Bool) async throws {
+            while !(await condition()) {
+                try sampleWorkers()
+                if stage == "initial route and login handoff",
+                   let outcome = client.latestTerminalOutcome,
+                   outcome != .userInterventionRequired {
+                    throw CompositionFailure.incomplete("Task reached \(outcome.rawValue) before the required login handoff")
+                }
+                guard ContinuousClock.now < deadline else {
+                    throw CompositionFailure.incomplete("Timed out at \(stage)")
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+
+        do {
+            manager.start(pairingCode: pairingCode, additionalChannels: [channel], includeDefaultChannel: false)
+            stage = "host ready"
+            try await waitUntil(stage, deadline: overallDeadline) {
+                manager.capability.state == .ready
+            }
+            manager.authorizePeer(senderID: clientID)
+            try await clientChannel.handshake()
+            client.start()
+            stage = "initial route and login handoff"
+            XCTAssertTrue(client.sendPrompt(goal))
+            let pending = try XCTUnwrap(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            let decoded = try RemoteDesktopHost.ComputerUseExecutionPromptDecoder.decode(pending.exactWireBody)
+            XCTAssertEqual(decoded.prompt, goal)
+            XCTAssertTrue(decoded.supportsApprovedActionEvidence)
+
+            try await waitUntil(stage, deadline: overallDeadline) {
+                return client.state == .paused && client.hasHostPauseAcknowledgement && manager.activity == .paused
+            }
+            XCTAssertTrue(client.hasActivePrompt)
+            XCTAssertEqual(client.latestTerminalOutcome, .userInterventionRequired)
+            terminalAtHandoff = client.latestTerminalOutcome?.rawValue
+            authenticationHandoffObserved = client.interventionGuidance == expectedLoginGuidance
+            XCTAssertTrue(authenticationHandoffObserved, "The pause must be the owned browser's authentication gate")
+            browserURLAtHandoff = visibleBrowserURL()
+            clientStateAtHandoff = String(describing: client.state)
+            hostActivityAtHandoff = String(describing: manager.activity)
+            browserTaskMatchesPrompt = ownedBrowser?.taskID == pending.messageID
+            interventionGuidanceAtHandoff = client.interventionGuidance
+            XCTAssertEqual(browserURLAtHandoff, "https://github.com/login")
+            XCTAssertEqual(manager.activity, .paused)
+            XCTAssertEqual(ownedBrowser?.taskControls?.phase, .paused)
+            XCTAssertEqual(ownedBrowser?.taskControls?.canResume, true)
+            XCTAssertEqual(interventionGuidanceAtHandoff, expectedLoginGuidance)
+            XCTAssertEqual(browserTaskMatchesPrompt, true)
+            XCTAssertEqual(pendingStore.load(hostID: hostID, pairingCode: pairingCode)?.exactWireBody,
+                           pending.exactWireBody)
+            XCTAssertEqual(trace.initialRoute, ["kind": "openLink", "reference": "user-url-1", "text": ""])
+            XCTAssertFalse(trace.pageToolCalls.contains { ["click", "type", "submit"].contains($0) })
+
+            stage = "Stop and reject Resume"
+            client.stopCurrentTask()
+            XCTAssertTrue(client.isCancellationPending)
+            client.resumeAI()
+            XCTAssertTrue(client.isCancellationPending, "Resume cannot supersede a pending Stop")
+            try await waitUntil(stage, deadline: overallDeadline) {
+                !client.hasActivePrompt && client.latestTerminalOutcome == .unableToComplete && manager.activity == .idle
+            }
+            XCTAssertEqual(client.state, .ready)
+            XCTAssertNil(pendingStore.load(hostID: hostID, pairingCode: pairingCode))
+            XCTAssertNil(ownedBrowser?.taskID)
+            client.resumeAI()
+            XCTAssertFalse(client.hasActivePrompt)
+            XCTAssertEqual(client.state, .ready, "Late Resume cannot restart a stopped login task")
+            XCTAssertEqual(try ledger.claim(taskID: pending.messageID, senderID: clientID,
+                sessionID: sessionID, promptBody: pending.exactWireBody),
+                .completed(ComputerUseTaskLedger.stoppedResponse))
+        } catch { failure = error }
+
+        client.stop()
+        await manager.shutdown()
+        ownedBrowser?.close()
+        await runtime.shutdown()
+        let workersAfterShutdown = try inspector.matchingProcesses(for: runtimeURL).count
+        let report: [String: Any] = [
+            "test": "ComputerUseClarificationCompositionTests/testOptInShippedClientManagedBrowserHandsOffPublicGitHubLoginAndStops",
+            "goalSHA256": SHA256.hash(data: Data(goal.utf8)).map { String(format: "%02x", $0) }.joined(),
+            "initialRoute": trace.initialRoute as Any? ?? NSNull(),
+            "pageFunctionCalls": trace.pageToolCalls,
+            "clientState": String(describing: client.state), "terminalOutcomeAtHandoff": terminalAtHandoff as Any? ?? NSNull(),
+            "stage": stage, "clientStateAtHandoff": clientStateAtHandoff as Any? ?? NSNull(),
+            "hostActivityAtHandoff": hostActivityAtHandoff as Any? ?? NSNull(),
+            "browserTaskMatchesPrompt": browserTaskMatchesPrompt as Any? ?? NSNull(),
+            "interventionGuidanceAtHandoff": interventionGuidanceAtHandoff as Any? ?? NSNull(),
+            "hostActivityAtEnd": String(describing: manager.activity), "browserURLAtHandoff": browserURLAtHandoff as Any? ?? NSNull(),
+            "authenticationHandoffObserved": authenticationHandoffObserved,
+            "elapsedSeconds": Date().timeIntervalSince(started), "maximumObservedWorkerCount": maximumWorkers,
+            "peakWorkerMemoryBytes": peakWorkerMemoryBytes, "workerSamples": workerSamples,
+            "workersAfterShutdown": workersAfterShutdown,
+            "nativeReceiptVerified": true, "macControlReceiptVerified": true,
+            "visualInstallAttempts": await visualInstaller.installAttempts,
+            "failureType": failure.map { String(reflecting: type(of: $0)) } as Any? ?? NSNull()
+        ]
+        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+            .write(to: output.appendingPathComponent("result.json"), options: .withoutOverwriting)
+        XCTAssertEqual(workersAfterShutdown, 0)
+        XCTAssertLessThanOrEqual(maximumWorkers, 1)
+        XCTAssertLessThanOrEqual(peakWorkerMemoryBytes, 4 * 1_024 * 1_024 * 1_024)
+        let visualInstallAttempts = await visualInstaller.installAttempts
+        XCTAssertEqual(visualInstallAttempts, 0)
+        if let failure { throw failure }
+    }
+
     private func runShippedClientTLSLoginWorkflow(stopAtLogin: Bool) async throws {
         let server = try OwnedBrowserHTTPFixture(routes: [
             "/form": .init(body: """
@@ -1343,5 +1556,51 @@ private final class CompositionPendingStore: RemoteDesktopClientCore.ComputerUse
     }
     func remove(hostID: String) {
         lock.lock(); defer { lock.unlock() }; if value?.hostID == hostID { value = nil }
+    }
+}
+
+private final class CompositionManagedLoginTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var route: [String: String]?
+    private var calls: [String] = []
+
+    var initialRoute: [String: String]? {
+        lock.lock(); defer { lock.unlock() }; return route
+    }
+    var pageToolCalls: [String] {
+        lock.lock(); defer { lock.unlock() }; return calls
+    }
+
+    func record(response: Data) {
+        guard let root = try? JSONSerialization.jsonObject(with: response) as? [String: Any],
+              let choices = root["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any] else { return }
+        if let content = message["content"] as? String,
+           let data = content.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+           object["kind"] == "openLink", object["text"] == "" {
+            lock.lock(); route = object; lock.unlock(); return
+        }
+        guard let toolCalls = message["tool_calls"] as? [[String: Any]] else { return }
+        let safe = toolCalls.compactMap { call -> String? in
+            guard let function = call["function"] as? [String: Any],
+                  let name = function["name"] as? String else { return nil }
+            return name
+        }
+        lock.lock(); calls.append(contentsOf: safe); lock.unlock()
+    }
+}
+
+private actor CompositionUnavailableVisualInstaller: ComputerUseModelProvisioning {
+    private(set) var installAttempts = 0
+
+    func currentInstallation() async -> ComputerUseInstallationReceipt? { nil }
+    func interruptedInstallationExists() async -> Bool { false }
+    func clearInterruptedInstallationMarker() async {}
+    func recordRuntimeActivationSuccess(for receipt: ComputerUseInstallationReceipt) async throws {}
+    func restorePreviousInstallation(afterFailedActivationOf receipt: ComputerUseInstallationReceipt) async throws {}
+    func install(progress: @MainActor @Sendable @escaping (ComputerUseInstaller.Update) -> Void) async throws -> ComputerUseInstallationReceipt {
+        installAttempts += 1
+        throw CompositionFailure.incomplete("Visual installation is disabled in the public login-handoff test")
     }
 }
