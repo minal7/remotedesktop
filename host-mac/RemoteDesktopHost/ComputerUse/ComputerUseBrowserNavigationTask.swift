@@ -363,6 +363,10 @@ final class ComputerUseBrowserNavigationTask: ComputerUseBrowserResearchAdmittin
         try browser.validateAgentMemoryObservation(observation)
     }
 
+    func validateAgentReadCompletion(_ observation: ComputerUseOwnedBrowser.AgentObservation, references: [String]) async throws {
+        try await browser.validateAgentReadCompletion(observation, references: references)
+    }
+
     func predictedAgentAction(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) throws -> ComputerUsePredictedAction? {
         try browser.predictedAgentAction(action, observation: observation)
     }

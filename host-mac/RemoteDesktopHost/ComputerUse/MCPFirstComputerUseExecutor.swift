@@ -93,6 +93,20 @@ final class MCPFirstComputerUseExecutor:
     MCPApprovalContinuing,
     ComputerUseVisualApprovalContinuing,
     ComputerUseTextClarificationContinuing {
+    /// Host-only proof that a validated native answer used selected records
+    /// from one exact page observation. Never decoded from model output.
+    struct NativeReadCompletion: Sendable {
+        let proposal: ComputerUseFaraModel.Proposal
+        let authorityDigest: String
+        let references: [String]
+
+        fileprivate init(proposal: ComputerUseFaraModel.Proposal, authorityDigest: String, references: [String]) {
+            self.proposal = proposal
+            self.authorityDigest = authorityDigest
+            self.references = references
+        }
+    }
+
     enum ExecutorError: Error, LocalizedError, Equatable {
         case requiredToolsMissing
         case alreadyExecuting
@@ -839,6 +853,45 @@ final class MCPFirstComputerUseExecutor:
         }, operation: operation)
     }
 
+    private static func nativeReadCompletion(
+        plan: ComputerUseMCPBrowserStepPlanner.Plan,
+        context: ComputerUseMCPBrowserStepPlanner.Context,
+        observation: ComputerUseOwnedBrowser.AgentObservation,
+        proposal: ComputerUseFaraModel.Proposal
+    ) throws -> NativeReadCompletion {
+        guard plan.kind == .answer, !context.isPartialRecordView,
+              let assessment = plan.assessment,
+              assessment.requirements.allSatisfy({ $0.kind == .information && $0.state == .observed && !$0.evidenceReferences.isEmpty }) else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
+        let page = observation.approvalPageEvidence.page
+        var nativeReferences = ["source": observation.currentURL.absoluteString]
+        for text in page.texts {
+            nativeReferences["text:\(text.id)"] = text.text
+            if let tooltip = text.tooltip { nativeReferences["tooltip:\(text.id)"] = tooltip }
+        }
+        for link in page.links { nativeReferences["link:\(link.id)"] = link.label }
+        let selected = Set(assessment.requirements.flatMap(\.evidenceReferences))
+        guard context.evidenceReferences["source"] == observation.currentURL.absoluteString else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+        }
+        for reference in selected {
+            guard let contextValue = context.evidenceReferences[reference],
+                  let pageValue = nativeReferences[reference],
+                  contextValue.utf8.elementsEqual(pageValue.utf8) else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+            }
+        }
+        for requirement in assessment.requirements {
+            let selectedEvidence = requirement.evidenceReferences.compactMap { context.evidenceReferences[$0] }.joined(separator: "\n")
+            guard selectedEvidence.utf8.elementsEqual(requirement.evidence.utf8) else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+            }
+        }
+        return NativeReadCompletion(proposal: proposal, authorityDigest: observation.authorityDigest,
+            references: selected.sorted())
+    }
+
     private func proposeBrowserToolStep(_ input: ComputerUseFaraModel.Input,
         observation: ComputerUseFaraBrowserExecutor.ToolObservation,
         rootTaskID: String,
@@ -931,6 +984,10 @@ final class MCPFirstComputerUseExecutor:
             .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
         let response = "<tool_call>" + encoded + "</tool_call>"
         let proposal = try ComputerUseFaraModel.Proposal(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+        if plan.kind == .answer, case .page(let page) = observation {
+            return .nativeReadCompletion(try Self.nativeReadCompletion(plan: plan, context: context,
+                observation: page, proposal: proposal))
+        }
         return .proposal(proposal)
     }
 

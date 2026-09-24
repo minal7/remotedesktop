@@ -31,9 +31,13 @@ struct ComputerUseBrowserIntentContract: Sendable, Equatable {
     }
 }
 
+protocol ComputerUseNativeBrowserStepPlanning: Sendable {
+    func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan
+}
+
 /// Native records only. Runtime authority and process ownership remain with
 /// OSAtlasLlamaRuntime; this adapter can propose a step but execute no effects.
-struct ComputerUseLocalTextBrowserStepPlanner: Sendable {
+struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlanning {
     static let contextTokens = 4_096
     static let outputTokens = 768
     static let framingReserve = 64
@@ -495,7 +499,7 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
     var inspectCatalogue: (@Sendable (ComputerUseBrowserPageSnapshot, URL) throws -> Void)? = nil
     /// Opt-in raw model exchange diagnostics; unset in normal composition.
     var inspectExchange: (@Sendable (Data, Data, Int) -> Void)? = nil
-    var nativeTextPlanner: (@MainActor @Sendable () async throws -> ComputerUseRuntimeBrowserStepPlanner?)? = nil
+    var nativeTextPlanner: (@MainActor @Sendable () async throws -> (any ComputerUseNativeBrowserStepPlanning)?)? = nil
     enum Failure: Error, Equatable, LocalizedError {
         case contextLimit
         case unsupportedAnswerClaim

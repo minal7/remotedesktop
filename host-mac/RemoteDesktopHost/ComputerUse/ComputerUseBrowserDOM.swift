@@ -2,7 +2,7 @@ import Foundation
 import WebKit
 
 enum ComputerUseBrowserDOMCommand: String {
-    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, observeResearchControls, agentTarget, validateAgentChrome
+    case fields, read, edit, receipt, reobserve, preflight, pageIdentity, pageSnapshot, validatePageSnapshot, validatePageReadEvidence, observeResearchControls, agentTarget, validateAgentChrome
     case scrollViewport, viewportScrollReceipt, validateAgentScroll, agentScroll, agentFragmentScroll, validatePageLink, finishPendingChange, continueUnsentInput
     case prepareFormQuery, validateFormQuery, bindPageFields, formFields, extendFormFields, reviseFormFields, inspectPreparedRevision, inspectFormRequirements, retireUnsentInputs
     case prepareFormPreservation, validateFormPreservation, verifyFormState, validateFormState
@@ -1209,13 +1209,13 @@ enum ComputerUseBrowserDOM {
         return before.length === after.length && before.every((item,index) => item.element === after[index].element
           && JSON.stringify(item.rect) === JSON.stringify(after[index].rect));
       }
-      function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = []) {
+      function pageContent(linkBindings, controlBindings, containerBindings, includeControlState = false, scopedControlIDs = [], textBindingOutput = null) {
         // The text pass reads rendered text nodes, never form values,
         // innerHTML, scripts or frame documents. Bounded HTML title metadata
         // stays separate from each caption. A separate opt-in pass below
         // observes native properties or scoped declarations. Omitted surfaces remain explicit.
         const excluded = 'script,style,noscript,template,input,textarea,select,option,[contenteditable]:not([contenteditable="false"]),[role="textbox"],[role="combobox"],[role="listbox"],[role="option"],[hidden],[inert],[aria-hidden="true"]';
-        const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map();
+        const texts = [], links = [], controls = [], controlStates = [], structure = [], anchors = new Map(), buttons = new Map(), containers = new Map(), textNodesByID = new Map();
         const textRange = doc.createRange();
         const pageParent = node => node.assignedSlot || parent(node);
         let count = 0, bytes = 0, truncated = false, omittedEmbeddedContent = false, omittedControls = false, omittedControlMetadata = false, omittedStructure = false;
@@ -1254,6 +1254,16 @@ enum ComputerUseBrowserDOM {
             containerBindings.set(binding.record.id, {element:binding.element, parent:binding.parent});
           }
           return parentID;
+        }
+        // Retain DOM identity for selected read evidence. The serialized tN/gN
+        // identifiers are presentation indexes and may shift after unrelated insertions.
+        function structuralPath(node) {
+          const path = [];
+          for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
+            path.push({element, kind:element.localName + ':' + (element.getAttribute('role') || '')});
+            if (element === root) return path;
+          }
+          return null;
         }
         function visibleInPage(element, textRects = null) {
           const original = element;
@@ -1339,11 +1349,13 @@ enum ComputerUseBrowserDOM {
           if (!containerID || bytes + size > 65536) { truncated = true; continue; }
           bytes += size;
           const entry = {id: 't' + (texts.length + 1), containerID, text};
+          let tooltipElement = null;
           // HTML title inheritance applies through the composed ancestors.
           // An explicit empty title suppresses an ancestor's tooltip. Never
           // read tooltips from excluded controls or non-rendered text nodes.
           for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
             if (element.hasAttribute('title')) {
+              tooltipElement = element;
               const tooltip = element.getAttribute('title');
               if (tooltip.length > 8192) { truncated = true; break; }
               const tooltipBytes = encoder.encode(tooltip).length;
@@ -1356,6 +1368,10 @@ enum ComputerUseBrowserDOM {
             if (element === root) break;
           }
           texts.push(entry);
+          const ancestry = structuralPath(node);
+          if (!ancestry) { truncated = true; omittedStructure = true; continue; }
+          textNodesByID.set(entry.id, node);
+          textBindingOutput?.set(entry.id, {element:node, text:entry.text, tooltip:entry.tooltip ?? null, tooltipElement, ancestry});
           for (let element = pageParent(node), depth = 0; element && depth < 128; element = pageParent(element), depth++) {
             if (anchors.has(element)) { anchors.get(element).push(entry); break; }
           }
@@ -1403,8 +1419,8 @@ enum ComputerUseBrowserDOM {
           if (labelBytes > 2048 || urlBytes > 8192 || links.length >= 128 || bytes + labelBytes + urlBytes > 65536) {
             truncated = true; continue;
           }
-          const containerID = containerIDFor(anchor);
-          if (!containerID || bytes + labelBytes + urlBytes > 65536) { truncated = true; continue; }
+          const containerID = containerIDFor(anchor), ancestry = structuralPath(anchor);
+          if (!containerID || !ancestry || bytes + labelBytes + urlBytes > 65536) { truncated = true; continue; }
           bytes += labelBytes + urlBytes;
           const id = 'l' + (links.length + 1);
           links.push({id, label, destination: url.href, textIDs: parts.map(entry => entry.id), containerID});
@@ -1431,7 +1447,10 @@ enum ComputerUseBrowserDOM {
           }
           const agentNavigationKind = !agentCanNavigate ? null : source.href !== destination.href
             ? (target.toLowerCase() === '_blank' ? 'document' : null) : fragmentTarget ? 'fragment' : null;
-          linkBindings.set(id, {element: anchor, base, signature, canOpen, agentNavigationKind, fragmentTarget,
+          const labelSource = parts.length ? 'text' : (anchor.getAttribute('aria-label') || '').trim() ? 'aria' : imageLabel ? 'image' : 'none';
+          linkBindings.set(id, {element: anchor, base, signature, canOpen, agentNavigationKind, fragmentTarget, ancestry,
+            textNodes:parts.map(entry => textNodesByID.get(entry.id)), labelSource,
+            ariaLabel:labelSource === 'aria' ? (anchor.getAttribute('aria-label') || '').trim() : null,
             labelImages:imageLabel?.images || [],metadata:{label,destination:url.href}});
         }
         // Observe supported native control metadata in a separate bounded
@@ -1962,7 +1981,7 @@ enum ComputerUseBrowserDOM {
               || JSON.stringify(readViewport()) !== JSON.stringify(operation.receipt.after)) return reply('uncertain');
           return {...reply('viewport-scroll-confirmed'), scroll: operation.receipt};
         }
-        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
+        if (['pageSnapshot', 'observeResearchControls', 'validatePageSnapshot', 'validatePageReadEvidence', 'agentTarget', 'validateAgentChrome', 'validateAgentScroll', 'agentScroll', 'agentFragmentScroll', 'scrollViewport', 'validatePageLink', 'prepareFormQuery', 'validateFormQuery', 'bindPageFields', 'formFields', 'extendFormFields', 'reviseFormFields', 'inspectPreparedRevision', 'verifyFormState', 'validateFormState', 'inspectFormRequirements', 'prepareFormPreservation', 'popupCandidates', 'preparePopup', 'validatePopup', 'openPopup', 'optionSelectionCandidates', 'prepareOptionSelection', 'validateOptionSelection', 'selectOption'].includes(command)) {
           const status = authenticationStatus();
           if (status) { lastPageSnapshot = null; return reply(status); }
           if (doc.readyState !== 'complete') return reply(command === 'pageSnapshot' ? 'page-loading' : 'stale');
@@ -1970,8 +1989,9 @@ enum ComputerUseBrowserDOM {
           if (command === 'pageSnapshot' && args.includeControlState !== undefined && typeof args.includeControlState !== 'boolean') return reply('unsupported');
           const includeControlState = command === 'pageSnapshot' ? args.includeControlState === true : lastPageSnapshot?.includeControlState === true;
           const scopedControlIDs = command === 'pageSnapshot' ? [] : lastPageSnapshot?.scopedControlIDs || [];
-          const content = pageContent(links, controls, containers, includeControlState, scopedControlIDs), serialized = JSON.stringify(content);
-          const needsAgentState = command === 'pageSnapshot' ? args.agentInput === true : !!lastPageSnapshot?.agentState;
+          const textBindings = new Map();
+          const content = pageContent(links, controls, containers, includeControlState, scopedControlIDs, textBindings), serialized = JSON.stringify(content);
+          const needsAgentState = command === 'pageSnapshot' ? args.agentInput === true : command === 'validatePageReadEvidence' ? false : !!lastPageSnapshot?.agentState;
           const agentState = needsAgentState ? agentInputState() : null;
           if (needsAgentState && !agentState) { lastPageSnapshot = null; return reply('unsupported'); }
           if (command === 'pageSnapshot' && agentState && !captureAgentHitTargets(agentState,controls,links,args.agentRaster)) {
@@ -1983,6 +2003,36 @@ enum ComputerUseBrowserDOM {
             if (!lastPageSnapshot || args.documentID !== documentID || args.snapshotID !== lastPageSnapshot.id
                 || lastPageSnapshot.documentID !== documentID || lastPageSnapshot.url !== doc.URL
                 || lastPageSnapshot.scroller !== doc.scrollingElement) return reply('stale');
+            if (command === 'validatePageReadEvidence') {
+              const refs = args.references;
+              if (!Array.isArray(refs) || refs.length < 1 || refs.length > 64 || new Set(refs).size !== refs.length
+                  || refs.some(ref => typeof ref !== 'string' || !/^(source|text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*)$/.test(ref))) return reply('unsupported');
+              if (typeof args.expectedURL !== 'string' || doc.URL !== args.expectedURL || lastPageSnapshot.url !== args.expectedURL) return reply('stale');
+              const samePath = (before, after) => Array.isArray(before) && Array.isArray(after) && before.length === after.length
+                && before.every((item,index) => item.element === after[index].element && item.kind === after[index].kind);
+              const currentTextFor = previous => Array.from(textBindings.values()).find(item => item.element === previous.element);
+              const currentLinkFor = previous => Array.from(links.values()).find(item => item.element === previous.element);
+              for (const ref of refs) {
+                if (ref === 'source') continue;
+                const separator = ref.indexOf(':'), kind = ref.slice(0, separator), id = ref.slice(separator + 1);
+                if (kind === 'text' || kind === 'tooltip') {
+                  const previous = lastPageSnapshot.texts?.get(id), current = previous && currentTextFor(previous);
+                  if (!previous || !current || previous.text !== current.text || previous.tooltip !== current.tooltip
+                      || !samePath(previous.ancestry, current.ancestry)) return reply('stale-read-evidence');
+                  if (kind === 'tooltip' && (!previous.tooltip?.trim() || previous.tooltipElement !== current.tooltipElement)) return reply('stale-read-evidence');
+                } else {
+                  const previous = lastPageSnapshot.links.get(id), current = previous && currentLinkFor(previous);
+                  if (!previous || !current || previous.metadata.label !== current.metadata.label
+                      || previous.metadata.destination !== current.metadata.destination || previous.labelSource !== current.labelSource
+                      || previous.ariaLabel !== current.ariaLabel || !samePath(previous.ancestry, current.ancestry)
+                      || previous.textNodes.length !== current.textNodes.length
+                      || previous.textNodes.some((node,index) => node !== current.textNodes[index])
+                      || previous.labelImages.length !== current.labelImages.length
+                      || previous.labelImages.some((node,index) => node !== current.labelImages[index])) return reply('stale-read-evidence');
+                }
+              }
+              return reply('page-read-evidence-current');
+            }
             // Native Find and explicit URL/search navigation do not activate
             // a page control. Retain the document/snapshot and fresh login gate;
             // native code verifies its owner/window and any Find editing state.
@@ -2278,11 +2328,11 @@ enum ComputerUseBrowserDOM {
               if (!Array.isArray(ids) || ids.length < 1 || ids.length > 16 || new Set(ids).size !== ids.length
                   || ids.some(id => typeof id !== 'string' || !controls.has(id)
                     || !researchScopeAllowed(controls.get(id).element, controls.get(id).metadata))) return reply('unsupported');
-              const observedLinks = new Map(), observedControls = new Map(), observedContainers = new Map();
-              const reading = pageContent(observedLinks, observedControls, observedContainers, true, ids), id = nonce();
+              const observedLinks = new Map(), observedControls = new Map(), observedContainers = new Map(), observedTexts = new Map();
+              const reading = pageContent(observedLinks, observedControls, observedContainers, true, ids, observedTexts), id = nonce();
               formQueries.clear();
               lastPageSnapshot = {id, documentID, serialized:JSON.stringify(reading), includeControlState:true, scopedControlIDs:ids,
-                url:doc.URL, scroller:doc.scrollingElement, links:observedLinks, controls:observedControls, containers:observedContainers};
+                url:doc.URL, scroller:doc.scrollingElement, links:observedLinks, controls:observedControls, containers:observedContainers, texts:observedTexts};
               return {status:'page-snapshot', documentID, page:{id, ...reading}};
             }
             if (command === 'prepareFormPreservation') return prepareFieldPreservation(args,controls);
@@ -2394,7 +2444,7 @@ enum ComputerUseBrowserDOM {
           }
           const id = nonce();
           formQueries.clear();
-          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, agentState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers};
+          lastPageSnapshot = {id, documentID, serialized, includeControlState, scopedControlIDs, agentState, url: doc.URL, scroller: doc.scrollingElement, links, controls, containers, texts:textBindings};
           return {status: 'page-snapshot', documentID, page: {id, ...content}};
         }
         if (command !== 'fields' && args.documentID !== documentID) return reply('stale');

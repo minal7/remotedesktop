@@ -3920,6 +3920,262 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInFaraRechecksReportCompletionAfterSameDocumentBannerChange() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: same-document freshness gate for a native completion proposal")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let policyText = "Returns are accepted up to 48 hours before the performance."
+        let server = try OwnedBrowserHTTPFixture(routes: ["/policy": .init(body: """
+            <!doctype html><html><body><h1>Ticket policy</h1><p>\(policyText)</p>
+            <script>document.addEventListener('click',()=>fetch('/clicked'));document.addEventListener('input',()=>fetch('/edited'))</script>
+            </body></html>
+            """), "/clicked": .init(body: "clicked"), "/edited": .init(body: "edited")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraCompletionFreshness-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "completion-freshness-" + UUID().uuidString
+        let url = base.appendingPathComponent("policy")
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: taskID)
+        let document = try await browser.navigate(taskID: taskID, operationID: "fixture", to: url)
+        var retainedWindow: NSWindow?
+        try requireSameNativeWindow(&retainedWindow)
+        func webViews(_ view: NSView) -> [WKWebView] {
+            if let webView = view as? WKWebView { return [webView] }
+            return view.subviews.flatMap(webViews)
+        }
+        let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == url })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let goal = "Read the ticket policy on this page."
+        let firstAnswer = call(#"{"action":"terminate","answer":"Returns are accepted up to 48 hours before the performance."}"#)
+        let finalAnswer = call(#"{"action":"terminate","answer":"Returns are accepted up to 48 hours before the performance."}"#)
+        let rootJournalID = ComputerUseTaskContract.digest(["fara-browser-session-v1", taskID])
+        func rootJournal() throws -> ComputerUseTaskJournal {
+            let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"),
+                includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            let journals = try files.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+            return try XCTUnwrap(journals.first { $0.taskID == rootJournalID })
+        }
+        var proposalCount = 0, visualCalls = 0
+        var firstObservation: ComputerUseOwnedBrowser.AgentObservation?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in
+                visualCalls += 1
+                throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+            }, proposeUsingTools: { input, observation in
+                proposalCount += 1
+                guard proposalCount <= 2, case .page(let pageObservation) = observation else {
+                    throw ComputerUseFaraBrowserExecutor.Failure.stepLimit
+                }
+                XCTAssertEqual(pageObservation.approvalPageEvidence.document.taskID, taskID)
+                XCTAssertEqual(pageObservation.approvalPageEvidence.document, document)
+                XCTAssertEqual(input.currentURL, url)
+                XCTAssertEqual(input.history.count, proposalCount - 1)
+                XCTAssertTrue(input.observedPage?.text.contains(policyText) == true)
+                if proposalCount == 1 {
+                    firstObservation = pageObservation
+                    XCTAssertFalse(input.observedPage?.text.contains("Harmless cookie notice") == true)
+                    XCTAssertEqual(try rootJournal().statuses, [.attempted], "A proposed completion is not verified until its observation is fresh")
+                    _ = try await web.evaluateJavaScript("const banner=document.createElement('aside');banner.id='harmless-cookie-notice';banner.textContent='Harmless cookie notice';document.body.prepend(banner)")
+                    XCTAssertEqual(web.url, url, "The harmless banner edit must stay in the same document")
+                    XCTAssertEqual(try rootJournal().statuses, [.attempted])
+                    return .proposal(try .init(response: firstAnswer, action: ComputerUseFaraAction.decodeNativeMessage(firstAnswer)))
+                }
+                let originalObservation = try XCTUnwrap(firstObservation)
+                XCTAssertNotEqual(pageObservation, originalObservation, "The stale completion must be retried against a fresh capture")
+                XCTAssertEqual(pageObservation.sessionIdentity, originalObservation.sessionIdentity, "Refresh retains the same browser owner")
+                XCTAssertEqual(pageObservation.approvalPageEvidence.document, originalObservation.approvalPageEvidence.document)
+                XCTAssertTrue(input.observedPage?.text.contains("Harmless cookie notice") == true)
+                XCTAssertTrue(input.observedPage?.text.contains(policyText) == true)
+                XCTAssertEqual(input.history.first?.response, firstAnswer)
+                XCTAssertEqual(try rootJournal().statuses, [.attempted], "The first stale reportCompletion did not verify task completion")
+                let rootOwner = try XCTUnwrap(browser.taskID)
+                XCTAssertEqual(rootOwner, taskID)
+                return .proposal(try .init(response: finalAnswer, action: ComputerUseFaraAction.decodeNativeMessage(finalAnswer)))
+            })
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Returns are accepted up to 48 hours before the performance."))
+        XCTAssertEqual(proposalCount, 2)
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(try XCTUnwrap(browser.taskID), taskID, "The original browser owner remains in control")
+        XCTAssertEqual(server.count("/clicked"), 0)
+        XCTAssertEqual(server.count("/edited"), 0)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"),
+            includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, 0)
+        XCTAssertEqual(try rootJournal().statuses, [.verified], "Only the stable second completion verifies the root journal")
+    }
+
+    @MainActor
+    func testOptInNativeReadCompletionChecksSelectedDOMRecordsDespiteUnrelatedText() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: selected native read evidence in a real owned browser; no inference")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let caption = "Returns are accepted up to 48 hours before the performance."
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: """
+            <!doctype html><html><body><main><p id='group'><span id='fact' title='Policy note'>\(caption)</span></p>
+            <a id='details' href='/details'>Policy details</a><section id='other'>Other content</section></main>
+            <script>document.addEventListener('click',()=>fetch('/clicked'));document.addEventListener('input',()=>fetch('/edited'))</script>
+            </body></html>
+            """)])
+        let base = try await server.start(); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "read-records")
+        var retainedWindow: NSWindow?
+        @MainActor func webViews(_ view: NSView) -> [WKWebView] {
+            if let web = view as? WKWebView { return [web] }
+            return view.subviews.flatMap(webViews)
+        }
+        let changes: [(String, String, String, Bool)] = [
+            ("unrelated", "document.body.prepend(Object.assign(document.createElement('aside'),{textContent:'New banner'}));document.body.append(Object.assign(document.createElement('footer'),{textContent:'New footer'}))", "all", true),
+            ("text", "fact.firstChild.nodeValue='Returns are accepted up to 24 hours before the performance.'", "text", false),
+            ("tooltip", "fact.title='Changed policy note'", "tooltip", false),
+            ("link-label", "details.firstChild.nodeValue='Other details'", "link", false),
+            ("link-destination", "details.href='/other-destination'", "link", false),
+            ("removed", "fact.remove()", "text", false),
+            ("replaced", "fact.replaceWith(fact.cloneNode(true))", "text", false),
+            ("reparented", "document.getElementById('other').append(fact)", "text", false),
+            ("hidden", "fact.style.display='none'", "text", false),
+            ("login", "document.body.append(Object.assign(document.createElement('input'),{type:'password'}))", "text", false),
+            ("source-url", "history.replaceState({},'', '/changed-source')", "text", false),
+        ]
+        for (mode, change, selected, allowed) in changes {
+            let document = try await browser.navigate(taskID: "read-records", operationID: mode, to: base.appendingPathComponent("page"))
+            try requireSameNativeWindow(&retainedWindow)
+            let observation = try await browser.captureAgentObservation(document: document)
+            let page = observation.approvalPageEvidence.page
+            let text = try XCTUnwrap(page.texts.first { $0.text == caption })
+            XCTAssertEqual(text.tooltip, "Policy note")
+            let link = try XCTUnwrap(page.links.first { $0.label == "Policy details" })
+            let references = selected == "all" ? ["text:\(text.id)", "tooltip:\(text.id)", "link:\(link.id)"]
+                : [selected == "link" ? "link:\(link.id)" : "\(selected):\(text.id)"]
+            let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView).flatMap(webViews).first { $0.url == document.committedURL })
+            _ = try await web.evaluateJavaScript(change)
+            do {
+                try await browser.validateAgentReadCompletion(observation, references: references)
+                XCTAssertTrue(allowed, "Changed selected record was admitted: \(mode)")
+            } catch {
+                if allowed { XCTFail("Unrelated text must not invalidate selected records: \(error)") }
+                else if mode == "login" { XCTAssertEqual(error as? ComputerUseBrowserError, .authenticationRequired) }
+                else if mode == "source-url" { XCTAssertNotNil(error as? ComputerUseBrowserError) }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged, mode) }
+            }
+            if allowed {
+                let fresh = try await browser.observePage(document: document)
+                let moved = try XCTUnwrap(fresh.page.texts.first { $0.text == caption })
+                XCTAssertNotEqual(moved.id, text.id, "Prepending text must shift ordinal IDs while the selected DOM node survives")
+            }
+        }
+        XCTAssertEqual(server.count("/clicked"), 0); XCTAssertEqual(server.count("/edited"), 0)
+        XCTAssertEqual(server.count("/details"), 0); XCTAssertEqual(server.count("/other-destination"), 0)
+    }
+
+    @MainActor
+    func testOptInNativeReadCompletionRejectsInvalidSelectedReferences() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: selected read-reference validation on real native records")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let body = "<!doctype html>" + (1...64).map { "<p>Observed policy \($0)</p>" }.joined()
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: body)])
+        let url = try await server.start().appendingPathComponent("page"); defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: "read-reference-shape")
+        let document = try await browser.navigate(taskID: "read-reference-shape", operationID: "open", to: url)
+        let observation = try await browser.captureAgentObservation(document: document)
+        let selected = observation.approvalPageEvidence.page.texts.filter { $0.text.hasPrefix("Observed policy ") }
+        XCTAssertEqual(selected.count, 64)
+        let validReferences = selected.map { "text:\($0.id)" }
+        let reference = try XCTUnwrap(validReferences.first)
+        let invalid: [([String], ComputerUseBrowserError)] = [
+            ([], .pageEvidenceUnavailable), ([""], .pageEvidenceUnavailable),
+            (["text:t999999"], .pageChanged), ([reference, reference], .pageEvidenceUnavailable),
+            ([reference, "link:l999999"], .pageChanged), (validReferences + ["source"], .pageEvidenceUnavailable),
+        ]
+        for (references, expected) in invalid {
+            do { try await browser.validateAgentReadCompletion(observation, references: references); XCTFail("Invalid selection admitted: \(references)") }
+            catch { XCTAssertEqual(error as? ComputerUseBrowserError, expected, "\(references)") }
+        }
+        try await browser.validateAgentReadCompletion(observation, references: validReferences)
+    }
+
+    @MainActor
+    func testOptInNativeReadCompletionRetainsLifecycleGatesAcrossAwait() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: native read-completion authority before and after WebKit await")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/page": .init(body: "<!doctype html><p>Observed policy</p>"),
+            "/replacement": .init(body: "<!doctype html><p>Observed policy</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        var allowed = true, hostAllowed = true, validationDispatches = 0
+        var onValidation: (() -> Void)?
+        var running: Task<Void, Error>?
+        let browser = ComputerUseOwnedBrowser(domScriptDidDispatch: { command in
+            if command == .validatePageReadEvidence { validationDispatches += 1; onValidation?() }
+        }, mayAct: { allowed })
+        defer { running?.cancel(); browser.close() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativeReadHostPause-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { hostAllowed },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory))
+        for mode in ["owner", "document", "source-policy", "pause-before", "cancel-before", "pause-await", "host-pause-await", "cancel-await", "close-await"] {
+            allowed = true; hostAllowed = true; onValidation = nil; validationDispatches = 0
+            let taskID = "read-authority-" + mode
+            let session = try browser.prepareWorkflowSession(taskID: taskID)
+            let document = try await browser.navigate(taskID: taskID, operationID: "open-" + mode, to: base.appendingPathComponent("page"))
+            let observation = try await browser.captureAgentObservation(document: document)
+            let text = try XCTUnwrap(observation.approvalPageEvidence.page.texts.first { $0.text == "Observed policy" })
+            let references = ["text:\(text.id)"]
+            switch mode {
+            case "owner": try browser.claim(taskID: "successor")
+            case "document": _ = try await browser.navigate(taskID: taskID, operationID: "replace", to: base.appendingPathComponent("replacement"))
+            case "source-policy":
+                let goal = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: "Read the policy", referenceDate: Date(), timeZoneIdentifier: "UTC")
+                try browser.installSourcePolicy(.init(goal: goal, allowedOrigins: []), replacing: nil, session: session)
+            case "pause-before": allowed = false
+            case "pause-await": onValidation = { allowed = false }
+            case "host-pause-await": onValidation = { hostAllowed = false }
+            case "cancel-await": onValidation = { running?.cancel() }
+            case "close-await": onValidation = { browser.close() }
+            default: break
+            }
+            running = Task { @MainActor in
+                if mode == "cancel-before" { withUnsafeCurrentTask { $0?.cancel() } }
+                if mode == "host-pause-await" {
+                    try await tools.validateOwnedBrowserAgentReadCompletion(observation, references: references)
+                } else {
+                    try await browser.validateAgentReadCompletion(observation, references: references)
+                }
+            }
+            do { try await running?.value; XCTFail("Withdrawn read-completion authority admitted: \(mode)") }
+            catch {
+                if mode.hasPrefix("cancel-") { XCTAssertTrue(error is CancellationError, "\(mode): \(error)") }
+                else if mode == "host-pause-await" { XCTAssertEqual(error as? ComputerUseHostTools.ToolError, .paused); XCTAssertTrue(allowed) }
+                else { XCTAssertNotNil(error as? ComputerUseBrowserError, "\(mode): \(error)") }
+            }
+            running = nil; onValidation = nil
+            if mode == "cancel-await" { try await browser.waitForDOMCompletion(document: document) }
+            XCTAssertEqual(validationDispatches, mode.hasSuffix("-await") ? 1 : 0, mode)
+            if mode == "owner" { XCTAssertEqual(browser.taskID, "successor", "Validation must never reclaim ownership") }
+            if mode == "close-await" {
+                do { try await browser.validateAgentReadCompletion(observation, references: references); XCTFail("Closed browser admitted old evidence") }
+                catch { XCTAssertNotNil(error as? ComputerUseBrowserError) }
+            }
+        }
+    }
+
+    @MainActor
     func testOptInAgentAllowsUnrelatedMotionAndRejectsMotionAtInputPoint() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded native input geometry") }
         let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)

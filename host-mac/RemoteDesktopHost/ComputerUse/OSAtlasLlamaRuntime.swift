@@ -105,7 +105,7 @@ struct ComputerUseRuntimeBrowserGoalPlanner: ComputerUseBrowserGoalPlanning {
     }
 }
 
-struct ComputerUseRuntimeBrowserStepPlanner: Sendable {
+struct ComputerUseRuntimeBrowserStepPlanner: ComputerUseNativeBrowserStepPlanning {
     let inputs: ComputerUseNativeTextRuntimeInputs
     var runtime: OSAtlasLlamaRuntime = .shared
     var inspectExchange: (@Sendable (Data, Data, Int) -> Void)? = nil

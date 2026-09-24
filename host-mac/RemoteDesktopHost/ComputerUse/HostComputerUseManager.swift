@@ -1412,6 +1412,15 @@ final class ComputerUseHostTools {
         try browserNavigationTask.validateAgentMemoryObservation(observation)
     }
 
+    func validateOwnedBrowserAgentReadCompletion(_ observation: ComputerUseOwnedBrowser.AgentObservation, references: [String]) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
+        try await browserNavigationTask.validateAgentReadCompletion(observation, references: references)
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+    }
+
     func predictedOwnedBrowserAgentAction(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) throws -> ComputerUsePredictedAction? {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
@@ -4483,7 +4492,7 @@ final class HostComputerUseManager: ObservableObject {
                 let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
                 let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
                     runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
-                return .init(inputs: inputs, inspectExchange: inspectExchange)
+                return ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, inspectExchange: inspectExchange)
             }
         }
         let browserPlanner = configuredBrowserPlanner

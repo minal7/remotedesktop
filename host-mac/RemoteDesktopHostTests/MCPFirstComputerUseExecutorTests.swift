@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import CryptoKit
+import WebKit
 @testable import RemoteDesktopHost
 
 @MainActor
@@ -364,6 +365,80 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         _ = try await executor.execute(taskID: "native", prompt: "Inspect the current app's layout.", tools: tools, progress: { _ in })
         XCTAssertEqual(preparations, 1); XCTAssertEqual(browser.callCount, 2); XCTAssertEqual(native.callCount, 1)
         XCTAssertEqual(planner.requests.count, 2); XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
+    }
+
+    func testOptInMCPNativeAnswerSurvivesUnrelatedPrependedBannerWithoutReplanning() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: real owned browser and production MCP completion admission; no inference")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let policyText = "Returns are accepted up to 48 hours before the performance."
+        let server = try OwnedBrowserHTTPFixture(routes: ["/policy": .init(body: """
+            <!doctype html><html><body><h1>Ticket policy</h1><p id='policy'>\(policyText)</p>
+            <script>document.addEventListener('click',()=>fetch('/clicked'));document.addEventListener('input',()=>fetch('/edited'))</script>
+            </body></html>
+            """), "/clicked": .init(body: "clicked"), "/edited": .init(body: "edited")])
+        let url = try await server.start().appendingPathComponent("policy"); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MCPNativeAnswerFreshness-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "native-answer-freshness-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: taskID)
+        let document = try await browser.navigate(taskID: taskID, operationID: "fixture", to: url)
+        let web = try XCTUnwrap(NSApp.windows.compactMap(\.contentView)
+            .flatMap(mcpNativeAnswerWebViews).first { $0.url == url })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        var allowed = [try makeMailTool()]
+        for (name, properties) in [
+            ("find_elements", ["pid": MCPJSONValue.object(["type": .string("integer")]), "role": .object(["type": .string("string")]), "title": .object(["type": .string("string")]), "limit": .object(["type": .string("integer")]), "max_depth": .object(["type": .string("integer")])]),
+            ("get_element_attributes", ["element_id": .object(["type": .string("string")]), "names": .object(["type": .string("array"), "items": .object(["type": .string("string")])])]),
+        ] {
+            allowed.append(try .init(serverID: MCPServerRegistry.macControl.serverID, processGeneration: 1,
+                toolName: name, description: "Native link read",
+                inputSchema: objectSchema(properties: properties, required: Array(properties.keys)),
+                risk: .readOnly, approval: MCPToolSafetyPolicy.assess(toolName: name).approval))
+        }
+        let pool = RecordingMCPClientPool(tools: allowed, resultsByTool: [:])
+        let route = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
+        let native = BannerNativeBrowserStepPlanner(web: web, policyText: policyText, sourceURL: url)
+        let fallback = StubVisualExecutor()
+        var visualCalls = 0
+        let fara = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction })
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: route, clientPool: pool,
+            browserStepPlanner: .init(nativeTextPlanner: { native }), browserExecutorFactory: { fara })
+        let goal = "Read the ticket policy on this page and report the return deadline."
+        var result: ComputerUseExecutionResult?, failure: Error?
+        do {
+            result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+        } catch { failure = error }
+        XCTAssertNil(failure, "An unchanged selected native fact must survive an unrelated banner: \(String(reflecting: failure))")
+        XCTAssertEqual(result, .completed(policyText))
+        XCTAssertEqual(native.calls, 1, "The native answer must not request another page proposal for unrelated content")
+        XCTAssertEqual(route.requests.count, 1)
+        XCTAssertEqual(visualCalls, 0); XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertEqual(browser.taskID, taskID); XCTAssertEqual(browser.currentDocument(taskID: taskID), document)
+        XCTAssertEqual(web.url, url)
+        let selectedNodeUnchanged = try await web.evaluateJavaScript("window.__nativeAnswerSelectedNode === document.getElementById('policy') && document.getElementById('policy').textContent === window.__nativeAnswerSelectedText")
+        XCTAssertEqual(selectedNodeUnchanged as? Bool, true)
+        let bannerIsFirst = try await web.evaluateJavaScript("document.body.firstElementChild.id === 'harmless-cookie-notice'")
+        XCTAssertEqual(bannerIsFirst as? Bool, true)
+        XCTAssertEqual(server.count("/policy"), 1)
+        XCTAssertEqual(server.count("/clicked"), 0); XCTAssertEqual(server.count("/edited"), 0)
+        let direct = await pool.directCalls(), approved = await pool.approvedCalls()
+        XCTAssertTrue(direct.isEmpty); XCTAssertTrue(approved.isEmpty)
+        XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"),
+            includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
+            .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        let rootID = ComputerUseTaskContract.digest(["fara-browser-session-v1", taskID])
+        let root = try XCTUnwrap(journals.first { $0.taskID == rootID })
+        XCTAssertEqual(root.statuses, [.verified])
+        XCTAssertFalse(journals.contains { $0.stepIDs == ["native-dispatch-returned"] })
     }
 
     func testBrowserPreparationStopAndFailureCannotExecuteOrFallThrough() async throws {
@@ -4862,6 +4937,61 @@ private struct PlannerVisibleReadOnlyRow {
     let structuredContent: MCPJSONValue
     let completion: String
     let expectedProjection: String
+}
+
+@MainActor
+private func mcpNativeAnswerWebViews(_ view: NSView) -> [WKWebView] {
+    if let web = view as? WKWebView { return [web] }
+    return view.subviews.flatMap(mcpNativeAnswerWebViews)
+}
+
+@MainActor
+private final class BannerNativeBrowserStepPlanner: ComputerUseNativeBrowserStepPlanning {
+    enum Failure: Error { case unexpectedSecondPageProposal }
+    let web: WKWebView
+    let policyText: String
+    let sourceURL: URL
+    private(set) var calls = 0
+
+    init(web: WKWebView, policyText: String, sourceURL: URL) {
+        self.web = web; self.policyText = policyText; self.sourceURL = sourceURL
+    }
+
+    func propose(_ context: ComputerUseMCPBrowserStepPlanner.Context) async throws -> ComputerUseMCPBrowserStepPlanner.Plan {
+        calls += 1
+        guard calls == 1 else { throw Failure.unexpectedSecondPageProposal }
+        XCTAssertEqual(context.evidenceReferences["source"], sourceURL.absoluteString)
+        XCTAssertFalse(context.evidenceReferences.values.contains("Harmless cookie notice"))
+        let references = context.evidenceReferences.filter {
+            $0.key.hasPrefix("text:") && $0.value.utf8.elementsEqual(policyText.utf8)
+        }.keys.sorted()
+        XCTAssertEqual(references.count, 1)
+        let reference = try XCTUnwrap(references.first)
+        let value = MCPJSONValue.object([
+            "kind": .string("answer"), "reference": .string(""), "text": .string(policyText),
+            "assessment": .object([
+                "objective": .string("Read the policy and report the return deadline."),
+                "constraints": .string(""), "workerObjective": .string(""),
+                "requirements": .array([.object([
+                    "instruction": .string("Report the return deadline."), "kind": .string("information"),
+                    "state": .string("observed"), "evidence": .string(reference)
+                ])])
+            ])
+        ])
+        let plan = try ComputerUseMCPBrowserStepPlanner().decode(value, context: context)
+        XCTAssertEqual(plan.assessment?.requirements.first?.evidenceReferences, [reference])
+        // Mutate only after the production decoder has bound the original
+        // selected record. The same DOM node/value remains, but ordinal IDs shift.
+        _ = try await web.evaluateJavaScript("""
+            window.__nativeAnswerSelectedNode = document.getElementById('policy');
+            window.__nativeAnswerSelectedText = window.__nativeAnswerSelectedNode.textContent;
+            const banner = document.createElement('aside');
+            banner.id = 'harmless-cookie-notice'; banner.textContent = 'Harmless cookie notice';
+            document.body.prepend(banner);
+            """)
+        XCTAssertEqual(web.url, sourceURL)
+        return plan
+    }
 }
 
 private final class BrowserRouteMCPPlanner: MCPProposalPlanning, @unchecked Sendable {

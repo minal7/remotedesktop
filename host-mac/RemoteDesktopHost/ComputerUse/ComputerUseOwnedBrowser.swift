@@ -842,6 +842,48 @@ final class ComputerUseOwnedBrowser: NSObject, ObservableObject, WKNavigationDel
         guard agentObservationID == observation.id, hasRequiredPresentation else { throw ComputerUseBrowserError.pageChanged }
     }
 
+    /// Read-only terminal verification for host-validated native text refs.
+    /// It preserves the original screenshot observation and grants no input authority.
+    func validateAgentReadCompletion(_ observation: AgentObservation, references: [String]) async throws {
+        try validateAgentMemoryObservation(observation)
+        guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
+        guard (1...64).contains(references.count), Set(references).count == references.count,
+              references.allSatisfy({ $0 == "source" || $0.range(of: #"^(text:t[1-9][0-9]*|tooltip:t[1-9][0-9]*|link:l[1-9][0-9]*)$"#, options: .regularExpression) != nil }) else {
+            throw ComputerUseBrowserError.pageEvidenceUnavailable
+        }
+        agentOperationInProgress = true
+        defer { agentOperationInProgress = false }
+        let policy = sourcePolicy
+        let evidence = observation.evidence
+        func check() throws {
+            try Task.checkCancellation()
+            try validateAgentSession(observation)
+            try validateSourceDocument(evidence.document)
+            guard agentObservationID == observation.id, ownershipEpoch == observation.ownership,
+                  takeoverEpoch == observation.takeover, sourcePolicy == policy,
+                  browser?.bounds.size == observation.viewportSize, window?.frame == observation.windowFrame,
+                  mainSurface?.findBar.state == observation.findState, hasRequiredPresentation else {
+                throw ComputerUseBrowserError.pageChanged
+            }
+        }
+        try check()
+        let result = try await callDOM(.validatePageReadEvidence,
+            arguments: ["documentID": evidence.documentID, "snapshotID": evidence.page.id,
+                "expectedURL": evidence.document.committedURL.absoluteString, "references": references],
+            document: evidence.document, validateContext: {
+                self.agentObservationID == observation.id && self.ownershipEpoch == observation.ownership
+                    && self.takeoverEpoch == observation.takeover && self.validate(evidence.document)
+                    && self.hasOwnership(taskID: evidence.document.taskID) && self.sourcePolicy == policy
+                    && self.browser?.bounds.size == observation.viewportSize && self.window?.frame == observation.windowFrame
+                    && self.mainSurface?.findBar.state == observation.findState && self.hasRequiredPresentation
+            })
+        try check()
+        guard result.status == "page-read-evidence-current", result.documentID == evidence.documentID,
+              result.fields == nil, result.page == nil, result.scroll == nil, result.formQuery == nil else {
+            throw ComputerUseBrowserError.pageChanged
+        }
+    }
+
     func captureAgentObservation(document expected: ComputerUseBrowserDocument) async throws -> AgentObservation {
         guard !agentOperationInProgress else { throw ComputerUseBrowserError.busy }
         agentOperationInProgress = true

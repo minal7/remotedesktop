@@ -18,8 +18,13 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
     enum ToolPlan: Sendable {
         case proposal(ComputerUseFaraModel.Proposal)
+        case nativeReadCompletion(MCPFirstComputerUseExecutor.NativeReadCompletion)
         case handoff(ComputerUseFaraModel.WorkerDirective)
         case noProposal
+    }
+    private struct PlannedProposal: Sendable {
+        let proposal: ComputerUseFaraModel.Proposal
+        let nativeReadCompletion: MCPFirstComputerUseExecutor.NativeReadCompletion?
     }
     typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ToolPlan
     enum Failure: Error, LocalizedError, Equatable {
@@ -244,7 +249,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
 
     private func nextProposal(_ input: ComputerUseFaraModel.Input, observation: ToolObservation,
-                              tools: ComputerUseHostTools) async throws -> ComputerUseFaraModel.Proposal {
+                              tools: ComputerUseHostTools) async throws -> PlannedProposal {
         let toolPlanner = proposeUsingTools, visualPlanner = propose
         let hasToolPlanner = toolPlanner != nil || tools.hasOwnedBrowserToolProposals
         return try await planning.perform(timeout: 45) {
@@ -263,26 +268,36 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 try await checkObservation()
                 return plan
             }
-            @MainActor func visualProposal(_ visualInput: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+            @MainActor func visualProposal(_ visualInput: ComputerUseFaraModel.Input) async throws -> PlannedProposal {
                 try await checkObservation()
                 let proposal = try await visualPlanner(visualInput)
                 try await checkObservation()
-                guard hasToolPlanner, case .reportCompletion(let candidateText) = proposal.action else { return proposal }
+                guard hasToolPlanner, case .reportCompletion(let candidateText) = proposal.action else {
+                    return PlannedProposal(proposal: proposal, nativeReadCompletion: nil)
+                }
                 var reviewInput = input
                 reviewInput.browserWorkerDirective = nil
                 reviewInput.specialistCompletion = candidateText
                 let reviewed = try await toolPlan(for: reviewInput)
-                guard case .proposal(let reviewedProposal) = reviewed else {
-                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                let reviewedProposal: ComputerUseFaraModel.Proposal
+                switch reviewed {
+                case .proposal(let candidate): reviewedProposal = candidate
+                case .nativeReadCompletion(let receipt):
+                    // A visual specialist's answer has no native evidence receipt;
+                    // retain the existing full-scene validation path.
+                    reviewedProposal = receipt.proposal
+                default: throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
                 }
-                return try Self.readOnlyToolProposal(reviewedProposal)
+                return PlannedProposal(proposal: try Self.readOnlyToolProposal(reviewedProposal), nativeReadCompletion: nil)
             }
             if hasToolPlanner {
                 switch try await toolPlan(for: input) {
                 case .proposal(let proposal):
                     // This proposal boundary is read/navigation-only. Real
                     // MCP mutations need their own approved effect receipts.
-                    return try Self.readOnlyToolProposal(proposal)
+                    return PlannedProposal(proposal: try Self.readOnlyToolProposal(proposal), nativeReadCompletion: nil)
+                case .nativeReadCompletion(let receipt):
+                    return PlannedProposal(proposal: try Self.readOnlyToolProposal(receipt.proposal), nativeReadCompletion: receipt)
                 case .handoff(let directive):
                     guard input.surface == .browser else { throw Failure.unsupportedAction }
                     try directive.validate()
@@ -312,7 +327,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         progress("Reading the browser…")
         let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history,
             userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal)
-        let proposal = try await nextProposal(input, observation: .initial(observation), tools: tools)
+        let planned = try await nextProposal(input, observation: .initial(observation), tools: tools)
+        if planned.nativeReadCompletion != nil { throw Failure.unsupportedAction }
+        let proposal = planned.proposal
         try Task.checkCancellation(); try lease.assertOwnership()
         try tools.validateOwnedBrowserInitialAgentObservation(observation)
         let destination: URL
@@ -499,7 +516,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
                 clarifiedGoal: session.clarifiedGoal)
-            let proposal = try await nextProposal(input, observation: .page(observation), tools: tools)
+            let planned = try await nextProposal(input, observation: .page(observation), tools: tools)
+            let proposal = planned.proposal
             try Task.checkCancellation(); try lease.assertOwnership()
             // Even a model's final assessment needs the same scene it read.
             // Native dispatch receipts below do not themselves prove the goal.
@@ -514,6 +532,15 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                     break
                 case .remember:
                     try tools.validateOwnedBrowserAgentMemoryObservation(observation)
+                case .reportCompletion where planned.nativeReadCompletion != nil:
+                    guard let receipt = planned.nativeReadCompletion,
+                          receipt.authorityDigest == observation.authorityDigest else {
+                        throw ComputerUseBrowserError.pageChanged
+                    }
+                    // Only the direct native planner can mint this receipt;
+                    // it scopes freshness to the selected native records.
+                    try await tools.validateOwnedBrowserAgentReadCompletion(observation, references: receipt.references)
+                    try Task.checkCancellation(); try lease.assertOwnership()
                 case .reportCompletion where session.pageReading == nil && input.observedPage == nil:
                     // The visual-only exception cannot validate an answer
                     // informed by native text or tooltips outside the pixels.
