@@ -866,6 +866,94 @@ final class MCPFirstComputerUseExecutor:
         }, operation: operation)
     }
 
+    private static func nativeDirectReadCompletion(
+        plan: ComputerUseMCPBrowserStepPlanner.Plan,
+        completion: ComputerUseMCPBrowserStepPlanner.Plan.DirectCompletion,
+        context: ComputerUseMCPBrowserStepPlanner.Context,
+        observation: ComputerUseOwnedBrowser.AgentObservation,
+        proposal: ComputerUseFaraModel.Proposal,
+        rootTaskID: String,
+        retainedVisits: RetainedBrowserVisits?
+    ) throws -> NativeReadCompletion {
+        let currentDocument = observation.approvalPageEvidence.document
+        guard plan.kind == .answer, !context.isPartialRecordView,
+              completion.goal == context.userGoal, completion.sessionIdentity == observation.sessionIdentity,
+              context.sessionIdentity == observation.sessionIdentity, context.currentDocument == currentDocument,
+              currentDocument.taskID == rootTaskID,
+              context.evidenceReferences["source"] == observation.currentURL.absoluteString,
+              (1...8).contains(completion.outcomes.count), completion.constraints.count <= 8,
+              !completion.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+        }
+        var nativeReferences = ["source": observation.currentURL.absoluteString]
+        for text in observation.approvalPageEvidence.page.texts {
+            nativeReferences["text:\(text.id)"] = text.text
+            if let tooltip = text.tooltip { nativeReferences["tooltip:\(text.id)"] = tooltip }
+        }
+        for link in observation.approvalPageEvidence.page.links { nativeReferences["link:\(link.id)"] = link.label }
+        nativeReferences.merge(try ComputerUseMCPBrowserStepPlanner.currentNativeReadingBlockEvidence(
+            for: observation.approvalPageEvidence.page)) { _, current in current }
+
+        var selected = Set<String>()
+        var effectURLs = Set<String>()
+        for outcome in completion.outcomes {
+            switch outcome.kind {
+            case .information:
+                guard !outcome.evidenceReferences.isEmpty else {
+                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                }
+                selected.formUnion(outcome.evidenceReferences)
+            case .action:
+                guard outcome.evidenceReferences.isEmpty, outcome.effectProof != nil else {
+                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                }
+            }
+            if let proof = outcome.effectProof {
+                switch proof {
+                case .openURL(let visit):
+                    effectURLs.insert(visit.requestedURL.absoluteString)
+                    effectURLs.insert(visit.committedURL.absoluteString)
+                    guard visit.source == .automationNavigation, visit.taskID == rootTaskID,
+                          visit.contextID == currentDocument.contextID,
+                          let scope = retainedVisits, scope.rootTaskID == rootTaskID,
+                          scope.goal == completion.goal, scope.sessionIdentity == observation.sessionIdentity,
+                          context.retainedVisits.count <= 64, context.retainedVisits == scope.documents,
+                          scope.documents.contains(visit) else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                    }
+                case .nativeGET(let submission):
+                    effectURLs.insert(submission.receipt.document.requestedURL.absoluteString)
+                    effectURLs.insert(submission.receipt.document.committedURL.absoluteString)
+                    guard submission.taskID == rootTaskID,
+                          submission.goalDigest == ComputerUseTaskContract.digest([completion.goal.taskIdentityText]),
+                          submission.sessionIdentity == observation.sessionIdentity,
+                          submission.receipt.document.taskID == rootTaskID,
+                          submission.receipt.document.contextID == currentDocument.contextID,
+                          submission.receipt.document.operationID == ComputerUseTaskContract.digest([submission.operationID, "form-navigation"]),
+                          context.observedNativeGETSubmissions.count <= 64,
+                          context.observedNativeGETSubmissions.contains(submission),
+                          let scope = retainedVisits, scope.rootTaskID == rootTaskID,
+                          scope.goal == completion.goal, scope.sessionIdentity == observation.sessionIdentity else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                    }
+                }
+            }
+        }
+        try ComputerUseMCPBrowserStepPlanner().validateAnswerClaims(plan.text, context: context,
+            requiresEvidence: completion.outcomes.contains(where: { $0.kind == .information }),
+            selectedReferences: selected, verifiedNavigationURLs: effectURLs)
+        if selected.isEmpty { selected.insert("source") }
+        for reference in selected {
+            guard let contextValue = context.evidenceReferences[reference],
+                  let pageValue = nativeReferences[reference],
+                  contextValue.utf8.elementsEqual(pageValue.utf8) else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim
+            }
+        }
+        return NativeReadCompletion(proposal: proposal, authorityDigest: observation.authorityDigest,
+            references: selected.sorted())
+    }
+
     private static func nativeReadCompletion(
         plan: ComputerUseMCPBrowserStepPlanner.Plan,
         context: ComputerUseMCPBrowserStepPlanner.Context,
@@ -874,10 +962,14 @@ final class MCPFirstComputerUseExecutor:
         rootTaskID: String,
         retainedVisits: RetainedBrowserVisits?
     ) throws -> NativeReadCompletion {
-        guard plan.kind == .answer, !context.isPartialRecordView,
-              let assessment = plan.assessment else {
+        guard plan.kind == .answer, !context.isPartialRecordView else {
             throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         }
+        if let completion = plan.directCompletion {
+            return try nativeDirectReadCompletion(plan: plan, completion: completion, context: context,
+                observation: observation, proposal: proposal, rootTaskID: rootTaskID, retainedVisits: retainedVisits)
+        }
+        guard let assessment = plan.assessment else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
         let page = observation.approvalPageEvidence.page
         let currentDocument = observation.approvalPageEvidence.document
         guard currentDocument.taskID == rootTaskID,
@@ -1147,6 +1239,18 @@ final class MCPFirstComputerUseExecutor:
         if plan.kind == .incomplete { throw ExecutorError.structuredToolFailed(plan.text) }
         guard plan.kind == .answer, hasPageObservation else {
             throw AppleFoundationMCPPlannerError.unknownProposal
+        }
+        if let completion = plan.directCompletion {
+            guard completion.goal.taskIdentityText.utf8.elementsEqual(goal.utf8),
+                  (1...8).contains(completion.outcomes.count),
+                  !completion.objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  completion.outcomes.allSatisfy({ outcome in
+                      switch outcome.kind {
+                      case .information: return !outcome.evidenceReferences.isEmpty
+                      case .action: return outcome.evidenceReferences.isEmpty && outcome.effectProof != nil
+                      }
+                  }) else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
+            return
         }
         guard let assessment = plan.assessment else {
             throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence

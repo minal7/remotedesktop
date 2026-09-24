@@ -1,0 +1,1082 @@
+{
+  "schema": "native-direct-answer-results-sept24-v1",
+  "status": "RED plus GREEN01/GREEN02 complete; managed05 deferred by priority; semantic negatives remain unqualified",
+  "scope": {
+    "question": "Can the default-off direct native browser loop propose a final answer in the same next-step model call using current factual evidence and real host navigation/GET receipt references, with host-side fail-closed validation?",
+    "productionMode": "Direct planning remains opt-in/default-off. No model or inference/runtime budget changes.",
+    "limitations": [
+      "Structural negative tests establish parser and receipt-binding behavior only; they do not prove natural-language semantic completeness or model reliability.",
+      "Synthetic typed receipts in unit tests are not dispatched browser effects or final MCPFirst host admission.",
+      "Unknown-ref, forged-history, and unsupported purchase/edit tests do not prove that a model will retain every natural-language requirement.",
+      "A frozen managed positive and negative run is required before semantic qualification.",
+      "No raw model narrative, hidden reasoning, or unrestricted completion prose is stored here; a managed run should retain only strict native argument projections.",
+      "The managed direct-form run was deferred before execution when priority shifted to Drive upload and clarification-choice behavior; the passing GREEN02 test batch is compile/structural verification only."
+    ]
+  },
+  "red": {
+    "commandRecord": {
+      "name": "native-direct-answer-red01",
+      "executionState": "finished",
+      "preparedOnly": false,
+      "ids": [
+        "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+        "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+        "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect"
+      ],
+      "inference": false,
+      "expected": "Compile then behavioral RED on the same-call answer candidate: current direct planning rejects answer before any legacy goal-contract preflight. Negative cases remain rejected for unknown/history-only GET refs and unsupported purchase/edit actions without host effect proof.",
+      "runnerPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/run-native-direct-answer-red01.py",
+      "runnerSHA256": "8797c19a20f34d1da3891d0d080f878c82c846d28034b492814ad3cc008c1510",
+      "buildConfigSHA256": "66891e6654e4a62394769ff87fbe9ef808b41c886ff44a521fb8ac0d56dc4294",
+      "requiredSources": [
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift"
+      ],
+      "limits": {
+        "jobs": 1,
+        "parallelTesting": false,
+        "maximumTestExecutionTimeAllowanceSeconds": 90,
+        "inference": false
+      },
+      "environment": {
+        "RUN_FARA_NATIVE_BROWSER_INPUT": "1",
+        "otherTEST_RUNNER_variables": "removed"
+      },
+      "outputPaths": {
+        "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01.xcresult",
+        "log": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01.log",
+        "sourceSnapshot": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01-sources"
+      },
+      "baseCommand": [
+        "xcodebuild",
+        "-quiet",
+        "test",
+        "-project",
+        "host-mac/RemoteDesktopHost.xcodeproj",
+        "-scheme",
+        "RemoteDesktopHost",
+        "-configuration",
+        "Debug",
+        "-destination",
+        "platform=macOS,arch=arm64",
+        "-derivedDataPath",
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+        "-clonedSourcePackagesDirPath",
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+        "-onlyUsePackageVersionsFromResolvedFile",
+        "-skipPackageUpdates",
+        "-jobs",
+        "1",
+        "-parallel-testing-enabled",
+        "NO",
+        "-test-timeouts-enabled",
+        "YES",
+        "-maximum-test-execution-time-allowance",
+        "90",
+        "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+        "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+        "CODE_SIGN_STYLE=Manual",
+        "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+        "CODE_SIGN_ENTITLEMENTS=",
+        "PROVISIONING_PROFILE_SPECIFIER=",
+        "PROVISIONING_PROFILE="
+      ],
+      "args": [
+        "xcodebuild",
+        "-quiet",
+        "test",
+        "-project",
+        "host-mac/RemoteDesktopHost.xcodeproj",
+        "-scheme",
+        "RemoteDesktopHost",
+        "-configuration",
+        "Debug",
+        "-destination",
+        "platform=macOS,arch=arm64",
+        "-derivedDataPath",
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+        "-clonedSourcePackagesDirPath",
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+        "-onlyUsePackageVersionsFromResolvedFile",
+        "-skipPackageUpdates",
+        "-jobs",
+        "1",
+        "-parallel-testing-enabled",
+        "NO",
+        "-test-timeouts-enabled",
+        "YES",
+        "-maximum-test-execution-time-allowance",
+        "90",
+        "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+        "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+        "CODE_SIGN_STYLE=Manual",
+        "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+        "CODE_SIGN_ENTITLEMENTS=",
+        "PROVISIONING_PROFILE_SPECIFIER=",
+        "PROVISIONING_PROFILE=",
+        "-resultBundlePath",
+        "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01.xcresult",
+        "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+        "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+        "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect"
+      ],
+      "requiredSnapshotSourceCount": 18,
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "bfa124ccf29d57a0aad920b797530939c083c376efb1320fc1e2643dff5471c8",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "e6b442932ed6699da50ba71d3a528f96c5687b2dece0dfa0f022d1182cc52ce7",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "6c6144c42ea47d9500003b526ddcd5b90e0d228ad6548821698a5bd2ae70f9f9",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+      },
+      "sourceSnapshotPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01-sources",
+      "exitCode": 65,
+      "logPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-red01.log"
+    },
+    "summary": {
+      "devicesAndConfigurations": [
+        {
+          "device": {
+            "architecture": "arm64",
+            "deviceId": "00006021-000821AC02BB401E",
+            "deviceName": "My Mac",
+            "modelName": "MacBook Pro",
+            "osBuildNumber": "26A5406e",
+            "osVersion": "27.0",
+            "platform": "macOS"
+          },
+          "expectedFailures": 0,
+          "failedTests": 1,
+          "passedTests": 2,
+          "skippedTests": 0,
+          "testPlanConfiguration": {
+            "configurationId": "1",
+            "configurationName": "Test Scheme Action"
+          }
+        }
+      ],
+      "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "finishTime": 1790286154.954,
+      "passedTests": 2,
+      "result": "Failed",
+      "runtimeWarnings": [],
+      "skippedTests": 0,
+      "startTime": 1790286121.058,
+      "statistics": [],
+      "testFailures": [
+        {
+          "failureText": "XCTUnwrap failed: expected non-nil value of type \"Array<Dictionary<String, Any>>\" - The model request must expose only typed current host effects",
+          "targetName": "RemoteDesktopHostTests",
+          "testIdentifier": 3,
+          "testIdentifierString": "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall()",
+          "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+          "testName": "testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall()"
+        }
+      ],
+      "title": "Test - RemoteDesktopHost",
+      "topInsights": [],
+      "totalTestCount": 3
+    },
+    "buildRecord": {
+      "actionTitle": "Testing project RemoteDesktopHost with scheme RemoteDesktopHost",
+      "analyzerWarningCount": 0,
+      "analyzerWarnings": [],
+      "destination": {
+        "architecture": "arm64",
+        "deviceId": "00006021-000821AC02BB401E",
+        "deviceName": "My Mac",
+        "modelName": "MacBook Pro",
+        "osBuildNumber": "26A5406e",
+        "osVersion": "27.0",
+        "platform": "macOS"
+      },
+      "endTime": 1790286154.954,
+      "errorCount": 0,
+      "errors": [],
+      "startTime": 1790286121.058,
+      "status": "succeeded",
+      "warningCount": 9,
+      "warnings": [
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "UnavailableSendableConformance",
+          "message": "'RangeServingURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=69&EndingLineNumber=12044&StartingColumnNumber=69&StartingLineNumber=12044&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "Main actor-isolated static property 'prompt' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=119&EndingLineNumber=1004&StartingColumnNumber=119&StartingLineNumber=1004&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "Main actor-isolated static property 'date' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=73&EndingLineNumber=1008&StartingColumnNumber=73&StartingLineNumber=1008&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "UnavailableSendableConformance",
+          "message": "'MCPRangeURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/MacControlMCPInstallerTests.swift#EndingColumnNumber=65&EndingLineNumber=359&StartingColumnNumber=65&StartingLineNumber=359&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "NoUsage",
+          "message": "Immutable value 'windows' was never used; consider replacing with '_' or removing it",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=20&EndingLineNumber=2774&StartingColumnNumber=20&StartingLineNumber=2774&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "'releasePreparation' mutated after capture by sendable closure",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6161&StartingColumnNumber=12&StartingLineNumber=6161&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "'releaseLoad' mutated after capture by sendable closure",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6334&StartingColumnNumber=12&StartingLineNumber=6334&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "'releaseInitialLoad' mutated after capture by sendable closure",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6426&StartingColumnNumber=12&StartingLineNumber=6426&Timestamp=811978921.148157"
+        },
+        {
+          "className": "DVTTextDocumentLocation",
+          "issueType": "Swift Compiler Warning",
+          "message": "'releaseLoad' mutated after capture by sendable closure",
+          "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=8&EndingLineNumber=6524&StartingColumnNumber=8&StartingLineNumber=6524&Timestamp=811978921.148157"
+        }
+      ]
+    },
+    "artifactSHA256": {
+      "command": "ac7e8950bb609898613c02862277a364f6559a5b4a31056f38ce87b90fe20b46",
+      "summary": "b154e450f005cfe08ea1d625e50c3430cd9c26c29b2eca0c937f952684569c19",
+      "build": "7c3b3436bf708f5bb8986756615753ebfc398435236063fc66b98da30196623d"
+    },
+    "sourceSHA256": {
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "bfa124ccf29d57a0aad920b797530939c083c376efb1320fc1e2643dff5471c8",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+      "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+      "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "e6b442932ed6699da50ba71d3a528f96c5687b2dece0dfa0f022d1182cc52ce7",
+      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+      "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+      "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+      "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+      "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "6c6144c42ea47d9500003b526ddcd5b90e0d228ad6548821698a5bd2ae70f9f9",
+      "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+      "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+    },
+    "sourceCount": 18
+  },
+  "green": {
+    "status": "GREEN02 passed: 8/8; GREEN01 retained as first attempt with one obsolete assertion failure; no semantic E2E qualification.",
+    "native-direct-answer-green01": {
+      "commandRecord": {
+        "name": "native-direct-answer-green01",
+        "executionState": "finished",
+        "preparedOnly": false,
+        "ids": [
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningSubmitsFormFromOriginalGoalAndClarifications",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls",
+          "ComputerUseMobileInitiationTests/testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt",
+          "ComputerUseMobileInitiationTests/testNativeBrowserDoesNotTreatCurrentPageAsSuppliedURLAuthority",
+          "ComputerUseMobileInitiationTests/testNativeBrowserReusesOnlyExactClarifiedGoalContract"
+        ],
+        "inference": false,
+        "expected": "Focused GREEN validation for same-call direct answer, invalid/forged/unsupported effect rejection, existing direct submitForm and malformed-call paths, and the current-page/foreign-navigation/exact-goal-scope completion guards.",
+        "runnerPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/run-native-direct-answer-green01.py",
+        "runnerSHA256": "9a9fb63dac0cac6cef91e02f6a25cb6de4747bb8564b7c26934a308709326b14",
+        "buildConfigSHA256": "66891e6654e4a62394769ff87fbe9ef808b41c886ff44a521fb8ac0d56dc4294",
+        "requiredSources": [
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift"
+        ],
+        "limits": {
+          "jobs": 1,
+          "parallelTesting": false,
+          "maximumTestExecutionTimeAllowanceSeconds": 90,
+          "inference": false
+        },
+        "environment": {
+          "RUN_FARA_NATIVE_BROWSER_INPUT": "1",
+          "otherTEST_RUNNER_variables": "removed"
+        },
+        "outputPaths": {
+          "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01.xcresult",
+          "log": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01.log",
+          "sourceSnapshot": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01-sources"
+        },
+        "baseCommand": [
+          "xcodebuild",
+          "-quiet",
+          "test",
+          "-project",
+          "host-mac/RemoteDesktopHost.xcodeproj",
+          "-scheme",
+          "RemoteDesktopHost",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "platform=macOS,arch=arm64",
+          "-derivedDataPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+          "-clonedSourcePackagesDirPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+          "-onlyUsePackageVersionsFromResolvedFile",
+          "-skipPackageUpdates",
+          "-jobs",
+          "1",
+          "-parallel-testing-enabled",
+          "NO",
+          "-test-timeouts-enabled",
+          "YES",
+          "-maximum-test-execution-time-allowance",
+          "90",
+          "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+          "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+          "CODE_SIGN_STYLE=Manual",
+          "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+          "CODE_SIGN_ENTITLEMENTS=",
+          "PROVISIONING_PROFILE_SPECIFIER=",
+          "PROVISIONING_PROFILE="
+        ],
+        "testScopeNote": "Unit transport fixtures synthesize typed host receipt values for parser/decoder proof binding. Owned-browser guard tests exercise real local WebKit navigation receipt scope. Neither scripted mocks nor this batch establishes model semantic completeness or replaces a future frozen managed positive/negative E2E run.",
+        "args": [
+          "xcodebuild",
+          "-quiet",
+          "test",
+          "-project",
+          "host-mac/RemoteDesktopHost.xcodeproj",
+          "-scheme",
+          "RemoteDesktopHost",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "platform=macOS,arch=arm64",
+          "-derivedDataPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+          "-clonedSourcePackagesDirPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+          "-onlyUsePackageVersionsFromResolvedFile",
+          "-skipPackageUpdates",
+          "-jobs",
+          "1",
+          "-parallel-testing-enabled",
+          "NO",
+          "-test-timeouts-enabled",
+          "YES",
+          "-maximum-test-execution-time-allowance",
+          "90",
+          "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+          "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+          "CODE_SIGN_STYLE=Manual",
+          "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+          "CODE_SIGN_ENTITLEMENTS=",
+          "PROVISIONING_PROFILE_SPECIFIER=",
+          "PROVISIONING_PROFILE=",
+          "-resultBundlePath",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01.xcresult",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningSubmitsFormFromOriginalGoalAndClarifications",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserDoesNotTreatCurrentPageAsSuppliedURLAuthority",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserReusesOnlyExactClarifiedGoalContract"
+        ],
+        "requiredSnapshotSourceCount": 18,
+        "sourceSHA256": {
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+          "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+          "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+          "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+          "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "112b3735b90912b502849db22e2ae6ae105aaa8f9458ae790d35330d82920b6f",
+          "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+          "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+        },
+        "sourceSnapshotPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01-sources",
+        "exitCode": 65,
+        "logPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01.log"
+      },
+      "commandSHA256": "007235f0f35d96be50d0934267304e3db4499cdcb3aeb8b667bfddae317cd701",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 7,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1790286675.046,
+        "passedTests": 7,
+        "result": "Failed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1790286585.658,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertTrue failed - answer",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 7,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls",
+            "testName": "testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 8
+      },
+      "summarySHA256": "9bc5916fbd23da1eec74d2df4a5b8c254fcb6e4c4374a8da9fbe904b6fdde37b",
+      "buildRecord": {
+        "actionTitle": "Testing project RemoteDesktopHost with scheme RemoteDesktopHost",
+        "analyzerWarningCount": 0,
+        "analyzerWarnings": [],
+        "destination": {
+          "architecture": "arm64",
+          "deviceId": "00006021-000821AC02BB401E",
+          "deviceName": "My Mac",
+          "modelName": "MacBook Pro",
+          "osBuildNumber": "26A5406e",
+          "osVersion": "27.0",
+          "platform": "macOS"
+        },
+        "endTime": 1790286675.046,
+        "errorCount": 0,
+        "errors": [],
+        "startTime": 1790286585.658,
+        "status": "succeeded",
+        "warningCount": 28,
+        "warnings": [
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Stored property 'action' of 'Sendable'-conforming struct 'AgentTarget' has non-Sendable type 'ComputerUsePredictedAction'; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift#EndingColumnNumber=12&EndingLineNumber=764&StartingColumnNumber=12&StartingLineNumber=764&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "ConformanceIsolation",
+            "message": "Conformance of 'ComputerUseOwnedBrowser' to protocol 'ObservableObject' crosses into main actor-isolated code and can cause data races; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift#EndingColumnNumber=47&EndingLineNumber=649&StartingColumnNumber=47&StartingLineNumber=649&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "DeprecatedDeclaration",
+            "message": "'init(sampling:temperature:maximumResponseTokens:)' is deprecated: replaced by 'init(samplingMode:temperature:maximumResponseTokens:)'",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift#EndingColumnNumber=29&EndingLineNumber=1982&StartingColumnNumber=29&StartingLineNumber=1982&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift#EndingColumnNumber=20&EndingLineNumber=278&StartingColumnNumber=20&StartingLineNumber=278&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift#EndingColumnNumber=24&EndingLineNumber=284&StartingColumnNumber=24&StartingLineNumber=284&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift#EndingColumnNumber=20&EndingLineNumber=287&StartingColumnNumber=20&StartingLineNumber=287&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift#EndingColumnNumber=20&EndingLineNumber=291&StartingColumnNumber=20&StartingLineNumber=291&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift#EndingColumnNumber=20&EndingLineNumber=293&StartingColumnNumber=20&StartingLineNumber=293&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnavailableSendableConformance",
+            "message": "'RangeServingURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=69&EndingLineNumber=12044&StartingColumnNumber=69&StartingLineNumber=12044&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated static property 'prompt' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=119&EndingLineNumber=1004&StartingColumnNumber=119&StartingLineNumber=1004&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated static property 'date' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=73&EndingLineNumber=1008&StartingColumnNumber=73&StartingLineNumber=1008&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnavailableSendableConformance",
+            "message": "'MCPRangeURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/MacControlMCPInstallerTests.swift#EndingColumnNumber=65&EndingLineNumber=359&StartingColumnNumber=65&StartingLineNumber=359&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "SendableClosureCaptures",
+            "message": "Capture of 'old' with non-Sendable type 'NSObject' in a '@Sendable' closure; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=57&EndingLineNumber=7397&StartingColumnNumber=57&StartingLineNumber=7397&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "AddPreconcurrencyImport",
+            "message": "Add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'ObjectiveC'",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=0&EndingLineNumber=0&StartingColumnNumber=0&StartingLineNumber=0&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "SendableClosureCaptures",
+            "message": "Capture of 'current' with non-Sendable type 'NSObject' in a '@Sendable' closure; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=61&EndingLineNumber=7399&StartingColumnNumber=61&StartingLineNumber=7399&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "SendableClosureCaptures",
+            "message": "Capture of 'testCase' with non-Sendable type '(task: String, routes: [OSAtlasSemanticActionRoute], expected: [ComputerUsePredictedAction])' in a '@Sendable' closure; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift#EndingColumnNumber=22&EndingLineNumber=5219&StartingColumnNumber=22&StartingLineNumber=5219&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "AddPreconcurrencyImport",
+            "message": "Add '@preconcurrency' to suppress 'Sendable'-related warnings from module 'RemoteDesktopHost'",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift#EndingColumnNumber=10&EndingLineNumber=6&StartingColumnNumber=10&StartingLineNumber=6&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "SendableClosureCaptures",
+            "message": "Capture of 'testCase' with non-Sendable type '(String, [OSAtlasSemanticActionRoute], [ComputerUsePredictedAction])' in a '@Sendable' closure; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift#EndingColumnNumber=27&EndingLineNumber=5275&StartingColumnNumber=27&StartingLineNumber=5275&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "SendableClosureCaptures",
+            "message": "Capture of 'testCase' with non-Sendable type '(String, [OSAtlasSemanticActionRoute], [ComputerUsePredictedAction])' in a '@Sendable' closure; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift#EndingColumnNumber=27&EndingLineNumber=5309&StartingColumnNumber=27&StartingLineNumber=5309&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "String interpolation produces a debug description for an optional value; did you mean to make this explicit?",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift#EndingColumnNumber=178&EndingLineNumber=1373&StartingColumnNumber=178&StartingLineNumber=1373&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated property 'subviews' can not be referenced from a nonisolated context",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift#EndingColumnNumber=133&EndingLineNumber=1612&StartingColumnNumber=133&StartingLineNumber=1612&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated property 'subviews' can not be referenced from a nonisolated autoclosure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift#EndingColumnNumber=101&EndingLineNumber=3602&StartingColumnNumber=101&StartingLineNumber=3602&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnnecessaryEffectMarker",
+            "message": "No 'async' operations occur within 'await' expression",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift#EndingColumnNumber=28&EndingLineNumber=7649&StartingColumnNumber=28&StartingLineNumber=7649&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "NoUsage",
+            "message": "Immutable value 'windows' was never used; consider replacing with '_' or removing it",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=20&EndingLineNumber=2788&StartingColumnNumber=20&StartingLineNumber=2788&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releasePreparation' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6175&StartingColumnNumber=12&StartingLineNumber=6175&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6348&StartingColumnNumber=12&StartingLineNumber=6348&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseInitialLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6440&StartingColumnNumber=12&StartingLineNumber=6440&Timestamp=811979385.746304"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=8&EndingLineNumber=6538&StartingColumnNumber=8&StartingLineNumber=6538&Timestamp=811979385.746304"
+          }
+        ]
+      },
+      "buildSHA256": "b1d0bb254d5649cecd151a092febff33b3372dc807cd76fb184a77392289546f",
+      "reportedSourceCount": 18,
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "112b3735b90912b502849db22e2ae6ae105aaa8f9458ae790d35330d82920b6f",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+      },
+      "result": {
+        "passedTests": 7,
+        "failedTests": 1,
+        "skippedTests": 0,
+        "runtimeWarnings": [],
+        "compileErrors": 0,
+        "compilerWarnings": 28
+      }
+    },
+    "native-direct-answer-green02": {
+      "commandRecord": {
+        "name": "native-direct-answer-green02",
+        "executionState": "finished",
+        "preparedOnly": false,
+        "ids": [
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningSubmitsFormFromOriginalGoalAndClarifications",
+          "ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls",
+          "ComputerUseMobileInitiationTests/testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt",
+          "ComputerUseMobileInitiationTests/testNativeBrowserDoesNotTreatCurrentPageAsSuppliedURLAuthority",
+          "ComputerUseMobileInitiationTests/testNativeBrowserReusesOnlyExactClarifiedGoalContract"
+        ],
+        "inference": false,
+        "expected": "Focused GREEN rerun after malformed-call test correction; same 8 method IDs, compile and behavioral validation only, no inference.",
+        "runnerPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/run-native-direct-answer-green02.py",
+        "runnerSHA256": "c28836c933c9f0341c3171cbebb6b6a7c6ec4fd97bca78a0e84cf6709b257f3d",
+        "requiredSources": [
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift"
+        ],
+        "limits": {
+          "jobs": 1,
+          "parallelTesting": false,
+          "maximumTestExecutionTimeAllowanceSeconds": 90,
+          "inference": false
+        },
+        "environment": {
+          "RUN_FARA_NATIVE_BROWSER_INPUT": "1",
+          "otherTEST_RUNNER_variables": "removed"
+        },
+        "outputPaths": {
+          "resultBundle": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02.xcresult",
+          "log": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02.log",
+          "sourceSnapshot": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02-sources"
+        },
+        "baseCommand": [
+          "xcodebuild",
+          "-quiet",
+          "test",
+          "-project",
+          "host-mac/RemoteDesktopHost.xcodeproj",
+          "-scheme",
+          "RemoteDesktopHost",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "platform=macOS,arch=arm64",
+          "-derivedDataPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+          "-clonedSourcePackagesDirPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+          "-onlyUsePackageVersionsFromResolvedFile",
+          "-skipPackageUpdates",
+          "-jobs",
+          "1",
+          "-parallel-testing-enabled",
+          "NO",
+          "-test-timeouts-enabled",
+          "YES",
+          "-maximum-test-execution-time-allowance",
+          "90",
+          "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+          "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+          "CODE_SIGN_STYLE=Manual",
+          "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+          "CODE_SIGN_ENTITLEMENTS=",
+          "PROVISIONING_PROFILE_SPECIFIER=",
+          "PROVISIONING_PROFILE="
+        ],
+        "testScopeNote": "Unit transport fixtures synthesize typed host receipt values for parser/decoder proof binding. Owned-browser guard tests exercise real local WebKit navigation receipt scope. Neither scripted mocks nor this batch establishes model semantic completeness or replaces a future frozen managed positive/negative E2E run.",
+        "args": [
+          "xcodebuild",
+          "-quiet",
+          "test",
+          "-project",
+          "host-mac/RemoteDesktopHost.xcodeproj",
+          "-scheme",
+          "RemoteDesktopHost",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "platform=macOS,arch=arm64",
+          "-derivedDataPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+          "-clonedSourcePackagesDirPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+          "-onlyUsePackageVersionsFromResolvedFile",
+          "-skipPackageUpdates",
+          "-jobs",
+          "1",
+          "-parallel-testing-enabled",
+          "NO",
+          "-test-timeouts-enabled",
+          "YES",
+          "-maximum-test-execution-time-allowance",
+          "90",
+          "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+          "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+          "CODE_SIGN_STYLE=Manual",
+          "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+          "CODE_SIGN_ENTITLEMENTS=",
+          "PROVISIONING_PROFILE_SPECIFIER=",
+          "PROVISIONING_PROFILE=",
+          "-resultBundlePath",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02.xcresult",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerRejectsUnknownAndHistoryOnlyGETEffects",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionAnswerCannotCompleteUnsupportedPurchaseOrEditWithoutEffect",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningSubmitsFormFromOriginalGoalAndClarifications",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeDirectActionPlanningRejectsTerminalUnknownAndMalformedCalls",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserDoesNotTreatCurrentPageAsSuppliedURLAuthority",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testNativeBrowserReusesOnlyExactClarifiedGoalContract"
+        ],
+        "buildConfigSHA256": "66891e6654e4a62394769ff87fbe9ef808b41c886ff44a521fb8ac0d56dc4294",
+        "requiredSnapshotSourceCount": 18,
+        "sourceSHA256": {
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+          "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+          "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+          "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+          "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "2d131d0a9a6ba06c79422a3c3a3b06aa6b71d5409838215287702dee954b7088",
+          "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+          "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+        },
+        "sourceSnapshotPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02-sources",
+        "exitCode": 0,
+        "logPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02.log"
+      },
+      "commandSHA256": "968f0828eebd6dc9692e3e0ba5b7539e38bc1a10116bd9479c8c0c9a6c8256ff",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 0,
+            "passedTests": 8,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 0,
+        "finishTime": 1790286800.641,
+        "passedTests": 8,
+        "result": "Passed",
+        "runtimeWarnings": [],
+        "skippedTests": 0,
+        "startTime": 1790286775.608,
+        "statistics": [],
+        "testFailures": [],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 8
+      },
+      "summarySHA256": "3dfa566c87c1fa83b9fb163bb48ded9faeff3d9d27c8b1c2c62670d945923d4f",
+      "buildRecord": {
+        "actionTitle": "Testing project RemoteDesktopHost with scheme RemoteDesktopHost",
+        "analyzerWarningCount": 0,
+        "analyzerWarnings": [],
+        "destination": {
+          "architecture": "arm64",
+          "deviceId": "00006021-000821AC02BB401E",
+          "deviceName": "My Mac",
+          "modelName": "MacBook Pro",
+          "osBuildNumber": "26A5406e",
+          "osVersion": "27.0",
+          "platform": "macOS"
+        },
+        "endTime": 1790286800.641,
+        "errorCount": 0,
+        "errors": [],
+        "startTime": 1790286775.608,
+        "status": "succeeded",
+        "warningCount": 9,
+        "warnings": [
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnavailableSendableConformance",
+            "message": "'RangeServingURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseTests.swift#EndingColumnNumber=69&EndingLineNumber=12044&StartingColumnNumber=69&StartingLineNumber=12044&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated static property 'prompt' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=119&EndingLineNumber=1004&StartingColumnNumber=119&StartingLineNumber=1004&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "Main actor-isolated static property 'date' can not be referenced from a nonisolated context; this is an error in the Swift 6 language mode",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseBrowserResearchDriverTests.swift#EndingColumnNumber=73&EndingLineNumber=1008&StartingColumnNumber=73&StartingLineNumber=1008&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "UnavailableSendableConformance",
+            "message": "'MCPRangeURLProtocol' inherits an unavailable 'Sendable' conformance; conforming here risks data races",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/MacControlMCPInstallerTests.swift#EndingColumnNumber=65&EndingLineNumber=359&StartingColumnNumber=65&StartingLineNumber=359&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "NoUsage",
+            "message": "Immutable value 'windows' was never used; consider replacing with '_' or removing it",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=20&EndingLineNumber=2789&StartingColumnNumber=20&StartingLineNumber=2789&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releasePreparation' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6176&StartingColumnNumber=12&StartingLineNumber=6176&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6349&StartingColumnNumber=12&StartingLineNumber=6349&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseInitialLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=12&EndingLineNumber=6441&StartingColumnNumber=12&StartingLineNumber=6441&Timestamp=811979575.696969"
+          },
+          {
+            "className": "DVTTextDocumentLocation",
+            "issueType": "Swift Compiler Warning",
+            "message": "'releaseLoad' mutated after capture by sendable closure",
+            "sourceURL": "file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift#EndingColumnNumber=8&EndingLineNumber=6539&StartingColumnNumber=8&StartingLineNumber=6539&Timestamp=811979575.696969"
+          }
+        ]
+      },
+      "buildSHA256": "b16f24d42cd276f98a43fad1093e08d322badd61bc0af656fac5e67ff294901e",
+      "reportedSourceCount": 18,
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "b27f878efd8772fb8ece4003ffbd2e101bfdf86380eec0d072f6352b38b21501",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "9cea8daa3f554792ec78737126bba700074c8958b65ef570be08d8ca65e80ac4",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "4a1d1ff5e13196485086192d3e04e53aa17e733c71433565f6cb14469543ad9f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "145c060e244eaf20a7872c95341c84fc04b3ddaacf95cb3ab6ae43059c5f70fc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "bca752bce381de583301beeafdfe4343a3aba88a88fc62fa064aaa899c190fba",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "27d71a0d5d45725253f14d5b1b6789e5df55b61ccb629d43a565c7f6c1bde58b",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "de937753ac305cae7c1e90a3729bb280449b2f1f0f1fa9f802f33c3a32b41ddc",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "a9d246af2e21bdf2ab29569ac83182e9f0f1f4f3c56d22539e3dab442c937841",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5411a06b52985264984b7ea8c676ec54338160de48d9231aa10e5fb56da1d47a",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "1ad623db6eaa72e52d0764e9fe33b73c818515fd31a1bb0093a7b28e4713fa5d",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "09be36b8c7264e333f103a094f44b8f69c6789a062f8732c10043f532b70317e",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "cb2ac9ad1077615291d77273deedf4bf360c1b0308b20d9a1984738b28166cf3",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "2d131d0a9a6ba06c79422a3c3a3b06aa6b71d5409838215287702dee954b7088",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58"
+      },
+      "result": {
+        "passedTests": 8,
+        "failedTests": 0,
+        "skippedTests": 0,
+        "runtimeWarnings": [],
+        "compileErrors": 0,
+        "compilerWarnings": 9
+      }
+    }
+  },
+  "managed05": {
+    "status": "deferred-unexecuted-by-new-user-priority",
+    "preparedCommandRecord": {
+      "name": "native-direct-form-search-sept24-05",
+      "ids": [
+        "ComputerUseMobileInitiationTests/testOptInManagedNativeFormSearchReportsObservedHeadingWithDirectActionPlanning"
+      ],
+      "environment": {
+        "DEVELOPER_DIR": "/Applications/Xcode-beta.app/Contents/Developer",
+        "TEST_RUNNER_RUN_MANAGED_NATIVE_FORM_SEARCH_DIRECT": "1",
+        "TEST_RUNNER_MANAGED_NATIVE_FORM_SEARCH_DIRECT_DIRECTORY": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-form-search-sept24-05",
+        "TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT": "1",
+        "TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS": "1"
+      },
+      "outputDirectory": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-form-search-sept24-05",
+      "resultBundlePath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-form-search-sept24-05.xcresult",
+      "externalOraclePath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-form-search-sept24-05-oracle.json",
+      "externalOracleSHA256": "fab26e7ee908ab60194281f55f5c48d5b729f3ea6cf51ee1afd26be4f1c17cf0",
+      "testCreatesOutputDirectory": true,
+      "outputDirectoryMustBeAbsent": true,
+      "fixtureScope": "Same real managed host/helper/local browser GET workflow; opt-in direct original-goal action selection; same model/runtime/sampler and unchanged terminal/ownership/form oracle.",
+      "oracleTestIDNote": "The unchanged oracle names the base test; this distinct opt-in wrapper invokes that same helper and assertions.",
+      "inference": true,
+      "runnerSHA256": "61f8665a87ada7f89c9520adfbedda00329d2b582dff9cbd8b2dad4aff397e12",
+      "qualification": "Unexecuted; direct mode remains default false.",
+      "changeUnderTest": "Experimental direct candidate answer replaces mandatory legacy completion classification; model, default flag, resource profile, and existing dispatch/authority guards unchanged.",
+      "executionState": "not-run",
+      "preparedOnly": true,
+      "sourceSnapshotPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-form-search-sept24-05-sources"
+    },
+    "sanitizedNativeArgumentProjection": null,
+    "sourceSHA256": null,
+    "summary": null,
+    "buildRecord": null,
+    "narrativeRetention": "Do not store raw model narrative or hidden reasoning; if run, project strict native function names and arguments only.",
+    "deferralReason": "Superseded by the next must-pass Drive upload and clarification-choice workflow; this direct-form managed test was not run in this checkpoint."
+  },
+  "artifactPaths": {
+    "redCommand": ".build/repair-verification/native-direct-answer-red01-command.json",
+    "redSummary": ".build/repair-verification/native-direct-answer-red01-summary.json",
+    "redBuild": ".build/repair-verification/native-direct-answer-red01-build.json",
+    "greenCommand": ".build/repair-verification/native-direct-answer-green01-command.json",
+    "managed05Command": ".build/repair-verification/native-direct-form-search-sept24-05-command.json",
+    "green01": {
+      "command": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01-command.json",
+      "summary": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01-summary.json",
+      "build": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green01-build.json"
+    },
+    "green02": {
+      "command": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02-command.json",
+      "summary": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02-summary.json",
+      "build": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-direct-answer-green02-build.json"
+    }
+  },
+  "review": {
+    "productionPatchSHA256": "e179b9688a849f5abcf8d01740d8b2d0bb6696a423e9d390c261399c45a08c06",
+    "postREDTestCorrectionSHA256": "87c13f7d5719a23c3a6f2af07e51387a0e80c34409d30c85b5f403ff334ee218",
+    "green01Failure": "The legacy malformed-call test correctly rejected the malformed answer, but still asserted that the answer tool was absent. Only that availability expectation changed for GREEN02.",
+    "productionSourcesUnchangedBetweenGREEN01AndGREEN02": true,
+    "warningsOnChangedLinesGREEN01": [],
+    "finalSourceHashesVerifiedByRoot": true,
+    "inferenceExecuted": false,
+    "completeWorkflowAccepted": false
+  }
+}
