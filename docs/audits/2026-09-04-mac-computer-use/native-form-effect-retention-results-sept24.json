@@ -14,7 +14,7 @@
     "notEstablished": [
       "Natural-language goal coverage or completion admission from a receipt alone.",
       "Capture-failure Resume/recovery.",
-    "Model refusal to finish from a matching heading without the requested search; this negative is a deterministic host-context assertion, not model terminal acceptance.",
+      "Model refusal to finish from a matching heading without the requested search; this negative is a deterministic host-context assertion, not model terminal acceptance.",
       "Whole-Mac memory or thermal qualification."
     ]
   },
@@ -711,7 +711,7 @@
       "usesNativeTextModel": true,
       "visualInstalls": 0,
       "workerSamples": 436,
-      "goal": "<controlled fixture goal redacted; exact goal remains in command/fixture source>",
+      "goal": "Open http://127.0.0.1:63839/index. Use its Search field to look up Apollo 11, then report the heading from the resulting page.",
       "plannerExchanges": [
         {
           "exchange": 1,
