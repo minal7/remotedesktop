@@ -1,0 +1,1024 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-23",
+  "sourceCommit": "45d8595d483135f5746080078d85f49e2d5c9e9b",
+  "scope": "Isolated user-goal interpretation only: exact frozen original request plus ordered accepted clarification pairs, with no page records, history, oracle, visual input or application effects. Four collected inference responses across two goals, plus one preflight failure.",
+  "status": "Four collected inference responses plus one preflight failure; thinking passes two scoped goal-interpretation checks, with no general qualification.",
+  "productionChanges": false,
+  "modelSelectionChanges": false,
+  "appReplayPerformed": false,
+  "integrationPerformed": false,
+  "applicationEffects": [],
+  "qualification": {
+    "modelQualified": false,
+    "wholeMacQualified": false,
+    "fullSixCaseBatchQualified": false,
+    "conditionalThinkingInterpretationPassed": true,
+    "batchDisposition": "The original six-case batch stopped at the conditional failure. Separately authorized thinking comparisons then covered conditional-purchase and concert-original. Four other frozen cases remain unrun.",
+    "futureStage": "Any stage-2 pending-action test of the exact actual contract is separate and not included here.",
+    "otherFourCases": "concert-typos, literal-note, policy-howto and clarified-action: prepared-unrun",
+    "originalThinkingInterpretationPassed": true
+  },
+  "metadataCorrection": {
+    "field": "nativeRecordReplayOnly",
+    "retainedValue": true,
+    "meaning": "Inherited legacy runner metadata, preserved verbatim. These actual user messages contain only goal and clarifications, not native page records. They are not page-record replays.",
+    "verification": "Prepared and executed request messages were checked against the frozen source goal/clarification pairs; no page, history, expected outcome or oracle field occurs in the user object."
+  },
+  "evaluationPolicy": "Judge the entire objective and requirements for preserved final outcomes and conditions, without requiring one wording or duplication into constraints. A goal interpretation neither authorizes effects nor proves completion. Preserve ambiguous and failed outputs without accepting them by schema alone.",
+  "preparedSource": {
+    "path": "docs/audits/2026-09-04-mac-computer-use/orchestration-language-cases-sept23.json",
+    "sha256": "1366c16c9b0abf44c04d0b176bd67dab37b5959123f762729314df5c14c1ff4b",
+    "goalAndClarificationByteEqualityVerified": true,
+    "oracleInModelInput": false
+  },
+  "preparationArtifacts": {
+    "source": "45042803d453ad98c0bf895906e22d9f3e469053933755ab2998edef117008ef",
+    "promptSchemaSpec": "2568b99fa86bb2a0b4973c936d34dc1deb77c85ef9eba9e10e4b3ae550a0a8fa"
+  },
+  "preparedCases": [
+    {
+      "id": "concert-original",
+      "requestArtifact": "c3c7dafa9c5afd0bd1d9a0113af0137558b92f864181919de0bb2e8e29a7c932",
+      "userInput": {
+        "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.",
+        "clarifications": []
+      },
+      "status": "one bounded thinking interpretation diagnostic retained below",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    },
+    {
+      "id": "concert-typos",
+      "requestArtifact": "b8c2b803ce14485c7f8157bb28b6435de645e2ecae7946985c862d8cccc18d52",
+      "userInput": {
+        "goal": "hey open https://www.sfjazz.org/tickets/ticket-policies/ n tell me the flat retun fee, how far ahead i gotta return tix for box office credit, n what membership skips the fee. link the source pls. dont actually buy or retun anything",
+        "clarifications": []
+      },
+      "status": "prepared-unrun",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    },
+    {
+      "id": "conditional-purchase",
+      "requestArtifact": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+      "userInput": {
+        "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.",
+        "clarifications": []
+      },
+      "status": "conditional-only diagnostic attempts retained below",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    },
+    {
+      "id": "literal-note",
+      "requestArtifact": "b5a638e48d40a538c37b1b662bb6e125f1ce46898ed44839b32d01f4d14dabf7",
+      "userInput": {
+        "goal": "Read https://www.sfjazz.org/tickets/ticket-policies/ and type \"Do not purchase tickets\" into Notes.",
+        "clarifications": []
+      },
+      "status": "prepared-unrun",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    },
+    {
+      "id": "policy-howto",
+      "requestArtifact": "4704e93e6a56ec6ea82c206953ea4df102117da699d2b942ce718c28812036d4",
+      "userInput": {
+        "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/. How would I return my tickets for credit, what is the fee and deadline, and which membership waives it? Just explain it with the source link.",
+        "clarifications": []
+      },
+      "status": "prepared-unrun",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    },
+    {
+      "id": "clarified-action",
+      "requestArtifact": "4c44db6eaa7a115c5be2689183986a00308f44a103f1445d2593a3bae7d25175",
+      "userInput": {
+        "goal": "Open https://www.sfjazz.org/tickets/ticket-policies/ and explain the return policy.",
+        "clarifications": [
+          {
+            "question": "Is there any other work you want done?",
+            "answer": "also put a short note about it in Notes pls"
+          }
+        ]
+      },
+      "status": "prepared-unrun",
+      "authority": "Exact frozen goal and accepted question/answer pairs. Questions are context, answers are user-authored; no page/history/evidence/oracle keys."
+    }
+  ],
+  "preflightFailure": {
+    "id": "qwen-goal-contract-thinking-conditional-01",
+    "metadata": {
+      "status": "preflight-failed",
+      "error": "ValueError: unexpected frozen request contract",
+      "reason": "Runner retained the non-thinking max_tokens==768 preflight while request used 1024. No runtime/model launched.",
+      "workerLaunched": false,
+      "requestPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-conditional-thinking01-request.json"
+    },
+    "failureArtifact": "db8fd6b79e3cc4b1497b937059c38d1d36c001975800288142b0a57fa30a5eaf",
+    "runnerArtifact": "829d669f4b3e43e5e719bc0dd683510454eaa88fd1258618ce6106da7ac50aac",
+    "requestArtifact": "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0",
+    "workerLaunched": false,
+    "cause": "The reasoning request used max_tokens=1024 but the runner preflight still asserted max_tokens==768. The exception happened before run()/worker launch. This is harness preflight failure, not model output or memory failure.",
+    "fix": "Only the preflight assertion changed from 768 to 1024 before the next attempt launched. Both source versions and the exact diff are preserved.",
+    "sourceFixUnifiedDiff": [
+      "--- thinking-01/probe.py",
+      "+++ thinking-02/probe.py",
+      "@@ -294,7 +294,7 @@",
+      "     origin=opts.request.resolve(); request=read_json(origin)",
+      "     (output/\"probe.py\").write_bytes(Path(__file__).read_bytes())",
+      "     SYSTEM=request[\"messages\"][0][\"content\"]",
+      "-    if request[\"max_tokens\"] != 768 or request[\"model\"] != \"native-form-planner-v2\":",
+      "+    if request[\"max_tokens\"] != 1024 or request[\"model\"] != \"native-form-planner-v2\":",
+      "         raise ValueError(\"unexpected frozen request contract\")",
+      "     raw=origin.read_bytes()",
+      "     (output/\"original-request-body.json\").write_bytes(raw)"
+    ]
+  },
+  "modelRuntimePins": {
+    "runtime": {
+      "tag": "b9992",
+      "revision": "6eddde06a4f25d55d538b5d15628dcc2b6882147",
+      "reportedExecutableSHA256": "b67b32ba770017717ef77118c663ad65f96d9bf27a90858b3f06604bf75d7127",
+      "version": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+      "identityBasis": "Recorded in each retained run; no runtime launched or rehashed during assembly."
+    },
+    "Qwen3.5-4B Q4_K_M": {
+      "repository": "unsloth/Qwen3.5-4B-GGUF",
+      "revision": "e87f176479d0855a907a41277aca2f8ee7a09523",
+      "fileName": "Qwen3.5-4B-Q4_K_M.gguf",
+      "byteCount": 2740937888,
+      "sha256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+      "artifactURL": "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/blob/e87f176479d0855a907a41277aca2f8ee7a09523/Qwen3.5-4B-Q4_K_M.gguf",
+      "authorTemplate": {
+        "url": "https://huggingface.co/Qwen/Qwen3.5-4B/resolve/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a/chat_template.jinja",
+        "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "bytes": 7756
+      }
+    },
+    "Agents-A1-4B Q4_K_M": {
+      "repository": "InternScience/Agents-A1-4B-Q4_K_M-GGUF",
+      "revision": "d92b02e27074b27542384f72bc0e72203c970f0f",
+      "fileName": "Agents-A1-4B-Q4_K_M.gguf",
+      "byteCount": 2708805312,
+      "sha256": "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+      "artifactURL": "https://huggingface.co/InternScience/Agents-A1-4B-Q4_K_M-GGUF/blob/d92b02e27074b27542384f72bc0e72203c970f0f/Agents-A1-4B-Q4_K_M.gguf",
+      "authorTemplate": {
+        "url": "https://huggingface.co/InternScience/Agents-A1-4B/resolve/945c40a4aa6f534d434a353207b8d42ecf7a5293/chat_template.jinja",
+        "sha256": "dd65e4c6e20ea9e7d5d3d98d4f625c1e20136d2d0112b66dcf9db5d361ff5f02",
+        "bytes": 8979
+      }
+    }
+  },
+  "limits": [
+    "Model/runtime hashes and resource observations are retained from completed runs, not new launches or weight reads during assembly.",
+    "Sampled one-worker memory does not establish whole-Mac 12 GB usage or sustained heat.",
+    "Requests use the existing native-form-planner-v2 alias; that alias does not identify the actual loaded weights. modelIdentity/modelSHA256 and launch arguments identify Qwen versus Agents.",
+    "Thinking reasoning remains in the exact retained API response artifact; semantic judgment uses the final contract, and no reasoning trace is repeated as a narrative.",
+    "All inference collection statuses remain response-collected-unqualified. The scoped independent interpretation judgment does not rewrite runner status into a qualified model."
+  ],
+  "runs": [
+    {
+      "id": "qwen-goal-contract-conditional-01",
+      "metadata": {
+        "status": "response-collected-unqualified",
+        "plannedCount": 1,
+        "memorySamples": 35,
+        "peakSampledProcessMemoryBytes": 3244703744,
+        "peakNamedWorkerCount": 1,
+        "memoryStopLimitBytes": 4294967296,
+        "contextTokens": 4096,
+        "maxOutputTokens": 768,
+        "thinkingEnabled": false,
+        "wholeMacRAMTargetGB": 12,
+        "wholeMacQualified": false,
+        "productionChanged": false,
+        "modelSelectionChanged": false,
+        "applicationEffects": [],
+        "nativeRecordReplayOnly": true,
+        "modelIdentity": "Qwen3.5-4B Q4_K_M",
+        "oracleSuppliedToModel": false,
+        "sourceSHA256": "b2dd54e4c736901160b0e114d2a9d37eae7fc1089c3b48b308e9c2d74550014c",
+        "requestPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-prepared-01/conditional-purchase.request.json",
+        "originalRequestBodySHA256": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "canonicalRequestSHA256": "ae5600f99d5facf38f50a79802fda2edba2b74e8edae4eea4c79b9c302309afe",
+        "comparison": "Isolated user-goal contract diagnostic. Exact frozen original goal and accepted clarification pairs only; no page/history/oracle/observations. Minimal objective/userconstraints/requirements schema, no completion states or routing. Same native launch settings, model, sampling, output/context and memory budgets; no application changes or effects.",
+        "hostCompletionAccepted": null,
+        "runtimeSHA256": "b67b32ba770017717ef77118c663ad65f96d9bf27a90858b3f06604bf75d7127",
+        "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+        "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        "authorTemplateSHA256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "launchProfile": "Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=false. Standalone lifecycle watchdog retains 4GiB cap.",
+        "ownedPID": 54247,
+        "httpErrors": [
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/v1/chat/completions",
+            "status": 401,
+            "body": "{\"error\":{\"message\":\"Invalid API Key\",\"type\":\"authentication_error\",\"code\":401}}"
+          }
+        ],
+        "startupSeconds": 0.8787405420007417,
+        "unauthenticatedRequestRejected": true,
+        "ownedProcessExited": true,
+        "exitCode": 0,
+        "credentialRemoved": true,
+        "workerWallSeconds": 4.122381999999561
+      },
+      "caseMeasurement": {
+        "id": "conditional-purchase",
+        "inputTokens": 218,
+        "seconds": 3.0885542079995503,
+        "usage": {
+          "completion_tokens": 157,
+          "prompt_tokens": 218,
+          "total_tokens": 375,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "retainedResultFile": {
+        "path": ".build/repair-verification/qwen-goal-contract-conditional-01/result.json",
+        "sha256": "c52f64ba2fa5b639b11553beb3648b52cb7577f45667ccaefa71ee87e73f4e34"
+      },
+      "artifacts": {
+        "requestBodyUTF8": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "retainedRequestJSON": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "retainedResponseJSON": "58a440ef4f7480e2a51f5c5b6454ee954a943b3df325c6da97fc609ce79863f9",
+        "appliedPromptUTF8": "b805892196ed23337244b708ac18559a4d61b99b8d564b6c7092c80620c3ec63",
+        "runnerSource": "b2dd54e4c736901160b0e114d2a9d37eae7fc1089c3b48b308e9c2d74550014c",
+        "launchArguments": "19e7faaaaa47c2dde55be141577e260204ce6b96c707993521a92a393c81c963"
+      },
+      "actualInputScope": {
+        "goalOnly": true,
+        "userKeys": [
+          "goal",
+          "clarifications"
+        ],
+        "containsNativePageRecords": false,
+        "containsHistory": false,
+        "containsOracle": false,
+        "acceptedClarificationPairs": []
+      },
+      "comparisonAudit": {
+        "promptMessagesIdenticalToPreparedNonThinking": true,
+        "parsedSchemaIdentical": true,
+        "changedRequestFields": {},
+        "transmittedBodySHA256": "fbe23c95c7876d99654aaaa3a54a952be4e068f2b0bed0313e5e9e9055594dd9",
+        "transmittedBodyBytes": 2007,
+        "transmittedBodyReconstruction": "Retained runner fetch serializes parsed request with ensure_ascii=False and compact separators, preserving insertion order. Export whitespace differs; original HTTP response whitespace is not retained."
+      },
+      "semanticAssessment": {
+        "verdict": "semantic-failure",
+        "wholeGoalInterpretationAccepted": false,
+        "findings": [
+          "Requirements contain only reading/extracting information and omit the requested purchase action. The objective mentions awaiting approval, but does not repair the missing action requirement.",
+          "Invents a restriction against browsing other sections, which the user did not request."
+        ],
+        "qualification": "Rejected for this frozen conditional case; no integration or promotion."
+      },
+      "appReplayPerformed": false,
+      "integrationPerformed": false,
+      "hostCompletionAccepted": null
+    },
+    {
+      "id": "agents-goal-contract-conditional-01",
+      "metadata": {
+        "status": "response-collected-unqualified",
+        "plannedCount": 1,
+        "memorySamples": 28,
+        "peakSampledProcessMemoryBytes": 3207168000,
+        "peakNamedWorkerCount": 1,
+        "memoryStopLimitBytes": 4294967296,
+        "contextTokens": 4096,
+        "maxOutputTokens": 768,
+        "thinkingEnabled": false,
+        "wholeMacRAMTargetGB": 12,
+        "wholeMacQualified": false,
+        "productionChanged": false,
+        "modelSelectionChanged": false,
+        "applicationEffects": [],
+        "nativeRecordReplayOnly": true,
+        "modelIdentity": "Agents-A1-4B Q4_K_M",
+        "oracleSuppliedToModel": false,
+        "sourceSHA256": "afc8141efad90309bf34d0ed98cb06b625eae0af37fb37a2529600446ef13d02",
+        "requestPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-prepared-01/conditional-purchase.request.json",
+        "originalRequestBodySHA256": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "canonicalRequestSHA256": "ae5600f99d5facf38f50a79802fda2edba2b74e8edae4eea4c79b9c302309afe",
+        "comparison": "Goal-only model comparison: identical conditional-purchase request as Qwen goal-contract diagnostic, same launch/sampling/budgets; only verified model weights/author template differ. No page/history/observations/oracles, application changes or effects.",
+        "hostCompletionAccepted": null,
+        "runtimeSHA256": "b67b32ba770017717ef77118c663ad65f96d9bf27a90858b3f06604bf75d7127",
+        "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+        "modelSHA256": "d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062",
+        "authorTemplateSHA256": "dd65e4c6e20ea9e7d5d3d98d4f625c1e20136d2d0112b66dcf9db5d361ff5f02",
+        "launchProfile": "Application native-text arguments; embedded template byte-equals pinned author template; request enable_thinking=false. Standalone lifecycle watchdog retains 4GiB cap.",
+        "ownedPID": 54570,
+        "httpErrors": [
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/v1/chat/completions",
+            "status": 401,
+            "body": "{\"error\":{\"message\":\"Invalid API Key\",\"type\":\"authentication_error\",\"code\":401}}"
+          }
+        ],
+        "startupSeconds": 0.8919520420004119,
+        "unauthenticatedRequestRejected": true,
+        "ownedProcessExited": true,
+        "exitCode": 0,
+        "credentialRemoved": true,
+        "workerWallSeconds": 3.2376710420012387
+      },
+      "caseMeasurement": {
+        "id": "conditional-purchase",
+        "inputTokens": 218,
+        "seconds": 2.2386649170002784,
+        "usage": {
+          "completion_tokens": 114,
+          "prompt_tokens": 218,
+          "total_tokens": 332,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "retainedResultFile": {
+        "path": ".build/repair-verification/agents-goal-contract-conditional-01/result.json",
+        "sha256": "ce93fd0528eb4e868295519d210db6a0316bba23d66fd4aeb405acb356cbe574"
+      },
+      "artifacts": {
+        "requestBodyUTF8": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "retainedRequestJSON": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+        "retainedResponseJSON": "e22e99513385c31d82454663ddf116164dc51551d036f65fda5503664fa9c54f",
+        "appliedPromptUTF8": "b805892196ed23337244b708ac18559a4d61b99b8d564b6c7092c80620c3ec63",
+        "runnerSource": "afc8141efad90309bf34d0ed98cb06b625eae0af37fb37a2529600446ef13d02",
+        "launchArguments": "dfac9bdd257a82c3822e0496cac5affe477c4afffa90c874cf89458760c1dea6"
+      },
+      "actualInputScope": {
+        "goalOnly": true,
+        "userKeys": [
+          "goal",
+          "clarifications"
+        ],
+        "containsNativePageRecords": false,
+        "containsHistory": false,
+        "containsOracle": false,
+        "acceptedClarificationPairs": []
+      },
+      "comparisonAudit": {
+        "promptMessagesIdenticalToPreparedNonThinking": true,
+        "parsedSchemaIdentical": true,
+        "changedRequestFields": {},
+        "transmittedBodySHA256": "fbe23c95c7876d99654aaaa3a54a952be4e068f2b0bed0313e5e9e9055594dd9",
+        "transmittedBodyBytes": 2007,
+        "transmittedBodyReconstruction": "Retained runner fetch serializes parsed request with ensure_ascii=False and compact separators, preserving insertion order. Export whitespace differs; original HTTP response whitespace is not retained."
+      },
+      "semanticAssessment": {
+        "verdict": "ambiguous-final-outcome-unqualified",
+        "wholeGoalInterpretationAccepted": false,
+        "findings": [
+          "Objective weakens purchase to prepare-to-purchase. Its only action requirement is waiting for approval before executing purchase, so the final purchase is at best implicit in the full output.",
+          "Empty constraints alone is not the failure: the approval condition occurs in the action requirement. The prepare-only objective makes retention less clear than the subsequent thinking response."
+        ],
+        "qualification": "Not established as a complete final-outcome contract; not promoted."
+      },
+      "appReplayPerformed": false,
+      "integrationPerformed": false,
+      "hostCompletionAccepted": null
+    },
+    {
+      "id": "qwen-goal-contract-thinking-conditional-02",
+      "metadata": {
+        "status": "response-collected-unqualified",
+        "plannedCount": 1,
+        "memorySamples": 109,
+        "peakSampledProcessMemoryBytes": 3251273728,
+        "peakNamedWorkerCount": 1,
+        "memoryStopLimitBytes": 4294967296,
+        "contextTokens": 4096,
+        "maxOutputTokens": 1024,
+        "thinkingEnabled": true,
+        "wholeMacRAMTargetGB": 12,
+        "wholeMacQualified": false,
+        "productionChanged": false,
+        "modelSelectionChanged": false,
+        "applicationEffects": [],
+        "nativeRecordReplayOnly": true,
+        "modelIdentity": "Qwen3.5-4B Q4_K_M",
+        "oracleSuppliedToModel": false,
+        "sourceSHA256": "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2",
+        "requestPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-conditional-thinking01-request.json",
+        "originalRequestBodySHA256": "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0",
+        "canonicalRequestSHA256": "d9f955fad2a86423354fe64302fb215989c34022245fec24fae71964da799f79",
+        "comparison": "One bounded reasoning comparison on the same isolated goal-only conditional request. Only enable_thinking=true and max_tokens1024 differ; same prompt, original goal, ordered schema, sampling, verified Qwen weights, production launch profile reasoning-budget512 and 4GiB cap. No application changes or effects.",
+        "hostCompletionAccepted": null,
+        "runtimeSHA256": "b67b32ba770017717ef77118c663ad65f96d9bf27a90858b3f06604bf75d7127",
+        "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+        "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        "authorTemplateSHA256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "launchProfile": "Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=true, max_tokens1024, reasoning budget512. Standalone lifecycle watchdog retains 4GiB cap.",
+        "ownedPID": 56140,
+        "httpErrors": [
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/v1/chat/completions",
+            "status": 401,
+            "body": "{\"error\":{\"message\":\"Invalid API Key\",\"type\":\"authentication_error\",\"code\":401}}"
+          }
+        ],
+        "startupSeconds": 0.871831333000955,
+        "unauthenticatedRequestRejected": true,
+        "ownedProcessExited": true,
+        "exitCode": 0,
+        "credentialRemoved": true,
+        "workerWallSeconds": 12.337533458001417
+      },
+      "caseMeasurement": {
+        "id": "conditional-purchase",
+        "inputTokens": 216,
+        "seconds": 11.377206000001024,
+        "usage": {
+          "completion_tokens": 629,
+          "prompt_tokens": 216,
+          "total_tokens": 845,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "retainedResultFile": {
+        "path": ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/result.json",
+        "sha256": "f2f047559e38ae03ac243d0806b798dfbcdc29bc62b5a564f1c6bf7b4b799845"
+      },
+      "artifacts": {
+        "requestBodyUTF8": "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0",
+        "retainedRequestJSON": "bb8d10a6e4ef346d037d9a8a1416c800f6ccc89e1be4b6fc8a3a40a17a3a5670",
+        "retainedResponseJSON": "5ef13ccea2482a1634f10c2f0ae08d7f67856358a72f4bf7c0b72c541126c880",
+        "appliedPromptUTF8": "b758203985834ed9c93e91bba47eebd0ee6d8e3149f10a756a1d07f0d051296b",
+        "runnerSource": "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2",
+        "launchArguments": "6078f09500708c41c9bfd137d44c32ddeb1c4d58894f899e7a59726bfc19b912"
+      },
+      "actualInputScope": {
+        "goalOnly": true,
+        "userKeys": [
+          "goal",
+          "clarifications"
+        ],
+        "containsNativePageRecords": false,
+        "containsHistory": false,
+        "containsOracle": false,
+        "acceptedClarificationPairs": []
+      },
+      "comparisonAudit": {
+        "promptMessagesIdenticalToPreparedNonThinking": true,
+        "parsedSchemaIdentical": true,
+        "changedRequestFields": {
+          "chat_template_kwargs": {
+            "before": {
+              "enable_thinking": false
+            },
+            "after": {
+              "enable_thinking": true
+            }
+          },
+          "max_tokens": {
+            "before": 768,
+            "after": 1024
+          }
+        },
+        "transmittedBodySHA256": "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0",
+        "transmittedBodyBytes": 2007,
+        "transmittedBodyReconstruction": "Retained runner fetch serializes parsed request with ensure_ascii=False and compact separators, preserving insertion order. Export whitespace differs; original HTTP response whitespace is not retained."
+      },
+      "semanticAssessment": {
+        "verdict": "scoped-interpretation-pass",
+        "wholeGoalInterpretationAccepted": true,
+        "findings": [
+          "Objective explicitly requests access to the policies and purchase pending approval.",
+          "The action requirement says to wait for user approval before purchasing tickets. Read with the objective, this retains both the final purchase and its approval condition; no exact wording or duplicated condition is required.",
+          "constraints is empty: record this field-format deviation, but do not falsely fail the semantics because the condition is retained elsewhere. No additional constraint was invented."
+        ],
+        "qualification": "Adequate interpretation for this one frozen conditional goal only. Not a planner/completion/effect/permission proof or general model qualification. A separate stage-2 pending-action diagnostic may consume the exact unedited output."
+      },
+      "appReplayPerformed": false,
+      "integrationPerformed": false,
+      "hostCompletionAccepted": null
+    },
+    {
+      "id": "qwen-goal-contract-thinking-original-01",
+      "metadata": {
+        "status": "response-collected-unqualified",
+        "plannedCount": 1,
+        "memorySamples": 127,
+        "peakSampledProcessMemoryBytes": 3246604288,
+        "peakNamedWorkerCount": 1,
+        "memoryStopLimitBytes": 4294967296,
+        "contextTokens": 4096,
+        "maxOutputTokens": 1024,
+        "thinkingEnabled": true,
+        "wholeMacRAMTargetGB": 12,
+        "wholeMacQualified": false,
+        "productionChanged": false,
+        "modelSelectionChanged": false,
+        "applicationEffects": [],
+        "nativeRecordReplayOnly": true,
+        "modelIdentity": "Qwen3.5-4B Q4_K_M",
+        "oracleSuppliedToModel": false,
+        "sourceSHA256": "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2",
+        "requestPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-original-thinking01-request.json",
+        "originalRequestBodySHA256": "a68571307bc1ba81ca55d82826062b86051c11b1eb0bc99ada701f4d550621a9",
+        "canonicalRequestSHA256": "42683bbc2d05e7a68592ce7c487e8a854dd0df1aa9176b275f1ee54dfb37aef3",
+        "comparison": "One bounded reasoning comparison on the same isolated goal-only conditional request. Only enable_thinking=true and max_tokens1024 differ; same prompt, original goal, ordered schema, sampling, verified Qwen weights, production launch profile reasoning-budget512 and 4GiB cap. No application changes or effects.",
+        "hostCompletionAccepted": null,
+        "runtimeSHA256": "b67b32ba770017717ef77118c663ad65f96d9bf27a90858b3f06604bf75d7127",
+        "runtimeVersion": "version: 9992 (6eddde06a)\nbuilt with AppleClang 21.0.0.21000101 for Darwin arm64",
+        "modelSHA256": "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        "authorTemplateSHA256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+        "launchProfile": "Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=true, max_tokens1024, reasoning budget512. Standalone lifecycle watchdog retains 4GiB cap.",
+        "ownedPID": 63629,
+        "httpErrors": [
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/health",
+            "status": 503,
+            "body": "{\"error\":{\"message\":\"Loading model\",\"type\":\"unavailable_error\",\"code\":503}}"
+          },
+          {
+            "path": "/v1/chat/completions",
+            "status": 401,
+            "body": "{\"error\":{\"message\":\"Invalid API Key\",\"type\":\"authentication_error\",\"code\":401}}"
+          }
+        ],
+        "startupSeconds": 0.8800554999997985,
+        "unauthenticatedRequestRejected": true,
+        "ownedProcessExited": true,
+        "exitCode": 0,
+        "credentialRemoved": true,
+        "workerWallSeconds": 14.28390762500021
+      },
+      "caseMeasurement": {
+        "id": "concert-original",
+        "inputTokens": 250,
+        "seconds": 13.307960791998994,
+        "usage": {
+          "completion_tokens": 745,
+          "prompt_tokens": 250,
+          "total_tokens": 995,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          }
+        }
+      },
+      "retainedResultFile": {
+        "path": ".build/repair-verification/qwen-goal-contract-thinking-original-01/result.json",
+        "sha256": "a93f0ad4ca6b605d14ef1284a99e99774e715bd0e5c4dfad4979d30927b4443f"
+      },
+      "artifacts": {
+        "requestBodyUTF8": "a68571307bc1ba81ca55d82826062b86051c11b1eb0bc99ada701f4d550621a9",
+        "retainedRequestJSON": "6feb77b9c5fab11312fc3213459c03cefb89bcef0a9db3b1f42f452e2a5c354d",
+        "retainedResponseJSON": "248abacb006aa59cb1b1d7ef70bc2519c6909603eac4224dc7899acf5023f6aa",
+        "appliedPromptUTF8": "65cff1d15fb6b7c4455220f9fb88e03a40739f9805924e843b4ba0311f6c0d67",
+        "runnerSource": "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2",
+        "launchArguments": "ee6f0f083966a136f84db7a16fd1e1be32252304553224a6091f524065418e90"
+      },
+      "appReplayPerformed": false,
+      "integrationPerformed": false,
+      "hostCompletionAccepted": null,
+      "actualInputScope": {
+        "goalOnly": true,
+        "userKeys": [
+          "goal",
+          "clarifications"
+        ],
+        "containsNativePageRecords": false,
+        "containsHistory": false,
+        "containsOracle": false,
+        "acceptedClarificationPairs": []
+      },
+      "comparisonAudit": {
+        "promptAndParsedSchemaIdenticalToConditionalThinking": true,
+        "onlyChangedRequestValueFromConditionalThinking": "/messages/1/content JSON goal",
+        "generationSettingsIdentical": true,
+        "originalGoalMatchesPreparedFrozenOriginal": true,
+        "changedFieldsFromPreparedNonThinking": {
+          "max_tokens": {
+            "before": 768,
+            "after": 1024
+          },
+          "chat_template_kwargs": {
+            "before": {
+              "enable_thinking": false
+            },
+            "after": {
+              "enable_thinking": true
+            }
+          }
+        }
+      },
+      "metadataCorrection": {
+        "field": "comparison",
+        "issue": "Inherited runner text still calls this a conditional request.",
+        "actualIdentity": "caseMeasurement.id=concert-original and the retained request contains the exact frozen concert-original goal. Only that goal changed relative to conditional thinking; prompt, schema, model/runtime and generation profile are unchanged."
+      },
+      "semanticAssessment": {
+        "verdict": "scoped-interpretation-pass",
+        "wholeGoalInterpretationAccepted": true,
+        "findings": [
+          "Retains the requested starting URL, flat return-for-credit fee, advance-notice deadline, waived membership level and official source link as information requirements.",
+          "Retains the user prohibition against returning or purchasing tickets. No action is substituted or invented."
+        ],
+        "qualification": "Adequate interpretation for this one frozen original goal; no factual answer, completion/effect/permission proof or general model qualification."
+      }
+    }
+  ],
+  "artifactEncoding": "SHA-256-addressed exact retained UTF-8 artifacts, stored once per unique content; no model weights or server logs copied.",
+  "artifacts": {
+    "c3c7dafa9c5afd0bd1d9a0113af0137558b92f864181919de0bb2e8e29a7c932": {
+      "sha256": "c3c7dafa9c5afd0bd1d9a0113af0137558b92f864181919de0bb2e8e29a7c932",
+      "byteCount": 2989,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/concert-original.request.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "b8c2b803ce14485c7f8157bb28b6435de645e2ecae7946985c862d8cccc18d52": {
+      "sha256": "b8c2b803ce14485c7f8157bb28b6435de645e2ecae7946985c862d8cccc18d52",
+      "byteCount": 2943,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/concert-typos.request.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"hey open https://www.sfjazz.org/tickets/ticket-policies/ n tell me the flat retun fee, how far ahead i gotta return tix for box office credit, n what membership skips the fee. link the source pls. dont actually buy or retun anything\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd": {
+      "sha256": "96b650be9a96cbd3b4bbc58be0c8ecb11cb21060bd5c67d6a980d09a9fd3eafd",
+      "byteCount": 2827,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/conditional-purchase.request.json",
+        ".build/repair-verification/qwen-goal-contract-conditional-01/original-request-body.json",
+        ".build/repair-verification/qwen-goal-contract-conditional-01/request-01.json",
+        ".build/repair-verification/agents-goal-contract-conditional-01/original-request-body.json",
+        ".build/repair-verification/agents-goal-contract-conditional-01/request-01.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "b5a638e48d40a538c37b1b662bb6e125f1ce46898ed44839b32d01f4d14dabf7": {
+      "sha256": "b5a638e48d40a538c37b1b662bb6e125f1ce46898ed44839b32d01f4d14dabf7",
+      "byteCount": 2816,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/literal-note.request.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Read https://www.sfjazz.org/tickets/ticket-policies/ and type \\\\\\\"Do not purchase tickets\\\\\\\" into Notes.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "4704e93e6a56ec6ea82c206953ea4df102117da699d2b942ce718c28812036d4": {
+      "sha256": "4704e93e6a56ec6ea82c206953ea4df102117da699d2b942ce718c28812036d4",
+      "byteCount": 2906,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/policy-howto.request.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. How would I return my tickets for credit, what is the fee and deadline, and which membership waives it? Just explain it with the source link.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "4c44db6eaa7a115c5be2689183986a00308f44a103f1445d2593a3bae7d25175": {
+      "sha256": "4c44db6eaa7a115c5be2689183986a00308f44a103f1445d2593a3bae7d25175",
+      "byteCount": 2910,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/clarified-action.request.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": false\n  },\n  \"max_tokens\": 768,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/ and explain the return policy.\\\",\\\"clarifications\\\":[{\\\"question\\\":\\\"Is there any other work you want done?\\\",\\\"answer\\\":\\\"also put a short note about it in Notes pls\\\"}]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "58a440ef4f7480e2a51f5c5b6454ee954a943b3df325c6da97fc609ce79863f9": {
+      "sha256": "58a440ef4f7480e2a51f5c5b6454ee954a943b3df325c6da97fc609ce79863f9",
+      "byteCount": 1493,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-conditional-01/response-01.json"
+      ],
+      "content": "{\n  \"choices\": [\n    {\n      \"finish_reason\": \"stop\",\n      \"index\": 0,\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"{\\n  \\\"objective\\\": \\\"Read the return policy on https://www.sfjazz.org/tickets/ticket-policies/ and await user approval to purchase tickets.\\\",\\n  \\\"constraints\\\": [\\n    \\\"Do not proceed with the purchase until the user explicitly approves.\\\",\\n    \\\"Limit actions to reading the specific page content; do not browse other sections.\\\"\\n  ],\\n  \\\"requirements\\\": [\\n    {\\n      \\\"instruction\\\": \\\"Open and read the content of https://www.sfjazz.org/tickets/ticket-policies/\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Extract the specific text regarding the return policy.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    }\\n  ]\\n}\"\n      }\n    }\n  ],\n  \"created\": 1790211793,\n  \"model\": \"native-form-planner-v2\",\n  \"system_fingerprint\": \"b9992-6eddde06a\",\n  \"object\": \"chat.completion\",\n  \"usage\": {\n    \"completion_tokens\": 157,\n    \"prompt_tokens\": 218,\n    \"total_tokens\": 375,\n    \"prompt_tokens_details\": {\n      \"cached_tokens\": 0\n    }\n  },\n  \"id\": \"chatcmpl-edksvOV8Q9OzmDzNltDxtyL6qlTMJ46N\",\n  \"timings\": {\n    \"cache_n\": 0,\n    \"prompt_n\": 218,\n    \"prompt_ms\": 376.097,\n    \"prompt_per_token_ms\": 1.725215596330275,\n    \"prompt_per_second\": 579.6376998487093,\n    \"predicted_n\": 157,\n    \"predicted_ms\": 2697.04,\n    \"predicted_per_token_ms\": 17.17859872611465,\n    \"predicted_per_second\": 58.211965710556754\n  }\n}\n"
+    },
+    "b805892196ed23337244b708ac18559a4d61b99b8d564b6c7092c80620c3ec63": {
+      "sha256": "b805892196ed23337244b708ac18559a4d61b99b8d564b6c7092c80620c3ec63",
+      "byteCount": 1192,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-conditional-01/prompt-01.txt",
+        ".build/repair-verification/agents-goal-contract-conditional-01/prompt-01.txt"
+      ],
+      "content": "<|im_start|>system\nInterpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.<|im_end|>\n<|im_start|>user\n{\"goal\":\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\",\"clarifications\":[]}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    },
+    "b2dd54e4c736901160b0e114d2a9d37eae7fc1089c3b48b308e9c2d74550014c": {
+      "sha256": "b2dd54e4c736901160b0e114d2a9d37eae7fc1089c3b48b308e9c2d74550014c",
+      "byteCount": 15744,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-conditional-01/probe.py"
+      ],
+      "content": "#!/usr/bin/env python3\n\"\"\"Offline native-catalogue replay. Preparation is default; --run explicitly starts one worker.\n\nNo browser, MCP dispatch, external network, model download, visual input, or task oracle.\nOnly the owned authenticated loopback inference server is contacted in --run mode.\n\"\"\"\nimport argparse\nimport re\nimport copy\nimport ctypes\nimport datetime\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport secrets\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport urllib.error\nimport urllib.parse\nimport urllib.request\n\nGIB = 1024 ** 3\nCONTEXT = 4096\nOUTPUT_TOKENS = 768\nMODEL_BYTES = 2740937888\nMODEL_SHA256 = \"00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4\"\nSYSTEM = \"\"\n\n\ndef encoded(value):\n    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")\n\n\ndef digest(path):\n    value = hashlib.sha256()\n    with path.open(\"rb\") as handle:\n        for chunk in iter(lambda: handle.read(4 * 1024 ** 2), b\"\"):\n            value.update(chunk)\n    return value.hexdigest()\n\n\ndef read_json(path):\n    data = path.read_bytes()\n    if len(data) > 2 * 1024 ** 2:\n        raise ValueError(\"input exceeds 2 MiB: \" + str(path))\n    return json.loads(data)\n\n\ndef write_json(path, value):\n    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + \"\\n\")\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ndef named_workers():\n    text = subprocess.check_output([\"/bin/ps\", \"-axo\", \"pid=,comm=\"], text=True, timeout=3)\n    result = []\n    for line in text.splitlines():\n        fields = line.strip().split(None, 1)\n        if len(fields) == 2 and Path(fields[1]).name in (\"llama-server\", \"llama-cli\"):\n            result.append(int(fields[0]))\n    return result\n\n\ndef run(args, output, report, page, windows, messages, tool_schema):\n    if sys.platform != \"darwin\":\n        raise ValueError(\"this guard requires macOS proc_pid_rusage\")\n    if not args.runtime or not args.model:\n        raise ValueError(\"--run requires --runtime and --model\")\n    binary, model = args.runtime.resolve(), args.model.resolve()\n    source_root = Path(__file__).resolve().parent / \"native-reading-qwen\"\n    template = source_root / \"chat_template.jinja\"\n    expected_template = read_json(source_root / \"author-source-record.json\")[\"chat_template.jinja\"]\n    if digest(template) != expected_template[\"sha256\"]:\n        raise ValueError(\"pinned author chat template hash mismatch\")\n    if model.stat().st_size != MODEL_BYTES or digest(model) != MODEL_SHA256:\n        raise ValueError(\"model does not match pinned official Qwen3.5-4B Q4_K_M\")\n    if named_workers():\n        raise RuntimeError(\"another llama worker is active\")\n    subprocess.run([\"/usr/bin/codesign\", \"--verify\", \"--strict\", str(binary)], check=True, timeout=5,\n                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)\n    version = subprocess.run([str(binary), \"--version\"], capture_output=True, text=True, timeout=5, check=True)\n    version_text = version.stdout + version.stderr\n    if \"b9992\" not in version_text and \"6eddde06\" not in version_text:\n        raise ValueError(\"runtime version is not pinned b9992 / 6eddde06\")\n    report.update(runtimeSHA256=digest(binary), runtimeVersion=version_text.strip(), modelSHA256=MODEL_SHA256,\n                  authorTemplateSHA256=expected_template[\"sha256\"])\n    libproc = ctypes.CDLL(\"/usr/lib/libproc.dylib\")\n    libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]\n    libproc.proc_pid_rusage.restype = ctypes.c_int\n    def memory(pid):\n        buffer = ctypes.create_string_buffer(1024)\n        if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:\n            return None\n        return max(struct.unpack_from(\"=QQ\", buffer.raw, 64))\n    if not memory(os.getpid()):\n        raise RuntimeError(\"memory accounting unavailable\")\n    token = secrets.token_urlsafe(32)\n    key = output / \"temporary-api-key\"\n    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), \"w\") as handle:\n        handle.write(token)\n    with socket.socket() as sock:\n        sock.bind((\"127.0.0.1\", 0))\n        port = sock.getsockname()[1]\n    # Match the application's native-text launch profile exactly, apart from\n    # the verified candidate model path, dynamic port and temporary credential.\n    arguments = [str(binary), \"--model\", str(model), \"--alias\", \"native-form-planner-v2\",\n        \"--host\", \"127.0.0.1\", \"--port\", str(port), \"--api-key-file\", str(key),\n        \"--offline\", \"--no-ui\", \"--no-mmproj\", \"--log-disable\", \"--parallel\", \"1\",\n        \"--ctx-size\", \"4096\", \"--cache-ram\", \"0\", \"--threads\", \"2\", \"--threads-batch\", \"2\",\n        \"--poll\", \"0\", \"--poll-batch\", \"0\", \"--n-gpu-layers\", \"99\", \"--jinja\",\n        \"--reasoning\", \"on\", \"--reasoning-budget\", \"512\"]\n    report[\"launchProfile\"] = \"Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=false. Standalone lifecycle watchdog retains 4GiB cap.\"\n\n    write_json(output / \"launch-arguments.json\", arguments)\n    process, watcher = None, None\n    done = threading.Event()\n    started = time.monotonic()\n    phase = {\"name\": \"startup\", \"deadline\": started + 45}\n    lock = threading.Lock()\n    def stop_owned():\n        if process is not None and process.poll() is None:\n            try:\n                os.killpg(process.pid, signal.SIGTERM)\n            except ProcessLookupError:\n                pass\n    def monitor():\n        last_count, missed = 0.0, 0\n        while not done.wait(0.1):\n            if process.poll() is not None:\n                return\n            now = time.monotonic()\n            measured = memory(process.pid)\n            missed = missed + 1 if measured is None else 0\n            if measured is not None:\n                report[\"memorySamples\"] += 1\n                report[\"peakSampledProcessMemoryBytes\"] = max(report[\"peakSampledProcessMemoryBytes\"], measured)\n            reason = \"memory-limit\" if measured is not None and measured > 4 * GIB else None\n            if missed >= 10:\n                reason = \"memory-accounting-unavailable\"\n            with lock:\n                if now > phase[\"deadline\"]:\n                    reason = phase[\"name\"] + \"-deadline\"\n            if now - started > 100:\n                reason = \"total-deadline\"\n            if now - last_count >= 1:\n                try:\n                    workers = named_workers()\n                    report[\"peakNamedWorkerCount\"] = max(report[\"peakNamedWorkerCount\"], len(workers))\n                    if workers != [process.pid]:\n                        reason = \"worker-count\"\n                except Exception:\n                    reason = \"worker-count-unavailable\"\n                last_count = now\n            if reason:\n                report[\"watchdogReason\"] = reason\n                stop_owned()\n                if not done.wait(1) and process.poll() is None:\n                    try:\n                        os.killpg(process.pid, signal.SIGKILL)\n                    except ProcessLookupError:\n                        pass\n                return\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *unused, **kwargs):\n            return None\n    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())\n    def fetch(path, body=None, timeout=5, authorized=True):\n        headers = {\"Content-Type\": \"application/json\"}\n        if authorized:\n            headers[\"Authorization\"] = \"Bearer \" + token\n        request = urllib.request.Request(\"http://127.0.0.1:\" + str(port) + path,\n                                         data=None if body is None else json.dumps(body,ensure_ascii=False,separators=(\",\", \":\")).encode(\"utf-8\"), headers=headers)\n        try:\n            with opener.open(request, timeout=timeout) as response:\n                data = response.read(2 * 1024 ** 2 + 1)\n                if len(data) > 2 * 1024 ** 2:\n                    raise ValueError(\"loopback response exceeds bound\")\n                return json.loads(data)\n        except urllib.error.HTTPError as error:\n            detail = error.read(16384).decode(\"utf-8\", errors=\"replace\").replace(token, \"<redacted>\")\n            report.setdefault(\"httpErrors\", []).append({\"path\": path, \"status\": error.code, \"body\": detail})\n            raise\n    try:\n        with (output / \"server.log\").open(\"wb\") as log:\n            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,\n                                       start_new_session=True, env={k:v for k,v in os.environ.items() if not k.startswith((\"LLAMA_\", \"GGML_\", \"HF_\", \"HUGGINGFACE_\"))})\n            report[\"ownedPID\"] = process.pid\n            watcher = threading.Thread(target=monitor, daemon=True)\n            watcher.start()\n            while True:\n                if process.poll() is not None or report.get(\"watchdogReason\"):\n                    raise RuntimeError(\"owned worker stopped during startup\")\n                if time.monotonic() > started + 45:\n                    raise TimeoutError(\"startup exceeded 45 seconds\")\n                try:\n                    if fetch(\"/health\", timeout=1).get(\"status\") == \"ok\":\n                        break\n                except (urllib.error.URLError, TimeoutError):\n                    pass\n                time.sleep(0.1)\n            report[\"startupSeconds\"] = time.monotonic() - started\n            try:\n                fetch(\"/v1/chat/completions\", body={}, authorized=False)\n                raise RuntimeError(\"inference endpoint accepted an unauthenticated request\")\n            except urllib.error.HTTPError as error:\n                if error.code != 401:\n                    raise\n            report[\"unauthenticatedRequestRejected\"] = True\n            for number, case in enumerate(args.cases, 1):\n                with lock:\n                    phase.update(name=\"case-\" + str(number), deadline=time.monotonic() + 45)\n                request = checker_request(case)\n                write_json(output / (\"request-%02d.json\" % number), request)\n                print(json.dumps({\"stage\": \"case\", \"number\": number, \"id\": case[\"id\"]}), flush=True)\n                applied = fetch(\"/apply-template\", request)\n                prompt = applied.get(\"prompt\")\n                if not isinstance(prompt, str) or SYSTEM not in prompt or \"Current date: 2026-07-14\" in prompt or not prompt.endswith(\"<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\"):\n                    raise ValueError(\"author thinking prefill not verified\")\n                (output / (\"prompt-%02d.txt\" % number)).write_text(prompt)\n                tokens = fetch(\"/tokenize\", {\"content\": prompt, \"add_special\": False, \"parse_special\": True})[\"tokens\"]\n                if len(tokens) + OUTPUT_TOKENS + 64 > CONTEXT:\n                    raise ValueError(\"complete input and response reserve exceed 4K; no truncation\")\n                began = time.monotonic()\n                response = fetch(\"/v1/chat/completions\", request, timeout=45)\n                write_json(output / (\"response-%02d.json\" % number), response)\n                report[\"cases\"].append({\"id\": case[\"id\"], \"inputTokens\": len(tokens),\n                    \"seconds\": time.monotonic() - began, \"usage\": response.get(\"usage\"),\n                    \"response\": response})\n                report[\"status\"] = \"response-collected-unqualified\"\n\n    finally:\n        # Stop observation before intentional process shutdown so an empty\n        # process list during joined cleanup is not misreported as overlap.\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        stop_owned()\n        if process is not None:\n            try:\n                process.wait(timeout=3)\n            except subprocess.TimeoutExpired:\n                os.killpg(process.pid, signal.SIGKILL)\n                process.wait(timeout=3)\n            report[\"ownedProcessExited\"] = process.poll() is not None\n            report[\"exitCode\"] = process.returncode\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        key.unlink(missing_ok=True)\n        report[\"credentialRemoved\"] = not key.exists()\n        report[\"workerWallSeconds\"] = time.monotonic() - started\n\n\ndef checker_request(case):\n    return case[\"request\"]\n\ndef main():\n    from types import SimpleNamespace\n    global SYSTEM\n    parser=argparse.ArgumentParser()\n    parser.add_argument(\"--request\",type=Path,required=True)\n    parser.add_argument(\"--output\",type=Path,required=True)\n    parser.add_argument(\"--case\",required=True)\n    opts=parser.parse_args()\n    base=Path(__file__).resolve().parent\n    output=opts.output.resolve();output.mkdir(exist_ok=False)\n    origin=opts.request.resolve(); request=read_json(origin)\n    (output/\"probe.py\").write_bytes(Path(__file__).read_bytes())\n    SYSTEM=request[\"messages\"][0][\"content\"]\n    if request[\"max_tokens\"] != 768 or request[\"model\"] != \"native-form-planner-v2\":\n        raise ValueError(\"unexpected frozen request contract\")\n    raw=origin.read_bytes()\n    (output/\"original-request-body.json\").write_bytes(raw)\n    report={\"status\":\"prepared\", \"cases\":[], \"plannedCount\":1, \"memorySamples\":0,\n        \"peakSampledProcessMemoryBytes\":0, \"peakNamedWorkerCount\":0,\n        \"memoryStopLimitBytes\":4*GIB, \"contextTokens\":CONTEXT, \"maxOutputTokens\":OUTPUT_TOKENS,\n        \"thinkingEnabled\":False, \"wholeMacRAMTargetGB\":12, \"wholeMacQualified\":False,\n        \"productionChanged\":False, \"modelSelectionChanged\":False, \"applicationEffects\":[],\n        \"nativeRecordReplayOnly\":True, \"modelIdentity\":\"Qwen3.5-4B Q4_K_M\",\n        \"oracleSuppliedToModel\":False, \"sourceSHA256\":digest(Path(__file__)),\n        \"requestPath\":str(origin), \"originalRequestBodySHA256\":hashlib.sha256(raw).hexdigest(),\n        \"canonicalRequestSHA256\":hashlib.sha256(encoded(request)).hexdigest(),\n        \"comparison\":\"Isolated user-goal contract diagnostic. Exact frozen original goal and accepted clarification pairs only; no page/history/oracle/observations. Minimal objective/userconstraints/requirements schema, no completion states or routing. Same native launch settings, model, sampling, output/context and memory budgets; no application changes or effects.\",\n        \"hostCompletionAccepted\":None}\n    args=SimpleNamespace(cases=[{\"id\":opts.case,\"request\":request}],\n        runtime=Path(\"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\"),\n        model=Path(\"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\"))\n    def cancelled(signum,frame): raise KeyboardInterrupt(\"signal \"+str(signum))\n    signal.signal(signal.SIGTERM,cancelled)\n    try: run(args,output,report,None,None,None,None)\n    except BaseException as error:\n        report[\"status\"]=\"failed\";report[\"error\"]=type(error).__name__+\": \"+str(error)\n    finally: write_json(output/\"result.json\",report)\n    print(json.dumps({\"status\":report[\"status\"],\"error\":report.get(\"error\"),\n        \"cases\":[{\"id\":x[\"id\"],\"seconds\":x[\"seconds\"],\"inputTokens\":x[\"inputTokens\"],\n                  \"message\":x[\"response\"][\"choices\"][0][\"message\"]} for x in report[\"cases\"]],\n        \"peakBytes\":report[\"peakSampledProcessMemoryBytes\"],\"workers\":report[\"peakNamedWorkerCount\"],\n        \"exited\":report.get(\"ownedProcessExited\"),\"watchdog\":report.get(\"watchdogReason\")},indent=2))\n    return 0 if report[\"status\"]==\"response-collected-unqualified\" else 1\n\nif __name__==\"__main__\": sys.exit(main())\n"
+    },
+    "19e7faaaaa47c2dde55be141577e260204ce6b96c707993521a92a393c81c963": {
+      "sha256": "19e7faaaaa47c2dde55be141577e260204ce6b96c707993521a92a393c81c963",
+      "byteCount": 951,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-conditional-01/launch-arguments.json"
+      ],
+      "content": "[\n  \"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\",\n  \"--model\",\n  \"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\",\n  \"--alias\",\n  \"native-form-planner-v2\",\n  \"--host\",\n  \"127.0.0.1\",\n  \"--port\",\n  \"51992\",\n  \"--api-key-file\",\n  \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/qwen-goal-contract-conditional-01/temporary-api-key\",\n  \"--offline\",\n  \"--no-ui\",\n  \"--no-mmproj\",\n  \"--log-disable\",\n  \"--parallel\",\n  \"1\",\n  \"--ctx-size\",\n  \"4096\",\n  \"--cache-ram\",\n  \"0\",\n  \"--threads\",\n  \"2\",\n  \"--threads-batch\",\n  \"2\",\n  \"--poll\",\n  \"0\",\n  \"--poll-batch\",\n  \"0\",\n  \"--n-gpu-layers\",\n  \"99\",\n  \"--jinja\",\n  \"--reasoning\",\n  \"on\",\n  \"--reasoning-budget\",\n  \"512\"\n]\n"
+    },
+    "e22e99513385c31d82454663ddf116164dc51551d036f65fda5503664fa9c54f": {
+      "sha256": "e22e99513385c31d82454663ddf116164dc51551d036f65fda5503664fa9c54f",
+      "byteCount": 1318,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/agents-goal-contract-conditional-01/response-01.json"
+      ],
+      "content": "{\n  \"choices\": [\n    {\n      \"finish_reason\": \"stop\",\n      \"index\": 0,\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"{\\n  \\\"objective\\\": \\\"Read the return policy from https://www.sfjazz.org/tickets/ticket-policies/ and prepare to purchase tickets upon user approval.\\\",\\n  \\\"constraints\\\": [],\\n  \\\"requirements\\\": [\\n    {\\n      \\\"instruction\\\": \\\"Retrieve the return policy content from the specified URL.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Wait for user approval before executing the ticket purchase action.\\\",\\n      \\\"kind\\\": \\\"action\\\"\\n    }\\n  ]\\n}\"\n      }\n    }\n  ],\n  \"created\": 1790211836,\n  \"model\": \"native-form-planner-v2\",\n  \"system_fingerprint\": \"b9992-6eddde06a\",\n  \"object\": \"chat.completion\",\n  \"usage\": {\n    \"completion_tokens\": 114,\n    \"prompt_tokens\": 218,\n    \"total_tokens\": 332,\n    \"prompt_tokens_details\": {\n      \"cached_tokens\": 0\n    }\n  },\n  \"id\": \"chatcmpl-85W9sA12wCxvg4FkJ9fcjynp9xFNQtD2\",\n  \"timings\": {\n    \"cache_n\": 0,\n    \"prompt_n\": 218,\n    \"prompt_ms\": 410.86,\n    \"prompt_per_token_ms\": 1.884678899082569,\n    \"prompt_per_second\": 530.5943630433724,\n    \"predicted_n\": 114,\n    \"predicted_ms\": 1813.375,\n    \"predicted_per_token_ms\": 15.906798245614034,\n    \"predicted_per_second\": 62.86620252291997\n  }\n}\n"
+    },
+    "afc8141efad90309bf34d0ed98cb06b625eae0af37fb37a2529600446ef13d02": {
+      "sha256": "afc8141efad90309bf34d0ed98cb06b625eae0af37fb37a2529600446ef13d02",
+      "byteCount": 15552,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/agents-goal-contract-conditional-01/probe.py"
+      ],
+      "content": "#!/usr/bin/env python3\n\"\"\"Offline native-catalogue replay. Preparation is default; --run explicitly starts one worker.\n\nNo browser, MCP dispatch, external network, model download, visual input, or task oracle.\nOnly the owned authenticated loopback inference server is contacted in --run mode.\n\"\"\"\nimport argparse\nimport re\nimport copy\nimport ctypes\nimport datetime\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport secrets\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport urllib.error\nimport urllib.parse\nimport urllib.request\n\nGIB = 1024 ** 3\nCONTEXT = 4096\nOUTPUT_TOKENS = 768\nMODEL_BYTES = 2708805312\nMODEL_SHA256 = \"d93c393a9bd5139a4b5cfe24d31ef553c5a497bfb8afec178a354ecbf508f062\"\nSYSTEM = \"\"\n\n\ndef encoded(value):\n    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")\n\n\ndef digest(path):\n    value = hashlib.sha256()\n    with path.open(\"rb\") as handle:\n        for chunk in iter(lambda: handle.read(4 * 1024 ** 2), b\"\"):\n            value.update(chunk)\n    return value.hexdigest()\n\n\ndef read_json(path):\n    data = path.read_bytes()\n    if len(data) > 2 * 1024 ** 2:\n        raise ValueError(\"input exceeds 2 MiB: \" + str(path))\n    return json.loads(data)\n\n\ndef write_json(path, value):\n    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + \"\\n\")\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ndef named_workers():\n    text = subprocess.check_output([\"/bin/ps\", \"-axo\", \"pid=,comm=\"], text=True, timeout=3)\n    result = []\n    for line in text.splitlines():\n        fields = line.strip().split(None, 1)\n        if len(fields) == 2 and Path(fields[1]).name in (\"llama-server\", \"llama-cli\"):\n            result.append(int(fields[0]))\n    return result\n\n\ndef run(args, output, report, page, windows, messages, tool_schema):\n    if sys.platform != \"darwin\":\n        raise ValueError(\"this guard requires macOS proc_pid_rusage\")\n    if not args.runtime or not args.model:\n        raise ValueError(\"--run requires --runtime and --model\")\n    binary, model = args.runtime.resolve(), args.model.resolve()\n    source_root = Path(__file__).resolve().parent / \"agents-a1-browser-steps\"\n    template = source_root / \"chat_template.jinja\"\n    expected_template = read_json(source_root / \"author-source-record.json\")[\"chat_template.jinja\"]\n    if digest(template) != expected_template[\"sha256\"]:\n        raise ValueError(\"pinned author chat template hash mismatch\")\n    if model.stat().st_size != MODEL_BYTES or digest(model) != MODEL_SHA256:\n        raise ValueError(\"model does not match pinned official Agents-A1-4B Q4_K_M\")\n    if named_workers():\n        raise RuntimeError(\"another llama worker is active\")\n    subprocess.run([\"/usr/bin/codesign\", \"--verify\", \"--strict\", str(binary)], check=True, timeout=5,\n                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)\n    version = subprocess.run([str(binary), \"--version\"], capture_output=True, text=True, timeout=5, check=True)\n    version_text = version.stdout + version.stderr\n    if \"b9992\" not in version_text and \"6eddde06\" not in version_text:\n        raise ValueError(\"runtime version is not pinned b9992 / 6eddde06\")\n    report.update(runtimeSHA256=digest(binary), runtimeVersion=version_text.strip(), modelSHA256=MODEL_SHA256,\n                  authorTemplateSHA256=expected_template[\"sha256\"])\n    libproc = ctypes.CDLL(\"/usr/lib/libproc.dylib\")\n    libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]\n    libproc.proc_pid_rusage.restype = ctypes.c_int\n    def memory(pid):\n        buffer = ctypes.create_string_buffer(1024)\n        if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:\n            return None\n        return max(struct.unpack_from(\"=QQ\", buffer.raw, 64))\n    if not memory(os.getpid()):\n        raise RuntimeError(\"memory accounting unavailable\")\n    token = secrets.token_urlsafe(32)\n    key = output / \"temporary-api-key\"\n    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), \"w\") as handle:\n        handle.write(token)\n    with socket.socket() as sock:\n        sock.bind((\"127.0.0.1\", 0))\n        port = sock.getsockname()[1]\n    # Match the application's native-text launch profile exactly, apart from\n    # the verified candidate model path, dynamic port and temporary credential.\n    arguments = [str(binary), \"--model\", str(model), \"--alias\", \"native-form-planner-v2\",\n        \"--host\", \"127.0.0.1\", \"--port\", str(port), \"--api-key-file\", str(key),\n        \"--offline\", \"--no-ui\", \"--no-mmproj\", \"--log-disable\", \"--parallel\", \"1\",\n        \"--ctx-size\", \"4096\", \"--cache-ram\", \"0\", \"--threads\", \"2\", \"--threads-batch\", \"2\",\n        \"--poll\", \"0\", \"--poll-batch\", \"0\", \"--n-gpu-layers\", \"99\", \"--jinja\",\n        \"--reasoning\", \"on\", \"--reasoning-budget\", \"512\"]\n    report[\"launchProfile\"] = \"Application native-text arguments; embedded template byte-equals pinned author template; request enable_thinking=false. Standalone lifecycle watchdog retains 4GiB cap.\"\n\n    write_json(output / \"launch-arguments.json\", arguments)\n    process, watcher = None, None\n    done = threading.Event()\n    started = time.monotonic()\n    phase = {\"name\": \"startup\", \"deadline\": started + 45}\n    lock = threading.Lock()\n    def stop_owned():\n        if process is not None and process.poll() is None:\n            try:\n                os.killpg(process.pid, signal.SIGTERM)\n            except ProcessLookupError:\n                pass\n    def monitor():\n        last_count, missed = 0.0, 0\n        while not done.wait(0.1):\n            if process.poll() is not None:\n                return\n            now = time.monotonic()\n            measured = memory(process.pid)\n            missed = missed + 1 if measured is None else 0\n            if measured is not None:\n                report[\"memorySamples\"] += 1\n                report[\"peakSampledProcessMemoryBytes\"] = max(report[\"peakSampledProcessMemoryBytes\"], measured)\n            reason = \"memory-limit\" if measured is not None and measured > 4 * GIB else None\n            if missed >= 10:\n                reason = \"memory-accounting-unavailable\"\n            with lock:\n                if now > phase[\"deadline\"]:\n                    reason = phase[\"name\"] + \"-deadline\"\n            if now - started > 100:\n                reason = \"total-deadline\"\n            if now - last_count >= 1:\n                try:\n                    workers = named_workers()\n                    report[\"peakNamedWorkerCount\"] = max(report[\"peakNamedWorkerCount\"], len(workers))\n                    if workers != [process.pid]:\n                        reason = \"worker-count\"\n                except Exception:\n                    reason = \"worker-count-unavailable\"\n                last_count = now\n            if reason:\n                report[\"watchdogReason\"] = reason\n                stop_owned()\n                if not done.wait(1) and process.poll() is None:\n                    try:\n                        os.killpg(process.pid, signal.SIGKILL)\n                    except ProcessLookupError:\n                        pass\n                return\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *unused, **kwargs):\n            return None\n    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())\n    def fetch(path, body=None, timeout=5, authorized=True):\n        headers = {\"Content-Type\": \"application/json\"}\n        if authorized:\n            headers[\"Authorization\"] = \"Bearer \" + token\n        request = urllib.request.Request(\"http://127.0.0.1:\" + str(port) + path,\n                                         data=None if body is None else json.dumps(body,ensure_ascii=False,separators=(\",\", \":\")).encode(\"utf-8\"), headers=headers)\n        try:\n            with opener.open(request, timeout=timeout) as response:\n                data = response.read(2 * 1024 ** 2 + 1)\n                if len(data) > 2 * 1024 ** 2:\n                    raise ValueError(\"loopback response exceeds bound\")\n                return json.loads(data)\n        except urllib.error.HTTPError as error:\n            detail = error.read(16384).decode(\"utf-8\", errors=\"replace\").replace(token, \"<redacted>\")\n            report.setdefault(\"httpErrors\", []).append({\"path\": path, \"status\": error.code, \"body\": detail})\n            raise\n    try:\n        with (output / \"server.log\").open(\"wb\") as log:\n            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,\n                                       start_new_session=True, env={k:v for k,v in os.environ.items() if not k.startswith((\"LLAMA_\", \"GGML_\", \"HF_\", \"HUGGINGFACE_\"))})\n            report[\"ownedPID\"] = process.pid\n            watcher = threading.Thread(target=monitor, daemon=True)\n            watcher.start()\n            while True:\n                if process.poll() is not None or report.get(\"watchdogReason\"):\n                    raise RuntimeError(\"owned worker stopped during startup\")\n                if time.monotonic() > started + 45:\n                    raise TimeoutError(\"startup exceeded 45 seconds\")\n                try:\n                    if fetch(\"/health\", timeout=1).get(\"status\") == \"ok\":\n                        break\n                except (urllib.error.URLError, TimeoutError):\n                    pass\n                time.sleep(0.1)\n            report[\"startupSeconds\"] = time.monotonic() - started\n            try:\n                fetch(\"/v1/chat/completions\", body={}, authorized=False)\n                raise RuntimeError(\"inference endpoint accepted an unauthenticated request\")\n            except urllib.error.HTTPError as error:\n                if error.code != 401:\n                    raise\n            report[\"unauthenticatedRequestRejected\"] = True\n            for number, case in enumerate(args.cases, 1):\n                with lock:\n                    phase.update(name=\"case-\" + str(number), deadline=time.monotonic() + 45)\n                request = checker_request(case)\n                write_json(output / (\"request-%02d.json\" % number), request)\n                print(json.dumps({\"stage\": \"case\", \"number\": number, \"id\": case[\"id\"]}), flush=True)\n                applied = fetch(\"/apply-template\", request)\n                prompt = applied.get(\"prompt\")\n                if not isinstance(prompt, str) or SYSTEM not in prompt or \"Current date: 2026-07-14\" in prompt or not prompt.endswith(\"<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n\"):\n                    raise ValueError(\"author thinking prefill not verified\")\n                (output / (\"prompt-%02d.txt\" % number)).write_text(prompt)\n                tokens = fetch(\"/tokenize\", {\"content\": prompt, \"add_special\": False, \"parse_special\": True})[\"tokens\"]\n                if len(tokens) + OUTPUT_TOKENS + 64 > CONTEXT:\n                    raise ValueError(\"complete input and response reserve exceed 4K; no truncation\")\n                began = time.monotonic()\n                response = fetch(\"/v1/chat/completions\", request, timeout=45)\n                write_json(output / (\"response-%02d.json\" % number), response)\n                report[\"cases\"].append({\"id\": case[\"id\"], \"inputTokens\": len(tokens),\n                    \"seconds\": time.monotonic() - began, \"usage\": response.get(\"usage\"),\n                    \"response\": response})\n                report[\"status\"] = \"response-collected-unqualified\"\n\n    finally:\n        # Stop observation before intentional process shutdown so an empty\n        # process list during joined cleanup is not misreported as overlap.\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        stop_owned()\n        if process is not None:\n            try:\n                process.wait(timeout=3)\n            except subprocess.TimeoutExpired:\n                os.killpg(process.pid, signal.SIGKILL)\n                process.wait(timeout=3)\n            report[\"ownedProcessExited\"] = process.poll() is not None\n            report[\"exitCode\"] = process.returncode\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        key.unlink(missing_ok=True)\n        report[\"credentialRemoved\"] = not key.exists()\n        report[\"workerWallSeconds\"] = time.monotonic() - started\n\n\ndef checker_request(case):\n    return case[\"request\"]\n\ndef main():\n    from types import SimpleNamespace\n    global SYSTEM\n    parser=argparse.ArgumentParser()\n    parser.add_argument(\"--request\",type=Path,required=True)\n    parser.add_argument(\"--output\",type=Path,required=True)\n    parser.add_argument(\"--case\",required=True)\n    opts=parser.parse_args()\n    base=Path(__file__).resolve().parent\n    output=opts.output.resolve();output.mkdir(exist_ok=False)\n    origin=opts.request.resolve(); request=read_json(origin)\n    (output/\"probe.py\").write_bytes(Path(__file__).read_bytes())\n    SYSTEM=request[\"messages\"][0][\"content\"]\n    if request[\"max_tokens\"] != 768 or request[\"model\"] != \"native-form-planner-v2\":\n        raise ValueError(\"unexpected frozen request contract\")\n    raw=origin.read_bytes()\n    (output/\"original-request-body.json\").write_bytes(raw)\n    report={\"status\":\"prepared\", \"cases\":[], \"plannedCount\":1, \"memorySamples\":0,\n        \"peakSampledProcessMemoryBytes\":0, \"peakNamedWorkerCount\":0,\n        \"memoryStopLimitBytes\":4*GIB, \"contextTokens\":CONTEXT, \"maxOutputTokens\":OUTPUT_TOKENS,\n        \"thinkingEnabled\":False, \"wholeMacRAMTargetGB\":12, \"wholeMacQualified\":False,\n        \"productionChanged\":False, \"modelSelectionChanged\":False, \"applicationEffects\":[],\n        \"nativeRecordReplayOnly\":True, \"modelIdentity\":\"Agents-A1-4B Q4_K_M\",\n        \"oracleSuppliedToModel\":False, \"sourceSHA256\":digest(Path(__file__)),\n        \"requestPath\":str(origin), \"originalRequestBodySHA256\":hashlib.sha256(raw).hexdigest(),\n        \"canonicalRequestSHA256\":hashlib.sha256(encoded(request)).hexdigest(),\n        \"comparison\":\"Goal-only model comparison: identical conditional-purchase request as Qwen goal-contract diagnostic, same launch/sampling/budgets; only verified model weights/author template differ. No page/history/observations/oracles, application changes or effects.\",\n        \"hostCompletionAccepted\":None}\n    args=SimpleNamespace(cases=[{\"id\":opts.case,\"request\":request}],\n        runtime=Path(\"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\"),\n        model=base/\"agents-a1-model-q4/Agents-A1-4B-Q4_K_M.gguf\")\n    def cancelled(signum,frame): raise KeyboardInterrupt(\"signal \"+str(signum))\n    signal.signal(signal.SIGTERM,cancelled)\n    try: run(args,output,report,None,None,None,None)\n    except BaseException as error:\n        report[\"status\"]=\"failed\";report[\"error\"]=type(error).__name__+\": \"+str(error)\n    finally: write_json(output/\"result.json\",report)\n    print(json.dumps({\"status\":report[\"status\"],\"error\":report.get(\"error\"),\n        \"cases\":[{\"id\":x[\"id\"],\"seconds\":x[\"seconds\"],\"inputTokens\":x[\"inputTokens\"],\n                  \"message\":x[\"response\"][\"choices\"][0][\"message\"]} for x in report[\"cases\"]],\n        \"peakBytes\":report[\"peakSampledProcessMemoryBytes\"],\"workers\":report[\"peakNamedWorkerCount\"],\n        \"exited\":report.get(\"ownedProcessExited\"),\"watchdog\":report.get(\"watchdogReason\")},indent=2))\n    return 0 if report[\"status\"]==\"response-collected-unqualified\" else 1\n\nif __name__==\"__main__\": sys.exit(main())\n"
+    },
+    "dfac9bdd257a82c3822e0496cac5affe477c4afffa90c874cf89458760c1dea6": {
+      "sha256": "dfac9bdd257a82c3822e0496cac5affe477c4afffa90c874cf89458760c1dea6",
+      "byteCount": 930,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/agents-goal-contract-conditional-01/launch-arguments.json"
+      ],
+      "content": "[\n  \"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\",\n  \"--model\",\n  \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/agents-a1-model-q4/Agents-A1-4B-Q4_K_M.gguf\",\n  \"--alias\",\n  \"native-form-planner-v2\",\n  \"--host\",\n  \"127.0.0.1\",\n  \"--port\",\n  \"52012\",\n  \"--api-key-file\",\n  \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/agents-goal-contract-conditional-01/temporary-api-key\",\n  \"--offline\",\n  \"--no-ui\",\n  \"--no-mmproj\",\n  \"--log-disable\",\n  \"--parallel\",\n  \"1\",\n  \"--ctx-size\",\n  \"4096\",\n  \"--cache-ram\",\n  \"0\",\n  \"--threads\",\n  \"2\",\n  \"--threads-batch\",\n  \"2\",\n  \"--poll\",\n  \"0\",\n  \"--poll-batch\",\n  \"0\",\n  \"--n-gpu-layers\",\n  \"99\",\n  \"--jinja\",\n  \"--reasoning\",\n  \"on\",\n  \"--reasoning-budget\",\n  \"512\"\n]\n"
+    },
+    "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0": {
+      "sha256": "4758c425868499833ad8fd54da26ad552624264a673be359afe5e0ad6dbd41c0",
+      "byteCount": 2007,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/original-request-body.json",
+        ".build/repair-verification/native-goal-contract-conditional-thinking01-request.json"
+      ],
+      "content": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"native_goal_contract\",\"strict\":true,\"schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"type\":\"array\",\"minItems\":0,\"maxItems\":8,\"items\":{\"type\":\"string\"}},\"requirements\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":8,\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"information\",\"action\"]}},\"required\":[\"instruction\",\"kind\"]}}},\"required\":[\"objective\",\"constraints\",\"requirements\"]}}},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    },
+    "bb8d10a6e4ef346d037d9a8a1416c800f6ccc89e1be4b6fc8a3a40a17a3a5670": {
+      "sha256": "bb8d10a6e4ef346d037d9a8a1416c800f6ccc89e1be4b6fc8a3a40a17a3a5670",
+      "byteCount": 2827,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/request-01.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": true\n  },\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "5ef13ccea2482a1634f10c2f0ae08d7f67856358a72f4bf7c0b72c541126c880": {
+      "sha256": "5ef13ccea2482a1634f10c2f0ae08d7f67856358a72f4bf7c0b72c541126c880",
+      "byteCount": 3761,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/response-01.json"
+      ],
+      "content": "{\n  \"choices\": [\n    {\n      \"finish_reason\": \"stop\",\n      \"index\": 0,\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"{\\n          \\\"objective\\\": \\\"Access SF Jazz ticket policies and purchase tickets pending approval.\\\",\\n          \\\"constraints\\\": [],\\n          \\\"requirements\\\": [\\n            {\\n              \\\"instruction\\\": \\\"Open https://www.sfjazz.org/tickets/ticket-policies/ and read the return policy.\\\",\\n              \\\"kind\\\": \\\"information\\\"\\n            },\\n            {\\n              \\\"instruction\\\": \\\"Wait for user approval before purchasing tickets.\\\",\\n              \\\"kind\\\": \\\"action\\\"\\n            }\\n          ]\\n        }\",\n        \"reasoning_content\": \"Thinking Process:\\n\\n1.  **Analyze the Request:**\\n    *   Input: A JSON object containing a `goal` and `clarifications`.\\n    *   Goal: \\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\\\"\\n    *   Clarifications: Empty array `[]`.\\n    *   Constraints/Instructions for AI (System Prompt):\\n        *   Interpret only the complete original goal and ordered clarification answers in the user JSON.\\n        *   Questions supply context; answers carry user authority.\\n        *   Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content.\\n        *   Do not replace an action with preparation or explanation.\\n        *   Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents.\\n        *   Keep constraints to user-stated conditions; do not invent constraints or facts.\\n        *   Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action.\\n        *   Do not assess completion, evidence, observations, routing, tools, or next steps.\\n        *   Do not omit unresolved work or infer that an action is complete.\\n\\n2.  **Deconstruct the User Goal:**\\n    *   Action 1: Open URL `https://www.sfjazz.org/tickets/ticket-policies/`. (Information/Action)\\n    *   Action 2: Read the return policy. (Information/Action)\\n    *   Condition/Constraint: \\\"after I approve\\\". (Constraint: Waiting for user approval before proceeding to purchase).\\n    *   Action 3: Purchase tickets. (Action)\\n\\n3.  **Map to Schema Requirements:**\\n    *   The system prompt says: \\\"Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action.\\\"\\n    *   It also says: \\\"Do not assess completion, evidence, observations, routing, tools, or next steps.\\\"\\n    *   It emphasizes preserving every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content.\\n\\n4.  **Drafting the Output:**\\n    *   **Concise Objective\"\n      }\n    }\n  ],\n  \"created\": 1790211932,\n  \"model\": \"native-form-planner-v2\",\n  \"system_fingerprint\": \"b9992-6eddde06a\",\n  \"object\": \"chat.completion\",\n  \"usage\": {\n    \"completion_tokens\": 629,\n    \"prompt_tokens\": 216,\n    \"total_tokens\": 845,\n    \"prompt_tokens_details\": {\n      \"cached_tokens\": 0\n    }\n  },\n  \"id\": \"chatcmpl-6TVloWIiOIZYMFSGDQB0c6wJogPP6LHo\",\n  \"timings\": {\n    \"cache_n\": 0,\n    \"prompt_n\": 216,\n    \"prompt_ms\": 381.224,\n    \"prompt_per_token_ms\": 1.7649259259259258,\n    \"prompt_per_second\": 566.5960170398506,\n    \"predicted_n\": 629,\n    \"predicted_ms\": 10979.617,\n    \"predicted_per_token_ms\": 17.455670906200318,\n    \"predicted_per_second\": 57.287972795408066\n  }\n}\n"
+    },
+    "b758203985834ed9c93e91bba47eebd0ee6d8e3149f10a756a1d07f0d051296b": {
+      "sha256": "b758203985834ed9c93e91bba47eebd0ee6d8e3149f10a756a1d07f0d051296b",
+      "byteCount": 1181,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/prompt-01.txt"
+      ],
+      "content": "<|im_start|>system\nInterpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.<|im_end|>\n<|im_start|>user\n{\"goal\":\"Open https://www.sfjazz.org/tickets/ticket-policies/. Read the return policy. Then purchase tickets after I approve.\",\"clarifications\":[]}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2": {
+      "sha256": "82e6fd54c4bceabd8d1d76ac6981c8431571477b85342ed35c2666f3be9161b2",
+      "byteCount": 15730,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/probe.py",
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/probe.py"
+      ],
+      "content": "#!/usr/bin/env python3\n\"\"\"Offline native-catalogue replay. Preparation is default; --run explicitly starts one worker.\n\nNo browser, MCP dispatch, external network, model download, visual input, or task oracle.\nOnly the owned authenticated loopback inference server is contacted in --run mode.\n\"\"\"\nimport argparse\nimport re\nimport copy\nimport ctypes\nimport datetime\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport secrets\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport urllib.error\nimport urllib.parse\nimport urllib.request\n\nGIB = 1024 ** 3\nCONTEXT = 4096\nOUTPUT_TOKENS = 1024\nMODEL_BYTES = 2740937888\nMODEL_SHA256 = \"00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4\"\nSYSTEM = \"\"\n\n\ndef encoded(value):\n    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")\n\n\ndef digest(path):\n    value = hashlib.sha256()\n    with path.open(\"rb\") as handle:\n        for chunk in iter(lambda: handle.read(4 * 1024 ** 2), b\"\"):\n            value.update(chunk)\n    return value.hexdigest()\n\n\ndef read_json(path):\n    data = path.read_bytes()\n    if len(data) > 2 * 1024 ** 2:\n        raise ValueError(\"input exceeds 2 MiB: \" + str(path))\n    return json.loads(data)\n\n\ndef write_json(path, value):\n    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + \"\\n\")\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ndef named_workers():\n    text = subprocess.check_output([\"/bin/ps\", \"-axo\", \"pid=,comm=\"], text=True, timeout=3)\n    result = []\n    for line in text.splitlines():\n        fields = line.strip().split(None, 1)\n        if len(fields) == 2 and Path(fields[1]).name in (\"llama-server\", \"llama-cli\"):\n            result.append(int(fields[0]))\n    return result\n\n\ndef run(args, output, report, page, windows, messages, tool_schema):\n    if sys.platform != \"darwin\":\n        raise ValueError(\"this guard requires macOS proc_pid_rusage\")\n    if not args.runtime or not args.model:\n        raise ValueError(\"--run requires --runtime and --model\")\n    binary, model = args.runtime.resolve(), args.model.resolve()\n    source_root = Path(__file__).resolve().parent / \"native-reading-qwen\"\n    template = source_root / \"chat_template.jinja\"\n    expected_template = read_json(source_root / \"author-source-record.json\")[\"chat_template.jinja\"]\n    if digest(template) != expected_template[\"sha256\"]:\n        raise ValueError(\"pinned author chat template hash mismatch\")\n    if model.stat().st_size != MODEL_BYTES or digest(model) != MODEL_SHA256:\n        raise ValueError(\"model does not match pinned official Qwen3.5-4B Q4_K_M\")\n    if named_workers():\n        raise RuntimeError(\"another llama worker is active\")\n    subprocess.run([\"/usr/bin/codesign\", \"--verify\", \"--strict\", str(binary)], check=True, timeout=5,\n                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)\n    version = subprocess.run([str(binary), \"--version\"], capture_output=True, text=True, timeout=5, check=True)\n    version_text = version.stdout + version.stderr\n    if \"b9992\" not in version_text and \"6eddde06\" not in version_text:\n        raise ValueError(\"runtime version is not pinned b9992 / 6eddde06\")\n    report.update(runtimeSHA256=digest(binary), runtimeVersion=version_text.strip(), modelSHA256=MODEL_SHA256,\n                  authorTemplateSHA256=expected_template[\"sha256\"])\n    libproc = ctypes.CDLL(\"/usr/lib/libproc.dylib\")\n    libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]\n    libproc.proc_pid_rusage.restype = ctypes.c_int\n    def memory(pid):\n        buffer = ctypes.create_string_buffer(1024)\n        if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:\n            return None\n        return max(struct.unpack_from(\"=QQ\", buffer.raw, 64))\n    if not memory(os.getpid()):\n        raise RuntimeError(\"memory accounting unavailable\")\n    token = secrets.token_urlsafe(32)\n    key = output / \"temporary-api-key\"\n    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), \"w\") as handle:\n        handle.write(token)\n    with socket.socket() as sock:\n        sock.bind((\"127.0.0.1\", 0))\n        port = sock.getsockname()[1]\n    # Match the application's native-text launch profile exactly, apart from\n    # the verified candidate model path, dynamic port and temporary credential.\n    arguments = [str(binary), \"--model\", str(model), \"--alias\", \"native-form-planner-v2\",\n        \"--host\", \"127.0.0.1\", \"--port\", str(port), \"--api-key-file\", str(key),\n        \"--offline\", \"--no-ui\", \"--no-mmproj\", \"--log-disable\", \"--parallel\", \"1\",\n        \"--ctx-size\", \"4096\", \"--cache-ram\", \"0\", \"--threads\", \"2\", \"--threads-batch\", \"2\",\n        \"--poll\", \"0\", \"--poll-batch\", \"0\", \"--n-gpu-layers\", \"99\", \"--jinja\",\n        \"--reasoning\", \"on\", \"--reasoning-budget\", \"512\"]\n    report[\"launchProfile\"] = \"Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=true, max_tokens1024, reasoning budget512. Standalone lifecycle watchdog retains 4GiB cap.\"\n\n    write_json(output / \"launch-arguments.json\", arguments)\n    process, watcher = None, None\n    done = threading.Event()\n    started = time.monotonic()\n    phase = {\"name\": \"startup\", \"deadline\": started + 45}\n    lock = threading.Lock()\n    def stop_owned():\n        if process is not None and process.poll() is None:\n            try:\n                os.killpg(process.pid, signal.SIGTERM)\n            except ProcessLookupError:\n                pass\n    def monitor():\n        last_count, missed = 0.0, 0\n        while not done.wait(0.1):\n            if process.poll() is not None:\n                return\n            now = time.monotonic()\n            measured = memory(process.pid)\n            missed = missed + 1 if measured is None else 0\n            if measured is not None:\n                report[\"memorySamples\"] += 1\n                report[\"peakSampledProcessMemoryBytes\"] = max(report[\"peakSampledProcessMemoryBytes\"], measured)\n            reason = \"memory-limit\" if measured is not None and measured > 4 * GIB else None\n            if missed >= 10:\n                reason = \"memory-accounting-unavailable\"\n            with lock:\n                if now > phase[\"deadline\"]:\n                    reason = phase[\"name\"] + \"-deadline\"\n            if now - started > 100:\n                reason = \"total-deadline\"\n            if now - last_count >= 1:\n                try:\n                    workers = named_workers()\n                    report[\"peakNamedWorkerCount\"] = max(report[\"peakNamedWorkerCount\"], len(workers))\n                    if workers != [process.pid]:\n                        reason = \"worker-count\"\n                except Exception:\n                    reason = \"worker-count-unavailable\"\n                last_count = now\n            if reason:\n                report[\"watchdogReason\"] = reason\n                stop_owned()\n                if not done.wait(1) and process.poll() is None:\n                    try:\n                        os.killpg(process.pid, signal.SIGKILL)\n                    except ProcessLookupError:\n                        pass\n                return\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *unused, **kwargs):\n            return None\n    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())\n    def fetch(path, body=None, timeout=5, authorized=True):\n        headers = {\"Content-Type\": \"application/json\"}\n        if authorized:\n            headers[\"Authorization\"] = \"Bearer \" + token\n        request = urllib.request.Request(\"http://127.0.0.1:\" + str(port) + path,\n                                         data=None if body is None else json.dumps(body,ensure_ascii=False,separators=(\",\", \":\")).encode(\"utf-8\"), headers=headers)\n        try:\n            with opener.open(request, timeout=timeout) as response:\n                data = response.read(2 * 1024 ** 2 + 1)\n                if len(data) > 2 * 1024 ** 2:\n                    raise ValueError(\"loopback response exceeds bound\")\n                return json.loads(data)\n        except urllib.error.HTTPError as error:\n            detail = error.read(16384).decode(\"utf-8\", errors=\"replace\").replace(token, \"<redacted>\")\n            report.setdefault(\"httpErrors\", []).append({\"path\": path, \"status\": error.code, \"body\": detail})\n            raise\n    try:\n        with (output / \"server.log\").open(\"wb\") as log:\n            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,\n                                       start_new_session=True, env={k:v for k,v in os.environ.items() if not k.startswith((\"LLAMA_\", \"GGML_\", \"HF_\", \"HUGGINGFACE_\"))})\n            report[\"ownedPID\"] = process.pid\n            watcher = threading.Thread(target=monitor, daemon=True)\n            watcher.start()\n            while True:\n                if process.poll() is not None or report.get(\"watchdogReason\"):\n                    raise RuntimeError(\"owned worker stopped during startup\")\n                if time.monotonic() > started + 45:\n                    raise TimeoutError(\"startup exceeded 45 seconds\")\n                try:\n                    if fetch(\"/health\", timeout=1).get(\"status\") == \"ok\":\n                        break\n                except (urllib.error.URLError, TimeoutError):\n                    pass\n                time.sleep(0.1)\n            report[\"startupSeconds\"] = time.monotonic() - started\n            try:\n                fetch(\"/v1/chat/completions\", body={}, authorized=False)\n                raise RuntimeError(\"inference endpoint accepted an unauthenticated request\")\n            except urllib.error.HTTPError as error:\n                if error.code != 401:\n                    raise\n            report[\"unauthenticatedRequestRejected\"] = True\n            for number, case in enumerate(args.cases, 1):\n                with lock:\n                    phase.update(name=\"case-\" + str(number), deadline=time.monotonic() + 45)\n                request = checker_request(case)\n                write_json(output / (\"request-%02d.json\" % number), request)\n                print(json.dumps({\"stage\": \"case\", \"number\": number, \"id\": case[\"id\"]}), flush=True)\n                applied = fetch(\"/apply-template\", request)\n                prompt = applied.get(\"prompt\")\n                if not isinstance(prompt, str) or SYSTEM not in prompt or \"Current date: 2026-07-14\" in prompt or not prompt.endswith(\"<|im_start|>assistant\\n<think>\\n\"):\n                    raise ValueError(\"author thinking prefill not verified\")\n                (output / (\"prompt-%02d.txt\" % number)).write_text(prompt)\n                tokens = fetch(\"/tokenize\", {\"content\": prompt, \"add_special\": False, \"parse_special\": True})[\"tokens\"]\n                if len(tokens) + OUTPUT_TOKENS + 64 > CONTEXT:\n                    raise ValueError(\"complete input and response reserve exceed 4K; no truncation\")\n                began = time.monotonic()\n                response = fetch(\"/v1/chat/completions\", request, timeout=45)\n                write_json(output / (\"response-%02d.json\" % number), response)\n                report[\"cases\"].append({\"id\": case[\"id\"], \"inputTokens\": len(tokens),\n                    \"seconds\": time.monotonic() - began, \"usage\": response.get(\"usage\"),\n                    \"response\": response})\n                report[\"status\"] = \"response-collected-unqualified\"\n\n    finally:\n        # Stop observation before intentional process shutdown so an empty\n        # process list during joined cleanup is not misreported as overlap.\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        stop_owned()\n        if process is not None:\n            try:\n                process.wait(timeout=3)\n            except subprocess.TimeoutExpired:\n                os.killpg(process.pid, signal.SIGKILL)\n                process.wait(timeout=3)\n            report[\"ownedProcessExited\"] = process.poll() is not None\n            report[\"exitCode\"] = process.returncode\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        key.unlink(missing_ok=True)\n        report[\"credentialRemoved\"] = not key.exists()\n        report[\"workerWallSeconds\"] = time.monotonic() - started\n\n\ndef checker_request(case):\n    return case[\"request\"]\n\ndef main():\n    from types import SimpleNamespace\n    global SYSTEM\n    parser=argparse.ArgumentParser()\n    parser.add_argument(\"--request\",type=Path,required=True)\n    parser.add_argument(\"--output\",type=Path,required=True)\n    parser.add_argument(\"--case\",required=True)\n    opts=parser.parse_args()\n    base=Path(__file__).resolve().parent\n    output=opts.output.resolve();output.mkdir(exist_ok=False)\n    origin=opts.request.resolve(); request=read_json(origin)\n    (output/\"probe.py\").write_bytes(Path(__file__).read_bytes())\n    SYSTEM=request[\"messages\"][0][\"content\"]\n    if request[\"max_tokens\"] != 1024 or request[\"model\"] != \"native-form-planner-v2\":\n        raise ValueError(\"unexpected frozen request contract\")\n    raw=origin.read_bytes()\n    (output/\"original-request-body.json\").write_bytes(raw)\n    report={\"status\":\"prepared\", \"cases\":[], \"plannedCount\":1, \"memorySamples\":0,\n        \"peakSampledProcessMemoryBytes\":0, \"peakNamedWorkerCount\":0,\n        \"memoryStopLimitBytes\":4*GIB, \"contextTokens\":CONTEXT, \"maxOutputTokens\":OUTPUT_TOKENS,\n        \"thinkingEnabled\":True, \"wholeMacRAMTargetGB\":12, \"wholeMacQualified\":False,\n        \"productionChanged\":False, \"modelSelectionChanged\":False, \"applicationEffects\":[],\n        \"nativeRecordReplayOnly\":True, \"modelIdentity\":\"Qwen3.5-4B Q4_K_M\",\n        \"oracleSuppliedToModel\":False, \"sourceSHA256\":digest(Path(__file__)),\n        \"requestPath\":str(origin), \"originalRequestBodySHA256\":hashlib.sha256(raw).hexdigest(),\n        \"canonicalRequestSHA256\":hashlib.sha256(encoded(request)).hexdigest(),\n        \"comparison\":\"One bounded reasoning comparison on the same isolated goal-only conditional request. Only enable_thinking=true and max_tokens1024 differ; same prompt, original goal, ordered schema, sampling, verified Qwen weights, production launch profile reasoning-budget512 and 4GiB cap. No application changes or effects.\",\n        \"hostCompletionAccepted\":None}\n    args=SimpleNamespace(cases=[{\"id\":opts.case,\"request\":request}],\n        runtime=Path(\"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\"),\n        model=Path(\"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\"))\n    def cancelled(signum,frame): raise KeyboardInterrupt(\"signal \"+str(signum))\n    signal.signal(signal.SIGTERM,cancelled)\n    try: run(args,output,report,None,None,None,None)\n    except BaseException as error:\n        report[\"status\"]=\"failed\";report[\"error\"]=type(error).__name__+\": \"+str(error)\n    finally: write_json(output/\"result.json\",report)\n    print(json.dumps({\"status\":report[\"status\"],\"error\":report.get(\"error\"),\n        \"cases\":[{\"id\":x[\"id\"],\"seconds\":x[\"seconds\"],\"inputTokens\":x[\"inputTokens\"],\n                  \"message\":x[\"response\"][\"choices\"][0][\"message\"]} for x in report[\"cases\"]],\n        \"peakBytes\":report[\"peakSampledProcessMemoryBytes\"],\"workers\":report[\"peakNamedWorkerCount\"],\n        \"exited\":report.get(\"ownedProcessExited\"),\"watchdog\":report.get(\"watchdogReason\")},indent=2))\n    return 0 if report[\"status\"]==\"response-collected-unqualified\" else 1\n\nif __name__==\"__main__\": sys.exit(main())\n"
+    },
+    "6078f09500708c41c9bfd137d44c32ddeb1c4d58894f899e7a59726bfc19b912": {
+      "sha256": "6078f09500708c41c9bfd137d44c32ddeb1c4d58894f899e7a59726bfc19b912",
+      "byteCount": 960,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-02/launch-arguments.json"
+      ],
+      "content": "[\n  \"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\",\n  \"--model\",\n  \"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\",\n  \"--alias\",\n  \"native-form-planner-v2\",\n  \"--host\",\n  \"127.0.0.1\",\n  \"--port\",\n  \"52039\",\n  \"--api-key-file\",\n  \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/qwen-goal-contract-thinking-conditional-02/temporary-api-key\",\n  \"--offline\",\n  \"--no-ui\",\n  \"--no-mmproj\",\n  \"--log-disable\",\n  \"--parallel\",\n  \"1\",\n  \"--ctx-size\",\n  \"4096\",\n  \"--cache-ram\",\n  \"0\",\n  \"--threads\",\n  \"2\",\n  \"--threads-batch\",\n  \"2\",\n  \"--poll\",\n  \"0\",\n  \"--poll-batch\",\n  \"0\",\n  \"--n-gpu-layers\",\n  \"99\",\n  \"--jinja\",\n  \"--reasoning\",\n  \"on\",\n  \"--reasoning-budget\",\n  \"512\"\n]\n"
+    },
+    "45042803d453ad98c0bf895906e22d9f3e469053933755ab2998edef117008ef": {
+      "sha256": "45042803d453ad98c0bf895906e22d9f3e469053933755ab2998edef117008ef",
+      "byteCount": 4032,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/prepare-native-goal-contract.py"
+      ],
+      "content": "#!/usr/bin/env python3\n\"\"\"Prepare isolated native goal-interpretation requests; performs no inference.\"\"\"\n\nimport copy\nimport json\nfrom pathlib import Path\n\n\nROOT = Path(__file__).resolve().parents[2]\nMANIFEST = ROOT / \"docs/audits/2026-09-04-mac-computer-use/orchestration-language-cases-sept23.json\"\nTEMPLATE = ROOT / \".build/repair-verification/browser-compact02-conditional-request.json\"\nOUTPUT = ROOT / \".build/repair-verification/native-goal-contract-prepared-01\"\n\nPROMPT = \"\"\"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\"\"\"\n\nSCHEMA = {\n    \"type\": \"object\",\n    \"additionalProperties\": False,\n    \"properties\": {\n        \"objective\": {\"type\": \"string\"},\n        \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\"type\": \"string\"},\n        },\n        \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n                \"type\": \"object\",\n                \"additionalProperties\": False,\n                \"properties\": {\n                    \"instruction\": {\"type\": \"string\"},\n                    \"kind\": {\"type\": \"string\", \"enum\": [\"information\", \"action\"]},\n                },\n                \"required\": [\"instruction\", \"kind\"],\n            },\n        },\n    },\n    \"required\": [\"objective\", \"constraints\", \"requirements\"],\n}\n\n\ndef read_json(path: Path):\n    with path.open(encoding=\"utf-8\") as source:\n        return json.load(source)\n\n\ndef write_json(path: Path, value) -> None:\n    with path.open(\"w\", encoding=\"utf-8\", newline=\"\\n\") as output:\n        json.dump(value, output, ensure_ascii=False, indent=2)\n        output.write(\"\\n\")\n\n\ndef main() -> None:\n    if len(PROMPT) > 1600:\n        raise ValueError(f\"Prompt exceeds 1600 characters: {len(PROMPT)}\")\n\n    manifest = read_json(MANIFEST)\n    template = read_json(TEMPLATE)\n    cases = manifest[\"cases\"]\n    if len(cases) != 6:\n        raise ValueError(f\"Expected six frozen cases, found {len(cases)}\")\n\n    OUTPUT.mkdir(parents=True, exist_ok=False)\n    write_json(OUTPUT / \"prompt-schema-spec.json\", {\"prompt\": PROMPT, \"schema\": SCHEMA})\n    seen_ids = set()\n    for case in cases:\n        case_id = case[\"id\"]\n        if case_id in seen_ids:\n            raise ValueError(f\"Duplicate case id: {case_id}\")\n        seen_ids.add(case_id)\n\n        # Construct input from user-authored fields only. Oracle/expected fields,\n        # page records, history, and other template content never enter the request.\n        user_input = {\"goal\": case[\"goal\"], \"clarifications\": case.get(\"clarifications\", [])}\n        request = copy.deepcopy(template)\n        request[\"messages\"] = [\n            {\"content\": PROMPT, \"role\": \"system\"},\n            {\"content\": json.dumps(user_input, ensure_ascii=False, separators=(\",\", \":\")), \"role\": \"user\"},\n        ]\n        request[\"response_format\"] = {\n            \"type\": \"json_schema\",\n            \"json_schema\": {\"name\": \"native_goal_contract\", \"strict\": True, \"schema\": SCHEMA}\n        }\n        write_json(OUTPUT / f\"{case_id}.request.json\", request)\n\n\nif __name__ == \"__main__\":\n    main()\n"
+    },
+    "2568b99fa86bb2a0b4973c936d34dc1deb77c85ef9eba9e10e4b3ae550a0a8fa": {
+      "sha256": "2568b99fa86bb2a0b4973c936d34dc1deb77c85ef9eba9e10e4b3ae550a0a8fa",
+      "byteCount": 1928,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/native-goal-contract-prepared-01/prompt-schema-spec.json"
+      ],
+      "content": "{\n  \"prompt\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n  \"schema\": {\n    \"type\": \"object\",\n    \"additionalProperties\": false,\n    \"properties\": {\n      \"objective\": {\n        \"type\": \"string\"\n      },\n      \"constraints\": {\n        \"type\": \"array\",\n        \"minItems\": 0,\n        \"maxItems\": 8,\n        \"items\": {\n          \"type\": \"string\"\n        }\n      },\n      \"requirements\": {\n        \"type\": \"array\",\n        \"minItems\": 1,\n        \"maxItems\": 8,\n        \"items\": {\n          \"type\": \"object\",\n          \"additionalProperties\": false,\n          \"properties\": {\n            \"instruction\": {\n              \"type\": \"string\"\n            },\n            \"kind\": {\n              \"type\": \"string\",\n              \"enum\": [\n                \"information\",\n                \"action\"\n              ]\n            }\n          },\n          \"required\": [\n            \"instruction\",\n            \"kind\"\n          ]\n        }\n      }\n    },\n    \"required\": [\n      \"objective\",\n      \"constraints\",\n      \"requirements\"\n    ]\n  }\n}\n"
+    },
+    "db8fd6b79e3cc4b1497b937059c38d1d36c001975800288142b0a57fa30a5eaf": {
+      "sha256": "db8fd6b79e3cc4b1497b937059c38d1d36c001975800288142b0a57fa30a5eaf",
+      "byteCount": 408,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-01/preflight-failure.json"
+      ],
+      "content": "{\n  \"status\": \"preflight-failed\",\n  \"error\": \"ValueError: unexpected frozen request contract\",\n  \"reason\": \"Runner retained the non-thinking max_tokens==768 preflight while request used 1024. No runtime/model launched.\",\n  \"workerLaunched\": false,\n  \"requestPath\": \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-goal-contract-conditional-thinking01-request.json\"\n}\n"
+    },
+    "829d669f4b3e43e5e719bc0dd683510454eaa88fd1258618ce6106da7ac50aac": {
+      "sha256": "829d669f4b3e43e5e719bc0dd683510454eaa88fd1258618ce6106da7ac50aac",
+      "byteCount": 15729,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-conditional-01/probe.py"
+      ],
+      "content": "#!/usr/bin/env python3\n\"\"\"Offline native-catalogue replay. Preparation is default; --run explicitly starts one worker.\n\nNo browser, MCP dispatch, external network, model download, visual input, or task oracle.\nOnly the owned authenticated loopback inference server is contacted in --run mode.\n\"\"\"\nimport argparse\nimport re\nimport copy\nimport ctypes\nimport datetime\nimport hashlib\nimport json\nimport os\nfrom pathlib import Path\nimport secrets\nimport signal\nimport socket\nimport struct\nimport subprocess\nimport sys\nimport threading\nimport time\nimport urllib.error\nimport urllib.parse\nimport urllib.request\n\nGIB = 1024 ** 3\nCONTEXT = 4096\nOUTPUT_TOKENS = 1024\nMODEL_BYTES = 2740937888\nMODEL_SHA256 = \"00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4\"\nSYSTEM = \"\"\n\n\ndef encoded(value):\n    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")\n\n\ndef digest(path):\n    value = hashlib.sha256()\n    with path.open(\"rb\") as handle:\n        for chunk in iter(lambda: handle.read(4 * 1024 ** 2), b\"\"):\n            value.update(chunk)\n    return value.hexdigest()\n\n\ndef read_json(path):\n    data = path.read_bytes()\n    if len(data) > 2 * 1024 ** 2:\n        raise ValueError(\"input exceeds 2 MiB: \" + str(path))\n    return json.loads(data)\n\n\ndef write_json(path, value):\n    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + \"\\n\")\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\ndef named_workers():\n    text = subprocess.check_output([\"/bin/ps\", \"-axo\", \"pid=,comm=\"], text=True, timeout=3)\n    result = []\n    for line in text.splitlines():\n        fields = line.strip().split(None, 1)\n        if len(fields) == 2 and Path(fields[1]).name in (\"llama-server\", \"llama-cli\"):\n            result.append(int(fields[0]))\n    return result\n\n\ndef run(args, output, report, page, windows, messages, tool_schema):\n    if sys.platform != \"darwin\":\n        raise ValueError(\"this guard requires macOS proc_pid_rusage\")\n    if not args.runtime or not args.model:\n        raise ValueError(\"--run requires --runtime and --model\")\n    binary, model = args.runtime.resolve(), args.model.resolve()\n    source_root = Path(__file__).resolve().parent / \"native-reading-qwen\"\n    template = source_root / \"chat_template.jinja\"\n    expected_template = read_json(source_root / \"author-source-record.json\")[\"chat_template.jinja\"]\n    if digest(template) != expected_template[\"sha256\"]:\n        raise ValueError(\"pinned author chat template hash mismatch\")\n    if model.stat().st_size != MODEL_BYTES or digest(model) != MODEL_SHA256:\n        raise ValueError(\"model does not match pinned official Qwen3.5-4B Q4_K_M\")\n    if named_workers():\n        raise RuntimeError(\"another llama worker is active\")\n    subprocess.run([\"/usr/bin/codesign\", \"--verify\", \"--strict\", str(binary)], check=True, timeout=5,\n                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)\n    version = subprocess.run([str(binary), \"--version\"], capture_output=True, text=True, timeout=5, check=True)\n    version_text = version.stdout + version.stderr\n    if \"b9992\" not in version_text and \"6eddde06\" not in version_text:\n        raise ValueError(\"runtime version is not pinned b9992 / 6eddde06\")\n    report.update(runtimeSHA256=digest(binary), runtimeVersion=version_text.strip(), modelSHA256=MODEL_SHA256,\n                  authorTemplateSHA256=expected_template[\"sha256\"])\n    libproc = ctypes.CDLL(\"/usr/lib/libproc.dylib\")\n    libproc.proc_pid_rusage.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]\n    libproc.proc_pid_rusage.restype = ctypes.c_int\n    def memory(pid):\n        buffer = ctypes.create_string_buffer(1024)\n        if libproc.proc_pid_rusage(pid, 4, ctypes.byref(buffer)) != 0:\n            return None\n        return max(struct.unpack_from(\"=QQ\", buffer.raw, 64))\n    if not memory(os.getpid()):\n        raise RuntimeError(\"memory accounting unavailable\")\n    token = secrets.token_urlsafe(32)\n    key = output / \"temporary-api-key\"\n    with os.fdopen(os.open(key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), \"w\") as handle:\n        handle.write(token)\n    with socket.socket() as sock:\n        sock.bind((\"127.0.0.1\", 0))\n        port = sock.getsockname()[1]\n    # Match the application's native-text launch profile exactly, apart from\n    # the verified candidate model path, dynamic port and temporary credential.\n    arguments = [str(binary), \"--model\", str(model), \"--alias\", \"native-form-planner-v2\",\n        \"--host\", \"127.0.0.1\", \"--port\", str(port), \"--api-key-file\", str(key),\n        \"--offline\", \"--no-ui\", \"--no-mmproj\", \"--log-disable\", \"--parallel\", \"1\",\n        \"--ctx-size\", \"4096\", \"--cache-ram\", \"0\", \"--threads\", \"2\", \"--threads-batch\", \"2\",\n        \"--poll\", \"0\", \"--poll-batch\", \"0\", \"--n-gpu-layers\", \"99\", \"--jinja\",\n        \"--reasoning\", \"on\", \"--reasoning-budget\", \"512\"]\n    report[\"launchProfile\"] = \"Application native-text arguments; embedded model template; author source hash retained; request enable_thinking=true, max_tokens1024, reasoning budget512. Standalone lifecycle watchdog retains 4GiB cap.\"\n\n    write_json(output / \"launch-arguments.json\", arguments)\n    process, watcher = None, None\n    done = threading.Event()\n    started = time.monotonic()\n    phase = {\"name\": \"startup\", \"deadline\": started + 45}\n    lock = threading.Lock()\n    def stop_owned():\n        if process is not None and process.poll() is None:\n            try:\n                os.killpg(process.pid, signal.SIGTERM)\n            except ProcessLookupError:\n                pass\n    def monitor():\n        last_count, missed = 0.0, 0\n        while not done.wait(0.1):\n            if process.poll() is not None:\n                return\n            now = time.monotonic()\n            measured = memory(process.pid)\n            missed = missed + 1 if measured is None else 0\n            if measured is not None:\n                report[\"memorySamples\"] += 1\n                report[\"peakSampledProcessMemoryBytes\"] = max(report[\"peakSampledProcessMemoryBytes\"], measured)\n            reason = \"memory-limit\" if measured is not None and measured > 4 * GIB else None\n            if missed >= 10:\n                reason = \"memory-accounting-unavailable\"\n            with lock:\n                if now > phase[\"deadline\"]:\n                    reason = phase[\"name\"] + \"-deadline\"\n            if now - started > 100:\n                reason = \"total-deadline\"\n            if now - last_count >= 1:\n                try:\n                    workers = named_workers()\n                    report[\"peakNamedWorkerCount\"] = max(report[\"peakNamedWorkerCount\"], len(workers))\n                    if workers != [process.pid]:\n                        reason = \"worker-count\"\n                except Exception:\n                    reason = \"worker-count-unavailable\"\n                last_count = now\n            if reason:\n                report[\"watchdogReason\"] = reason\n                stop_owned()\n                if not done.wait(1) and process.poll() is None:\n                    try:\n                        os.killpg(process.pid, signal.SIGKILL)\n                    except ProcessLookupError:\n                        pass\n                return\n    class NoRedirect(urllib.request.HTTPRedirectHandler):\n        def redirect_request(self, *unused, **kwargs):\n            return None\n    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())\n    def fetch(path, body=None, timeout=5, authorized=True):\n        headers = {\"Content-Type\": \"application/json\"}\n        if authorized:\n            headers[\"Authorization\"] = \"Bearer \" + token\n        request = urllib.request.Request(\"http://127.0.0.1:\" + str(port) + path,\n                                         data=None if body is None else json.dumps(body,ensure_ascii=False,separators=(\",\", \":\")).encode(\"utf-8\"), headers=headers)\n        try:\n            with opener.open(request, timeout=timeout) as response:\n                data = response.read(2 * 1024 ** 2 + 1)\n                if len(data) > 2 * 1024 ** 2:\n                    raise ValueError(\"loopback response exceeds bound\")\n                return json.loads(data)\n        except urllib.error.HTTPError as error:\n            detail = error.read(16384).decode(\"utf-8\", errors=\"replace\").replace(token, \"<redacted>\")\n            report.setdefault(\"httpErrors\", []).append({\"path\": path, \"status\": error.code, \"body\": detail})\n            raise\n    try:\n        with (output / \"server.log\").open(\"wb\") as log:\n            process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,\n                                       start_new_session=True, env={k:v for k,v in os.environ.items() if not k.startswith((\"LLAMA_\", \"GGML_\", \"HF_\", \"HUGGINGFACE_\"))})\n            report[\"ownedPID\"] = process.pid\n            watcher = threading.Thread(target=monitor, daemon=True)\n            watcher.start()\n            while True:\n                if process.poll() is not None or report.get(\"watchdogReason\"):\n                    raise RuntimeError(\"owned worker stopped during startup\")\n                if time.monotonic() > started + 45:\n                    raise TimeoutError(\"startup exceeded 45 seconds\")\n                try:\n                    if fetch(\"/health\", timeout=1).get(\"status\") == \"ok\":\n                        break\n                except (urllib.error.URLError, TimeoutError):\n                    pass\n                time.sleep(0.1)\n            report[\"startupSeconds\"] = time.monotonic() - started\n            try:\n                fetch(\"/v1/chat/completions\", body={}, authorized=False)\n                raise RuntimeError(\"inference endpoint accepted an unauthenticated request\")\n            except urllib.error.HTTPError as error:\n                if error.code != 401:\n                    raise\n            report[\"unauthenticatedRequestRejected\"] = True\n            for number, case in enumerate(args.cases, 1):\n                with lock:\n                    phase.update(name=\"case-\" + str(number), deadline=time.monotonic() + 45)\n                request = checker_request(case)\n                write_json(output / (\"request-%02d.json\" % number), request)\n                print(json.dumps({\"stage\": \"case\", \"number\": number, \"id\": case[\"id\"]}), flush=True)\n                applied = fetch(\"/apply-template\", request)\n                prompt = applied.get(\"prompt\")\n                if not isinstance(prompt, str) or SYSTEM not in prompt or \"Current date: 2026-07-14\" in prompt or not prompt.endswith(\"<|im_start|>assistant\\n<think>\\n\"):\n                    raise ValueError(\"author thinking prefill not verified\")\n                (output / (\"prompt-%02d.txt\" % number)).write_text(prompt)\n                tokens = fetch(\"/tokenize\", {\"content\": prompt, \"add_special\": False, \"parse_special\": True})[\"tokens\"]\n                if len(tokens) + OUTPUT_TOKENS + 64 > CONTEXT:\n                    raise ValueError(\"complete input and response reserve exceed 4K; no truncation\")\n                began = time.monotonic()\n                response = fetch(\"/v1/chat/completions\", request, timeout=45)\n                write_json(output / (\"response-%02d.json\" % number), response)\n                report[\"cases\"].append({\"id\": case[\"id\"], \"inputTokens\": len(tokens),\n                    \"seconds\": time.monotonic() - began, \"usage\": response.get(\"usage\"),\n                    \"response\": response})\n                report[\"status\"] = \"response-collected-unqualified\"\n\n    finally:\n        # Stop observation before intentional process shutdown so an empty\n        # process list during joined cleanup is not misreported as overlap.\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        stop_owned()\n        if process is not None:\n            try:\n                process.wait(timeout=3)\n            except subprocess.TimeoutExpired:\n                os.killpg(process.pid, signal.SIGKILL)\n                process.wait(timeout=3)\n            report[\"ownedProcessExited\"] = process.poll() is not None\n            report[\"exitCode\"] = process.returncode\n        done.set()\n        if watcher is not None:\n            watcher.join(timeout=4)\n        key.unlink(missing_ok=True)\n        report[\"credentialRemoved\"] = not key.exists()\n        report[\"workerWallSeconds\"] = time.monotonic() - started\n\n\ndef checker_request(case):\n    return case[\"request\"]\n\ndef main():\n    from types import SimpleNamespace\n    global SYSTEM\n    parser=argparse.ArgumentParser()\n    parser.add_argument(\"--request\",type=Path,required=True)\n    parser.add_argument(\"--output\",type=Path,required=True)\n    parser.add_argument(\"--case\",required=True)\n    opts=parser.parse_args()\n    base=Path(__file__).resolve().parent\n    output=opts.output.resolve();output.mkdir(exist_ok=False)\n    origin=opts.request.resolve(); request=read_json(origin)\n    (output/\"probe.py\").write_bytes(Path(__file__).read_bytes())\n    SYSTEM=request[\"messages\"][0][\"content\"]\n    if request[\"max_tokens\"] != 768 or request[\"model\"] != \"native-form-planner-v2\":\n        raise ValueError(\"unexpected frozen request contract\")\n    raw=origin.read_bytes()\n    (output/\"original-request-body.json\").write_bytes(raw)\n    report={\"status\":\"prepared\", \"cases\":[], \"plannedCount\":1, \"memorySamples\":0,\n        \"peakSampledProcessMemoryBytes\":0, \"peakNamedWorkerCount\":0,\n        \"memoryStopLimitBytes\":4*GIB, \"contextTokens\":CONTEXT, \"maxOutputTokens\":OUTPUT_TOKENS,\n        \"thinkingEnabled\":True, \"wholeMacRAMTargetGB\":12, \"wholeMacQualified\":False,\n        \"productionChanged\":False, \"modelSelectionChanged\":False, \"applicationEffects\":[],\n        \"nativeRecordReplayOnly\":True, \"modelIdentity\":\"Qwen3.5-4B Q4_K_M\",\n        \"oracleSuppliedToModel\":False, \"sourceSHA256\":digest(Path(__file__)),\n        \"requestPath\":str(origin), \"originalRequestBodySHA256\":hashlib.sha256(raw).hexdigest(),\n        \"canonicalRequestSHA256\":hashlib.sha256(encoded(request)).hexdigest(),\n        \"comparison\":\"One bounded reasoning comparison on the same isolated goal-only conditional request. Only enable_thinking=true and max_tokens1024 differ; same prompt, original goal, ordered schema, sampling, verified Qwen weights, production launch profile reasoning-budget512 and 4GiB cap. No application changes or effects.\",\n        \"hostCompletionAccepted\":None}\n    args=SimpleNamespace(cases=[{\"id\":opts.case,\"request\":request}],\n        runtime=Path(\"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\"),\n        model=Path(\"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\"))\n    def cancelled(signum,frame): raise KeyboardInterrupt(\"signal \"+str(signum))\n    signal.signal(signal.SIGTERM,cancelled)\n    try: run(args,output,report,None,None,None,None)\n    except BaseException as error:\n        report[\"status\"]=\"failed\";report[\"error\"]=type(error).__name__+\": \"+str(error)\n    finally: write_json(output/\"result.json\",report)\n    print(json.dumps({\"status\":report[\"status\"],\"error\":report.get(\"error\"),\n        \"cases\":[{\"id\":x[\"id\"],\"seconds\":x[\"seconds\"],\"inputTokens\":x[\"inputTokens\"],\n                  \"message\":x[\"response\"][\"choices\"][0][\"message\"]} for x in report[\"cases\"]],\n        \"peakBytes\":report[\"peakSampledProcessMemoryBytes\"],\"workers\":report[\"peakNamedWorkerCount\"],\n        \"exited\":report.get(\"ownedProcessExited\"),\"watchdog\":report.get(\"watchdogReason\")},indent=2))\n    return 0 if report[\"status\"]==\"response-collected-unqualified\" else 1\n\nif __name__==\"__main__\": sys.exit(main())\n"
+    },
+    "a68571307bc1ba81ca55d82826062b86051c11b1eb0bc99ada701f4d550621a9": {
+      "sha256": "a68571307bc1ba81ca55d82826062b86051c11b1eb0bc99ada701f4d550621a9",
+      "byteCount": 2169,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/original-request-body.json"
+      ],
+      "content": "{\"cache_prompt\":false,\"chat_template_kwargs\":{\"enable_thinking\":true},\"max_tokens\":1024,\"messages\":[{\"content\":\"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\"role\":\"system\"},{\"content\":\"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.\\\",\\\"clarifications\\\":[]}\",\"role\":\"user\"}],\"min_p\":0,\"model\":\"native-form-planner-v2\",\"presence_penalty\":1.5,\"repeat_penalty\":1,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"native_goal_contract\",\"strict\":true,\"schema\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"objective\":{\"type\":\"string\"},\"constraints\":{\"type\":\"array\",\"minItems\":0,\"maxItems\":8,\"items\":{\"type\":\"string\"}},\"requirements\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":8,\"items\":{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"instruction\":{\"type\":\"string\"},\"kind\":{\"type\":\"string\",\"enum\":[\"information\",\"action\"]}},\"required\":[\"instruction\",\"kind\"]}}},\"required\":[\"objective\",\"constraints\",\"requirements\"]}}},\"seed\":20260914,\"stream\":false,\"temperature\":0.7,\"top_k\":20,\"top_p\":0.8}"
+    },
+    "6feb77b9c5fab11312fc3213459c03cefb89bcef0a9db3b1f42f452e2a5c354d": {
+      "sha256": "6feb77b9c5fab11312fc3213459c03cefb89bcef0a9db3b1f42f452e2a5c354d",
+      "byteCount": 2989,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/request-01.json"
+      ],
+      "content": "{\n  \"cache_prompt\": false,\n  \"chat_template_kwargs\": {\n    \"enable_thinking\": true\n  },\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"content\": \"Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\",\n      \"role\": \"system\"\n    },\n    {\n      \"content\": \"{\\\"goal\\\":\\\"Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.\\\",\\\"clarifications\\\":[]}\",\n      \"role\": \"user\"\n    }\n  ],\n  \"min_p\": 0,\n  \"model\": \"native-form-planner-v2\",\n  \"presence_penalty\": 1.5,\n  \"repeat_penalty\": 1,\n  \"response_format\": {\n    \"type\": \"json_schema\",\n    \"json_schema\": {\n      \"name\": \"native_goal_contract\",\n      \"strict\": true,\n      \"schema\": {\n        \"type\": \"object\",\n        \"additionalProperties\": false,\n        \"properties\": {\n          \"objective\": {\n            \"type\": \"string\"\n          },\n          \"constraints\": {\n            \"type\": \"array\",\n            \"minItems\": 0,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"string\"\n            }\n          },\n          \"requirements\": {\n            \"type\": \"array\",\n            \"minItems\": 1,\n            \"maxItems\": 8,\n            \"items\": {\n              \"type\": \"object\",\n              \"additionalProperties\": false,\n              \"properties\": {\n                \"instruction\": {\n                  \"type\": \"string\"\n                },\n                \"kind\": {\n                  \"type\": \"string\",\n                  \"enum\": [\n                    \"information\",\n                    \"action\"\n                  ]\n                }\n              },\n              \"required\": [\n                \"instruction\",\n                \"kind\"\n              ]\n            }\n          }\n        },\n        \"required\": [\n          \"objective\",\n          \"constraints\",\n          \"requirements\"\n        ]\n      }\n    }\n  },\n  \"seed\": 20260914,\n  \"stream\": false,\n  \"temperature\": 0.7,\n  \"top_k\": 20,\n  \"top_p\": 0.8\n}\n"
+    },
+    "248abacb006aa59cb1b1d7ef70bc2519c6909603eac4224dc7899acf5023f6aa": {
+      "sha256": "248abacb006aa59cb1b1d7ef70bc2519c6909603eac4224dc7899acf5023f6aa",
+      "byteCount": 4264,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/response-01.json"
+      ],
+      "content": "{\n  \"choices\": [\n    {\n      \"finish_reason\": \"stop\",\n      \"index\": 0,\n      \"message\": {\n        \"role\": \"assistant\",\n        \"content\": \"{\\n  \\\"objective\\\": \\\"Extract flat fee, advance-notice deadline, and waiver membership level for returning SFJAZZ tickets from ticket-policies.\\\",\\n  \\\"constraints\\\": [\\n    \\\"Do not return or purchase any tickets.\\\"\\n  ],\\n  \\\"requirements\\\": [\\n    {\\n      \\\"instruction\\\": \\\"Open https://www.sfjazz.org/tickets/ticket-policies/ to locate policy details.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Identify the flat fee for returning tickets for box-office credit.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Identify the advance-notice deadline for returning tickets for box-office credit.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Identify which membership level waives the fee.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    },\\n    {\\n      \\\"instruction\\\": \\\"Include the official source link in the output.\\\",\\n      \\\"kind\\\": \\\"information\\\"\\n    }\\n  ]\\n}\",\n        \"reasoning_content\": \"Thinking Process:\\n\\n1.  **Analyze the Request:**\\n    *   Input: A JSON object containing a `goal` and `clarifications`.\\n    *   Goal: Open a specific URL (https://www.sfjazz.org/tickets/ticket-policies/), extract specific information (flat fee, advance-notice deadline for returning tickets for box-office credit, membership level that waives the fee), include the official source link. Constraint: Do not return or purchase any tickets.\\n    *   Clarifications: Empty list `[]`.\\n    *   Instructions for me (the model): Interpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.\\n\\n2.  **Deconstruct the Goal:**\\n    *   Action: Open URL (https://www.sfjazz.org/tickets/ticket-policies/). This counts as \\\"information\\\" (reading/opening) per instructions, not a state-changing purchase action.\\n    *   Information Required 1: Flat fee for returning SFJAZZ concert tickets for box-office credit.\\n    *   Information Required 2: Advance-notice deadline for returning SFJAZZ concert tickets for box-office credit.\\n    *   Information Required 3: Which membership level waives the fee.\\n    *   Source Requirement: Include the official source link.\\n    *   Constraint: Do not return or purchase any tickets. (Prohibition/Constraint).\\n\\n3.  **Map to Output Schema:**\\n    *   The instructions say: \\\"Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action.\\\"\\n    *   Wait, looking closely at the instruction: \\\"Return only the schema...\\\". This usually means\"\n      }\n    }\n  ],\n  \"created\": 1790212490,\n  \"model\": \"native-form-planner-v2\",\n  \"system_fingerprint\": \"b9992-6eddde06a\",\n  \"object\": \"chat.completion\",\n  \"usage\": {\n    \"completion_tokens\": 745,\n    \"prompt_tokens\": 250,\n    \"total_tokens\": 995,\n    \"prompt_tokens_details\": {\n      \"cached_tokens\": 0\n    }\n  },\n  \"id\": \"chatcmpl-lzN2RxxF97QZkUKOrtuFlH1FXKgHU1Fb\",\n  \"timings\": {\n    \"cache_n\": 0,\n    \"prompt_n\": 250,\n    \"prompt_ms\": 413.817,\n    \"prompt_per_token_ms\": 1.655268,\n    \"prompt_per_second\": 604.1317780564839,\n    \"predicted_n\": 745,\n    \"predicted_ms\": 12878.787,\n    \"predicted_per_token_ms\": 17.286962416107382,\n    \"predicted_per_second\": 57.847062770740756\n  }\n}\n"
+    },
+    "65cff1d15fb6b7c4455220f9fb88e03a40739f9805924e843b4ba0311f6c0d67": {
+      "sha256": "65cff1d15fb6b7c4455220f9fb88e03a40739f9805924e843b4ba0311f6c0d67",
+      "byteCount": 1343,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/prompt-01.txt"
+      ],
+      "content": "<|im_start|>system\nInterpret only the complete original goal and ordered clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Distinguish information from actions; opening/searching/reading are information. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only the schema: concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.<|im_end|>\n<|im_start|>user\n{\"goal\":\"Open https://www.sfjazz.org/tickets/ticket-policies/. Tell me the flat fee and advance-notice deadline for returning SFJAZZ concert tickets for box-office credit, and which membership level waives the fee. Include the official source link. Do not return or purchase any tickets.\",\"clarifications\":[]}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+    },
+    "ee6f0f083966a136f84db7a16fd1e1be32252304553224a6091f524065418e90": {
+      "sha256": "ee6f0f083966a136f84db7a16fd1e1be32252304553224a6091f524065418e90",
+      "byteCount": 957,
+      "encoding": "utf-8",
+      "paths": [
+        ".build/repair-verification/qwen-goal-contract-thinking-original-01/launch-arguments.json"
+      ],
+      "content": "[\n  \"/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server\",\n  \"--model\",\n  \"/Users/michael/Library/Application Support/Remote Desktop Host/Native Text Model/Models/qwen35-4b-q4-k-m-native-text-v2-b9992/Qwen3.5-4B-Q4_K_M.gguf\",\n  \"--alias\",\n  \"native-form-planner-v2\",\n  \"--host\",\n  \"127.0.0.1\",\n  \"--port\",\n  \"52205\",\n  \"--api-key-file\",\n  \"/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/qwen-goal-contract-thinking-original-01/temporary-api-key\",\n  \"--offline\",\n  \"--no-ui\",\n  \"--no-mmproj\",\n  \"--log-disable\",\n  \"--parallel\",\n  \"1\",\n  \"--ctx-size\",\n  \"4096\",\n  \"--cache-ram\",\n  \"0\",\n  \"--threads\",\n  \"2\",\n  \"--threads-batch\",\n  \"2\",\n  \"--poll\",\n  \"0\",\n  \"--poll-batch\",\n  \"0\",\n  \"--n-gpu-layers\",\n  \"99\",\n  \"--jinja\",\n  \"--reasoning\",\n  \"on\",\n  \"--reasoning-budget\",\n  \"512\"\n]\n"
+    }
+  }
+}
