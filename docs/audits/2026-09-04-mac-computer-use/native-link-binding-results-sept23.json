@@ -18194,5 +18194,55 @@
     "No test count, cleanup result, semantic acceptance or final-source status is inferred from run names.",
     "Result paths may be run/probe/result.json or run/result.json; both are retained if present.",
     "The generator reads recorded evidence and xcresult summaries only; it does not run builds, tests, models or browser actions."
+  ],
+  "evidenceCorrections": [
+    {
+      "date": "2026-09-23",
+      "subject": "Agents-A1 launch-profile comparison",
+      "finding": "The retained candidate runner used --threads 2 and --threads-batch 2. The production native configuration and Qwen exact-request runner use 4 for both flags. Statements in the copied candidate report that only weights/template differ or all launch flags match are inaccurate. The request-body parity remains verified; no timing equivalence or production resource qualification follows.",
+      "authoritativeSource": {
+        "path": "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift",
+        "sha256": "a9ddbfa0e94fd5bbb94866739e2cc47beb3f5ae511d3b7d051bd1acc4a7b614d",
+        "workerThreads": 4
+      },
+      "candidateArguments": [
+        "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe/RemoteDesktopHost.app/Contents/Resources/ComputerUseRuntime/llama-b9992/llama-server",
+        "--model",
+        "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/agents-a1-model-q4/Agents-A1-4B-Q4_K_M.gguf",
+        "--alias",
+        "native-form-planner-v2",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "56792",
+        "--api-key-file",
+        "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-link-agents-first-window-01/temporary-api-key",
+        "--offline",
+        "--no-ui",
+        "--no-mmproj",
+        "--log-disable",
+        "--parallel",
+        "1",
+        "--ctx-size",
+        "4096",
+        "--cache-ram",
+        "0",
+        "--threads",
+        "2",
+        "--threads-batch",
+        "2",
+        "--poll",
+        "0",
+        "--poll-batch",
+        "0",
+        "--n-gpu-layers",
+        "99",
+        "--jinja",
+        "--reasoning",
+        "on",
+        "--reasoning-budget",
+        "512"
+      ]
+    }
   ]
 }
