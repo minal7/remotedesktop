@@ -716,7 +716,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let contractJSON = try JSONSerialization.data(withJSONObject: ["objective": "Open the requested source and report its heading.",
             "constraints": [], "requirements": [
                 ["instruction": "Open \(url.absoluteString).", "kind": "action",
-                    "expectedEffect": ["type": "openURL", "url": url.absoluteString]],
+                    "expectedEffect": ["type": "openURL", "reference": "user-url-1"]],
                 ["instruction": "Report the page heading.", "kind": "information"]
             ]], options: [.sortedKeys, .withoutEscapingSlashes])
         let contract = try response(["role": "assistant", "content": String(decoding: contractJSON, as: UTF8.self)])

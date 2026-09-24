@@ -1705,7 +1705,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let page = compactReadingPage(text: "Starting page heading", label: "Starting page heading")
         let planner = ComputerUseMCPBrowserStepPlanner()
         let context = try planner.context(input, page: page, wholePage: true)
-        let goalContract = #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open https://example.org/policy.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy"}},{"instruction":"Report its heading.","kind":"information"}]}"#
+        let goalContract = #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open https://example.org/policy.","kind":"action","expectedEffect":{"type":"openURL","reference":"user-url-1"}},{"instruction":"Report its heading.","kind":"information"}]}"#
         let transport = NativeStepQueueFixtureTransport(responses: [
             try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
             try nativeStepEnvelope(goalContract),
@@ -1744,6 +1744,44 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "A planner proposal alone is not a host-verified navigation receipt")
     }
 
+    func testNativeBrowserInterpretsSuppliedURLReferencesWithoutCopyingURLText() async throws {
+        let current = URL(string: "https://example.org/start")!
+        let source = URL(string: "https://example.org/policy?edition=2026")!
+        let original = "Open the source I provide and report its current heading."
+        let unresolved = try ComputerUseUnresolvedTextGoal(userRequest: original)
+        let goal = try unresolved.answering("Which source should I open?", with: "Use \(source.absoluteString).")
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: current,
+            clarifiedGoal: goal)
+        let page = compactReadingPage(text: "Starting page heading", label: "Starting page heading")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let goalContract = #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the requested source.","kind":"action","expectedEffect":{"type":"openURL","reference":"user-url-1"}},{"instruction":"Report its heading.","kind":"information"}]}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(goalContract),
+            try nativeBrowserFunctionEnvelope("openLink", argumentsJSON: #"{"reference":"user-url-1"}"#)
+        ])
+
+        let plan = try await nativeStepPlanner(transport: transport).propose(context)
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 3)
+
+        let goalRequest = try nativeStepUserObject(calls.requests[1])
+        XCTAssertEqual(goalRequest["goal"] as? String, original)
+        XCTAssertEqual(goalRequest["clarifications"] as? [[String: String]], goal.clarificationContext)
+        XCTAssertEqual(goalRequest["suppliedURLs"] as? [String: String], ["user-url-1": source.absoluteString])
+        let wire = String(decoding: calls.requests[1], as: UTF8.self)
+        XCTAssertTrue(wire.contains("\"enum\":[\"user-url-1\"]"), "The openURL schema must enumerate supplied URL references")
+        XCTAssertFalse(wire.contains("\"url\":{\"type\":\"string\"}"), "The model must not receive a raw URL field for openURL")
+
+        XCTAssertEqual(plan.kind, .openLink)
+        XCTAssertEqual(plan.reference, "user-url-1")
+        let retained = try XCTUnwrap(plan.retainedContract)
+        let openRequirement = try XCTUnwrap(retained.requirements.first { $0.kind == .action })
+        XCTAssertEqual(openRequirement.expectedEffect, .openURL(source.absoluteString))
+        XCTAssertEqual(plan.assessment?.requirements.map(\.state), [.pending, .pending],
+            "A reference proposal is not proof that navigation completed")
+    }
+
     func testNativeBrowserRejectsMalformedOrUnrequestedOpenURLEffects() async throws {
         let current = URL(string: "https://example.org/start")!
         let supplied = URL(string: "https://example.org/policy")!
@@ -1755,9 +1793,15 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
         let prerequisite = try nativeStepEnvelope(#"{"kind":"continue","text":""}"#)
         let malformedContracts = [
-            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy","extra":true}},{"instruction":"Report its heading.","kind":"information"}]}"#,
-            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open another source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/not-requested"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
-            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action"},{"instruction":"Report its heading.","kind":"information"}]}"#
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","reference":"user-url-1","extra":true}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","reference":1}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","reference":""}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the requested source and report its heading.","constraints":[],"requirements":[{"instruction":"Open another source.","kind":"action","expectedEffect":{"type":"openURL","reference":"user-url-2"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open a page link.","constraints":[],"requirements":[{"instruction":"Open the page link.","kind":"action","expectedEffect":{"type":"openURL","reference":"l1"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the supplied source.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action"},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the supplied source.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy"}},{"instruction":"Report its heading.","kind":"information"}]}"#,
+            #"{"objective":"Open the supplied source.","constraints":[],"requirements":[{"instruction":"Open the supplied source.","kind":"action","expectedEffect":{"type":"openURL","url":"https://example.org/policy","reference":"user-url-1"}},{"instruction":"Report its heading.","kind":"information"}]}"#
         ]
         for contract in malformedContracts {
             let transport = NativeStepQueueFixtureTransport(responses: [prerequisite, try nativeStepEnvelope(contract)])
@@ -1771,6 +1815,53 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             XCTAssertEqual(calls.completions, 2)
             XCTAssertEqual(calls.counts, 2)
         }
+    }
+
+    func testNativeBrowserDoesNotTreatCurrentPageAsSuppliedURLAuthority() async throws {
+        let current = URL(string: "https://example.org/current")!
+        let original = "Open the current page and report its heading."
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
+        let input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: Data(), currentURL: current,
+            clarifiedGoal: goal)
+        let page = compactReadingPage(text: "Current page heading", label: "Current page heading")
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let attemptedOpen = #"{"objective":"Open the current page and report its heading.","constraints":[],"requirements":[{"instruction":"Open the current page.","kind":"action","expectedEffect":{"type":"openURL","reference":"user-url-1"}},{"instruction":"Report its heading.","kind":"information"}]}"#
+        let transport = NativeStepQueueFixtureTransport(responses: [
+            try nativeStepEnvelope(#"{"kind":"continue","text":""}"#),
+            try nativeStepEnvelope(attemptedOpen)
+        ])
+
+        do {
+            _ = try await nativeStepPlanner(transport: transport).propose(context)
+            XCTFail("The current page URL must not create user-supplied URL authority")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse)
+        }
+        let calls = await transport.snapshot()
+        XCTAssertEqual(calls.completions, 2, "An unknown reference must be rejected without another inference")
+        XCTAssertEqual(calls.counts, 2)
+        let request = calls.requests[1]
+        let user = try nativeStepUserObject(request)
+        XCTAssertEqual(user["suppliedURLs"] as? [String: String], [:])
+        let requestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let responseFormat = try XCTUnwrap(requestObject["response_format"] as? [String: Any])
+        let jsonSchema = try XCTUnwrap(responseFormat["json_schema"] as? [String: Any])
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        let schemaProperties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let requirements = try XCTUnwrap(schemaProperties["requirements"] as? [String: Any])
+        let requirementItems = try XCTUnwrap(requirements["items"] as? [String: Any])
+        let requirementBranches = try XCTUnwrap(requirementItems["oneOf"] as? [[String: Any]])
+        let actionBranch = try XCTUnwrap(requirementBranches.first {
+            (($0["properties"] as? [String: Any])?["kind"] as? [String: Any])?["enum"] as? [String] == ["action"]
+        })
+        let actionProperties = try XCTUnwrap(actionBranch["properties"] as? [String: Any])
+        let expectedEffect = try XCTUnwrap(actionProperties["expectedEffect"] as? [String: Any])
+        let effectBranches = try XCTUnwrap(expectedEffect["oneOf"] as? [[String: Any]])
+        XCTAssertFalse(effectBranches.contains {
+            (($0["properties"] as? [String: Any])?["type"] as? [String: Any])?["enum"] as? [String] == ["openURL"]
+        }, "The openURL effect variant must be absent without supplied URLs")
+        XCTAssertFalse(String(decoding: request, as: UTF8.self).contains(current.absoluteString),
+            "The current page URL is not a supplied user destination")
     }
 
     func testNativeBrowserCreditsOnlyExactOwnedOpenURLReceipt() async throws {
@@ -1797,7 +1888,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let contractObject: [String: Any] = ["objective": "Open the requested source and report the current page heading.",
             "constraints": [], "requirements": [
                 ["instruction": "Open the supplied policy page.", "kind": "action",
-                    "expectedEffect": ["type": "openURL", "url": sourceURL.absoluteString]],
+                    "expectedEffect": ["type": "openURL", "reference": "user-url-1"]],
                 ["instruction": "Report the current page heading.", "kind": "information"]
             ]]
         let contract = String(decoding: try JSONSerialization.data(withJSONObject: contractObject,

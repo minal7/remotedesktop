@@ -64,7 +64,7 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
     private struct InitialWholePageCapacityExceeded: Error {}
 
     private static let goalInstructions = """
-    Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Information requirements request facts or reported results. An action that only requests opening a supplied URL has expectedEffect {type:openURL,url:<the exact supplied URL>}. Every other requested state-changing action has expectedEffect {type:unsupported}; retain its full instruction and conditions. Steps to obtain requested information need not become separate action requirements. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.
+    Interpret only the complete original goal and ordered accepted clarification answers in the user JSON. Questions supply context; answers carry user authority. Preserve every requested final outcome, information requirement, state-changing action, source constraint, prohibition, and quoted literal content. Do not replace an action with preparation or explanation. Information requirements request facts or reported results. An action that only requests opening a supplied URL has expectedEffect {type:openURL,reference:<an exact reference from suppliedURLs>}. Every other requested state-changing action has expectedEffect {type:unsupported}; retain its full instruction and conditions. Steps to obtain requested information need not become separate action requirements. Prohibitions are constraints, not actions; quoted content requested for entry or discussion is not an instruction to perform its contents. Keep constraints to user-stated conditions; do not invent constraints or facts. Return only a concise objective, user constraints, and one requirement for each requested outcome, each labeled information or action. Do not assess completion, evidence, observations, routing, tools, or next steps. Do not omit unresolved work or infer that an action is complete.
     """
 
     private static let prerequisiteInstructions = """
@@ -208,21 +208,30 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
         return request
     }
 
-    private func makeGoalRequest(_ goal: ComputerUseUnresolvedTextGoal) throws -> URLRequest {
+    private func makeGoalRequest(_ goal: ComputerUseUnresolvedTextGoal,
+                                 suppliedURLs: [String: URL]) throws -> URLRequest {
+        let urlReferences = suppliedURLs.keys.sorted()
         let user = try Self.orderedJSON(["goal": goal.userTurns[0],
-            "clarifications": goal.clarificationContext])
+            "clarifications": goal.clarificationContext,
+            "suppliedURLs": suppliedURLs.mapValues(\.absoluteString)])
         let informationRequirement: [String: Any] = ["type": "object", "additionalProperties": false,
             "properties": ["instruction": ["type": "string"], "kind": ["type": "string", "enum": ["information"]]],
             "required": ["instruction", "kind"]]
-        let openURL: [String: Any] = ["type": "object", "additionalProperties": false,
-            "properties": ["type": ["type": "string", "enum": ["openURL"]], "url": ["type": "string"]],
-            "required": ["type", "url"]]
+        var effects: [[String: Any]] = []
+        if !urlReferences.isEmpty {
+            let openURL: [String: Any] = ["type": "object", "additionalProperties": false,
+                "properties": ["type": ["type": "string", "enum": ["openURL"]],
+                    "reference": ["type": "string", "enum": urlReferences]],
+                "required": ["type", "reference"]]
+            effects.append(openURL)
+        }
         let unsupported: [String: Any] = ["type": "object", "additionalProperties": false,
             "properties": ["type": ["type": "string", "enum": ["unsupported"]]],
             "required": ["type"]]
+        effects.append(unsupported)
         let actionRequirement: [String: Any] = ["type": "object", "additionalProperties": false,
             "properties": ["instruction": ["type": "string"], "kind": ["type": "string", "enum": ["action"]],
-                "expectedEffect": ["oneOf": [openURL, unsupported]]],
+                "expectedEffect": ["oneOf": effects]],
             "required": ["instruction", "kind", "expectedEffect"]]
         let requirement: [String: Any] = ["oneOf": [informationRequirement, actionRequirement]]
         let schema: [String: Any] = ["type": "object", "additionalProperties": false,
@@ -477,7 +486,7 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
     private func interpret(_ goal: ComputerUseUnresolvedTextGoal,
                            suppliedURLs: [String: URL]) async throws -> ComputerUseBrowserIntentContract {
         try Task.checkCancellation()
-        let request = try makeGoalRequest(goal)
+        let request = try makeGoalRequest(goal, suppliedURLs: suppliedURLs)
         let count = try await transport.exactInputTokenCount(completionRequest: request)
         try Task.checkCancellation()
         guard count > 0, count <= Self.contextTokens - 1024 - Self.framingReserve else {
@@ -531,13 +540,15 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
                     guard Set(effect.keys) == ["type"] else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
                     expectedEffect = .unsupported
                 case "openURL":
-                    guard Set(effect.keys) == ["type", "url"],
-                          case .string(let rawURL)? = effect["url"], (1...2048).contains(rawURL.utf8.count),
-                          let url = URL(string: rawURL), ComputerUseOwnedBrowser.validatedURL(url) != nil,
-                          suppliedURLs.values.contains(where: { $0.absoluteString.utf8.elementsEqual(rawURL.utf8) }) else {
+                    guard Set(effect.keys) == ["type", "reference"],
+                          case .string(let reference)? = effect["reference"],
+                          let suppliedURL = suppliedURLs[reference],
+                          (1...2048).contains(suppliedURL.absoluteString.utf8.count),
+                          let validatedURL = ComputerUseOwnedBrowser.validatedURL(suppliedURL),
+                          validatedURL.absoluteString.utf8.elementsEqual(suppliedURL.absoluteString.utf8) else {
                         throw ComputerUseBrowserGoalPlanError.invalidResponse
                     }
-                    expectedEffect = .openURL(rawURL)
+                    expectedEffect = .openURL(suppliedURL.absoluteString)
                 default:
                     throw ComputerUseBrowserGoalPlanError.invalidResponse
                 }
