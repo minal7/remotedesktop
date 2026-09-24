@@ -6,15 +6,15 @@ Status: the first managed native-browser path is implemented, compiled and teste
 
 | Checkpoint | Result | Acceptance boundary |
 | --- | --- | --- |
-| Missing-user-input handoff | Loaded-page city question passes; live city answer preserves the original goal and browser owner | Named question and continuation mechanics only. |
-| Direct-URL BART regression | Earlier control returns all five requested outcomes, including the official source link | Separate named passing task; full-page answer path is unchanged. |
-| Partial native record planning | Scoped native function adapter compiles; 11 unique focused methods pass across protocol, reference, cancellation and full-page controls | Partial views cannot certify completion or authorize visual fallback. |
-| URL-free discovery and redirect | Real city-resume task follows a verified result to official BART; stale empty-redirect approval is discarded | Navigation succeeds for this case, but the final answer does not complete. |
-| Final-page capacity | Live task ends unableToComplete after 70.958 seconds and six model completions | Rejected request, token count and exact capacity gate are not captured yet. |
-| Model comparisons | Fara's text-only pair chooses the official result and honors explicit ask-before-open; Qwen and AgentCPM comparisons remain recorded | Scoped decisions only; no model switch or composed Fara qualification. |
-| Next repair | Capture the exact rejected request and capacity decision before changing limits | Keep native tools first, one worker, the 12 GB whole-Mac target, and Jev parked. |
+| Current production | Original 4096 application state at `6cb24b8` restored; rebuild and three focused checks pass | No application change from the capacity experiment is retained. |
+| Missing-user-input handoff | City question and accepted answer remain bound to the original goal and browser owner | Named question/continuation mechanics only. |
+| Native discovery | Original partial-window function interface follows a verified link to official BART | Final answer still fails capacity. |
+| Measured capacity | Parity-checked reconstruction: full page 3061/3008 input allowance; first window 3265/3264 | Reconstructed from saved history/capture; rejected requests were not directly logged. |
+| Larger-context experiment | 6144 passes 17 focused methods; live city task fails after 74.441s/five completions, still on Bing | Rejected and reverted. Full-page JSON interface attempted an answer, then planner timed out; no official-page dispatch or task completion. |
+| Model comparison | Earlier Fara native-function pair matches two scoped choices | No model promotion or composed Fara qualification. |
+| Next repair | Compare one consistent native function interface across actual search/official-page captures and ask-before-open control | Preserve complete goals/evidence; qualify live workflows before accepting a context or model change. |
 
-The [partial-tool archive](native-browser-partial-tools-results-sept24.json) preserves the executed RED→GREEN, 11 unique focused method passes and the failed live city-resume task. It records successful native search-result navigation separately from the final capacity failure. The [prerequisite archive](native-browser-prerequisite-results-sept24.json) retains the loaded-page clarification and separate passing direct-URL BART control. The [redirect repair](native-browser-planning-redirect-results-sept24.json) and [native-function comparisons](native-browser-native-step-authority-results-sept24.json) retain earlier failures and their scope. Source-link interpretation, general handoff, provider login, whole-Mac resources and native-app tasks remain open.
+The [capacity archive](native-browser-capacity-results-sept24.json) retains exact request bodies, token counts, source bindings, failed export harness attempt, candidate RED→GREEN, live failure and restored build. A unary-container compression candidate still exceeded the allowance and was not implemented. The [partial-tool archive](native-browser-partial-tools-results-sept24.json) retains the previous native navigation repair; the [prerequisite archive](native-browser-prerequisite-results-sept24.json) retains the separate passing direct-URL BART control. These results diagnose an interface-dependent failure and do not establish general completion, provider login, OS capability or 12 GB whole-Mac memory/heat qualification. Native tools remain first, only one model worker may run, and Jev stays parked.
 
 ## Primary-source basis
 
