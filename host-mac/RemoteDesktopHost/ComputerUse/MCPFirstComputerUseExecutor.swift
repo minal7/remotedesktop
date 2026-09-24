@@ -297,7 +297,7 @@ final class MCPFirstComputerUseExecutor:
     private let binaryURL: URL
     private let visualFallback: any ComputerUseExecuting
     typealias BrowserExecutorFactory = @MainActor () async throws -> any ComputerUseExecuting
-    private enum RoutingSignal: Error { case browserTools }
+    private enum RoutingSignal: Error { case browserTools, desktopTools }
     private let browserExecutorFactory: BrowserExecutorFactory
     private var retainedBrowserExecutor: (any ComputerUseExecuting)?
     private var retainedUsesBrowser = false
@@ -310,6 +310,7 @@ final class MCPFirstComputerUseExecutor:
     private var pendingApprovalState: PlanningState?
     private var pendingApprovalDigest: String?
     private var retainedFallback: (taskID: String, promptDigest: String)?
+    private var retainedNativeFailure: Error?
     private let documentPlanner: ComputerUseMCPDocumentPlanner
     private final class DocumentRun {
         let prompt: String
@@ -494,6 +495,22 @@ final class MCPFirstComputerUseExecutor:
         try beginExecution()
         defer { activeExecutionEpoch = nil }
         let promptDigest = ComputerUseTextTaskContract.digest(trustedUserPrompt)
+        func executeNativeAlternative(after failure: Error) async throws -> ComputerUseExecutionResult {
+            try checkExecutionCancellation()
+            guard let native = visualFallback as? any ComputerUseNativeOnlyExecuting else { throw failure }
+            // Retain the restriction before an alternative can suspend or edit.
+            // A later native decline must never activate its desktop factory.
+            retainedFallback = (taskID, promptDigest)
+            retainedNativeFailure = failure
+            let result = try await native.executeNativeOnly(taskID: taskID, modelPrompt: prompt,
+                currentUserPrompt: trustedUserPrompt, conversation: conversation ?? [], tools: tools,
+                progress: progress)
+            try checkExecutionCancellation()
+            if let result { return result }
+            // Keep this task restricted to native tools even if the native
+            // executor declines again after an intervention.
+            throw failure
+        }
         func executeVisualFallback(usingBrowser: Bool = false) async throws
             -> ComputerUseExecutionResult {
             // Commit before fallback can produce an effect or suspend. Resume
@@ -528,9 +545,11 @@ final class MCPFirstComputerUseExecutor:
         try await waitForStartedCancellation()
         if let retainedFallback, retainedFallback.taskID == taskID {
             guard retainedFallback.promptDigest == promptDigest else { throw ExecutorError.taskChanged }
+            if let failure = retainedNativeFailure { return try await executeNativeAlternative(after: failure) }
             return try await executeVisualFallback()
         }
         retainedFallback = nil
+        retainedNativeFailure = nil
         retainedBrowserExecutor = nil
         retainedUsesBrowser = false
         pendingApprovalState = nil
@@ -611,7 +630,7 @@ final class MCPFirstComputerUseExecutor:
             return documentResult
         }
 
-        guard planner.availability() == .available else {
+        if case .unavailable(let reason) = planner.availability() {
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
@@ -619,8 +638,7 @@ final class MCPFirstComputerUseExecutor:
                 progress: progress) {
                 return mailResult
             }
-            progress("Using visual control on this Mac…")
-            return try await executeVisualFallback()
+            return try await executeNativeAlternative(after: AppleFoundationMCPPlannerError.unavailable(reason))
         }
 
         let state = PlanningState(
@@ -637,6 +655,13 @@ final class MCPFirstComputerUseExecutor:
             try checkExecutionCancellation()
             progress("Continuing with browser tools…")
             return try await executeVisualFallback(usingBrowser: true)
+        } catch RoutingSignal.desktopTools {
+            try checkExecutionCancellation()
+            if let mailResult = try await routeMailWithoutPlanner(
+                taskID: taskID, prompt: prompt, trustedUserPrompt: trustedUserPrompt,
+                progress: progress) { return mailResult }
+            progress("Continuing with local app controls…")
+            return try await executeVisualFallback()
         } catch is CancellationError {
             throw CancellationError()
         } catch AppleFoundationMCPPlannerError.cancelled {
@@ -653,18 +678,13 @@ final class MCPFirstComputerUseExecutor:
                 progress: progress) {
                 return mailResult
             }
-            guard Self.canFallBackAfterPlannerError(error) else { throw error }
-            progress("Continuing with local app and browser controls…")
-            return try await executeVisualFallback()
+            guard Self.canTryNativeAlternative(after: error) else { throw error }
+            return try await executeNativeAlternative(after: error)
         } catch let error as ExecutorError {
             guard error == .tooManySteps else { throw error }
 
-            // This planning invocation has performed no approved effect.
-            // Approval-required calls stop before dispatch and use a separate
-            // confirmation path, so this fallback cannot replay an approval.
-            // Preserve deterministic Mail isolation, then hand a routing stall
-            // to the local visual executor instead of surfacing a false task
-            // failure to the phone.
+            // Repeating a native read does not show that its capability is
+            // insufficient. Only a restricted native alternative may run.
             if let mailResult = try await routeMailWithoutPlanner(
                 taskID: taskID,
                 prompt: prompt,
@@ -672,10 +692,7 @@ final class MCPFirstComputerUseExecutor:
                 progress: progress) {
                 return mailResult
             }
-            Self.log.info(
-                "Structured planner stalled on non-approved steps; switching to local visual control")
-            progress("Structured tools can’t finish this task — switching locally…")
-            return try await executeVisualFallback()
+            return try await executeNativeAlternative(after: error)
         } catch {
             // A helper/read step can fail outside the planner's typed error
             // surface. Explicit Mail still must not spill into GUI control.
@@ -819,13 +836,13 @@ final class MCPFirstComputerUseExecutor:
 
     private func proposeBrowserToolStep(_ input: ComputerUseFaraModel.Input,
         observation: ComputerUseFaraBrowserExecutor.ToolObservation,
-        tools: ComputerUseHostTools) async throws -> ComputerUseFaraModel.Proposal? {
+        tools: ComputerUseHostTools) async throws -> ComputerUseFaraBrowserExecutor.ToolPlan {
         try checkExecutionCancellation()
         let available = try await clientPool.allowedTools()
         try checkExecutionCancellation()
         guard ["find_elements", "get_element_attributes"].allSatisfy({ name in
             available.contains { $0.toolName == name && $0.risk == .readOnly && $0.serverID == MCPServerRegistry.macControl.serverID }
-        }) else { return nil }
+        }) else { return .noProposal }
         let browserPlanner = browserStepPlanner
         // A host context/schema limit is an integration failure, not evidence
         // that Mac tools cannot handle this task. It must not activate vision.
@@ -834,7 +851,9 @@ final class MCPFirstComputerUseExecutor:
         let arguments: [String: Any]
         switch plan.kind {
         case .inspectRecords: throw AppleFoundationMCPPlannerError.unknownProposal
-        case .visualFallback: return nil
+        case .visualFallback:
+            guard let assessment = plan.assessment else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
+            return .handoff(try assessment.workerDirective())
         case .search:
             guard !plan.text.isEmpty, plan.text.utf8.count <= 1024 else { throw AppleFoundationMCPPlannerError.unknownProposal }
             arguments = ["action": "web_search", "query": plan.text]
@@ -843,7 +862,7 @@ final class MCPFirstComputerUseExecutor:
             if let userURL = context.userURLs[plan.reference] { destination = userURL }
             else {
                 guard case .page(let page) = observation, let link = context.links[plan.reference],
-                      let verified = try await readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return nil }
+                      let verified = try await readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return .noProposal }
                 destination = verified
             }
             arguments = ["action": "visit_url", "url": destination.absoluteString]
@@ -864,18 +883,17 @@ final class MCPFirstComputerUseExecutor:
             .replacingOccurrences(of: "<", with: "\\u003c").replacingOccurrences(of: ">", with: "\\u003e")
         let response = "<tool_call>" + encoded + "</tool_call>"
         let proposal = try ComputerUseFaraModel.Proposal(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
-        return proposal
+        return .proposal(proposal)
     }
 
     // Completion admission is separate from deciding whether native tools
     // have a capability gap. A rejected answer cannot authorize vision.
     static func validateBrowserCompletion(plan: ComputerUseMCPBrowserStepPlanner.Plan,
         goal: ComputerUseUnresolvedTextGoal, hasPageObservation: Bool) throws {
-        // Preserve the existing conservative checks for every accepted user
-        // turn. This is not semantic intent classification or effect proof.
-        for turn in goal.userTurns {
-            try validateBrowserCompletion(plan: plan, goal: turn, hasPageObservation: hasPageObservation)
-        }
+        // The orchestrator sees the exact full conversation in its context.
+        // Code admits its bounded evidence contract; it does not reinterpret
+        // the user's language with a second keyword classifier.
+        try validateBrowserCompletion(plan: plan, goal: goal.taskIdentityText, hasPageObservation: hasPageObservation)
     }
 
     static func validateBrowserCompletion(plan: ComputerUseMCPBrowserStepPlanner.Plan, goal: String, hasPageObservation: Bool) throws {
@@ -886,9 +904,10 @@ final class MCPFirstComputerUseExecutor:
         guard plan.kind == .answer, hasPageObservation else {
             throw AppleFoundationMCPPlannerError.unknownProposal
         }
-        guard !requestsConsequentialMutation(goal) else {
+        guard let assessment = plan.assessment else {
             throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
         }
+        try assessment.validateCompletion()
     }
 
     // A missing accessible value is distinct from an invalid helper reply.
@@ -1457,7 +1476,7 @@ final class MCPFirstComputerUseExecutor:
                     let bounded = message.trimmingCharacters(
                         in: .whitespacesAndNewlines)
                     if bounded == "VISUAL_FALLBACK_REQUIRED" {
-                        throw AppleFoundationMCPPlannerError.generationFailed
+                        throw RoutingSignal.desktopTools
                     }
                     if let clarification = Self.sentinelBody(
                         "CLARIFICATION_REQUIRED:",
@@ -3508,8 +3527,8 @@ final class MCPFirstComputerUseExecutor:
             : bounded
     }
 
-    private static func canFallBackAfterPlannerError(
-        _ error: AppleFoundationMCPPlannerError
+    private static func canTryNativeAlternative(
+        after error: AppleFoundationMCPPlannerError
     ) -> Bool {
         switch error {
         case .unavailable, .unsupportedSchema, .generationFailed, .noProposal:

@@ -8,13 +8,22 @@ protocol ComputerUseTextClarificationContinuing {
     func invalidateClarification(taskID: String?)
 }
 
+/// A native decline is not permission to enter research or visual execution.
+/// The restriction must remain attached to a task across Resume.
+@MainActor
+protocol ComputerUseNativeOnlyExecuting {
+    func executeNativeOnly(taskID: String, modelPrompt: String, currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
+}
+
 /// Routes a whole current-user goal before effects begin. A native attempt
 /// may decline with no effects; an error or uncertain edit is never permission
 /// to reconstruct and replay the goal through another executor.
 @MainActor
 final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
-    ComputerUseBrowserResearchContinuing {
+    ComputerUseBrowserResearchContinuing, ComputerUseNativeOnlyExecuting {
     typealias NativeExecution = @MainActor (String, String, @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
     typealias DesktopFactory = @MainActor (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
 
@@ -36,6 +45,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private var route: Route = .native
     private var desktop: (any ComputerUseExecuting)?
     private var isExecuting = false
+    private var nativeOnlyTask = false
 
     init(nativeExecution: @escaping NativeExecution, desktopFactory: DesktopFactory? = nil,
          desktopIncludesVisualControl: Bool = true, nativeClarification: ComputerUseNativeTextExecutor? = nil,
@@ -88,6 +98,25 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     func execute(taskID: String, modelPrompt: String, currentUserPrompt: String,
                  conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
                  progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard let result = try await executeResolved(taskID: taskID, modelPrompt: modelPrompt,
+            currentUserPrompt: currentUserPrompt, conversation: conversation, tools: tools,
+            nativeOnly: false, progress: progress) else {
+            return .unableToComplete("The native tools could not finish this task.")
+        }
+        return result
+    }
+
+    func executeNativeOnly(taskID: String, modelPrompt: String, currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        try await executeResolved(taskID: taskID, modelPrompt: modelPrompt,
+            currentUserPrompt: currentUserPrompt, conversation: conversation, tools: tools,
+            nativeOnly: true, progress: progress)
+    }
+
+    private func executeResolved(taskID: String, modelPrompt: String, currentUserPrompt: String,
+        conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
+        nativeOnly: Bool, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
@@ -95,6 +124,12 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let digest = ComputerUseTextTaskContract.digest(currentUserPrompt)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
+            // A restricted attempt cannot reconstruct a task already owned
+            // by another route, or loosen its restriction on ordinary Resume.
+            if nativeOnly {
+                guard route == .native else { throw RoutingError.missingContinuation }
+                nativeOnlyTask = true
+            }
         } else {
             researchState?.owner.retire()
             researchState = nil
@@ -105,6 +140,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             self.taskID = taskID
             promptDigest = digest
             route = .native
+            nativeOnlyTask = nativeOnly
         }
         if route == .native {
             if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
@@ -122,6 +158,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
                 return result
             }
             try Task.checkCancellation()
+            if nativeOnlyTask { return nil }
             route = browserResearch == nil ? .desktop : .research
         }
         if route == .research {

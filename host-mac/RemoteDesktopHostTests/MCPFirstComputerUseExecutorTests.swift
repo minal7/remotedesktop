@@ -5,6 +5,158 @@ import CryptoKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    private func assertNativePlannerFailure(
+        _ result: Result<ComputerUseExecutionResult, Error>,
+        expected: AppleFoundationMCPPlannerError = .noProposal,
+        message: String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard case .failure(let error) = result else {
+            return XCTFail("Expected native planner failure: \(expected). Unexpected result: \(result). \(message)", file: file, line: line)
+        }
+        XCTAssertEqual(error as? AppleFoundationMCPPlannerError, expected, file: file, line: line)
+    }
+
+    private func captureExecution(
+        _ operation: () async throws -> ComputerUseExecutionResult
+    ) async -> Result<ComputerUseExecutionResult, Error> {
+        do { return .success(try await operation()) }
+        catch { return .failure(error) }
+    }
+
+    func testPlannerFailureNativeAlternativeCannotEnterConfiguredDesktopFactory() async throws {
+        let failures: [AppleFoundationMCPPlannerError] = [.generationFailed, .noProposal,
+            .unsupportedSchema(toolName: "focused_app", reason: "Unsupported schema")]
+        for failure in failures {
+            for outcome in ["success", "decline", "error"] {
+                var nativeCalls = 0, desktopLoads = 0
+                let nativeError = MCPFirstComputerUseExecutor.ExecutorError.structuredToolFailed("Native attempt failed")
+                let native = ComputerUseCapabilityExecutor(nativeExecution: { _, prompt, _ in
+                    nativeCalls += 1
+                    XCTAssertEqual(prompt, "Which application is focused?")
+                    if outcome == "error" { throw nativeError }
+                    return outcome == "success" ? .completed("Native result") : nil
+                }, desktopFactory: { _ in desktopLoads += 1; return StubVisualExecutor() })
+                let planner = DeadlineMCPPlanner { _ in throw failure }
+                let pool = StubMCPClientPool(tools: [try makeMailTool(), try makeFocusedAppTool()])
+                let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+                    visualFallback: native, planner: planner, clientPool: pool, planningWorker: ComputerUsePlanningWorker())
+                do {
+                    let result = try await executor.execute(taskID: "native-alternative", prompt: "Which application is focused?",
+                        tools: makeHostTools(), progress: { _ in })
+                    XCTAssertEqual(outcome, "success")
+                    XCTAssertEqual(result, .completed("Native result"))
+                } catch {
+                    XCTAssertNotEqual(outcome, "success")
+                    if outcome == "error" { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, nativeError) }
+                    else { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, failure) }
+                }
+                XCTAssertEqual(nativeCalls, 1); XCTAssertEqual(desktopLoads, 0)
+            }
+        }
+    }
+
+    func testRestrictedNativeResumeCannotFallThroughWhenNativeLaterDeclines() async throws {
+        var nativeCalls = 0, desktopLoads = 0
+        var browserPreparations = 0
+        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+            nativeCalls += 1
+            return nativeCalls == 1 ? .userInterventionRequired("Sign in, then Resume") : nil
+        }, desktopFactory: { _ in desktopLoads += 1; return StubVisualExecutor() })
+        let planner = StubMCPPlanner(mode: .clarification)
+        planner.availabilityOverride = .unavailable(.modelNotReady)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: native, planner: planner, clientPool: pool, browserExecutorFactory: {
+                browserPreparations += 1
+                return StubVisualExecutor()
+            })
+        let goal = "Edit the current document"
+        let first = try await executor.execute(taskID: "restricted", prompt: goal, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(first, .userInterventionRequired("Sign in, then Resume"))
+        planner.availabilityOverride = .available
+        do {
+            _ = try await executor.execute(taskID: "restricted", prompt: goal, tools: makeHostTools(), progress: { _ in })
+            XCTFail("A later native decline must preserve the original failure")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        do {
+            _ = try await executor.execute(taskID: "restricted", prompt: goal, tools: makeHostTools(), progress: { _ in })
+            XCTFail("The restriction must remain after a later native decline")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        XCTAssertEqual(nativeCalls, 3); XCTAssertEqual(desktopLoads, 0)
+        XCTAssertTrue(planner.proposedToolNames.isEmpty)
+        XCTAssertEqual(browserPreparations, 0)
+        // Even a direct ordinary Resume cannot remove the native restriction.
+        let resumed = try await native.execute(taskID: "restricted", prompt: goal, trustedUserPrompt: goal,
+            tools: makeHostTools(), progress: { _ in })
+        guard case .unableToComplete = resumed else { return XCTFail("Restricted decline must stay explicit") }
+        XCTAssertEqual(desktopLoads, 0)
+        _ = try await executor.execute(taskID: "new-native-task", prompt: goal, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(planner.proposedToolNames.count, 1)
+    }
+
+    func testNativePlannerErrorsCannotAuthorizeVisualExecution() async throws {
+        let failures: [AppleFoundationMCPPlannerError] = [
+            .unavailable(.modelNotReady), .generationFailed, .noProposal,
+            .unsupportedSchema(toolName: "focused_app", reason: "Unsupported schema"),
+            .invalidRequest("No structured tools are available."),
+        ]
+        for failure in failures {
+            let planner = DeadlineMCPPlanner { _ in throw failure }
+            let fallback = StubVisualExecutor(result: .completed("Unexpected visual completion"))
+            let pool = StubMCPClientPool(tools: [try makeMailTool(), try makeFocusedAppTool()])
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: fallback,
+                planner: planner, clientPool: pool, planningWorker: ComputerUsePlanningWorker())
+            do {
+                _ = try await executor.execute(taskID: "native-error", prompt: "Which application is focused?",
+                    tools: makeHostTools(), progress: { _ in })
+                XCTFail("A planning failure must remain a failure: \(failure)")
+            } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, failure) }
+            XCTAssertEqual(fallback.callCount, 0, "\(failure)")
+            let direct = await pool.directExecuteCount(), approved = await pool.approvedExecuteCount()
+            XCTAssertEqual(direct, 0); XCTAssertEqual(approved, 0)
+        }
+    }
+
+    func testUnavailableNativePlannerCannotLoadVisualModel() async throws {
+        var loads = 0
+        let visual = StubVisualExecutor()
+        let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return visual })
+        let pool = StubMCPClientPool(tools: [try makeMailTool(), try makeFocusedAppTool()])
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: deferred, planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
+        do {
+            _ = try await executor.execute(taskID: "unavailable-native", prompt: "Which application is focused?",
+                tools: makeHostTools(), progress: { _ in })
+            XCTFail("Model availability does not establish a tool capability gap")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        XCTAssertEqual(loads, 0); XCTAssertEqual(visual.callCount, 0)
+    }
+
+    func testRepeatedSuccessfulNativeReadDoesNotAuthorizeVisualExecution() async throws {
+        let planner = StubMCPPlanner(mode: .repeatFocusedApp)
+        let content: MCPJSONValue = .object(["ok": .bool(true), "app": .object([
+            "pid": .integer(4242), "name": .string("Notes"),
+            "bundleIdentifier": .string("com.apple.Notes"), "isActive": .bool(true)])])
+        let pool = RecordingMCPClientPool(tools: [try makeMailTool(), try makeFocusedAppTool()],
+            resultsByTool: ["focused_app": try MCPToolResult(text: "", structuredContent: content,
+                isError: false, wasTruncated: false)])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback, planner: planner, clientPool: pool)
+        do {
+            _ = try await executor.execute(taskID: "repeated-native-read", prompt: "Which application is focused?",
+                tools: makeHostTools(), progress: { _ in })
+            XCTFail("Repeating a successful native read is a planning failure")
+        } catch { XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError, .tooManySteps) }
+        let calls = await pool.directCalls()
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(planner.proposedToolNames.count, 2)
+        XCTAssertEqual(fallback.callCount, 0)
+    }
+
     func testBrowserLinkDiscoveryRejectsInvalidRepliesInsteadOfClaimingCapabilityGap() throws {
         let row: MCPJSONValue = .object(["id": .string("link-1"), "role": .string("AXLink")])
         let base: [String: MCPJSONValue] = ["ok": .bool(true), "pid": .integer(4242),
@@ -115,13 +267,13 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                             arguments = ["action": "terminate", "answer": "Verified details."]
                         } else {
                             let link = try XCTUnwrap(page.approvalPageEvidence.page.links.first { $0.label == "Details" })
-                            guard let url = try await mcp.readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return nil }
+                            guard let url = try await mcp.readBrowserLinkWithMCP(link, observation: page, tools: tools) else { return .noProposal }
                             arguments = ["action": "visit_url", "url": url.absoluteString]
                         }
                     }
                     let body: [String: Any] = ["name": "computer_use", "arguments": arguments]
                     let response = "<tool_call>" + String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self) + "</tool_call>"
-                    return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
                 })
             do {
                 let goal = "Open \(start.absoluteString) and read its Details page."
@@ -141,39 +293,42 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testBrowserCompletionChecksAcceptedAnswersWithoutPromotingQuestions() throws {
-        let original = try ComputerUseUnresolvedTextGoal(userRequest: "Read the store hours.")
-        let plan = ComputerUseMCPBrowserStepPlanner.Plan(kind: .answer, reference: "", text: "The store closes at six.")
-        let clarified = try original.answering("Anything else?", with: "Purchase a gift for me.")
-            .answering("Which gift?", with: "The blue one.")
+    func testBrowserCompletionRequiresAssessmentOfAllRemainingWork() throws {
+        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Read the store hours.")
+            .answering("Anything else?", with: "Purchase a gift for me.")
+        let assessment = ComputerUseMCPBrowserStepPlanner.Plan.Assessment(
+            objective: "Read store hours and purchase a gift", constraints: "",
+            workerObjective: "", requirements: [
+                .init(instruction: "Read opening hours", kind: .information, state: .observed, evidence: "The store closes at six."),
+                .init(instruction: "Purchase a gift", kind: .action, state: .pending, evidence: "")])
+        let plan = ComputerUseMCPBrowserStepPlanner.Plan(kind: .answer, reference: "", text: "The store closes at six.", assessment: assessment)
         XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
-            goal: clarified, hasPageObservation: true)) {
-            XCTAssertTrue($0 is ComputerUseMCPBrowserStepPlanner.Failure)
+            goal: goal, hasPageObservation: true)) {
+            XCTAssertEqual($0 as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence)
         }
-        let contextOnly = try original.answering("Should I purchase a gift?", with: "Just report the opening hours.")
-        XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
-            goal: contextOnly, hasPageObservation: true))
-        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
-            goal: contextOnly, hasPageObservation: false))
-        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
-            plan: .init(kind: .incomplete, reference: "", text: "The requested work remains incomplete."),
-            goal: clarified, hasPageObservation: true)) {
-            XCTAssertEqual($0 as? MCPFirstComputerUseExecutor.ExecutorError, .structuredToolFailed("The requested work remains incomplete."))
-        }
+        // This tests the contract, not the LLM's interpretation of this text.
+        // Real-model evaluation must prove it retains the requested purchase.
     }
 
-    func testRejectedBrowserCompletionIsAnErrorInsteadOfVisualFallback() throws {
-        for (goal, answer, hasPage) in [
-            ("Find the store hours and purchase a gift.", "The store closes at 6 PM.", true),
-            ("Read the fare policy. Do not purchase any tickets.", "Here is the fare policy.", true),
-            ("Read the page.", "", true),
-            ("Read the page.", "Some information.", false),
-        ] {
-            XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
-                plan: .init(kind: .answer, reference: "", text: answer), goal: goal, hasPageObservation: hasPage), goal)
+    func testBrowserCompletionRequiresAssessmentAndCurrentObservation() throws {
+        let assessment = ComputerUseMCPBrowserStepPlanner.Plan.Assessment(
+            objective: "Report observed hours", constraints: "", workerObjective: "",
+            requirements: [.init(instruction: "Report hours", kind: .information, state: .observed, evidence: "The store closes at six.")])
+        let plan = ComputerUseMCPBrowserStepPlanner.Plan(kind: .answer, reference: "", text: "The store closes at six.", assessment: assessment)
+        XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
+            goal: "Read the store hours.", hasPageObservation: true))
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: plan,
+            goal: "Read the store hours.", hasPageObservation: false))
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+            plan: .init(kind: .answer, reference: "", text: "The store closes at six."),
+            goal: "Read the store hours.", hasPageObservation: true)) {
+            XCTAssertEqual($0 as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence)
         }
-        XCTAssertNoThrow(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
-            plan: .init(kind: .answer, reference: "", text: "The store closes at 6 PM."), goal: "Read the store hours.", hasPageObservation: true))
+        XCTAssertThrowsError(try MCPFirstComputerUseExecutor.validateBrowserCompletion(
+            plan: .init(kind: .answer, reference: "", text: "", assessment: assessment),
+            goal: "Read the store hours.", hasPageObservation: true)) {
+            XCTAssertEqual($0 as? AppleFoundationMCPPlannerError, .unknownProposal)
+        }
     }
 
     func testIncompleteBrowserPlanCannotBecomeSuccessfulCompletion() throws {
@@ -335,11 +490,13 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testFocusedMCPReadKeepsUnavailableCapabilityOnFallbackPath() async throws {
+    func testFocusedMCPReadPreservesNoProposalWhenAXToolsAreMissing() async throws {
         let fixture = try await focusedReadExecutor(includeAXTools: false)
-        let result = try await fixture.executor.execute(taskID: "missing-ax", prompt: "Read the current document.", tools: focusedReadTools { self.focusedReadSnapshot() }, progress: { _ in })
-        XCTAssertEqual(result, .completed("Visual fallback"))
-        XCTAssertEqual(fixture.fallback.callCount, 1)
+        do {
+            _ = try await fixture.executor.execute(taskID: "missing-ax", prompt: "Read the current document.", tools: focusedReadTools { self.focusedReadSnapshot() }, progress: { _ in })
+            XCTFail("A missing read capability must remain a planning failure")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .noProposal) }
+        XCTAssertEqual(fixture.fallback.callCount, 0)
         let calls = await fixture.pool.directCalls()
         XCTAssertTrue(calls.isEmpty)
     }
@@ -1143,7 +1300,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(after, 1)
     }
 
-    func testStructuredTaskDoesNotLoadVisualUntilFallbackActuallyExecutes() async throws {
+    func testStructuredTaskDoesNotLoadVisualForUnavailablePlanner() async throws {
         var loads = 0
         let actual = StubVisualExecutor()
         let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return actual })
@@ -1155,10 +1312,13 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(loads, 0)
         let needsVisual = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: deferred, planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
-        _ = try await needsVisual.execute(taskID: "visual", prompt: "Use this GUI-only app",
-            tools: makeHostTools(), progress: { _ in })
-        XCTAssertEqual(loads, 1)
-        XCTAssertEqual(actual.callCount, 1)
+        do {
+            _ = try await needsVisual.execute(taskID: "visual", prompt: "Use this GUI-only app",
+                tools: makeHostTools(), progress: { _ in })
+            XCTFail("Planner unavailability alone must not load visual control")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        XCTAssertEqual(loads, 0)
+        XCTAssertEqual(actual.callCount, 0)
     }
 
     func testFallbackResumeKeepsItsRouteWhenMCPBecomesAvailableAndRejectsChangedGoal() async throws {
@@ -1191,15 +1351,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(nativeCalls, 2)
     }
 
-    func testMissingVisualWithUnavailableAppleReturnsSpecificUnableOutcome() async throws {
+    func testMissingVisualKeepsUnavailablePlannerError() async throws {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: ComputerUseDeferredVisualExecutor(), planner: StubMCPPlanner(mode: .unavailable), clientPool: pool)
         XCTAssertTrue(executor.isReady)
-        let result = try await executor.execute(taskID: "missing-visual", prompt: "Use this GUI-only app",
-            tools: makeHostTools(), progress: { _ in })
-        guard case .unableToComplete(let reason) = result else { return XCTFail("Missing visual capability must be explicit") }
-        XCTAssertTrue(reason.contains("visual control"))
+        do {
+            _ = try await executor.execute(taskID: "missing-visual", prompt: "Use this GUI-only app",
+                tools: makeHostTools(), progress: { _ in })
+            XCTFail("Unavailable planning must remain typed when no native route exists")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
         let count = await pool.directExecuteCount()
         XCTAssertEqual(count, 0)
     }
@@ -1330,11 +1491,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedAfterReplay, 1)
     }
 
-    func testUnavailableAppleModelUsesVisualFallbackWithoutCallingMCP() async throws {
+    func testUnavailableAppleModelPreservesTypedErrorWithoutCallingMCP() async throws {
         let tool = try makeMailTool()
         let planner = StubMCPPlanner(mode: .unavailable)
         let pool = StubMCPClientPool(tools: [tool])
-        let fallback = StubVisualExecutor(result: .completed("Visual fallback finished"))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -1342,14 +1503,15 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "task-gui",
-            prompt: "Use this GUI-only app",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        XCTAssertEqual(result, .completed("Visual fallback finished"))
-        XCTAssertEqual(fallback.callCount, 1)
+        do {
+            _ = try await executor.execute(
+                taskID: "task-gui",
+                prompt: "Use this GUI-only app",
+                tools: makeHostTools(),
+                progress: { _ in })
+            XCTFail("Planner unavailability alone must not authorize visual execution")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(directCount, 0)
@@ -1462,14 +1624,13 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testVisibleSupportPhoneReadUsesGenericFallbackWhenPlannerUnavailable()
+    func testVisibleSupportPhoneReadPreservesUnavailablePlannerError()
         async throws {
         let prompt =
             "Please open Safari and tell me the support phone number shown on the local page already loaded there."
         let planner = StubMCPPlanner(mode: .unavailable)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visible page read finished"))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -1477,17 +1638,18 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "support-phone-generic-unavailable",
-            prompt: prompt,
-            trustedUserPrompt: prompt,
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        XCTAssertEqual(result, .completed("Visible page read finished"))
-        XCTAssertEqual(fallback.callCount, 1)
-        XCTAssertEqual(fallback.prompts, [prompt])
-        XCTAssertEqual(fallback.trustedUserPrompts, [prompt])
+        do {
+            _ = try await executor.execute(
+                taskID: "support-phone-generic-unavailable",
+                prompt: prompt,
+                trustedUserPrompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+            XCTFail("Planner unavailability alone must not authorize visual execution")
+        } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady)) }
+        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertTrue(fallback.prompts.isEmpty)
+        XCTAssertTrue(fallback.trustedUserPrompts.isEmpty)
         XCTAssertTrue(planner.proposedToolNames.isEmpty)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
@@ -1495,7 +1657,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedCount, 0)
     }
 
-    func testBrowserOnlyReadUsesGenericPlannerFallbackWithoutAdvertisingBlockedBrowserTools() async throws {
+    func testBrowserOnlyReadPreservesGenerationFailureWithoutAdvertisingBlockedBrowserTools() async throws {
         let browserNames = [
             "browser_close_tab", "browser_get_active_tab", "browser_list_tabs",
             "browser_navigate", "browser_new_tab",
@@ -1505,9 +1667,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: [try makeMailTool()] + (try browserNames.map {
                 try makeBlockedBrowserAdvertisement($0)
             }))
-        let guidance = OSAtlasComputerUseExecutor.deliverySignInGuidance
-        let fallback = StubVisualExecutor(
-            result: .userInterventionRequired(guidance))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -1517,14 +1677,17 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let prompt = "Check the current delivered price and ETA for the DoorDash item already in my cart. Do not place the order. Do not enter account information or check out."
         var progress: [String] = []
 
-        let result = try await executor.execute(
-            taskID: "task-doordash-visual-login-handoff",
-            prompt: prompt,
-            tools: makeHostTools(),
-            progress: { progress.append($0) })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "task-doordash-visual-login-handoff",
+                prompt: prompt,
+                tools: makeHostTools(),
+                progress: { progress.append($0) })
+        }
 
-        XCTAssertEqual(result, .userInterventionRequired(guidance))
-        XCTAssertEqual(fallback.prompts, [prompt])
+        assertNativePlannerFailure(outcome, expected: .generationFailed)
+        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertTrue(fallback.prompts.isEmpty)
         XCTAssertEqual(
             planner.proposedToolNames.count,
             1,
@@ -1539,7 +1702,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(
             progress.first,
             "Planning with on-device Apple Intelligence…")
-        XCTAssertTrue(progress.contains(
+        XCTAssertFalse(progress.contains(
             "This app needs visual control — switching locally…"))
         XCTAssertFalse(progress.contains(where: {
             $0.localizedCaseInsensitiveContains("Reminders")
@@ -1669,11 +1832,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
-    func testExplicitlyNegatedDeliveryEffectsUseGenericVisualFallbackWithoutEffects()
+    func testExplicitlyNegatedDeliveryEffectsPreserveGenerationFailure()
         async throws {
         let planner = StubMCPPlanner(mode: .generationFailure)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor(result: .completed("Quote reported."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -1682,15 +1845,17 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             clientPool: pool)
         let prompt = "Check the current DoorDash delivery price and ETA without emailing or saving it. Do not place the order."
 
-        let result = try await executor.execute(
-            taskID: "pure-quote-negated-effects",
-            prompt: prompt,
-            trustedUserPrompt: prompt,
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "pure-quote-negated-effects",
+                prompt: prompt,
+                trustedUserPrompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Quote reported."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome, expected: .generationFailed)
+        XCTAssertEqual(fallback.callCount, 0)
         XCTAssertEqual(
             planner.proposedToolNames.count,
             1,
@@ -1832,8 +1997,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             let pool = RecordingMCPClientPool(
                 tools: [tool, try makeMailTool()],
                 resultsByTool: [:])
-            let fallback = StubVisualExecutor(
-                result: .completed("Visual verification took over."))
+            let fallback = StubVisualExecutor()
             let executor = try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath:
                     "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -1841,18 +2005,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 planner: planner,
                 clientPool: pool)
 
-            let result = try await executor.execute(
-                taskID: row.label,
-                prompt: row.prompt,
-                trustedUserPrompt: row.prompt,
-                tools: makeHostTools(),
-                progress: { _ in })
-
-            XCTAssertEqual(
-                result,
-                .completed("Visual verification took over."),
-                row.label)
-            XCTAssertEqual(fallback.callCount, 1, row.label)
+            do {
+                _ = try await executor.execute(
+                    taskID: row.label,
+                    prompt: row.prompt,
+                    trustedUserPrompt: row.prompt,
+                    tools: makeHostTools(),
+                    progress: { _ in })
+                XCTFail("A forbidden private read must remain a planning failure: \(row.label)")
+            } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .noProposal, row.label) }
+            XCTAssertEqual(fallback.callCount, 0, row.label)
             let directCalls = await pool.directCalls()
             XCTAssertTrue(
                 directCalls.isEmpty,
@@ -2203,8 +2365,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2264,8 +2425,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         isError: false,
                         wasTruncated: wasTruncated),
                 ])
-            let fallback = StubVisualExecutor(
-                result: .completed("Visual verification took over."))
+            let fallback = StubVisualExecutor()
             let executor = try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath:
                     "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2273,17 +2433,15 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 planner: planner,
                 clientPool: pool)
 
-            let result = try await executor.execute(
-                taskID: "typed-result-precondition-\(label)",
-                prompt: "Which app is currently focused?",
-                tools: makeHostTools(),
-                progress: { _ in })
-
-            XCTAssertEqual(
-                result,
-                .completed("Visual verification took over."),
-                label)
-            XCTAssertEqual(fallback.callCount, 1, label)
+            do {
+                _ = try await executor.execute(
+                    taskID: "typed-result-precondition-\(label)",
+                    prompt: "Which app is currently focused?",
+                    tools: makeHostTools(),
+                    progress: { _ in })
+                XCTFail("Incomplete structured evidence must remain a planning failure: \(label)")
+            } catch { XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .noProposal, label) }
+            XCTAssertEqual(fallback.callCount, 0, label)
             let directCalls = await pool.directCalls()
             XCTAssertEqual(directCalls.count, 1, label)
         }
@@ -2431,8 +2589,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2442,18 +2599,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let modelPrompt = "Search Contacts for Desktop wallpaper and report its phone value."
         let trustedUserPrompt = "What color is the current desktop wallpaper?"
 
-        let result = try await executor.execute(
-            taskID: "irrelevant-typed-tool-data",
-            prompt: modelPrompt,
-            trustedUserPrompt: trustedUserPrompt,
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "irrelevant-typed-tool-data",
+                prompt: modelPrompt,
+                trustedUserPrompt: trustedUserPrompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
-        XCTAssertEqual(fallback.prompts, [modelPrompt])
-        XCTAssertEqual(fallback.trustedUserPrompts, [trustedUserPrompt])
-        XCTAssertEqual(fallback.taskIDs, ["irrelevant-typed-tool-data"])
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertTrue(fallback.prompts.isEmpty)
+        XCTAssertTrue(fallback.trustedUserPrompts.isEmpty)
+        XCTAssertTrue(fallback.taskIDs.isEmpty)
         let directCalls = await pool.directCalls()
         XCTAssertTrue(
             directCalls.isEmpty,
@@ -2492,8 +2651,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2501,14 +2659,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "contact-query-result-mismatch",
-            prompt: "Find Jordan Lee's phone number in Contacts.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "contact-query-result-mismatch",
+                prompt: "Find Jordan Lee's phone number in Contacts.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.count, 1)
         XCTAssertEqual(planner.completedStepCount, 1)
@@ -2528,8 +2688,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = RecordingMCPClientPool(
             tools: [reminders, try makeMailTool()],
             resultsByTool: [:])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2537,14 +2696,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "reminder-completion-filter-inversion",
-            prompt: "Show my first five incomplete reminders.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "reminder-completion-filter-inversion",
+                prompt: "Show my first five incomplete reminders.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertTrue(directCalls.isEmpty)
     }
@@ -2560,8 +2721,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = RecordingMCPClientPool(
             tools: [windows, try makeMailTool()],
             resultsByTool: [:])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2569,14 +2729,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "named-window-unproved-pid",
-            prompt: "List the open Notes windows.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "named-window-unproved-pid",
+                prompt: "List the open Notes windows.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertTrue(directCalls.isEmpty)
     }
@@ -2675,8 +2837,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             let pool = RecordingMCPClientPool(
                 tools: [windows, try makeMailTool()],
                 resultsByTool: [:])
-            let fallback = StubVisualExecutor(
-                result: .completed("Visual verification took over."))
+            let fallback = StubVisualExecutor()
             let executor = try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath:
                     "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2684,17 +2845,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 planner: planner,
                 clientPool: pool)
 
-            let result = try await executor.execute(
-                taskID: "named-window-form-\(index)",
-                prompt: prompt,
-                tools: makeHostTools(),
-                progress: { _ in })
+            let outcome = await captureExecution {
+                try await executor.execute(
+                    taskID: "named-window-form-\(index)",
+                    prompt: prompt,
+                    tools: makeHostTools(),
+                    progress: { _ in })
+            }
 
-            XCTAssertEqual(
-                result,
-                .completed("Visual verification took over."),
-                prompt)
-            XCTAssertEqual(fallback.callCount, 1, prompt)
+            assertNativePlannerFailure(outcome, file: #filePath, line: #line)
+            XCTAssertEqual(fallback.callCount, 0, prompt)
             let directCalls = await pool.directCalls()
             XCTAssertTrue(
                 directCalls.isEmpty,
@@ -2788,8 +2948,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2797,14 +2956,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "ambiguous-named-window-pid-proof",
-            prompt: "List windows for Notes.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "ambiguous-named-window-pid-proof",
+                prompt: "List windows for Notes.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(
             directCalls.map(\.toolName),
@@ -2846,8 +3007,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2855,14 +3015,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "exhaustive-contact-values-over-bound",
-            prompt: "Find every phone number for Jordan Lee in Contacts.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "exhaustive-contact-values-over-bound",
+                prompt: "Find every phone number for Jordan Lee in Contacts.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertTrue(
             directCalls.isEmpty,
@@ -2909,8 +3071,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2918,14 +3079,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "exhaustive-reminder-rows-over-bound",
-            prompt: "Show every incomplete reminder.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "exhaustive-reminder-rows-over-bound",
+                prompt: "Show every incomplete reminder.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertTrue(
             directCalls.isEmpty,
@@ -2965,8 +3128,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -2974,14 +3136,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "all-window-rows-over-projection-bound",
-            prompt: "List all windows.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "all-window-rows-over-projection-bound",
+                prompt: "List all windows.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.map(\.toolName), ["list_windows"])
         XCTAssertEqual(
@@ -2994,10 +3158,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let prompt = "Find Jordan Lee and Avery Chen in Contacts."
         for query in ["Jordan Lee", "Avery Chen"] {
             let observed = try await exerciseContactRequirements(prompt: prompt, queries: [query])
-            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."))
+            assertNativePlannerFailure(observed.outcome)
             XCTAssertEqual(observed.readQueries, [query])
             XCTAssertEqual(observed.plannerSteps, 2)
-            XCTAssertEqual(observed.fallbackPrompts, [prompt])
+            XCTAssertTrue(observed.fallbackPrompts.isEmpty)
         }
     }
 
@@ -3011,7 +3175,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         for prompt in prompts {
             let observed = try await exerciseContactRequirements(
                 prompt: prompt, queries: ["Avery Chen", "Jordan Lee"])
-            XCTAssertEqual(observed.result, .completed(
+            guard case .success(let result) = observed.outcome else {
+                return XCTFail("Complete contact proof should project successfully: \(prompt)")
+            }
+            XCTAssertEqual(result, .completed(
                 "Contacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none.\n\nContacts query: Avery Chen\nContacts (showing up to 5):\n1. Avery Chen — phones: +1 415 555 0199; emails: none."), prompt)
             XCTAssertEqual(observed.readQueries, ["Avery Chen", "Jordan Lee"], prompt)
             XCTAssertEqual(observed.plannerSteps, 3, prompt)
@@ -3025,7 +3192,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let observed = try await exerciseContactRequirements(
             prompt: "Find Jordan Lee and Avery Chen in Contacts.",
             queries: ["Jordan Lee", "Avery Chen"], emptyQueries: ["Avery Chen"])
-        XCTAssertEqual(observed.result, .completed(
+        guard case .success(let result) = observed.outcome else {
+            return XCTFail("Complete contact proof should project successfully")
+        }
+        XCTAssertEqual(result, .completed(
             "Contacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none.\n\nContacts query: Avery Chen\nNo matching contacts were found."))
         XCTAssertEqual(observed.readQueries, ["Jordan Lee", "Avery Chen"])
         XCTAssertTrue(observed.fallbackPrompts.isEmpty)
@@ -3038,10 +3208,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         ] {
             let observed = try await exerciseContactRequirements(
                 prompt: row.prompt, queries: [row.query])
-            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."))
+            assertNativePlannerFailure(observed.outcome)
             XCTAssertTrue(observed.readQueries.isEmpty, row.prompt)
             XCTAssertEqual(observed.plannerSteps, 1, row.prompt)
-            XCTAssertEqual(observed.fallbackPrompts, [row.prompt])
+            XCTAssertTrue(observed.fallbackPrompts.isEmpty)
         }
     }
 
@@ -3053,24 +3223,27 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "Find Jordan Lee and Avery Chen in Contacts without showing Avery Chen.",
         ] {
             let observed = try await exerciseContactRequirements(prompt: prompt, queries: ["Jordan Lee"])
-            XCTAssertEqual(observed.result, .clarificationRequired("Unfulfilled task reached fallback."), prompt)
+            assertNativePlannerFailure(observed.outcome, message: "Uncompiled prompt: \(prompt)", file: #filePath, line: #line)
             XCTAssertEqual(observed.readQueries, ["Jordan Lee"], prompt)
             XCTAssertEqual(observed.plannerSteps, 2, prompt)
-            XCTAssertEqual(observed.fallbackPrompts, [prompt])
+            XCTAssertTrue(observed.fallbackPrompts.isEmpty, prompt)
         }
         let deniedPrompt = "Find Jordan Lee and Avery Chen in Contacts without showing Avery Chen."
         let denied = try await exerciseContactRequirements(
             prompt: deniedPrompt, queries: ["Jordan Lee", "Avery Chen"])
-        XCTAssertEqual(denied.result, .clarificationRequired("Unfulfilled task reached fallback."))
+        assertNativePlannerFailure(denied.outcome, message: "Denied prompt: \(deniedPrompt)")
         XCTAssertEqual(denied.plannerSteps, 3)
-        XCTAssertEqual(denied.fallbackPrompts, [deniedPrompt])
+        XCTAssertTrue(denied.fallbackPrompts.isEmpty)
     }
 
     func testQuotedContactEntityKeepsItsConjunctionInsideOneQuery() async throws {
         let observed = try await exerciseContactRequirements(
             prompt: #"Find "Avery and Sons" and Jordan Lee in Contacts."#,
             queries: ["Avery and Sons", "Jordan Lee"])
-        XCTAssertEqual(observed.result, .completed(
+        guard case .success(let result) = observed.outcome else {
+            return XCTFail("Quoted contact entities should project successfully")
+        }
+        XCTAssertEqual(result, .completed(
             "Contacts query: Avery and Sons\nContacts (showing up to 5):\n1. Avery and Sons — phones: +1 415 555 0199; emails: none.\n\nContacts query: Jordan Lee\nContacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."))
         XCTAssertEqual(observed.readQueries, ["Avery and Sons", "Jordan Lee"])
         XCTAssertEqual(observed.plannerSteps, 3)
@@ -3082,7 +3255,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         queries: [String],
         emptyQueries: Set<String> = []
     ) async throws -> (
-        result: ComputerUseExecutionResult,
+        outcome: Result<ComputerUseExecutionResult, Error>,
         readQueries: [String],
         plannerSteps: Int,
         fallbackPrompts: [String],
@@ -3112,14 +3285,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = RecordingMCPClientPool(
             tools: [contacts, try makeMailTool()], resultsByTool: [:],
             queuedResultsByTool: ["contacts_search": results])
-        let fallback = StubVisualExecutor(result: .clarificationRequired("Unfulfilled task reached fallback."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
             visualFallback: fallback, planner: planner, clientPool: pool)
-        let result = try await executor.execute(
-            taskID: "contact-requirements", prompt: prompt,
-            tools: makeHostTools(), progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "contact-requirements", prompt: prompt,
+                tools: makeHostTools(), progress: { _ in })
+        }
         let calls = await pool.directCalls()
         let readQueries = calls.compactMap { call -> String? in
             guard case .string(let query)? = call.arguments["query"] else { return nil }
@@ -3127,7 +3302,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
         let approvedCalls = await pool.approvedCalls()
         XCTAssertTrue(approvedCalls.isEmpty, prompt)
-        return (result, readQueries, planner.completedStepCount,
+        return (outcome, readQueries, planner.completedStepCount,
                 fallback.trustedUserPrompts, planner.requests.first?.prompt ?? "")
     }
 
@@ -3145,7 +3320,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             try await assertContactReadCompletion(
                 prompt: prompt,
                 trustedPrompt: prompt,
-                expectsFallback: true)
+                expectsNoProposal: true)
         }
         // Separate sentences and an ordinary polite question still ask for work.
         for suffix in ["Open Notes.", "Could you open Notes?"] {
@@ -3153,7 +3328,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             try await assertContactReadCompletion(
                 prompt: prompt,
                 trustedPrompt: prompt,
-                expectsFallback: true)
+                expectsNoProposal: true)
         }
     }
 
@@ -3168,7 +3343,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             try await assertContactReadCompletion(
                 prompt: prompt,
                 trustedPrompt: prompt,
-                expectsFallback: false)
+                expectsNoProposal: false)
         }
     }
 
@@ -3178,15 +3353,15 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try await assertContactReadCompletion(
             prompt: readPrompt,
             trustedPrompt: compoundPrompt,
-            expectsFallback: true)
+            expectsNoProposal: true)
         try await assertContactReadCompletion(
             prompt: "Earlier request: open Notes. Current request: \(readPrompt)",
             trustedPrompt: readPrompt,
-            expectsFallback: false)
+            expectsNoProposal: false)
     }
 
     func testReadCompletionDistinguishesOpenWindowInventoryFromOpeningWindows() async throws {
-        let rows: [(prompt: String, expectsFallback: Bool)] = [
+        let rows: [(prompt: String, expectsNoProposal: Bool)] = [
             ("List open windows.", false),
             ("Please show all open windows.", false),
             ("Could you list the currently open windows?", false),
@@ -3217,26 +3392,30 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                         isError: false,
                         wasTruncated: false),
                 ])
-            let fallbackResult = ComputerUseExecutionResult.clarificationRequired(
-                "Fixture fallback received the full request.")
-            let fallback = StubVisualExecutor(result: fallbackResult)
+            let fallback = StubVisualExecutor()
             let executor = try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath:
                     "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
                 visualFallback: fallback,
                 planner: planner,
                 clientPool: pool)
-            let result = try await executor.execute(
-                taskID: "read-completion-open-windows",
-                prompt: row.prompt,
-                tools: makeHostTools(),
-                progress: { _ in })
-
-            XCTAssertEqual(result, row.expectsFallback ? fallbackResult : .completed(
-                "Open windows:\n1. Packing list — PID 4242; index 0."), row.prompt)
-            XCTAssertEqual(fallback.callCount, row.expectsFallback ? 1 : 0, row.prompt)
-            XCTAssertEqual(fallback.trustedUserPrompts,
-                           row.expectsFallback ? [row.prompt] : [], row.prompt)
+            let outcome = await captureExecution {
+                try await executor.execute(
+                    taskID: "read-completion-open-windows",
+                    prompt: row.prompt,
+                    tools: makeHostTools(),
+                    progress: { _ in })
+            }
+            if row.expectsNoProposal {
+                assertNativePlannerFailure(outcome, file: #filePath, line: #line)
+            } else {
+                guard case .success(let result) = outcome else {
+                    return XCTFail("Complete window inventory should project successfully: \(row.prompt)")
+                }
+                XCTAssertEqual(result, .completed("Open windows:\n1. Packing list — PID 4242; index 0."), row.prompt)
+            }
+            XCTAssertEqual(fallback.callCount, 0, row.prompt)
+            XCTAssertTrue(fallback.trustedUserPrompts.isEmpty, row.prompt)
             let directCalls = await pool.directCalls()
             XCTAssertEqual(directCalls.map(\.toolName), ["list_windows"], row.prompt)
             let approvedCalls = await pool.approvedCalls()
@@ -3248,7 +3427,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     private func assertContactReadCompletion(
         prompt: String,
         trustedPrompt: String,
-        expectsFallback: Bool,
+        expectsNoProposal: Bool,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
@@ -3277,33 +3456,35 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallbackResult = ComputerUseExecutionResult.clarificationRequired(
-            "Fixture fallback received the full request.")
-        let fallback = StubVisualExecutor(result: fallbackResult)
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let result = try await executor.execute(
-            taskID: "read-completion-additional-work",
-            prompt: prompt,
-            trustedUserPrompt: trustedPrompt,
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        XCTAssertEqual(result, expectsFallback ? fallbackResult : .completed(
-            "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
-            trustedPrompt, file: file, line: line)
-        XCTAssertEqual(fallback.callCount, expectsFallback ? 1 : 0,
-                       trustedPrompt, file: file, line: line)
-        XCTAssertEqual(fallback.prompts, expectsFallback ? [prompt] : [],
-                       trustedPrompt, file: file, line: line)
-        XCTAssertEqual(fallback.trustedUserPrompts, expectsFallback ? [trustedPrompt] : [],
-                       trustedPrompt, file: file, line: line)
-        XCTAssertEqual(fallback.taskIDs, expectsFallback ? ["read-completion-additional-work"] : [],
-                       trustedPrompt, file: file, line: line)
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "read-completion-additional-work",
+                prompt: prompt,
+                trustedUserPrompt: trustedPrompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
+        if expectsNoProposal {
+            assertNativePlannerFailure(outcome, file: file, line: line)
+        } else {
+            guard case .success(let result) = outcome else {
+                return XCTFail("Read-only completion should project successfully", file: file, line: line)
+            }
+            XCTAssertEqual(result, .completed(
+                "Contacts (showing up to 5):\n1. Jordan Lee — phones: +1 415 555 0142; emails: none."),
+                trustedPrompt, file: file, line: line)
+        }
+        XCTAssertEqual(fallback.callCount, 0, trustedPrompt, file: file, line: line)
+        XCTAssertTrue(fallback.prompts.isEmpty, trustedPrompt, file: file, line: line)
+        XCTAssertTrue(fallback.trustedUserPrompts.isEmpty, trustedPrompt, file: file, line: line)
+        XCTAssertTrue(fallback.taskIDs.isEmpty, trustedPrompt, file: file, line: line)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.map(\.toolName), ["contacts_search"],
                        trustedPrompt, file: file, line: line)
@@ -3343,8 +3524,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -3352,14 +3532,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "multi-domain-partial-proof",
-            prompt: "Find Jordan Lee's phone number in Contacts and show my incomplete reminders.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "multi-domain-partial-proof",
+                prompt: "Find Jordan Lee's phone number in Contacts and show my incomplete reminders.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.count, 1)
         XCTAssertEqual(planner.completedStepCount, 2)
@@ -3473,8 +3655,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                     isError: false,
                     wasTruncated: false),
             ])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual verification took over."))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -3482,14 +3663,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "reminder-list-intent-mismatch",
-            prompt: "Show my first five incomplete reminders in my Work list.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "reminder-list-intent-mismatch",
+                prompt: "Show my first five incomplete reminders in my Work list.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual verification took over."))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.count, 1)
         XCTAssertEqual(planner.completedStepCount, 1)
@@ -3919,12 +4102,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(fallback.callCount, 0)
     }
 
-    func testDuplicateReadOnlyPlanSwitchesToVisualFallback() async throws {
+    func testUnrelatedRepeatedReadPlanPreservesNoProposal() async throws {
         let planner = StubMCPPlanner(mode: .repeatFocusedApp)
         let pool = StubMCPClientPool(
             tools: [try makeMailTool(), try makeFocusedAppTool()],
             resultText: "Safari is focused")
-        let fallback = StubVisualExecutor(result: .completed("Visual fallback finished"))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -3932,19 +4115,21 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "task-repeated-read",
-            prompt: "Use the GUI-only editor to change the visible document.",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "task-repeated-read",
+                prompt: "Use the GUI-only editor to change the visible document.",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual fallback finished"))
+        assertNativePlannerFailure(outcome)
         let directCount = await pool.directExecuteCount()
         XCTAssertEqual(
             directCount,
             0,
             "GUI-only context must not authorize an unrelated focused-app read")
-        XCTAssertEqual(fallback.callCount, 1)
+        XCTAssertEqual(fallback.callCount, 0)
     }
 
     func testDuplicateReadOnlyPlanStillKeepsIncompleteMailOutOfVisualControl() async throws {
@@ -4476,7 +4661,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(
             tools: [try makeMailTool(), try makeFocusedAppTool()],
             resultText: "Mail is focused")
-        let fallback = StubVisualExecutor(result: .completed("Visual send required"))
+        let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
@@ -4484,14 +4669,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "task-false-send",
-            prompt: "Which app is focused?",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "task-false-send",
+                prompt: "Which app is focused?",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(result, .completed("Visual send required"))
-        XCTAssertEqual(fallback.callCount, 1)
+        assertNativePlannerFailure(outcome)
+        XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         XCTAssertEqual(directCount, 1)
     }

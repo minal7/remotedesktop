@@ -1278,8 +1278,8 @@ final class ComputerUseHostTools {
     }
 
     func proposeUsingOwnedBrowserTools(_ input: ComputerUseFaraModel.Input,
-        observation: ComputerUseFaraBrowserExecutor.ToolObservation) async throws -> ComputerUseFaraModel.Proposal? {
-        guard let scope = browserToolProposals else { return nil }
+        observation: ComputerUseFaraBrowserExecutor.ToolObservation) async throws -> ComputerUseFaraBrowserExecutor.ToolPlan {
+        guard let scope = browserToolProposals else { return .noProposal }
         func check() throws {
             try Task.checkCancellation()
             guard mayAct() else { throw ToolError.paused }
@@ -4476,13 +4476,14 @@ final class HostComputerUseManager: ObservableObject {
         self.visualExecutorLoader = modelLoader
         var configuredBrowserPlanner = mcpBrowserStepPlanner
         if configuredBrowserPlanner.nativeTextPlanner == nil, let nativeTextInstaller {
+            let inspectExchange = configuredBrowserPlanner.inspectExchange
             configuredBrowserPlanner.nativeTextPlanner = {
                 guard let receipt = await nativeTextInstaller.currentInstallation() else { return nil }
                 try Task.checkCancellation()
                 let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
                 let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
                     runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
-                return .init(inputs: inputs)
+                return .init(inputs: inputs, inspectExchange: inspectExchange)
             }
         }
         let browserPlanner = configuredBrowserPlanner

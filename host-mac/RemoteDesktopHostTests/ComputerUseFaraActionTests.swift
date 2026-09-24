@@ -46,6 +46,127 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertTrue(try legacy.validatedBrowserGoal().questions.isEmpty)
     }
 
+    func testWorkerDirectiveRetainsOriginalGoalAndRejectsDesktopOrOversizeContext() throws {
+        let original = "plz chek this dont buy nething", png = try smallPNG()
+        var input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: png)
+        input.browserWorkerDirective = .init(objective: "Read the visible return policy", constraints: "Do not purchase", completionCriteria: ["Return the observed policy"])
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil, baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(request.httpBody)
+        let text = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(text.contains(original))
+        XCTAssertTrue(text.contains("Read the visible return policy"))
+        XCTAssertTrue(text.contains("Do not purchase"))
+        var desktop = ComputerUseFaraModel.Input(goal: original, screenshotPNG: png, surface: .desktop)
+        desktop.browserWorkerDirective = input.browserWorkerDirective
+        XCTAssertThrowsError(try desktop.validateSurfaceContext())
+        input.browserWorkerDirective = .init(objective: String(repeating: "x", count: 1_025), constraints: "", completionCriteria: ["Read it"])
+        XCTAssertThrowsError(try input.validateSurfaceContext())
+    }
+
+    @MainActor
+    func testFaraBrowserUsesSharedPlanningPermitAfterTimedOutCall() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><p>Policy</p>")])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraSharedPlanning-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "shared-planning-" + UUID().uuidString
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "fixture", to: base.appendingPathComponent("page"))
+        var visualCalls = 0, toolCalls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in
+                visualCalls += 1
+                throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
+            }, proposeUsingTools: { _, _ in
+                toolCalls += 1
+                return .noProposal
+            })
+
+        let worker = ComputerUsePlanningWorker.shared
+        try worker.requireAvailable()
+        let gate = ComputerUsePlanningTestGate<Int>(
+            started: expectation(description: "shared planner started"),
+            returned: expectation(description: "shared planner returned"))
+        defer { gate.finish(42) }
+        let timeoutDelivered = expectation(description: "shared caller received deadline")
+        let blockedCall = Task { () -> ComputerUsePlanningWorker.Failure? in
+            defer { timeoutDelivered.fulfill() }
+            do { _ = try await worker.perform(timeout: 0.1) { await gate.wait() }; return nil }
+            catch { return error as? ComputerUsePlanningWorker.Failure }
+        }
+        await fulfillment(of: [gate.started, timeoutDelivered], timeout: 2, enforceOrder: true)
+        let deadlineFailure = await blockedCall.value
+        var browserFailure: ComputerUsePlanningWorker.Failure?
+        do {
+            _ = try await executor.execute(taskID: taskID, prompt: "Read the visible policy.",
+                trustedUserPrompt: "Read the visible policy.", tools: tools, progress: { _ in })
+        } catch { browserFailure = error as? ComputerUsePlanningWorker.Failure }
+
+        gate.finish(42)
+        await fulfillment(of: [gate.returned], timeout: 2)
+        try await waitForAvailablePlanningWorker(worker)
+        XCTAssertEqual(deadlineFailure, .timedOut)
+        XCTAssertEqual(browserFailure, .busy)
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(toolCalls, 0)
+    }
+
+    @MainActor
+    func testOptInSpecialistCompletionReturnsToOrchestratorBeforeTaskFinishes() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: controlled specialist return boundary") }
+        let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(policy) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/page": .init(body: "<!doctype html><h1>Policy available</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        for review in ["noProposal", "handoff", "question"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SpecialistReturn-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let goal = "Read the policy and help me complete the remaining task."
+            var calls = 0, visualCalls = 0
+            let directive = ComputerUseFaraModel.WorkerDirective(objective: "Read the visible policy", constraints: "Do not submit", completionCriteria: ["Return the observed policy"])
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("task"), propose: { input in
+                visualCalls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.browserWorkerDirective, directive)
+                let response = self.call(#"{"action":"terminate","answer":"The policy is available; my subtask is done."}"#)
+                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+            }, proposeUsingTools: { input, observation in
+                calls += 1
+                if calls == 1 {
+                    guard case .initial = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    let response = self.call("{\"action\":\"visit_url\",\"url\":\"\(base.appendingPathComponent("page").absoluteString)\"}")
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+                }
+                guard case .page = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                if calls == 2 { return .handoff(directive) }
+                XCTAssertEqual(calls, 3)
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.specialistCompletion, "The policy is available; my subtask is done.")
+                if review == "noProposal" { return .noProposal }
+                if review == "handoff" { return .handoff(directive) }
+                let response = self.call(#"{"action":"ask_user_question","question":"Which remaining task should I perform?"}"#)
+                return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+            })
+            do {
+                let result = try await executor.execute(taskID: review, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+                XCTAssertEqual(review, "question")
+                XCTAssertEqual(result, .clarificationRequired("Which remaining task should I perform?"))
+            } catch {
+                XCTAssertNotEqual(review, "question")
+                XCTAssertEqual(error as? ComputerUseMCPBrowserStepPlanner.Failure, .incompleteEvidence)
+            }
+            XCTAssertEqual(calls, 3); XCTAssertEqual(visualCalls, 1)
+        }
+    }
+
     @MainActor
     func testOptInFailedOrRetiredBrowserToolProposalCannotLoadModel() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: tool proposal retirement") }
@@ -54,7 +175,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var allowed = true
         let browser = ComputerUseOwnedBrowser(mayAct: { allowed }); defer { browser.close() }
         var retainedWindow: NSWindow?
-        for mode in ["error", "capacity", "completion", "negated-completion", "incomplete", "cancellation", "control", "owner", "invalid-action", "foreign-scope", "nested-scope"] {
+        for mode in ["error", "capacity", "missing-assessment", "missing-assessment-with-prohibition", "incomplete", "cancellation", "control", "owner", "invalid-action", "foreign-scope", "nested-scope"] {
             allowed = true
             let taskID = "retired-tools-" + mode
             // First admission creates the native view. Later cases retain
@@ -78,9 +199,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     switch mode {
                     case "error": throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction
                     case "capacity": throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit
-                    case "completion", "negated-completion":
+                    case "missing-assessment", "missing-assessment-with-prohibition":
                         try MCPFirstComputerUseExecutor.validateBrowserCompletion(plan: .init(kind: .answer, reference: "", text: "The store closes at 6 PM."),
-                            goal: mode == "completion" ? "Read the store hours and purchase a gift."
+                            goal: mode == "missing-assessment" ? "Read the store hours and purchase a gift."
                                 : "Read the store hours. Do not purchase a gift.", hasPageObservation: true)
                     case "incomplete":
                         try MCPFirstComputerUseExecutor.validateBrowserCompletion(
@@ -90,15 +211,15 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     case "control": allowed = false
                     case "owner": try browser.claim(taskID: "replacement-owner")
                     case "nested-scope":
-                        _ = try await tools.withOwnedBrowserToolProposals(taskID: taskID, propose: { _, _ in nil }, operation: {
+                        _ = try await tools.withOwnedBrowserToolProposals(taskID: taskID, propose: { _, _ in .noProposal }, operation: {
                             XCTFail("An overlapping scope cannot execute")
                             return .completed("unexpected")
                         })
                     default:
                         let response = self.call(#"{"action":"left_click","coordinate":[200,200]}"#)
-                        return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                        return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
                     }
-                    return nil
+                    return .noProposal
                 }
             do {
                 _ = try await tools.withOwnedBrowserToolProposals(taskID: mode == "foreign-scope" ? "foreign" : taskID,
@@ -109,7 +230,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
             } catch {
                 switch mode {
                 case "error", "invalid-action": XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .unsupportedAction)
-                case "capacity", "completion", "negated-completion": XCTAssertNotNil(error as? ComputerUseMCPBrowserStepPlanner.Failure)
+                case "capacity", "missing-assessment", "missing-assessment-with-prohibition": XCTAssertNotNil(error as? ComputerUseMCPBrowserStepPlanner.Failure)
                 case "incomplete": XCTAssertEqual(error as? MCPFirstComputerUseExecutor.ExecutorError,
                     .structuredToolFailed("The requested action has not been performed."))
                 case "cancellation": XCTAssertTrue(error is CancellationError)
@@ -151,6 +272,8 @@ final class ComputerUseFaraActionTests: XCTestCase {
                     XCTAssertEqual(input.history.count, 1); XCTAssertEqual(input.history.first?.response, search)
                     XCTAssertEqual(input.currentURL, base.appendingPathComponent("search").appending(queryItems: [.init(name: "q", value: "night train")]))
                     XCTAssertTrue(input.observedPage?.text.contains("21:45") == true)
+                    XCTAssertEqual(input.browserWorkerDirective?.objective, "Read the departure time")
+                    XCTAssertEqual(input.browserWorkerDirective?.constraints, "Read only")
                     return try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer))
                 }, proposeUsingTools: { input, observation in
                     toolCalls += 1; XCTAssertEqual(input.goal, goal)
@@ -158,21 +281,28 @@ final class ComputerUseFaraActionTests: XCTestCase {
                         guard case .initial = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
                         firstWindow = NSApp.keyWindow
                         XCTAssertNil(input.currentURL); XCTAssertTrue(input.history.isEmpty)
-                        return try .init(response: search, action: ComputerUseFaraAction.decodeNativeMessage(search))
+                        return .proposal(try .init(response: search, action: ComputerUseFaraAction.decodeNativeMessage(search)))
                     }
-                    guard toolCalls == 2, case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                    guard toolCalls <= 3, case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
                     XCTAssertTrue(NSApp.keyWindow === firstWindow)
                     XCTAssertEqual(page.currentURL, input.currentURL)
                     XCTAssertEqual(input.history.first?.response, search)
                     XCTAssertTrue(page.approvalPageEvidence.page.texts.contains { $0.text.contains("21:45") })
-                    return needsModel ? nil : try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer))
+                    if toolCalls == 2 && needsModel {
+                        return .handoff(.init(objective: "Read the departure time", constraints: "Read only", completionCriteria: ["Report the observed departure time"]))
+                    }
+                    if needsModel {
+                        XCTAssertEqual(toolCalls, 3)
+                        XCTAssertEqual(input.specialistCompletion, "The night train departs at 21:45.")
+                    }
+                    return .proposal(try .init(response: answer, action: ComputerUseFaraAction.decodeNativeMessage(answer)))
                 })
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
             XCTAssertEqual(result, .completed("The night train departs at 21:45."))
-            XCTAssertEqual(toolCalls, 2); XCTAssertEqual(modelCalls, needsModel ? 1 : 0)
+            XCTAssertEqual(toolCalls, needsModel ? 3 : 2); XCTAssertEqual(modelCalls, needsModel ? 1 : 0)
             XCTAssertEqual(server.count("/search?q=night%20train"), before + 1)
             let replay = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-            XCTAssertEqual(replay, result); XCTAssertEqual(toolCalls, 2)
+            XCTAssertEqual(replay, result); XCTAssertEqual(toolCalls, needsModel ? 3 : 2)
             XCTAssertEqual(modelCalls, needsModel ? 1 : 0); XCTAssertEqual(server.count("/search?q=night%20train"), before + 1)
         }
     }

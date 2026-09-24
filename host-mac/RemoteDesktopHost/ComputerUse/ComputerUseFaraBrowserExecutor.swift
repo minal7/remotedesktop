@@ -16,7 +16,12 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
         }
     }
-    typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ComputerUseFaraModel.Proposal?
+    enum ToolPlan: Sendable {
+        case proposal(ComputerUseFaraModel.Proposal)
+        case handoff(ComputerUseFaraModel.WorkerDirective)
+        case noProposal
+    }
+    typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ToolPlan
     enum Failure: Error, LocalizedError, Equatable {
         case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion, visualModelUnavailable
         var errorDescription: String? {
@@ -78,7 +83,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private let proposeUsingTools: ProposeUsingTools?
     private let searchProvider: ComputerUseBrowserSearchProvider
     private let finishRun: @MainActor @Sendable () async -> Void
-    private let planning = ComputerUsePlanningWorker()
+    private let planning = ComputerUsePlanningWorker.shared
     private var session: Session?
     private var sessionTools: ComputerUseHostTools?
     private let now: @MainActor () -> Date
@@ -229,6 +234,15 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     /// Tool planning shares the original observation and execution history.
     /// Only an explicit no-proposal result can reach the computer-use model;
     /// cancellation, a changed owner/document, or a failed tool read cannot.
+    private nonisolated static func readOnlyToolProposal(_ proposal: ComputerUseFaraModel.Proposal) throws
+        -> ComputerUseFaraModel.Proposal {
+        switch proposal.action {
+        case .visitURL, .webSearch, .readPageQuestion, .remember, .askUser, .reportCompletion, .wait:
+            return proposal
+        default: throw Failure.unsupportedAction
+        }
+    }
+
     private func nextProposal(_ input: ComputerUseFaraModel.Input, observation: ToolObservation,
                               tools: ComputerUseHostTools) async throws -> ComputerUseFaraModel.Proposal {
         let toolPlanner = proposeUsingTools, visualPlanner = propose
@@ -241,24 +255,50 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 case .page(let page): try tools.validateOwnedBrowserAgentMemoryObservation(page)
                 }
             }
+            @MainActor func toolPlan(for candidate: ComputerUseFaraModel.Input) async throws -> ToolPlan {
+                try await checkObservation()
+                let plan: ToolPlan
+                if let toolPlanner { plan = try await toolPlanner(candidate, observation) }
+                else { plan = try await tools.proposeUsingOwnedBrowserTools(candidate, observation: observation) }
+                try await checkObservation()
+                return plan
+            }
+            @MainActor func visualProposal(_ visualInput: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+                try await checkObservation()
+                let proposal = try await visualPlanner(visualInput)
+                try await checkObservation()
+                guard hasToolPlanner, case .reportCompletion(let candidateText) = proposal.action else { return proposal }
+                var reviewInput = input
+                reviewInput.browserWorkerDirective = nil
+                reviewInput.specialistCompletion = candidateText
+                let reviewed = try await toolPlan(for: reviewInput)
+                guard case .proposal(let reviewedProposal) = reviewed else {
+                    throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                }
+                return try Self.readOnlyToolProposal(reviewedProposal)
+            }
             if hasToolPlanner {
-                try await checkObservation()
-                let proposed: ComputerUseFaraModel.Proposal?
-                if let toolPlanner { proposed = try await toolPlanner(input, observation) }
-                else { proposed = try await tools.proposeUsingOwnedBrowserTools(input, observation: observation) }
-                try await checkObservation()
-                if let proposed {
+                switch try await toolPlan(for: input) {
+                case .proposal(let proposal):
                     // This proposal boundary is read/navigation-only. Real
                     // MCP mutations need their own approved effect receipts.
-                    switch proposed.action {
-                    case .visitURL, .webSearch, .readPageQuestion, .remember, .askUser, .reportCompletion, .wait:
-                        return proposed
-                    default: throw Failure.unsupportedAction
+                    return try Self.readOnlyToolProposal(proposal)
+                case .handoff(let directive):
+                    guard input.surface == .browser else { throw Failure.unsupportedAction }
+                    try directive.validate()
+                    var specialistInput = input
+                    specialistInput.browserWorkerDirective = directive
+                    specialistInput.specialistCompletion = nil
+                    return try await visualProposal(specialistInput)
+                case .noProposal:
+                    guard input.browserWorkerDirective == nil else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
                     }
+                    return try await visualProposal(input)
                 }
             }
             try Task.checkCancellation()
-            return try await visualPlanner(input)
+            return try await visualProposal(input)
         }
     }
 

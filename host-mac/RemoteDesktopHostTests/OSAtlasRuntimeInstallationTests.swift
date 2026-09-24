@@ -42,9 +42,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
                 if let identity { XCTAssertEqual(initial.sessionIdentity, identity) }
                 else { identity = initial.sessionIdentity }
                 toolCalls += 1
-                if toolCalls > 1 { return nil }
+                if toolCalls > 1 { return .noProposal }
                 let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"ask_user_question","question":"Which project?"}}</tool_call>"#
-                return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
+                return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
             }
             let first = try await tools.withOwnedBrowserToolProposals(taskID: "task", propose: propose) {
                 try await executor.execute(taskID: "task", prompt: "Browse documentation.", trustedUserPrompt: "Browse documentation.", tools: tools, progress: { _ in })
