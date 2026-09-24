@@ -1671,6 +1671,111 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInOwnedBrowserCaptureReturnsCompleteEmptyBeforeDelayedPopulation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: characterize native page readiness on controlled local content")
+        }
+        let previousPolicy = NSApp.activationPolicy()
+        NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/delayed": .init(body: """
+                <!doctype html><html><body><script>
+                document.body.dataset.fixturePopulated = 'false';
+                setTimeout(() => {
+                  document.body.innerHTML = '<main><p>Delayed fixture content</p><a href="/target">Delayed target</a></main>';
+                  document.body.dataset.fixturePopulated = 'true';
+                }, 4000);
+                </script></body></html>
+                """),
+            "/stable-empty": .init(body: "<!doctype html><html><body></body></html>"),
+            "/target": .init(body: "<!doctype html><html><body><p>Target</p></body></html>")
+        ])
+        let base = try await server.start()
+        defer { server.stop() }
+        let browser = ComputerUseOwnedBrowser(mayAct: { true })
+        defer { browser.close() }
+        var retainedWindow: NSWindow?
+        let taskID = "empty-page-lifecycle"
+        try browser.claim(taskID: taskID)
+        var document = try await browser.navigate(taskID: taskID, operationID: "delayed", to: base.appendingPathComponent("delayed"))
+        try requireSameNativeWindow(&retainedWindow)
+        func webViews(_ view: NSView) -> [WKWebView] { (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews) }
+        let web = try XCTUnwrap(NSApp.keyWindow?.contentView.flatMap { webViews($0).first })
+        func pageState() async throws -> (readyState: String, populated: Bool) {
+            let result = try await web.callAsyncJavaScript(
+                "return JSON.stringify({readyState:document.readyState,populated:document.body.dataset.fixturePopulated==='true'});",
+                arguments: [:], in: nil, contentWorld: ComputerUseBrowserDOM.world)
+            let json = try XCTUnwrap(result as? String)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            return (try XCTUnwrap(object["readyState"] as? String), try XCTUnwrap(object["populated"] as? Bool))
+        }
+        func captureLine(_ label: String, _ observation: ComputerUseOwnedBrowser.AgentObservation,
+                         _ state: (readyState: String, populated: Bool)) -> String {
+            let page = observation.approvalPageEvidence.page
+            return "\(label): url=\(observation.currentURL.absoluteString), webViewLoading=\(web.isLoading), browserLoading=\(browser.isLoadingPage), readyState=\(state.readyState), populated=\(state.populated), stage=\(browser.lastAgentCaptureStage ?? "none"), texts=\(page.texts.count), links=\(page.links.count), containers=\(page.containers.count)"
+        }
+        var report: [String] = []
+        let initialState = try await pageState()
+        let initial = try await browser.captureAgentObservation(document: document)
+        let afterInitial = try await pageState()
+        report.append(captureLine("delayed-initial", initial, afterInitial))
+        XCTAssertEqual(initial.currentURL, document.committedURL)
+        XCTAssertFalse(web.isLoading)
+        XCTAssertFalse(browser.isLoadingPage)
+        XCTAssertEqual(afterInitial.readyState, "complete")
+        XCTAssertFalse(afterInitial.populated, "The fixture's known delayed content must still be pending")
+        XCTAssertEqual(initial.approvalPageEvidence.page.texts.count, 0)
+        XCTAssertEqual(initial.approvalPageEvidence.page.links.count, 0)
+        XCTAssertEqual(initial.approvalPageEvidence.page.containers.count, 0)
+        XCTAssertEqual(browser.lastAgentCaptureStage, "complete")
+        XCTAssertEqual(initialState.readyState, "complete")
+
+        let populationDeadline = ContinuousClock.now + .seconds(5)
+        var populatedState = afterInitial
+        while !populatedState.populated {
+            guard ContinuousClock.now < populationDeadline else {
+                XCTFail("Controlled content did not populate before the experiment deadline")
+                break
+            }
+            try Task.checkCancellation()
+            try await Task.sleep(for: .milliseconds(50))
+            populatedState = try await pageState()
+        }
+        XCTAssertTrue(populatedState.populated)
+        let populated = try await browser.captureAgentObservation(document: document)
+        report.append(captureLine("delayed-populated", populated, populatedState))
+        XCTAssertEqual(populated.currentURL, document.committedURL)
+        XCTAssertFalse(web.isLoading)
+        XCTAssertFalse(browser.isLoadingPage)
+        XCTAssertTrue(populated.approvalPageEvidence.page.texts.contains { $0.text == "Delayed fixture content" })
+        XCTAssertTrue(populated.approvalPageEvidence.page.links.contains { $0.label == "Delayed target" })
+
+        document = try await browser.navigate(taskID: taskID, operationID: "stable-empty", to: base.appendingPathComponent("stable-empty"), from: document)
+        let stableState = try await pageState()
+        let stableFirst = try await browser.captureAgentObservation(document: document)
+        try await Task.sleep(for: .milliseconds(250))
+        let stableAgainState = try await pageState()
+        let stableAgain = try await browser.captureAgentObservation(document: document)
+        report.append(captureLine("stable-empty-first", stableFirst, stableState))
+        report.append(captureLine("stable-empty-again", stableAgain, stableAgainState))
+        XCTAssertEqual(stableState.readyState, "complete")
+        XCTAssertEqual(stableAgainState.readyState, "complete")
+        XCTAssertFalse(web.isLoading)
+        XCTAssertFalse(browser.isLoadingPage)
+        for observation in [stableFirst, stableAgain] {
+            XCTAssertEqual(observation.currentURL, document.committedURL)
+            XCTAssertTrue(observation.approvalPageEvidence.page.texts.isEmpty)
+            XCTAssertTrue(observation.approvalPageEvidence.page.links.isEmpty)
+            XCTAssertTrue(observation.approvalPageEvidence.page.containers.isEmpty)
+        }
+        let attachment = XCTAttachment(string: report.joined(separator: "\n"))
+        attachment.name = "Native empty-page lifecycle characterization"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    @MainActor
     func testOptInAgentObservationWaitsForDocumentReadinessWithoutLosingControlGates() async throws {
         guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else { throw XCTSkip("Opt-in: bounded native document readiness") }
         let policy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
@@ -3916,6 +4021,247 @@ final class ComputerUseFaraActionTests: XCTestCase {
             let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
                 .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
             XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, mode == "once" ? 1 : 0)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraReplansAfterInvalidResponseFromObsoleteObservation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: stale native planner error recovery on controlled local pages")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/initial": .init(body: "<!doctype html><html><body><p>Initial fixture page</p></body></html>"),
+            "/fresh": .init(body: "<!doctype html><html><body><p>Fresh fixture page</p></body></html>"),
+            "/clicked": .init(body: "clicked"), "/submitted": .init(body: "submitted")
+        ])
+        let base = try await server.start(); defer { server.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraStalePlannerError-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "stale-planner-error-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        var plannerCalls = 0, visualCalls = 0
+        var diagnosticStages: [String] = []
+        func recordStage(_ name: String) {
+            diagnosticStages.append("\(name); capture=\(browser.lastAgentCaptureStage ?? "none"); currentURL=\(browser.currentDocument(taskID: taskID)?.committedURL.absoluteString ?? "none"); plannerCalls=\(plannerCalls); visualCalls=\(visualCalls)")
+        }
+        defer {
+            let attachment = XCTAttachment(string: diagnosticStages.joined(separator: "\n"))
+            attachment.name = "Stale planner error recovery stages"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        recordStage("before claim")
+        try browser.claim(taskID: taskID)
+        recordStage("after claim, before initial navigate")
+        let initialURL = base.appendingPathComponent("initial")
+        let freshURL = base.appendingPathComponent("fresh")
+        _ = try await browser.navigate(taskID: taskID, operationID: "initial", to: initialURL)
+        recordStage("after initial navigate")
+        var retainedWindow: NSWindow?
+        try requireSameNativeWindow(&retainedWindow)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let goal = "Read the current local page and report its visible text."
+        let completionText = "The current page says: Fresh fixture page."
+        let completionResponse = call(#"{"action":"terminate","answer":"The current page says: Fresh fixture page."}"#)
+        recordStage("before executor")
+        var originalObservation: ComputerUseOwnedBrowser.AgentObservation?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { input, observation in
+                plannerCalls += 1
+                recordStage("planner entry")
+                guard case .page(let page) = observation else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+                if plannerCalls == 1 {
+                    originalObservation = page
+                    XCTAssertEqual(input.currentURL, initialURL)
+                    recordStage("before fixture navigation")
+                    _ = try await browser.navigate(taskID: taskID, operationID: "test-navigation", to: freshURL,
+                        from: page.approvalPageEvidence.document)
+                    recordStage("after fixture navigation")
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                }
+                let original = try XCTUnwrap(originalObservation)
+                XCTAssertNotEqual(page, original, "A planner error from a superseded document must trigger fresh observation")
+                XCTAssertEqual(page.approvalPageEvidence.document.committedURL, freshURL)
+                XCTAssertEqual(input.currentURL, freshURL)
+                XCTAssertTrue(input.observedPage?.text.contains("Fresh fixture page") == true)
+                XCTAssertEqual(input.history.count, 0, "The rejected planner error is not a proposal and should not enter Fara history")
+                return .proposal(try .init(response: completionResponse,
+                    action: ComputerUseFaraAction.decodeNativeMessage(completionResponse)))
+            })
+        let result: ComputerUseExecutionResult
+        do {
+            result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+            recordStage("after executor")
+        } catch {
+            XCTFail("Expected stale invalidResponse to be replaced by a fresh observation; got \(String(reflecting: type(of: error))): \(String(reflecting: error)); localizedDescription=\(error.localizedDescription)")
+            return
+        }
+        XCTAssertEqual(result, .completed(completionText))
+        XCTAssertEqual(plannerCalls, 2)
+        XCTAssertEqual(visualCalls, 0, "A stale text-planner error must not activate visual fallback")
+        XCTAssertEqual(browser.currentDocument(taskID: taskID)?.committedURL, freshURL)
+        XCTAssertEqual(server.count("/clicked"), 0)
+        XCTAssertEqual(server.count("/submitted"), 0)
+        let journals = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("fara"), includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        XCTAssertEqual(journals.filter { $0.stepIDs == ["native-dispatch-returned"] }.count, 0)
+    }
+
+    @MainActor
+    func testOptInFaraBoundsRetriesForInvalidResponseFromRepeatedStaleObservations() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: bounded stale native planner error recovery")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        var routes: [String: OwnedBrowserHTTPFixture.Response] = [
+            "/clicked": .init(body: "clicked"), "/submitted": .init(body: "submitted")
+        ]
+        for index in 0...4 {
+            routes["/page\(index)"] = .init(body: "<!doctype html><html><body><p>Fixture page \(index)</p></body></html>")
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: routes); defer { server.stop() }
+        let base = try await server.start()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraStalePlannerErrorBound-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let taskID = "stale-planner-error-bound-" + UUID().uuidString
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        try browser.claim(taskID: taskID)
+        _ = try await browser.navigate(taskID: taskID, operationID: "initial", to: base.appendingPathComponent("page0"))
+        var retainedWindow: NSWindow?
+        try requireSameNativeWindow(&retainedWindow)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let goal = "Read the current local page."
+        var plannerCalls = 0, visualCalls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { _, observation in
+                plannerCalls += 1
+                guard case .page(let page) = observation else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+                _ = try await browser.navigate(taskID: taskID, operationID: "test-navigation-\(plannerCalls)",
+                    to: base.appendingPathComponent("page\(plannerCalls)"), from: page.approvalPageEvidence.document)
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            })
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        guard case .userInterventionRequired = result else {
+            return XCTFail("Repeated stale planner errors should use the existing bounded stale-observation limit")
+        }
+        XCTAssertEqual(plannerCalls, 4, "Three stale retries are allowed; the fourth stale proposal reaches the existing cap")
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(browser.currentDocument(taskID: taskID)?.committedURL, base.appendingPathComponent("page4"))
+        XCTAssertEqual(server.count("/clicked"), 0)
+        XCTAssertEqual(server.count("/submitted"), 0)
+    }
+
+    @MainActor
+    func testOptInFaraKeepsInvalidResponseTerminalWhenObservationIsCurrent() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: unchanged and same-document invalid planner responses remain terminal")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["unchanged", "same-document"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/page": .init(body: "<!doctype html><html><body><p id=content>Stable fixture page</p></body></html>"),
+                "/clicked": .init(body: "clicked"), "/submitted": .init(body: "submitted")
+            ])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraPlannerErrorCurrent-\(mode)-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let taskID = "planner-error-current-\(mode)-" + UUID().uuidString
+            let url = base.appendingPathComponent("page")
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "initial", to: url)
+            var retainedWindow: NSWindow?
+            try requireSameNativeWindow(&retainedWindow)
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let goal = "Read the current local page."
+            var plannerCalls = 0, visualCalls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+                propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, observation in
+                    plannerCalls += 1
+                    guard case .page = observation else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+                    if mode == "same-document" {
+                        @MainActor func webViews(_ view: NSView) -> [WKWebView] {
+                            (view as? WKWebView).map { [$0] } ?? view.subviews.flatMap(webViews)
+                        }
+                        let web = try XCTUnwrap(webViews(try XCTUnwrap(NSApp.keyWindow?.contentView)).first)
+                        _ = try await web.evaluateJavaScript("document.getElementById('content').textContent='Updated in the same document'")
+                    }
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                })
+            do {
+                _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                    tools: tools, progress: { _ in })
+                XCTFail("A malformed response from a current observation must remain terminal (\(mode))")
+            } catch {
+                XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse, mode)
+            }
+            XCTAssertEqual(plannerCalls, 1, mode)
+            XCTAssertEqual(visualCalls, 0, mode)
+            XCTAssertEqual(browser.currentDocument(taskID: taskID)?.committedURL, url, mode)
+            XCTAssertEqual(server.count("/clicked"), 0, mode)
+            XCTAssertEqual(server.count("/submitted"), 0, mode)
+        }
+    }
+
+    @MainActor
+    func testOptInFaraPreservesCancellationAndOwnershipLossOverInvalidResponse() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
+            throw XCTSkip("Opt-in: cancellation and owner errors retain precedence over planner errors")
+        }
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        for mode in ["cancel", "owner"] {
+            let server = try OwnedBrowserHTTPFixture(routes: [
+                "/page": .init(body: "<!doctype html><html><body><p>Fixture page</p></body></html>"),
+                "/clicked": .init(body: "clicked"), "/submitted": .init(body: "submitted")
+            ])
+            let base = try await server.start(); defer { server.stop() }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraPlannerErrorPriority-\(mode)-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let taskID = "planner-error-\(mode)-" + UUID().uuidString
+            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+            try browser.claim(taskID: taskID)
+            _ = try await browser.navigate(taskID: taskID, operationID: "initial", to: base.appendingPathComponent("page"))
+            var retainedWindow: NSWindow?
+            try requireSameNativeWindow(&retainedWindow)
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+            let goal = "Read the current local page."
+            var plannerCalls = 0, visualCalls = 0
+            let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+                propose: { _ in visualCalls += 1; throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+                proposeUsingTools: { _, _ in
+                    plannerCalls += 1
+                    if mode == "cancel" { withUnsafeCurrentTask { $0?.cancel() } }
+                    else { try browser.claim(taskID: "successor") }
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                })
+            do {
+                _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                    tools: tools, progress: { _ in })
+                XCTFail("A planner error must not replace \(mode) during freshness recovery")
+            } catch {
+                if mode == "cancel" { XCTAssertTrue(error is CancellationError, "\(mode): \(error)") }
+                else { XCTAssertEqual(error as? ComputerUseBrowserError, .ownershipLost) }
+            }
+            XCTAssertEqual(plannerCalls, 1, mode)
+            XCTAssertEqual(visualCalls, 0, mode)
+            XCTAssertEqual(browser.taskID, mode == "owner" ? "successor" : taskID, mode)
+            XCTAssertEqual(server.count("/clicked"), 0, mode)
+            XCTAssertEqual(server.count("/submitted"), 0, mode)
+            server.stop()
         }
     }
 

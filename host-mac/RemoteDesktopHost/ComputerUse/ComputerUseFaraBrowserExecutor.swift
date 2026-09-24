@@ -263,8 +263,13 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             @MainActor func toolPlan(for candidate: ComputerUseFaraModel.Input) async throws -> ToolPlan {
                 try await checkObservation()
                 let plan: ToolPlan
-                if let toolPlanner { plan = try await toolPlanner(candidate, observation) }
-                else { plan = try await tools.proposeUsingOwnedBrowserTools(candidate, observation: observation) }
+                do {
+                    if let toolPlanner { plan = try await toolPlanner(candidate, observation) }
+                    else { plan = try await tools.proposeUsingOwnedBrowserTools(candidate, observation: observation) }
+                } catch ComputerUseBrowserGoalPlanError.invalidResponse {
+                    try await checkObservation()
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                }
                 try await checkObservation()
                 return plan
             }
