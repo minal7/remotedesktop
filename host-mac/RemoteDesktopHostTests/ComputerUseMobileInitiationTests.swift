@@ -1203,6 +1203,50 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(pendingCalls.counts, 3); XCTAssertEqual(pendingCalls.completions, 3)
     }
 
+    func testNativeBrowserCorrectionFeedbackListsAllLiteralsOrClearlyBoundsOverflow() async throws {
+        let source = URL(string: "https://example.org/policy")!
+        let input = ComputerUseFaraModel.Input(goal: "Report the fee.", screenshotPNG: Data(), currentURL: source)
+        let page = ComputerUseBrowserPageSnapshot(id: String(repeating: "e", count: 32), texts: [
+            .init(id: "t1", containerID: "g1", text: "The fee is $1.")],
+            links: [], truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "main")], omittedStructure: false)
+        let context = try ComputerUseMCPBrowserStepPlanner().context(input, page: page, wholePage: true)
+        let contractResponse = #"{"objective":"Report the fee.","constraints":[],"requirements":[{"instruction":"Report the fee.","kind":"information"}]}"#
+        let corrected = try nativeBrowserFunctionEnvelope("answer", arguments: ["text": "The fee is $1.",
+            "evidence": ["r1": ["text:t1"]]])
+
+        for (name, unsupportedText, expectedLiterals) in [
+            ("complete-list", "Amounts: $11, $22, $33, and $44.", ["$11", "$22", "$33", "$44"]),
+            ("bounded-overflow", "Amounts: $" + String(repeating: "7", count: 70) + ", ¥" + String(repeating: "8", count: 70) + ", $" + String(repeating: "9", count: 70) + ", $" + String(repeating: "6", count: 70) + ".", [] as [String])
+        ] {
+            let rejected = try nativeBrowserFunctionEnvelope("answer", arguments: ["text": unsupportedText,
+                "evidence": ["r1": ["text:t1"]]])
+            let transport = NativeStepQueueFixtureTransport(responses: [
+                try nativeStepEnvelope(#"{"kind":"continue","text":""}"#), try nativeStepEnvelope(contractResponse),
+                rejected, corrected], tokenCounts: [100, 100, 4_426, 4_426])
+            let planner = try nativeStepPlanner(transport: transport)
+            let plan = try await planner.propose(context)
+            XCTAssertEqual(plan.kind, .answer, name)
+            let calls = await transport.snapshot()
+            XCTAssertEqual(calls.counts, 4, name)
+            let capture = try nativeBrowserCapturedObject(calls.requests[3])
+            let feedback = try XCTUnwrap(capture["validationFeedback"] as? String, name)
+            if name == "complete-list" {
+                let marker = try XCTUnwrap(feedback.range(of: "literals ")?.upperBound)
+                let end = try XCTUnwrap(feedback[marker...].firstIndex(of: "]"))
+                let encoded = String(feedback[marker...end])
+                let listed = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(encoded.utf8)) as? [String])
+                XCTAssertLessThanOrEqual(encoded.utf8.count, 256)
+                XCTAssertEqual(Set(listed), Set(expectedLiterals), "A bounded list includes every unsupported literal")
+            } else {
+                XCTAssertLessThanOrEqual(feedback.utf8.count, 256, name)
+                XCTAssertFalse(feedback.contains("literals ["), "Overflow must not silently present a partial literal list")
+                XCTAssertTrue(feedback.localizedCaseInsensitiveContains("omitted"), "Overflow feedback explicitly discloses omission")
+                XCTAssertTrue(feedback.contains("URL") && feedback.contains("evidence references"), "Generic feedback covers URL and reference checks")
+            }
+        }
+    }
+
     func testNativeBrowserCorrectionExplainsInternalCitationIDs() async throws {
         let source = URL(string: "https://example.org/policy")!
         let original = "Read the return fee and deadline."

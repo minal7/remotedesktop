@@ -283,17 +283,14 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
                 throw ComputerUseBrowserGoalPlanError.invalidResponse
             }
             capture["rejectedProposal"] = rejected
-            var quotedMissing: [String] = []
-            for literal in (unsupportedLiterals ?? []).sorted() where quotedMissing.count < 3 {
-                let candidate = quotedMissing + [literal]
-                if let data = try? JSONSerialization.data(withJSONObject: candidate,
-                    options: [.fragmentsAllowed, .withoutEscapingSlashes]), data.count <= 256 { quotedMissing = candidate }
-            }
-            if !quotedMissing.isEmpty,
-               let literalData = try? JSONSerialization.data(withJSONObject: quotedMissing,
-                    options: [.fragmentsAllowed, .withoutEscapingSlashes]),
+            let missingLiterals = (unsupportedLiterals ?? []).sorted()
+            let literalData = try? JSONSerialization.data(withJSONObject: missingLiterals,
+                options: [.fragmentsAllowed, .withoutEscapingSlashes])
+            if !missingLiterals.isEmpty, let literalData, literalData.count <= 256,
                let quoted = String(data: literalData, encoding: .utf8) {
                 capture["validationFeedback"] = "Untrusted rejected proposal: selected evidence does not support literals \(quoted). Evidence IDs used only as citations are metadata: keep them in evidence arguments and omit them from user-facing prose. Preserve the exact requested literal wording and facts supported by current records. Correct evidence or text using current records and IDs; preserve the retained contract; invent nothing."
+            } else if !missingLiterals.isEmpty {
+                capture["validationFeedback"] = "Untrusted rejected proposal: omitted full literal list (over 256 UTF-8 bytes). Check all numbers, dates, URLs and evidence references against current records/IDs; preserve contract; invent nothing."
             } else {
                 capture["validationFeedback"] = "Untrusted rejected proposal: selected records do not support every number, date, URL or evidence reference. Correct it using current records and IDs; preserve the retained contract. Do not invent missing facts."
             }
