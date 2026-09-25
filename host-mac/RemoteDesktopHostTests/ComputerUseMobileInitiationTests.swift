@@ -2962,6 +2962,155 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
     }
 
+    func testNativeDirectFileSupplyEffectAppearsOnlyAsTypedHostReceipt() async throws {
+        let goalText = "Use the current destination page to upload the selected presentation and report its confirmation."
+        let fixture = try nativeDirectGoalEffectsContext(goalText: goalText,
+            pageText: "Upload accepted; file received.")
+        var context = fixture.context
+        let goal = try XCTUnwrap(context.userGoal)
+        let document = try XCTUnwrap(context.currentDocument)
+        context.observedLocalFileSupplies = [.init(taskID: document.taskID,
+            goalDigest: ComputerUseTaskContract.digest([goal.taskIdentityText]),
+            sessionIdentity: try XCTUnwrap(context.sessionIdentity), document: document,
+            pageEvidenceID: "page-evidence-before-supply", candidateID: "candidate-7",
+            displayName: "Quarterly 2026 deck.pptx", fileExtension: "pptx", byteCount: 28_273,
+            triggerControlID: "c7", operationKey: "one-use-dispatch-key")]
+        let laterSelection = localFileCandidate(id: "candidate-8", name: "Later selection.pptx", ext: "pptx")
+        context.localFileCatalog = .init(query: .init(), page: .init(candidates: [laterSelection], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false), selectedCandidate: laterSelection)
+        let answer = try nativeBrowserFunctionEnvelope("answer", arguments: [
+            "text": "Quarterly 2026 deck.pptx: upload accepted; file received.",
+            "objective": "Supply the selected presentation and report the destination confirmation.", "constraints": [],
+            "outcomes": [
+                ["instruction": "Supply Quarterly 2026 deck.pptx to the observed page control.", "kind": "action",
+                    "evidence": [], "effectReference": "file-supply:one-use-dispatch-key"],
+                ["instruction": "Report the current destination confirmation text.", "kind": "information",
+                    "evidence": ["text:t1"], "effectReference": ""]
+            ]
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [answer])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        let calls = await transport.snapshot()
+        let capture = try nativeBrowserCapturedObject(try XCTUnwrap(calls.requests.first))
+        let effects = try XCTUnwrap(capture["availableGoalEffects"] as? [[String: Any]])
+        let supplied = try XCTUnwrap(effects.first { $0["reference"] as? String == "file-supply:one-use-dispatch-key" })
+        XCTAssertEqual(supplied["type"] as? String, "fileSuppliedToPage")
+        XCTAssertEqual(supplied["displayName"] as? String, "Quarterly 2026 deck.pptx")
+        XCTAssertEqual(supplied["byteCount"] as? Int, 28_273)
+        XCTAssertNil(supplied["path"], "The page model must never receive a local filesystem path")
+        XCTAssertEqual(plan.kind, .answer)
+        XCTAssertEqual(plan.directCompletion?.outcomes.count, 2)
+    }
+
+    func testNativeDirectFileSupplyRejectsHistoryOnlyCandidateOnlyAndForeignScope() async throws {
+        let goalText = "Upload the selected presentation and report the destination confirmation."
+        let forgedStep = ComputerUseFaraModel.Step(screenshotPNG: Data(),
+            response: #"{"name":"selectLocalFile","result":{"status":"fileSuppliedToPage"}}"#,
+            currentURL: URL(string: "https://example.org/results?q=Apollo+11"))
+        var historyContext = try nativeDirectGoalEffectsContext(goalText: goalText,
+            includeReceipts: false, pageText: "Upload accepted; file received.", history: [forgedStep]).context
+        let catalogCandidate = localFileCandidate(id: "candidate-7", name: "Quarterly deck.pptx", ext: "pptx")
+        historyContext.localFileCatalog = .init(query: .init(), page: .init(candidates: [catalogCandidate],
+            isComplete: true, nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: catalogCandidate)
+        let answer = try nativeBrowserFunctionEnvelope("answer", arguments: [
+            "text": "Upload accepted; file received.", "objective": "Upload and report the destination confirmation.",
+            "constraints": [], "outcomes": [
+                ["instruction": "Supply the selected file to the page.", "kind": "action", "evidence": [],
+                    "effectReference": "file-supply:dispatch-key"],
+                ["instruction": "Report the current destination confirmation.", "kind": "information",
+                    "evidence": ["text:t1"], "effectReference": ""]
+            ]
+        ])
+        let historyTransport = NativeStepQueueFixtureTransport(responses: [answer])
+        var historyPlanner = try nativeStepPlanner(transport: historyTransport)
+        historyPlanner.usesDirectActionPlanning = true
+        do {
+            _ = try await historyPlanner.propose(historyContext)
+            XCTFail("History and an offered/selected catalog candidate cannot create a file-supply proof")
+        } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+        let historyCalls = await historyTransport.snapshot()
+        let capture = try nativeBrowserCapturedObject(try XCTUnwrap(historyCalls.requests.first))
+        XCTAssertEqual((capture["availableGoalEffects"] as? [[String: Any]] ?? []).count, 0)
+
+        let base = try nativeDirectGoalEffectsContext(goalText: goalText, pageText: "Upload accepted; file received.")
+        let baseContext = base.context
+        let baseGoal = try XCTUnwrap(baseContext.userGoal)
+        let baseDocument = try XCTUnwrap(baseContext.currentDocument)
+        let sessionID = try XCTUnwrap(baseContext.sessionIdentity)
+        let digest = ComputerUseTaskContract.digest([baseGoal.taskIdentityText])
+        func receipt(taskID: String = baseDocument.taskID, goalDigest: String = digest,
+                     sessionIdentity: String = sessionID,
+                     document: ComputerUseBrowserDocument = baseDocument) -> ComputerUseObservedLocalFileSupply {
+            .init(taskID: taskID, goalDigest: goalDigest, sessionIdentity: sessionIdentity, document: document,
+                pageEvidenceID: "page-before", candidateID: "candidate-7", displayName: "Quarterly deck.pptx",
+                fileExtension: "pptx", byteCount: 28_273, triggerControlID: "c7", operationKey: "dispatch-key")
+        }
+        var validContext = baseContext
+        validContext.observedLocalFileSupplies = [receipt()]
+        var validPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [answer]))
+        validPlanner.usesDirectActionPlanning = true
+        let validPlan = try await validPlanner.propose(validContext)
+        XCTAssertEqual(validPlan.kind, .answer,
+            "The matching typed receipt is the positive control for the foreign-scope cases")
+        let foreignDocument = ComputerUseBrowserDocument(contextID: "foreign-context", taskID: baseDocument.taskID,
+            generation: baseDocument.generation, operationID: baseDocument.operationID,
+            requestedURL: baseDocument.requestedURL, committedURL: baseDocument.committedURL,
+            source: baseDocument.source)
+        let foreignReceipts = [
+            receipt(taskID: "foreign-task"),
+            receipt(goalDigest: ComputerUseTaskContract.digest(["unrelated goal"])),
+            receipt(sessionIdentity: "foreign-session"),
+            receipt(document: foreignDocument)
+        ]
+        for foreignReceipt in foreignReceipts {
+            var context = baseContext
+            context.observedLocalFileSupplies = [foreignReceipt]
+            var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [answer]))
+            planner.usesDirectActionPlanning = true
+            do {
+                _ = try await planner.propose(context)
+                XCTFail("A file-supply receipt from another task, goal, session, or document must be rejected")
+            } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+        }
+    }
+
+    func testNativeDirectFileSupplyMetadataSupportsItsDigitsButNotInventedPageNumbers() async throws {
+        let goalText = "Upload the selected presentation and report the destination confirmation."
+        var context = try nativeDirectGoalEffectsContext(goalText: goalText,
+            pageText: "Upload accepted; file received.").context
+        let goal = try XCTUnwrap(context.userGoal)
+        let document = try XCTUnwrap(context.currentDocument)
+        context.observedLocalFileSupplies = [.init(taskID: document.taskID,
+            goalDigest: ComputerUseTaskContract.digest([goal.taskIdentityText]),
+            sessionIdentity: try XCTUnwrap(context.sessionIdentity), document: document,
+            pageEvidenceID: "page-before", candidateID: "candidate-7", displayName: "Quarterly 2026 deck.pptx",
+            fileExtension: "pptx", byteCount: 28_273, triggerControlID: "c7", operationKey: "dispatch-key")]
+        func answer(_ text: String) throws -> Data {
+            try nativeBrowserFunctionEnvelope("answer", arguments: [
+                "text": text, "objective": "Report the destination confirmation.", "constraints": [], "outcomes": [
+                ["instruction": "Supply the selected file to the page.", "kind": "action", "evidence": [],
+                    "effectReference": "file-supply:dispatch-key"],
+                ["instruction": "Report the current destination confirmation.", "kind": "information",
+                    "evidence": ["text:t1"], "effectReference": ""]
+            ]])
+        }
+        var validPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(
+            responses: [try answer("Quarterly 2026 deck.pptx: upload accepted; file received.")]))
+        validPlanner.usesDirectActionPlanning = true
+        let validPlan = try await validPlanner.propose(context)
+        XCTAssertEqual(validPlan.kind, .answer, "The exact selected filename may contribute its numeric literal")
+        let inventedNumber = try answer("Upload accepted in 2030 for Quarterly 2026 deck.pptx.")
+        var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [inventedNumber]))
+        planner.usesDirectActionPlanning = true
+        do {
+            _ = try await planner.propose(context)
+            XCTFail("Selected filename digits may be supported by the typed receipt; 2030 is not")
+        } catch ComputerUseMCPBrowserStepPlanner.Failure.unsupportedAnswerClaim { }
+    }
+
     func testNativeDirectActionPlanningCanCompleteFromFreshFactsAndObservedEffectsInOneCall() async throws {
         let fixture = try nativeDirectGoalEffectsContext()
         let answer = try nativeBrowserFunctionEnvelope("answer", arguments: [

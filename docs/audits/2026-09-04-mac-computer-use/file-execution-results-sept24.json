@@ -3002,7 +3002,7 @@
       }
     }
   ],
-  "currentResult": "The explicit unqueried catalog state is implemented and component-verified: GREEN01 passed 13/14 with one failing synthetic observed-control ID (c-unqueried); GREEN02 changed only that test fixture ID and passed 2/2. Across both GREEN batches, 14 distinct relevant methods passed. RED01 did not reach tests because of test-source compile errors; RED02 exposed a genuine executor expectation failure and also had a wrongly routed legacy projection setup failure; RED03 passed its positive control and failed both unqueried-state checks. Managed run05 posted the exact latest presentation but failed with empty answer effectReference; its actual supplied post-upload capture is unknown. Diagnostic run06 (test-only bounded 16 KiB trace) also posted exact oracle bytes and confirms the fifth request received a fresh, untruncated capture saying “Upload accepted; file received.” The model quoted it but cited only the navigation URL, classified upload as information, and included a modified timestamp unsupported by selected-page evidence; host rejected the answer. No controlled workflow is fully accepted.",
+  "currentResult": "The explicit unqueried catalog state is implemented and component-verified: GREEN01 passed 13/14 with one failing synthetic observed-control ID (c-unqueried); GREEN02 changed only that test fixture ID and passed 2/2. Across both GREEN batches, 14 distinct relevant methods passed. RED01 did not reach tests because of test-source compile errors; RED02 exposed a genuine executor expectation failure and also had a wrongly routed legacy projection setup failure; RED03 passed its positive control and failed both unqueried-state checks. Managed run05 posted the exact latest presentation but failed with empty answer effectReference; its actual supplied post-upload capture is unknown. Diagnostic run06 (test-only bounded 16 KiB trace) also posted exact oracle bytes and confirms the fifth request received a fresh, untruncated capture saying “Upload accepted; file received.” The model quoted it but cited only the navigation URL, classified upload as information, and included a modified timestamp unsupported by selected-page evidence; host rejected the answer. No controlled workflow is fully accepted. Managed run07, after file-supply receipt GREEN, failed before click because another Mac window had focus: four native calls, zero POSTs, and the new receipt completion path was not exercised. Build succeeded with 0 errors and 0 warnings; one test failed at the first-POST assertion; one existing runtime warning; 21 source hashes unchanged. End-to-end acceptance now targets the Mac default browser and a real website such as Google Drive; default-browser routing remains unimplemented.",
   "limitations": [
     "Managed model run01 did not navigate; its initial planner exchange had no valid assistant message. Run03 navigated to the local fixture and made a listFiles call, but passed invalid first-page cursor \"[]\" and ended unableToComplete with zero POSTs.",
     "The earlier one-POST dispatcher result came from a scripted planner fixture and proves only chooser/executor dispatch plus duplicate suppression. Managed run05 is separate model-driven evidence: it sent one external-oracle-matched POST, but did not satisfy task completion.",
@@ -3013,7 +3013,9 @@
     "The direct experimental planner remains default-off. The production profile is ephemeral; page chooser observation does not prove remote success; stale selection has no automatic recovery at any candidate count; browser projection is main-frame-only; catalog scope is Downloads-only; a TOCTOU gap remains.",
     "No Drive/mail/live-account workflow, phone choice interaction, full controlled E2E pass, production readiness or model promotion is established.",
     "Run06 differs from run05 by test-only bounded page-capture tracing. Its trace establishes the capture supplied to the model in this test, but the unsupported answer evidence and failed terminal assertion leave the complete workflow unaccepted.",
-    "Next: minimally connect file-supply completion to typed evidence and require answer references supported by fresh page capture. The run06 artifacts do not support adding a timing delay."
+    "Next: minimally connect file-supply completion to typed evidence and require answer references supported by fresh page capture. The run06 artifacts do not support adding a timing delay.",
+    "Managed run07 stopped before file dispatch because another Mac window had focus. It sent zero POSTs and did not exercise receipt-based completion; it provides no evidence about remote transfer, semantics, or the new completion path.",
+    "The requested Mac default-browser route to real websites such as Google Drive has not been implemented. Owned-WebKit loopback runs are diagnostic only and no further loopback run is E2E acceptance."
   ],
   "preparedManagedTest": "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes",
   "cursorContract": "First-page requests omit cursor; continuations use only the exact current host cursor for the same query. The explicit unqueried file catalog state is now implemented. GREEN01: 13 pass, 1 fail caused by invalid synthetic observed-control ID c-unqueried. GREEN02 corrected only the test fixture ID and passed 2/2. Fourteen distinct relevant methods pass across GREEN batches. Managed run05 matches one exact latest-presentation POST to the external oracle, but terminal completion fails; the model reports stale page text and invalid answer evidence.",
@@ -3285,5 +3287,58 @@
     },
     "interpretation": "One POST matched the external oracle for Launch plan.pptx (28,273 bytes). A test-only bounded 16 KiB trace records that the fifth request received a fresh, untruncated post-upload page capture saying “Upload accepted; file received.” The model quoted this confirmation, but cited only the navigation URL for both outcomes, classified the upload as information, and included a modified timestamp unsupported by the selected page evidence. The host rejected the answer for unsupported evidence. This diagnostic run confirms exact transfer and the page message supplied to the model, but does not pass task completion.",
     "testOnlyDiagnosticPatchSHA256": "fc74ca3aeea830e92e0d6bfc25a2620bd1fb348b9c5d1b27bcf95c28b59cea52"
-  }
+  },
+  "latestManagedRun07": {
+    "name": "native-managed-file-upload-sept24-07",
+    "runnerSHA256": "776101321f38ea477569cfdd50a13f57945b3776ca2554319f5825a6f16b2ad8",
+    "qualification": "Run only after focused supply-proof GREEN passes; actual same managed model/browser/fixture and frozen byte oracle.",
+    "testIDs": [
+      "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+    ],
+    "durationSeconds": 49.876,
+    "result": "Failed",
+    "passedTests": 0,
+    "failedTests": 1,
+    "totalTestCount": 1,
+    "failureDetails": [
+      "XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - Exactly one actual file POST must reach the fixture"
+    ],
+    "build": {
+      "status": "succeeded",
+      "errorCount": 0,
+      "warningCount": 0
+    },
+    "sourceAudit": {
+      "sourceCount": 21,
+      "sourceUnchanged": true,
+      "changed": []
+    },
+    "runtimeWarnings": [
+      {
+        "issueType": "Runtime Warning",
+        "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+      }
+    ],
+    "managedResult": {
+      "seconds": 34.053606033325195,
+      "maximumObservedWorkers": 1,
+      "workerSamples": 282,
+      "nativeFunctionNames": [
+        "openLink",
+        "listFiles",
+        "selectFile",
+        "selectLocalFile"
+      ],
+      "uploadRequestCount": 0,
+      "uploadBodyMatchesExternalLatestPresentation": false,
+      "terminalOutcome": "unableToComplete",
+      "terminalText": "I couldn't complete that task: The AI browser is open, but another Mac window still has focus. Select the AI browser, then continue.",
+      "requestedPaths": [
+        "/index"
+      ],
+      "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; isolated transport, ledger and browser; verified installed native text model and shared managed runtime; missing visual model receipt"
+    },
+    "interpretation": "The managed model made four native calls (openLink, listFiles, selectFile, selectLocalFile), then the host stopped before clicking because another Mac window had focus. No POST occurred and no upload bytes were sent. This is a browser-focus/pre-dispatch failure; receipt-based completion was not exercised."
+  },
+  "currentPriority": "Use the Mac default browser on a real website such as Google Drive for the end-to-end target. The owned-WebKit loopback runs are component diagnostics only; no further loopback run qualifies as E2E acceptance. Default-browser routing is not yet implemented."
 }

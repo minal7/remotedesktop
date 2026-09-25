@@ -104,6 +104,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var approval: PendingApproval?
         var pendingNativeFormSubmission: PendingNativeFormSubmission?
         var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
+        var observedLocalFileSupplies: [ComputerUseObservedLocalFileSupply] = []
         var localFileCatalog: ComputerUseLocalFileCatalog?
         var localFileContext: ComputerUseMCPBrowserStepPlanner.LocalFileContext?
         var selectedLocalFile: ComputerUseLocalFileCatalog.Candidate?
@@ -212,6 +213,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             session.answerOriginID = originatingTaskID
             session.clarifiedGoal = goal
             session.observedNativeGETSubmissions.removeAll()
+            let goalDigest = ComputerUseTaskContract.digest([goal.taskIdentityText])
+            session.observedLocalFileSupplies.removeAll { $0.goalDigest != goalDigest }
             session.userResponse = answer
             session.selectedLocalFile = selectedCandidate
             if selectedChoice != nil { session.userSelectedLocalFileID = selectedCandidate?.id }
@@ -422,6 +425,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         progress("Reading the browser…")
         let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history,
             userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal,
+            observedLocalFileSupplies: session.observedLocalFileSupplies,
             localFileCatalog: modelFileContext(for: session))
         let planned = try await nextProposal(input, observation: .initial(observation), tools: tools)
         try Task.checkCancellation(); try lease.assertOwnership()
@@ -576,7 +580,21 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         freshObservation: ComputerUseOwnedBrowser.AgentObservation) throws {
         guard let pending = session.pendingLocalFileSelection, pending.wasSupplied else { return }
         guard freshObservation.approvalPageEvidence.document.taskID == session.taskID,
-              freshObservation.sessionIdentity == session.browserIdentity else { throw Failure.browserChanged }
+              freshObservation.sessionIdentity == session.browserIdentity,
+              freshObservation.approvalPageEvidence.document.contextID == pending.observation.approvalPageEvidence.document.contextID else {
+            throw Failure.browserChanged
+        }
+        if !session.observedLocalFileSupplies.contains(where: { $0.operationKey == pending.key }) {
+            let goal = try session.clarifiedGoal ?? ComputerUseUnresolvedTextGoal(userRequest: session.goal)
+            session.observedLocalFileSupplies.append(.init(taskID: session.taskID,
+                goalDigest: ComputerUseTaskContract.digest([goal.taskIdentityText]),
+                sessionIdentity: session.browserIdentity,
+                document: pending.observation.approvalPageEvidence.document,
+                pageEvidenceID: pending.observation.approvalPageEvidence.page.id,
+                candidateID: pending.candidate.id, displayName: pending.candidate.displayName,
+                fileExtension: pending.candidate.fileExtension, byteCount: pending.candidate.byteCount,
+                triggerControlID: pending.triggerControlID, operationKey: pending.key))
+        }
         let responseObject: [String: Any] = [
             "name": "selectLocalFile",
             "arguments": ["candidateID": pending.candidate.id, "triggerControlID": pending.triggerControlID],
@@ -861,6 +879,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
                 clarifiedGoal: session.clarifiedGoal,
                 observedNativeGETSubmissions: session.observedNativeGETSubmissions,
+                observedLocalFileSupplies: session.observedLocalFileSupplies,
                 localFileCatalog: modelFileContext(for: session))
             let plannedStep: PlannedStep
             if let pending = session.pendingNativeFormSubmission {

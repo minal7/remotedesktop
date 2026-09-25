@@ -126,6 +126,9 @@ enum ComputerUseFaraModel {
         /// Host-retained receipts for native GET submissions; serialized only
         /// into the native planner context, never treated as semantic success.
         var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
+        /// Live host receipts that the native picker supplied a selected file
+        /// to a page control; never treat these as remote upload success.
+        var observedLocalFileSupplies: [ComputerUseObservedLocalFileSupply] = []
         var localFileCatalog: ComputerUseMCPBrowserStepPlanner.LocalFileContext? = nil
 
         func validatedBrowserGoal() throws -> ComputerUseUnresolvedTextGoal {
@@ -146,6 +149,7 @@ enum ComputerUseFaraModel {
                 guard currentURL == nil, pageReading == nil, userResponse == nil, observedPage == nil, clarifiedGoal == nil,
                       localFileCatalog == nil,
                       browserWorkerDirective == nil, specialistCompletion == nil, observedNativeGETSubmissions.isEmpty,
+                      observedLocalFileSupplies.isEmpty,
                       history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
                         && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse

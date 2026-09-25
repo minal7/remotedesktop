@@ -935,6 +935,7 @@ final class MCPFirstComputerUseExecutor:
 
         var selected = Set<String>()
         var effectURLs = Set<String>()
+        var verifiedEffectLiterals: [String] = []
         for outcome in completion.outcomes {
             switch outcome.kind {
             case .information:
@@ -975,12 +976,27 @@ final class MCPFirstComputerUseExecutor:
                           scope.goal == completion.goal, scope.sessionIdentity == observation.sessionIdentity else {
                         throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
                     }
+                case .fileSuppliedToPage(let supply):
+                    guard supply.taskID == rootTaskID,
+                          supply.goalDigest == ComputerUseTaskContract.digest([completion.goal.taskIdentityText]),
+                          supply.sessionIdentity == observation.sessionIdentity,
+                          supply.document.taskID == rootTaskID,
+                          supply.document.contextID == currentDocument.contextID,
+                          supply.document.generation <= currentDocument.generation,
+                          !supply.operationKey.isEmpty, !supply.pageEvidenceID.isEmpty,
+                          context.observedLocalFileSupplies.count <= 64,
+                          context.observedLocalFileSupplies.contains(supply) else {
+                        throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+                    }
+                    verifiedEffectLiterals.append(supply.displayName)
+                    verifiedEffectLiterals.append(String(supply.byteCount))
                 }
             }
         }
         try ComputerUseMCPBrowserStepPlanner().validateAnswerClaims(plan.text, context: context,
             requiresEvidence: completion.outcomes.contains(where: { $0.kind == .information }),
-            selectedReferences: selected, verifiedNavigationURLs: effectURLs)
+            selectedReferences: selected, verifiedNavigationURLs: effectURLs,
+            verifiedEffectLiterals: verifiedEffectLiterals)
         if selected.isEmpty { selected.insert("source") }
         for reference in selected {
             guard let contextValue = context.evidenceReferences[reference],
@@ -1302,7 +1318,9 @@ final class MCPFirstComputerUseExecutor:
                       case .information: return !outcome.evidenceReferences.isEmpty
                       case .action: return outcome.evidenceReferences.isEmpty && outcome.effectProof != nil
                       }
-                  }) else { throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence }
+                  }) else {
+                throw ComputerUseMCPBrowserStepPlanner.Failure.incompleteEvidence
+            }
             return
         }
         guard let assessment = plan.assessment else {

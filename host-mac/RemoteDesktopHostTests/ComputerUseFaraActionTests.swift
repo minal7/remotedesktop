@@ -7582,10 +7582,18 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 case 4:
                     let selected = try XCTUnwrap(input.localFileCatalog?.selectedCandidate)
                     XCTAssertEqual(selected.id, candidateID)
+                    XCTAssertTrue(input.observedLocalFileSupplies.isEmpty,
+                        "No file-supply proof exists before the native picker callback returns")
                     return .localFileOperation(.selectLocalFile(candidateID: selected.id,
                         triggerControlID: try XCTUnwrap(triggerControlID)), rootTaskID: taskID,
                         sessionIdentity: sessionIdentity)
                 case 5:
+                    let supplies = input.observedLocalFileSupplies
+                    XCTAssertEqual(supplies.count, 1,
+                        "Only a returned picker callback followed by fresh capture creates the typed receipt")
+                    XCTAssertEqual(supplies.first?.candidateID, candidateID)
+                    XCTAssertEqual(supplies.first?.triggerControlID, triggerControlID)
+                    XCTAssertEqual(supplies.first?.displayName, "Quarterly presentation.pptx")
                     let postDeadline = ContinuousClock.now + .seconds(2)
                     while server.count("/upload") == 0 && ContinuousClock.now < postDeadline {
                         try await Task.sleep(for: .milliseconds(20))
