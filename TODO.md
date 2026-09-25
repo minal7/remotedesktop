@@ -10,13 +10,13 @@
 | Fara action loop and login handoff | Yes | Mac | Real Drive run live12 passes; independent AX oracle confirms account chooser. One current screenshot avoids the observed 4 GiB worker stop | Login-handoff slice |
 | Completion and native account-chooser boundaries | Yes | Mac | Focused RED then GREEN; real account-chooser detector passes. Completion mismatch yields control instead of generating more actions | Tested for these cases |
 | File metadata, candidate choice and choice UI | Yes | Mac and iOS app | Earlier component checks pass; actual phone-button interaction untested | Components only |
-| Selected file to real default-browser native dialog | Pending connection | Pending | Prior owned-WebKit transfers are component diagnostics only | No |
+| Selected file to real default-browser native dialog | Connected | Mac |14 focused/read-only checks pass; actual native planner selects newest presentation. Full real picker run still rejects the click before catalog use | No |
 | Default-account Drive upload and fresh readback | Pending | Pending | No real upload; login remains pending | No |
 | Email attachment to verified own account | Pending | Pending | Not run | No |
 
 [Checkpoint evidence](docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json) records the failures as well as passing tests. In failed live11, an account was selected and an unexpected passkey prompt appeared; the prompt was canceled and the failed test window closed without completing login. The subsequent auth-boundary fix and real live12 pass are separate evidence. These checks do not establish general production readiness or the 12 GB whole-Mac performance target.
 
-Next: connect the existing native file catalog/choice flow to this default-browser route and its native file dialog. Then verify a disposable exact file upload and fresh destination readback on signed-in Google Drive. Keep changes driven by this workflow; avoid additional architecture until it works. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md).
+Next: fix the observed in-flight browser capture/click rejection, then finish exact native file selection. The native catalog/choice connection is implemented and compiled, with14 focused checks and a real two-call native model selection pass. The latest real Safari run still rejects actions before opening the chooser; do not count this as a working upload. After that passes, verify one disposable exact upload and fresh readback on signed-in Google Drive. Keep changes driven by this workflow; avoid additional architecture until it works. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md).
 
 **Earlier checkpoints and repair notes follow; the table above owns current acceptance.**
 

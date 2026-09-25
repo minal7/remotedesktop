@@ -9,6 +9,212 @@ import Vision
 
 @MainActor
 final class ComputerUseNativeTextIntegrationTests: XCTestCase {
+    @MainActor private final class DefaultBrowserFixtureState {
+        let app: ComputerUseApplicationIdentity
+        var windows: [ComputerUseDefaultBrowserSession.Window]
+        var focusedID = "existing"
+        var inputCount = 0
+        var fileOpenPanel: ComputerUseDefaultBrowserSession.FileOpenPanel?
+        init() {
+            let path = "/fixture/Browser.app"
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "org.example.Browser",
+                canonicalBundlePath: path, canonicalExecutablePath: "\(path)/Contents/MacOS/Browser",
+                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
+            app = try! XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "org.example.Browser",
+                processIdentifier: 91, launchGeneration: 1, codeIdentity: code))
+            windows = [Self.window("existing", pid: 91, hash: 1, app: app)]
+        }
+        static func window(_ id: String, pid: pid_t, hash: CFHashCode,
+            app: ComputerUseApplicationIdentity) -> ComputerUseDefaultBrowserSession.Window {
+            .init(id: id, application: app, accessibilityElement: AXUIElementCreateApplication(pid + pid_t(hash)),
+                identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: hash,
+                    bounds: CGRect(x: 0, y: 0, width: 640, height: 480)))
+        }
+        func session(_ journal: URL) throws -> ComputerUseDefaultBrowserSession {
+            let handler = ComputerUseDefaultBrowserTarget.Handler(bundleURL: URL(fileURLWithPath: "/fixture/Browser.app"),
+                bundleIdentifier: "org.example.Browser")
+            return try .init(journalDirectory: journal, resolveHandler: { handler },
+                launchApplication: { _, beforeOpen in try beforeOpen(); return self.app },
+                captureWindows: { app in
+                    guard app == self.app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    return .init(application: app, windows: self.windows, focusedWindowID: self.focusedID,
+                        hasSheets: self.fileOpenPanel != nil, fileOpenPanel: self.fileOpenPanel)
+                })
+        }
+    }
+
+    func testDefaultBrowserFileChoicesStayTaskBoundAndMetadataSurvivesScreenChanges() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("alpha".utf8).write(to: downloads.appendingPathComponent("Alpha.pdf"))
+        try Data("bravo".utf8).write(to: downloads.appendingPathComponent("Bravo.pdf"))
+
+        let state = DefaultBrowserFixtureState()
+        var captures = 0, screenColors: [Bool] = []
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "fixture", applicationID: state.app.bundleIdentifier,
+                accessibilityIdentity: "fixture-window") },
+            actionPerformer: { action in
+                guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == 8 else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                state.inputCount += 1
+                let created = DefaultBrowserFixtureState.window("created", pid: 91, hash: 2, app: state.app)
+                state.windows.append(created); state.focusedID = created.id
+            }, screenProvider: {
+                captures += 1
+                let isBlack = captures.isMultiple(of: 2)
+                screenColors.append(isBlack)
+                let color = isBlack ? CIColor.black : CIColor.white
+                return .init(image: CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            frontmostApplicationIdentityProvider: { state.app }, frontmostApplicationProvider: { "Browser" })
+        let session = try state.session(root.appendingPathComponent("session"))
+        let taskID = "file-choice-\(UUID().uuidString)", goal = "Ask me which PDF to supply to the current page."
+        let window = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        let panelElement = AXUIElementCreateApplication(201)
+        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
+            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
+            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
+            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
+            primaryActionEnabled: false)
+        var calls = 0, nativeCalls = 0, candidateIDs: [String] = [], sawOriginalGoal = false
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: root.appendingPathComponent("executor"),
+            session: session, propose: { input in
+                calls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertTrue(input.history.isEmpty, "Native catalog plans must not enter Fara's action history")
+                sawOriginalGoal = input.goal == goal && input.localFileCatalog?.selectedCandidate?.id == candidateIDs.first
+                return .init(response: "handoff", decision: .handoff("Ready for the next step."))
+            }, nativeFilePlanner: { input in
+                nativeCalls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.surface, .desktop)
+                XCTAssertNil(input.selectedLocalFilePath)
+                if nativeCalls == 1 {
+                    return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .listFiles(query: .init(), cursor: nil))
+                }
+                candidateIDs = try XCTUnwrap(input.localFileCatalog?.page.candidates.map(\.id))
+                return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .askFile(question: "Which PDF?", candidateIDs: candidateIDs))
+            }, localFileCatalogFactory: { id in
+                try ComputerUseLocalFileCatalog(taskID: id, approvedDirectory: downloads)
+            })
+        let first = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        guard case .clarificationRequired = first else { return XCTFail("Expected a typed file choice") }
+        XCTAssertEqual(nativeCalls, 2)
+        let resumed = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        guard case .clarificationRequired = resumed else { return XCTFail("Resume must preserve the pending choice") }
+        XCTAssertEqual(calls, 0)
+        let clarification = try XCTUnwrap(executor.clarification(taskID: taskID))
+        let choice = try XCTUnwrap(clarification.choices?.first)
+        let result = try await executor.continueClarification(taskID: taskID + "-choice", originatingTaskID: taskID,
+            goal: clarification.goal, selectedChoice: choice, progress: { _ in })
+        XCTAssertTrue(sawOriginalGoal)
+        XCTAssertEqual(state.inputCount, 1, "Only session creation inputs; metadata and choice dispatch no native effects")
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(Set(screenColors).count, 2, "Fresh captures changed while metadata-only operations continued")
+        if case .completed = result { XCTFail("File selection cannot establish remote completion") }
+        try FileManager.default.removeItem(at: downloads.appendingPathComponent(choice.label))
+        let staleReplay = try await executor.continueClarification(taskID: taskID + "-choice", originatingTaskID: taskID,
+            goal: clarification.goal, selectedChoice: choice, progress: { _ in })
+        XCTAssertEqual(calls, 1, "Replaying after the catalog file changes must fail before another proposal")
+        guard case .userInterventionRequired = staleReplay else { XCTFail("A stale candidate must stop the task"); return }
+    }
+
+    func testDefaultBrowserFilePanelRequiresTheResolvedCandidateBeforeOpen() {
+        let element = AXUIElementCreateSystemWide()
+        let panel = ComputerUseDefaultBrowserSession.FileOpenPanel(parentWindowID: "window",
+            parentWindowElement: element, accessibilityElement: element,
+            bounds: CGRect(x: 0, y: 0, width: 800, height: 600), isFocused: true,
+            goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
+            primaryActionElement: element, primaryActionBounds: CGRect(x: 700, y: 560, width: 80, height: 30),
+            primaryActionEnabled: true)
+        let candidate = URL(fileURLWithPath: "/tmp/selected.pptx")
+        let open = ComputerUsePredictedAction.click(x: 720, y: 575, button: 1, count: 1)
+        let enter = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.permitsFilePanel(open, within: panel.bounds,
+            panel: panel, selectedURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.permitsFilePanel(enter, within: panel.bounds,
+            panel: panel, selectedURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.permitsFilePanel(
+            .click(x: 720, y: 575, button: 1, count: 2), within: panel.bounds, panel: panel, selectedURL: candidate))
+
+        let selected = ComputerUseDefaultBrowserSession.FileOpenPanel(parentWindowID: "window",
+            parentWindowElement: element, accessibilityElement: element,
+            bounds: panel.bounds, isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil,
+            selectedFileURLs: [candidate], primaryActionElement: element,
+            primaryActionBounds: panel.primaryActionBounds, primaryActionEnabled: true)
+        XCTAssertTrue(ComputerUseDefaultBrowserActionScope.permitsFilePanel(open, within: selected.bounds,
+            panel: selected, selectedURL: candidate))
+        XCTAssertTrue(ComputerUseDefaultBrowserActionScope.permitsFilePanel(enter, within: selected.bounds,
+            panel: selected, selectedURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.permitsFilePanel(open, within: selected.bounds,
+            panel: selected, selectedURL: URL(fileURLWithPath: "/tmp/other.pptx")))
+    }
+
+    func testNativeFilePlannerTakesOverOnlyForAnObservedUnselectedPicker() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("alpha".utf8).write(to: downloads.appendingPathComponent("Alpha.pdf"))
+        try Data("bravo".utf8).write(to: downloads.appendingPathComponent("Bravo.pdf"))
+        let state = DefaultBrowserFixtureState()
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "fixture", applicationID: state.app.bundleIdentifier,
+                accessibilityIdentity: "fixture-window") },
+            actionPerformer: { action in
+                guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == 8 else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                state.inputCount += 1
+                let created = DefaultBrowserFixtureState.window("created", pid: 91, hash: 2, app: state.app)
+                state.windows.append(created); state.focusedID = created.id
+            }, screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            frontmostApplicationIdentityProvider: { state.app }, frontmostApplicationProvider: { "Browser" })
+        let session = try state.session(root.appendingPathComponent("session"))
+        let taskID = "native-file-choice-\(UUID().uuidString)", goal = "Supply one of these files to the open page."
+        let window = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        let panelElement = AXUIElementCreateApplication(201)
+        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
+            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
+            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
+            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
+            primaryActionEnabled: false)
+        var visualCalls = 0, nativeCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: root.appendingPathComponent("executor"),
+            session: session, propose: { _ in
+                visualCalls += 1; XCTFail("Fara must not choose among local files before host selection");
+                return .init(response: "", decision: .unsupported)
+            }, nativeFilePlanner: { input in
+                nativeCalls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.surface, .desktop)
+                XCTAssertNil(input.selectedLocalFilePath)
+                if nativeCalls == 1 {
+                    return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .listFiles(query: .init(), cursor: nil))
+                }
+                let ids = try XCTUnwrap(input.localFileCatalog?.page.candidates.map(\.id))
+                return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .askFile(question: "Which file?", candidateIDs: ids))
+            }, localFileCatalogFactory: { id in
+                try ComputerUseLocalFileCatalog(taskID: id, approvedDirectory: downloads)
+            })
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        guard case .clarificationRequired = result else { return XCTFail("Expected host-owned file choices") }
+        XCTAssertEqual(nativeCalls, 2)
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(state.inputCount, 1, "File catalog and clarification require no native input")
+    }
+
     private typealias DocumentRequirement = ComputerUseMCPDocumentProposal.Requirement
     private func compileDocument(_ prompt: String, original: String, requirements: [DocumentRequirement],
         application: String = "Editor", document: String = "Notes.txt") throws -> ComputerUseMCPDocumentEdit? {
@@ -1493,7 +1699,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let tools = desktopTestTools(perform: { _ in effects += 1; scopeValid = false })
         let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
             proposals += 1
-            if proposals > 1 { return .init(response: "candidate", action: .reportCompletion("Done")) }
+            if proposals > 1 { return .init(response: "review", decision: .handoff("Review the page.")) }
             return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 500)))
         }, surfaceScopeCheck: { _ in
             guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
@@ -1504,6 +1710,44 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
         XCTAssertEqual(proposals, 1)
         XCTAssertEqual(effects, 1)
+        scopeValid = true
+        let resumed = try await executor.execute(taskID: "changed-owned-window", prompt: "Resume", trustedUserPrompt: "Click", tools: tools, progress: { _ in })
+        XCTAssertEqual(resumed, .userInterventionRequired("Review the page."))
+        XCTAssertEqual(proposals, 2, "Restoring the same window should permit a fresh observation")
+        XCTAssertEqual(effects, 1, "Resume must not repeat the prior click")
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "click" }.count, 1)
+    }
+
+    func testScopedDesktopWaitsForPostClickTransitionBeforeObservingAgain() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, effects = 0, scopeValid = true
+        let tools = desktopTestTools(perform: { _ in
+            effects += 1
+            scopeValid = false
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(25))
+                scopeValid = true
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 {
+                return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+            }
+            XCTAssertEqual(input.history.count, 1, "The returned click should be recorded before the next proposal")
+            XCTAssertEqual(input.history.first?.response, "click")
+            return .init(response: "handoff", decision: .handoff("The page is ready for review."))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        })
+
+        let result = try await executor.execute(taskID: "post-click-transition", prompt: "Open the picker", trustedUserPrompt: "Open the picker", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The page is ready for review."))
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "click" }.count, 1)
+        XCTAssertEqual(executor.diagnosticHistory.first?.response, "click")
     }
 
     func testScopedCompletionUsesOwnedWindowPixelsAndHandoffDoesNotNeedPixelEquality() async throws {
@@ -1546,6 +1790,53 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }
             XCTAssertEqual(effects, 0, scenario)
             XCTAssertEqual(proposals, 1, "A terminal decision must not trigger more actions")
+        }
+    }
+
+    func testScopedVisualClickWithoutAXTargetIgnoresPixelsOutsideOwnedWindow() async throws {
+        let display = CGRect(x: 0, y: 0, width: 1728, height: 1050)
+        let window = CGRect(x: 0, y: 33, width: 1728, height: 999)
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+            canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+        let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+            launchGeneration: 1, codeIdentity: code)!
+
+        for scenario in ["outside", "inside"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var changed = false, proposals = 0, effects = 0
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                approvalTargetProvider: { _ in .init(context: "AXButton", applicationID: "fixture", accessibilityIdentity: "visual-target", frame: nil) }, actionPerformer: { _ in effects += 1 },
+                screenProvider: {
+                    let base = CIImage(color: .black).cropped(to: display)
+                    let changedRect = scenario == "outside"
+                        ? CGRect(x: 5, y: 1030, width: 20, height: 20)
+                        : CGRect(x: 500, y: 200, width: 20, height: 20)
+                    let image = changed ? CIImage(color: .blue).cropped(to: changedRect).composited(over: base) : base
+                    return .init(image: image, displayBounds: display, frontmostWindowBounds: window)
+                }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXButton Browse" },
+                authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+                frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                changed = true
+                if proposals == 1 {
+                    return .init(response: "click", action: .pointer(.leftClick, .init(x: 2000.0 / 3.0, y: 401000.0 / 1050.0)))
+                }
+                return .init(response: "handoff", decision: .handoff("Review the page."))
+            }, surfaceScopeCheck: { _ in })
+
+            let result = try await executor.execute(taskID: "nil-ax-\(scenario)", prompt: "Click in the owned window.",
+                trustedUserPrompt: "Click in the owned window.", tools: tools, progress: { _ in })
+            if scenario == "outside" {
+                XCTAssertEqual(result, .userInterventionRequired("Review the page."))
+                XCTAssertEqual(effects, 1, "A display change outside the owned window must not block its visual click")
+                XCTAssertEqual(proposals, 2)
+            } else {
+                XCTAssertEqual(effects, 0, "A changed pixel inside the owned window must still invalidate the click")
+                XCTAssertEqual(proposals, 2)
+            }
         }
     }
 

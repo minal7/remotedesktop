@@ -7827,6 +7827,151 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertEqual(try ComputerUseFaraAction.decode(call(#"{"action":"key","keys":["Control","a"]}"#)), .key(["Control", "a"]))
     }
 
+    func testDesktopFileOperationWireMessagesAreStrictlyBounded() throws {
+        for message in [
+            #"{"action":"list_files","file_kind":"presentation"}"#,
+            #"{"action":"select_file","candidate_id":"candidate-123"}"#,
+            #"{"action":"ask_file","question":"Which presentation?","candidate_ids":["candidate-123","candidate-456"]}"#
+        ] {
+            XCTAssertThrowsError(try ComputerUseFaraAction.decode(call(message)), message)
+        }
+    }
+
+    func testDesktopFileCatalogContextIsAcceptedAndConditionallyPresented() throws {
+        let first = ComputerUseLocalFileCatalog.Candidate(id: "candidate-123", displayName: "Quarterly plan.pptx",
+            contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+            byteCount: 273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let second = ComputerUseLocalFileCatalog.Candidate(id: "candidate-456", displayName: "Notes.docx",
+            contentTypeIdentifier: "org.openxmlformats.wordprocessingml.document", fileExtension: "docx",
+            byteCount: 91, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let files = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(fileKind: .presentation),
+            page: .init(candidates: [first, second], isComplete: false, nextCursor: "page-token",
+                hasTiedSortValues: true, hasMissingSortValues: false), selectedCandidate: first, inventoryState: .available)
+        let png = try smallPNG()
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "test-only-token")
+        func parse(_ input: ComputerUseFaraModel.Input) throws -> (String, String) {
+            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let system = try XCTUnwrap(messages.first?["content"] as? String)
+            let current = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+                .compactMap { $0["text"] as? String }.joined(separator: "\n")
+            return (system, current)
+        }
+        func actions(_ prompt: String) throws -> Set<String> {
+            let start = try XCTUnwrap(prompt.range(of: "<tools>\n")).upperBound
+            let end = try XCTUnwrap(prompt.range(of: "\n</tools>", range: start..<prompt.endIndex)).lowerBound
+            let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(prompt[start..<end].utf8)) as? [String: Any])
+            let function = try XCTUnwrap(root["function"] as? [String: Any])
+            let properties = try XCTUnwrap((function["parameters"] as? [String: Any])?["properties"] as? [String: Any])
+            return Set(try XCTUnwrap((properties["action"] as? [String: Any])?["enum"] as? [String]))
+        }
+        let input = ComputerUseFaraModel.Input(goal: "Find the requested file and open the native picker.",
+            screenshotPNG: png, surface: .desktop, localFileCatalog: files)
+        let (system, current) = try parse(input)
+        XCTAssertFalse(try actions(system).contains(where: { ["list_files", "select_file", "ask_file"].contains($0) }))
+        XCTAssertTrue(system.contains("host resolves local files when a native file chooser opens"))
+        XCTAssertTrue(system.contains("use the website's file chooser"))
+        XCTAssertTrue(current.contains("candidate-123"))
+        XCTAssertTrue(current.contains("candidate-456"))
+        XCTAssertTrue(current.contains("Quarterly plan.pptx"))
+        XCTAssertTrue(current.contains("page-token"))
+        XCTAssertFalse(current.contains("/Users/"), "Catalog metadata does not expose local paths")
+
+        var selectedInput = input
+        selectedInput.selectedLocalFilePath = "/Users/fixture/Downloads/Quarterly plan.pptx"
+        let (selectedSystem, selectedContext) = try parse(selectedInput)
+        XCTAssertFalse(try actions(selectedSystem).contains("select_file"))
+        XCTAssertTrue(selectedContext.contains("nativeOpenPanelPath"))
+        XCTAssertTrue(selectedContext.contains("/Users/fixture/Downloads/Quarterly plan.pptx"))
+        var invalidPathInput = input
+        invalidPathInput.selectedLocalFilePath = "Quarterly plan.pptx"
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: invalidPathInput))
+
+        let browserRequest = try ComputerUseFaraModel.makeRequest(endpoint: endpoint,
+            input: .init(goal: input.goal, screenshotPNG: png, surface: .browser, localFileCatalog: files))
+        let browserBody = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(browserRequest.httpBody)) as? [String: Any])
+        let browserMessages = try XCTUnwrap(browserBody["messages"] as? [[String: Any]])
+        let browserSystem = try XCTUnwrap(browserMessages.first?["content"] as? String)
+        XCTAssertFalse(try actions(browserSystem).contains(where: { ["list_files", "select_file", "ask_file"].contains($0) }))
+    }
+
+    @MainActor
+    func testOptInNativeFileSelectionPlannerListsThenSelectsNewestPresentation() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_NATIVE_FILE_SELECTION_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: two metadata-only native-planner proposals; no picker or remote file action")
+        }
+        let installation = await ComputerUseInstaller.nativeText().currentInstallation()
+        let receipt = try XCTUnwrap(installation)
+        let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+            receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+        let runtime = OSAtlasLlamaRuntime()
+        let exchanges = NativeFileSelectionProbeExchanges()
+        defer {
+            for (index, response) in exchanges.responses.enumerated() {
+                let attachment = XCTAttachment(data: response, uniformTypeIdentifier: "public.json")
+                attachment.name = "Native file selection response \(index + 1)"
+                attachment.lifetime = .keepAlways; add(attachment)
+            }
+        }
+        let textPlanner = ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, runtime: runtime,
+                inspectExchange: { request, response, _ in exchanges.append(request, response: response) })
+        var configured = ComputerUseMCPBrowserStepPlanner()
+        configured.nativeTextPlanner = { textPlanner }
+        let png = try smallPNG()
+        let goal = "Open the most recently modified presentation in my Downloads folder."
+        let empty = ComputerUseLocalFileCatalog.Page(candidates: [], isComplete: false, nextCursor: nil,
+            hasTiedSortValues: false, hasMissingSortValues: false)
+        let initial = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(), page: empty,
+            inventoryState: .notQueried)
+        do {
+            let first = try await ComputerUsePlanningWorker.shared.perform(timeout: 35) {
+                try await configured.proposeNativeFileSelection(input: .init(goal: goal, screenshotPNG: png,
+                    surface: .desktop, localFileCatalog: initial))
+            }
+            guard let first, let firstOperation = first.localFileOperation,
+                  case .listFiles(let query, let cursor) = firstOperation else {
+                throw ComputerUseFaraAction.Failure.invalidResponse
+            }
+            XCTAssertEqual(query.fileKind, .presentation)
+            XCTAssertEqual(query.sort, .init(field: .modifiedAt, direction: .descending))
+            XCTAssertNil(cursor)
+            let date = ISO8601DateFormatter()
+            let harbor = ComputerUseLocalFileCatalog.Candidate(id: "fixture-harbor", displayName: "Project Harbor.pptx",
+                contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+                byteCount: 250, modifiedAt: try XCTUnwrap(date.date(from: "2026-09-24T18:00:00Z")), createdAt: nil, addedToDirectoryAt: nil)
+            let falcon = ComputerUseLocalFileCatalog.Candidate(id: "fixture-falcon", displayName: "Project Falcon.pptx",
+                contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+                byteCount: 100, modifiedAt: try XCTUnwrap(date.date(from: "2025-01-01T00:00:00Z")), createdAt: nil, addedToDirectoryAt: nil)
+            let available = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: query,
+                page: .init(candidates: [falcon, harbor], isComplete: true, nextCursor: nil,
+                    hasTiedSortValues: false, hasMissingSortValues: false))
+            let second = try await ComputerUsePlanningWorker.shared.perform(timeout: 35) {
+                try await configured.proposeNativeFileSelection(input: .init(goal: goal, screenshotPNG: png,
+                    surface: .desktop, localFileCatalog: available))
+            }
+            guard let second, let secondOperation = second.localFileOperation,
+                  case .selectFile(candidateID: "fixture-harbor") = secondOperation else {
+                throw ComputerUseFaraAction.Failure.invalidResponse
+            }
+            XCTAssertEqual(exchanges.count, 2)
+            for request in exchanges.items {
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+                let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+                let names = Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
+                XCTAssertTrue(names.isSubset(of: ["askUser", "listFiles", "selectFile", "askFile", "incomplete"]))
+                XCTAssertTrue(names.contains("listFiles"))
+            }
+            await runtime.shutdown()
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+    }
+
     func testMapsNormalizedPointsToCurrentImageCellsWithoutEscapingEdges() throws {
         let origin = try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: 1188, height: 768)
         XCTAssertEqual(origin.x, 0); XCTAssertEqual(origin.y, 0)
@@ -7875,6 +8020,21 @@ enum FaraQ6TestProposalRunner {
         XCTAssertEqual(report["ownedProcessExited"] as? Bool,true); XCTAssertEqual(report["credentialRemoved"] as? Bool,true)
         guard status == 0 else { throw ComputerUseFaraAction.Failure.invalidResponse }
         return try Data(contentsOf: output.appendingPathComponent("response.json"))
+    }
+}
+
+private final class NativeFileSelectionProbeExchanges: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [Data] = []
+    private var responseData: [Data] = []
+    var items: [Data] { lock.withLock { requests } }
+    var responses: [Data] { lock.withLock { responseData } }
+    var count: Int { lock.withLock { requests.count } }
+    func append(_ request: Data, response: Data) {
+        lock.withLock {
+            requests.append(request)
+            if responseData.count < 4 { responseData.append(Data(response.prefix(65_536))) }
+        }
     }
 }
 

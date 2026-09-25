@@ -20,6 +20,36 @@ final class ComputerUseDefaultBrowserSession {
         let windows: [Window]
         let focusedWindowID: String?
         let hasSheets: Bool
+        let fileOpenPanel: FileOpenPanel?
+        let hasUnrecognizedSheets: Bool
+
+        init(application: ComputerUseApplicationIdentity, windows: [Window],
+             focusedWindowID: String?, hasSheets: Bool,
+             fileOpenPanel: FileOpenPanel? = nil, hasUnrecognizedSheets: Bool = false) {
+            self.application = application
+            self.windows = windows
+            self.focusedWindowID = focusedWindowID
+            self.hasSheets = hasSheets
+            self.fileOpenPanel = fileOpenPanel
+            self.hasUnrecognizedSheets = hasUnrecognizedSheets
+        }
+    }
+
+    struct FileOpenPanel {
+        let parentWindowID: String
+        let parentWindowElement: AXUIElement
+        let accessibilityElement: AXUIElement
+        let bounds: CGRect
+        let isFocused: Bool
+        let goToFolderBounds: CGRect?
+        let pathTextFieldElement: AXUIElement?
+        let selectedFileURLs: [URL]
+        let primaryActionElement: AXUIElement?
+        let primaryActionBounds: CGRect?
+        let primaryActionEnabled: Bool?
+
+        var actionBounds: CGRect { goToFolderBounds ?? bounds }
+        var isNavigatingPath: Bool { goToFolderBounds != nil }
     }
 
     enum Failure: Error, Equatable {
@@ -43,6 +73,8 @@ final class ComputerUseDefaultBrowserSession {
         var execution: ComputerUseTaskExecution?
         var busy = false
         var uncertain = false
+        var currentFileOpenPanel: FileOpenPanel?
+        var currentActionBounds: CGRect?
 
         init(taskID: String, goalDigest: String, sessionTaskID: String,
              handler: ComputerUseDefaultBrowserTarget.Handler) {
@@ -60,6 +92,8 @@ final class ComputerUseDefaultBrowserSession {
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private var runState: RunState?
     var currentWindow: Window? { runState?.target }
+    var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
+    var currentActionBounds: CGRect? { runState?.currentActionBounds }
 
     convenience init(journalDirectory: URL) throws {
         try self.init(journalDirectory: journalDirectory,
@@ -154,13 +188,26 @@ final class ComputerUseDefaultBrowserSession {
             throw Failure.changedTaskOrGoal
         }
         let current = try captureWindows(app)
-        guard current.application == app, !current.hasSheets,
-              current.focusedWindowID == expected.id,
+        guard current.application == app,
               let focused = current.windows.first(where: { $0.id == expected.id }),
               Self.sameWindow(focused, expected) else {
             throw current.hasSheets ? Failure.authenticationHandoff : Failure.targetLost
         }
+        let panel = current.fileOpenPanel
+        if current.hasSheets {
+            guard !current.hasUnrecognizedSheets, let panel,
+                  panel.parentWindowID == expected.id,
+                  CFEqual(panel.parentWindowElement, expected.accessibilityElement),
+                  current.focusedWindowID == expected.id || panel.isFocused else {
+                throw Failure.authenticationHandoff
+            }
+        } else {
+            guard !current.hasUnrecognizedSheets, panel == nil,
+                  current.focusedWindowID == expected.id else { throw Failure.targetLost }
+        }
         state.target = focused // Refresh current geometry; bounds are not window authority.
+        state.currentFileOpenPanel = panel
+        state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
     }
 
     private func run(_ execution: ComputerUseTaskExecution, state: RunState,
@@ -179,13 +226,26 @@ final class ComputerUseDefaultBrowserSession {
               let target = state.target, let app = state.app else { throw Failure.targetLost }
         try tools.requireActive()
         let current = try captureWindows(app)
-        guard current.application == app, !current.hasSheets,
-              current.focusedWindowID == target.id,
+        guard current.application == app,
               let focused = current.windows.first(where: { $0.id == target.id }),
               Self.sameWindow(focused, target) else {
             throw current.hasSheets ? Failure.authenticationHandoff : Failure.targetLost
         }
+        let panel = current.fileOpenPanel
+        if current.hasSheets {
+            guard !current.hasUnrecognizedSheets, let panel,
+                  panel.parentWindowID == target.id,
+                  CFEqual(panel.parentWindowElement, target.accessibilityElement),
+                  current.focusedWindowID == target.id || panel.isFocused else {
+                throw Failure.authenticationHandoff
+            }
+        } else {
+            guard !current.hasUnrecognizedSheets, panel == nil,
+                  current.focusedWindowID == target.id else { throw Failure.targetLost }
+        }
         state.target = focused // Refresh current geometry; bounds are not window authority.
+        state.currentFileOpenPanel = panel
+        state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
     }
 
     private func makeExecution(state: RunState, goalDigest: String,
@@ -460,7 +520,7 @@ final class ComputerUseDefaultBrowserSession {
         throw Failure.noNewFocusedWindow
     }
 
-    private static func captureWindowsForApplication(
+    static func captureWindowsForApplication(
         _ application: ComputerUseApplicationIdentity
     ) throws -> WindowSnapshot {
         try Task.checkCancellation()
@@ -488,8 +548,95 @@ final class ComputerUseDefaultBrowserSession {
               let elements = windowsValue as? [AXUIElement],
               let focusedValue = read(root, kAXFocusedWindowAttribute as CFString),
               CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { throw Failure.targetLost }
+        let focusedElement = focusedValue as! AXUIElement
+        func string(_ element: AXUIElement, _ attribute: CFString) -> String? {
+            read(element, attribute) as? String
+        }
+        func array(_ element: AXUIElement, _ attribute: CFString) -> [AXUIElement] {
+            guard let raw = read(element, attribute), CFGetTypeID(raw) == CFArrayGetTypeID() else { return [] }
+            return raw as? [AXUIElement] ?? []
+        }
+        func bounds(_ element: AXUIElement) -> CGRect? {
+            var origin = CGPoint.zero
+            var size = CGSize.zero
+            guard value(element, kAXPositionAttribute as CFString, .cgPoint, &origin),
+                  value(element, kAXSizeAttribute as CFString, .cgSize, &size),
+                  origin.x.isFinite, origin.y.isFinite, size.width.isFinite, size.height.isFinite,
+                  size.width > 0, size.height > 0 else { return nil }
+            return CGRect(origin: origin, size: size)
+        }
+        func parent(_ element: AXUIElement) -> AXUIElement? {
+            guard let raw = read(element, kAXParentAttribute as CFString),
+                  CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+            return (raw as! AXUIElement)
+        }
+        func descendants(_ start: AXUIElement, limit: Int = 256) -> [AXUIElement]? {
+            var found: [AXUIElement] = [start]
+            var queue: [(AXUIElement, Int)] = [(start, 0)]
+            while let (element, depth) = queue.first, found.count < limit {
+                queue.removeFirst()
+                guard depth < 6 else { continue }
+                // Do not enumerate the file list. Its selected rows are read
+                // separately below, after the panel shape has been verified.
+                if string(element, "AXIdentifier" as CFString) == "ListView"
+                    || ["AXOutline", "AXTable", "AXRow", "AXCell"].contains(string(element, kAXRoleAttribute as CFString) ?? "") {
+                    continue
+                }
+                for child in array(element, "AXSheets" as CFString) + array(element, kAXChildrenAttribute as CFString) {
+                    if !found.contains(where: { CFEqual($0, child) }) {
+                        found.append(child)
+                        queue.append((child, depth + 1))
+                    }
+                }
+            }
+            return queue.isEmpty ? found : nil
+        }
+        func selectedURLs(in list: AXUIElement) -> [URL] {
+            var selectedRows: [AXUIElement] = []
+            for row in array(list, "AXSelectedRows" as CFString) + array(list, "AXSelectedChildren" as CFString)
+                where !selectedRows.contains(where: { CFEqual($0, row) }) {
+                selectedRows.append(row)
+            }
+            guard selectedRows.count <= 8 else { return [] }
+            var result: [URL] = []
+            for row in selectedRows {
+                var rowNodes = [row]
+                var queue: [(AXUIElement, Int)] = [(row, 0)]
+                var rowURLs: [URL] = []
+                while let (node, depth) = queue.first, rowNodes.count <= 64 {
+                    queue.removeFirst()
+                    if let raw = read(node, "AXURL" as CFString) {
+                        if let url = raw as? URL, url.isFileURL { rowURLs.append(url.standardizedFileURL) }
+                        else if let value = raw as? String, let url = URL(string: value), url.isFileURL {
+                            rowURLs.append(url.standardizedFileURL)
+                        }
+                    }
+                    guard depth < 3 else { continue }
+                    for child in array(node, kAXChildrenAttribute as CFString) where !rowNodes.contains(where: { CFEqual($0, child) }) {
+                        rowNodes.append(child); queue.append((child, depth + 1))
+                    }
+                }
+                guard queue.isEmpty else { return [] }
+                var uniqueRowURLs: [URL] = []
+                for url in rowURLs where !uniqueRowURLs.contains(url) { uniqueRowURLs.append(url) }
+                guard uniqueRowURLs.count == 1 else { return [] }
+                result.append(uniqueRowURLs[0])
+            }
+            return result
+        }
+        func focusedWithin(_ focused: AXUIElement, _ root: AXUIElement) -> Bool {
+            var current: AXUIElement? = focused
+            for _ in 0..<12 {
+                guard let element = current else { return false }
+                if CFEqual(element, root) { return true }
+                current = parent(element)
+            }
+            return false
+        }
         var windows: [Window] = []
         var hasSheets = false
+        var hasUnrecognizedSheets = false
+        var panelCandidates: [(Window, AXUIElement)] = []
         for element in elements {
             var pid: pid_t = 0
             guard AXUIElementGetPid(element, &pid) == .success, pid == application.processIdentifier else {
@@ -501,27 +648,87 @@ final class ComputerUseDefaultBrowserSession {
                   value(element, kAXSizeAttribute as CFString, .cgSize, &size),
                   origin.x.isFinite, origin.y.isFinite, size.width.isFinite, size.height.isFinite,
                   size.width > 0, size.height > 0 else { throw Failure.ambiguousWindows }
-            if let sheetsValue = read(element, "AXSheets" as CFString),
-               CFGetTypeID(sheetsValue) == CFArrayGetTypeID(), CFArrayGetCount(sheetsValue as! CFArray) > 0 {
-                hasSheets = true
-            }
-            if let role = read(element, kAXRoleAttribute as CFString) as? String,
-               role == "AXSheet" {
-                hasSheets = true
-            }
             let bounds = CGRect(origin: origin, size: size)
             let hash = CFHash(element)
             let windowIdentity = ComputerUseFrontmostWindowCaptureIdentity(
                 applicationProcessIdentifier: pid, accessibilityWindowHash: hash, bounds: bounds)
             let id = "\(pid):\(hash)"
-            windows.append(Window(id: id, application: application,
-                accessibilityElement: element, identity: windowIdentity))
+            let window = Window(id: id, application: application,
+                accessibilityElement: element, identity: windowIdentity)
+            windows.append(window)
+            let axSheets = array(element, "AXSheets" as CFString)
+            if !axSheets.isEmpty { hasSheets = true }
+            for sheet in axSheets where string(sheet, kAXRoleAttribute as CFString) != "AXSheet" {
+                hasUnrecognizedSheets = true
+            }
+            var sheets: [AXUIElement] = []
+            for sheet in axSheets + array(element, kAXChildrenAttribute as CFString)
+                where string(sheet, kAXRoleAttribute as CFString) == "AXSheet"
+                    && !sheets.contains(where: { CFEqual($0, sheet) }) {
+                sheets.append(sheet)
+            }
+            for child in sheets {
+                hasSheets = true
+                if string(child, "AXIdentifier" as CFString) == "open-panel",
+                   let childParent = parent(child), CFEqual(childParent, element) {
+                    panelCandidates.append((window, child))
+                } else {
+                    hasUnrecognizedSheets = true
+                }
+            }
+            if string(element, kAXRoleAttribute as CFString) == "AXSheet" {
+                hasSheets = true
+                hasUnrecognizedSheets = true
+            }
         }
         guard uniqueWindows(windows),
               windows.filter({ CFEqual(focusedValue, $0.accessibilityElement) }).count <= 1 else {
             throw Failure.ambiguousWindows
         }
         let focusedID = windows.first(where: { CFEqual(focusedValue, $0.accessibilityElement) })?.id
+        var fileOpenPanel: FileOpenPanel?
+        if panelCandidates.count == 1, let (parentWindow, panel) = panelCandidates.first {
+            guard let nodes = descendants(panel) else { throw Failure.authenticationHandoff }
+            let listViews = nodes.filter { string($0, "AXIdentifier" as CFString) == "ListView" }
+            let cancelButtons = nodes.filter { string($0, "AXIdentifier" as CFString) == "CancelButton" }
+            let primaryButtons = nodes.filter { string($0, "AXIdentifier" as CFString) == "OKButton" }
+            let nestedSheets = nodes.filter { string($0, kAXRoleAttribute as CFString) == "AXSheet" && !CFEqual($0, panel) }
+            guard bounds(panel) != nil, listViews.count == 1, cancelButtons.count == 1,
+                  primaryButtons.count == 1,
+                  string(cancelButtons[0], kAXRoleAttribute as CFString) == "AXButton",
+                  string(primaryButtons[0], kAXRoleAttribute as CFString) == "AXButton",
+                  nestedSheets.count <= 1 else {
+                hasUnrecognizedSheets = true
+                throw Failure.authenticationHandoff
+            }
+            var goToBounds: CGRect?
+            var pathField: AXUIElement?
+            if let nested = nestedSheets.first {
+                guard let nestedNodes = descendants(nested) else { throw Failure.authenticationHandoff }
+                let fields = nestedNodes.filter { string($0, "AXIdentifier" as CFString) == "PathTextField" }
+                let closeButtons = nestedNodes.filter { string($0, "AXIdentifier" as CFString) == "CloseButton" }
+                guard string(nested, "AXIdentifier" as CFString) == "GoToWindow",
+                      fields.count == 1, closeButtons.count == 1,
+                      string(fields[0], kAXRoleAttribute as CFString) == "AXTextField",
+                      string(closeButtons[0], kAXRoleAttribute as CFString) == "AXButton",
+                      let nestedBounds = bounds(nested) else { throw Failure.authenticationHandoff }
+                goToBounds = nestedBounds
+                pathField = fields[0]
+            }
+            var enabled: Bool?
+            if let raw = read(primaryButtons[0], kAXEnabledAttribute as CFString), CFGetTypeID(raw) == CFBooleanGetTypeID() {
+                enabled = raw as? Bool
+            }
+            fileOpenPanel = FileOpenPanel(parentWindowID: parentWindow.id,
+                parentWindowElement: parentWindow.accessibilityElement, accessibilityElement: panel,
+                bounds: bounds(panel)!, isFocused: focusedWithin(focusedElement, panel),
+                goToFolderBounds: goToBounds, pathTextFieldElement: pathField,
+                selectedFileURLs: selectedURLs(in: listViews[0]),
+                primaryActionElement: primaryButtons[0], primaryActionBounds: bounds(primaryButtons[0]),
+                primaryActionEnabled: enabled)
+        } else if hasSheets {
+            hasUnrecognizedSheets = true
+        }
         guard let after = NSWorkspace.shared.frontmostApplication,
               !after.isTerminated,
               let afterIdentity = ComputerUseApplicationIdentity(runningApplication: after),
@@ -529,6 +736,7 @@ final class ComputerUseDefaultBrowserSession {
             throw Failure.targetLost
         }
         return WindowSnapshot(application: application, windows: windows,
-            focusedWindowID: focusedID, hasSheets: hasSheets)
+            focusedWindowID: focusedID, hasSheets: hasSheets, fileOpenPanel: fileOpenPanel,
+            hasUnrecognizedSheets: hasUnrecognizedSheets)
     }
 }

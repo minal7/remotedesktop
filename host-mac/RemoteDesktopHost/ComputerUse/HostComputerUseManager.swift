@@ -4538,6 +4538,9 @@ final class HostComputerUseManager: ObservableObject {
             }
         }
         let browserPlanner = configuredBrowserPlanner
+        let nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner = { input in
+            try await browserPlanner.proposeNativeFileSelection(input: input)
+        }
         self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
             try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
@@ -4546,7 +4549,7 @@ final class HostComputerUseManager: ObservableObject {
                 clientPool: MCPClientPool(), browserStepPlanner: browserPlanner, browserExecutorFactory: {
                     let receipt = await modelInstaller.currentInstallation()
                     try Task.checkCancellation()
-                    return try modelLoader.prepareDefaultBrowser(receipt: receipt)
+                    return try modelLoader.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner)
                 })
         }
         self.taskLedger = taskLedger

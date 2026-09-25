@@ -12,10 +12,16 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
     }
     let response: String
     let decision: Decision
-    init(response: String, decision: Decision) { self.response = response; self.decision = decision }
-    init(response: String, action: ComputerUseFaraAction) { self.init(response: response, decision: .action(action)) }
+    let includeInModelHistory: Bool
+    init(response: String, decision: Decision, includeInModelHistory: Bool = true) {
+        self.response = response; self.decision = decision; self.includeInModelHistory = includeInModelHistory
+    }
+    init(response: String, action: ComputerUseFaraAction, includeInModelHistory: Bool = true) {
+        self.init(response: response, decision: .action(action), includeInModelHistory: includeInModelHistory)
+    }
     init(_ proposal: ComputerUseFaraModel.Proposal) {
         response = proposal.response
+        includeInModelHistory = true
         if case .askUser(let question) = proposal.action { decision = .handoff(question) }
         else { decision = .action(proposal.action) }
     }
@@ -33,6 +39,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     typealias SurfaceScopeCheck = @MainActor @Sendable (ComputerUsePredictedAction?) throws -> Void
     /// Optional task-specific verifier, run after the model sees a fresh screenshot.
     typealias CompleteCheck = @MainActor @Sendable (String) async throws -> Bool
+    /// A host-owned, non-input operation. Nil means the operation was handled
+    /// and the next loop must obtain a fresh observation before proposing again.
+    typealias LocalFileOperationHandler = @MainActor @Sendable
+        (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) throws -> ComputerUseExecutionResult?
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -76,6 +86,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let propose: Propose
     private let surfaceScopeCheck: SurfaceScopeCheck?
     private let completeCheck: CompleteCheck?
+    private let localFileOperationHandler: LocalFileOperationHandler?
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
@@ -93,9 +104,11 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     init(journalDirectory: URL, propose: @escaping Propose,
          surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
+         localFileOperationHandler: LocalFileOperationHandler? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
-        self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck; self.finishRun = finishRun
+        self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
+        self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
     }
 
     private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
@@ -194,6 +207,15 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     "pointerTargetPixelsMatch": String(pixelsMatch), "pointerHasUnchangedEditorProof": String(unchangedField == target)]
                     lastRevalidationDiagnostic.merge(difference) { _, value in value }
                 }
+            } else if surfaceScopeCheck != nil,
+                      let window = expected.fingerprint.frontmostWindowBounds,
+                      window.contains(CGPoint(x: x, y: y)),
+                      expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint) {
+                // Visual fallback still works when AX has no element for the
+                // point. Pixels outside the retained window are not its target.
+                matches = try expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
+                if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
+                    "pointerPoint": "\(x),\(y)", "pointerWindowPixelsMatch": "false"] }
             } else {
                 // A point outside the focused window was grounded in the full
                 // desktop. Changes elsewhere cannot inherit window-only proof.
@@ -250,6 +272,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             let point = try image.displayPoint(normalizedX: point.x, normalizedY: point.y)
             return .click(x: point.x, y: point.y, button: button, count: count)
         case .typeText(let text): return .typeText(text)
+        case .localFileOperation: return nil
         case .key(let keys): return try ComputerUseNativeKeyChord.action(keys)
         case .scrollAt(let horizontal, let pixels, let point):
             guard pixels.isFinite, abs(pixels) >= 1, abs(pixels) <= 10_000, pixels.rounded() == pixels else { throw Failure.unsupportedAction }
@@ -264,6 +287,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     private func record(_ proposal: ComputerUseDesktopProposal, observation: Observation, session: Session) {
         session.turns += 1
+        guard proposal.includeInModelHistory else { return }
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
             actionError: session.actionError, action: proposal.action, focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
@@ -312,6 +336,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
                 if case .handoff = proposal.decision {
                     try checkScopedSurface()
+                } else if case .action(.localFileOperation) = proposal.decision {
+                    // Catalog operations read host metadata only. A page repaint
+                    // while the model was planning must not block that read.
+                    try checkScopedSurface()
                 } else {
                     do { try revalidate(observation, action: action, tools: tools) }
                     catch Failure.changedScreen {
@@ -340,6 +368,19 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         session: session, tools: tools, assertOwnership: { try lease.assertOwnership() })
                 } else {
                     switch proposal.decision {
+                    case .action(.localFileOperation(let operation)):
+                        guard let localFileOperationHandler else { throw Failure.unsupportedAction }
+                        try Task.checkCancellation(); try lease.assertOwnership()
+                        try checkScopedSurface()
+                        let result = try localFileOperationHandler(operation)
+                        try Task.checkCancellation(); try lease.assertOwnership()
+                        try checkScopedSurface()
+                        // Metadata-only catalog results are carried in the next
+                        // host-built input, not as synthetic Fara tool history.
+                        session.turns += 1
+                        session.actionError = nil; session.rejected = 0
+                        if let result { session.terminal = nil; return result }
+                        continue
                     case .completionStatus(let success):
                         if success {
                             try await verifyCompletionCandidate("The model reported completion.", observation: observation,
@@ -369,7 +410,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 // process. Cancellation here must not lose its history or
                 // reuse its journal ID after Resume.
                 if action != nil {
-                    try checkScopedSurface()
                     try await Task.sleep(for: .milliseconds(100))
                 }
             } catch Failure.completionUnverified {
@@ -415,7 +455,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 try self.store.save(attempted, replacing: nil)
                 began = true; willBeginEffect()
             })
-            try checkScopedSurface()
+            // This journal proves native input returned, not the resulting UI.
+            // A click can open a sheet asynchronously. Inspect its settled
+            // surface at the next observation, before proposing further input.
             var verified = attempted; verified.statuses = [.verified]
             try store.save(verified, replacing: attempted)
         } catch {
