@@ -390,7 +390,7 @@ final class MCPFirstComputerUseExecutor:
         documentPlanner: ComputerUseMCPDocumentPlanner = .init(),
         browserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init(),
         browserExecutorFactory: @escaping BrowserExecutorFactory = {
-            try OSAtlasVisualExecutorLoader().prepareBrowser(receipt: nil)
+            try OSAtlasVisualExecutorLoader().prepareDefaultBrowser(receipt: nil)
         }
     ) async throws -> MCPFirstComputerUseExecutor {
         let executor = MCPFirstComputerUseExecutor(

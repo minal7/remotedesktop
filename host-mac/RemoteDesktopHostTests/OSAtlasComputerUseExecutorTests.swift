@@ -1252,7 +1252,19 @@ final class OSAtlasComputerUseExecutorTests: XCTestCase {
                         """)),
             "The shipped DoorDash identity page AX tree must pause even when Email, rather than Password, is focused")
 
+        let accountChoosers = [
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXHeading • Choose an account\nAXLink • alex@example.test • Signed out"),
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXDialog • Pick an account\nAXButton • Use another account"),
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXWindow • Select an account\nAXLink • Signed out"),
+        ]
+        for snapshot in accountChoosers {
+            XCTAssertTrue(ComputerUseAuthenticationBarrierDetector.requiresUserIntervention(snapshot), "A structural account chooser must hand off before an account choice or passkey step")
+        }
+
         let negatives = [
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXStaticText • Choose an account\nAXButton • Continue reading"),
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXHeading • Choose an account\nAXStaticText • Signed out"),
+            ComputerUseAuthenticationContextSnapshot(focusedElement: "AXWebArea", boundedWindowContext: "AXStaticText • Choose an account in settings\nAXButton • Use another account"),
             ComputerUseAuthenticationContextSnapshot(
                 focusedElement: "AXButton • Sign In",
                 boundedWindowContext: "AXHeading • Welcome"),

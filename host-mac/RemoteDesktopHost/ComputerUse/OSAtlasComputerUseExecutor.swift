@@ -7536,6 +7536,21 @@ enum ComputerUseAuthenticationBarrierDetector {
                 .components(separatedBy: .newlines)
         let normalizedEntries = contextEntries.map(normalizedWords)
         let context = normalizedEntries.joined(separator: " ")
+        let hasStructuralAccountChooserHeading = normalizedEntries.contains { entry in
+            let structuralRole = [" axheading ", " axdialog ", " axwindow "]
+                .contains(where: entry.contains)
+            let chooserText = [" choose an account ", " pick an account ", " select an account "]
+                .contains(where: entry.contains)
+            return structuralRole && chooserText
+        }
+        if hasStructuralAccountChooserHeading,
+           normalizedEntries.contains(where: { entry in
+               let actionable = entry.contains(" axlink ") || entry.contains(" axbutton ")
+               return actionable && (entry.contains(" signed out ") || entry.contains(" use another account "))
+           }) {
+            return true
+        }
+
         let hasAuthenticationHeading = [
             " sign in ",
             " sign into ",

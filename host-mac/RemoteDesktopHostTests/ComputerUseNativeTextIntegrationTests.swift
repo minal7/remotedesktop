@@ -1465,6 +1465,130 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testScopedDesktopRejectsForeignAppOrWindowBeforeProposing() async throws {
+        for (scenario, appMatches, windowMatches) in [("foreign app", false, true), ("foreign window", true, false)] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var proposals = 0, effects = 0
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                return .init(response: "candidate", action: .reportCompletion("Done"))
+            }, surfaceScopeCheck: { _ in
+                guard appMatches && windowMatches else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+            })
+            do {
+                _ = try await executor.execute(taskID: "foreign-surface-\(scenario)", prompt: "Click", trustedUserPrompt: "Click", tools: tools, progress: { _ in })
+                XCTFail("A foreign app/window must stop before proposal: \(scenario)")
+            } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
+            XCTAssertEqual(proposals, 0, scenario)
+            XCTAssertEqual(effects, 0, scenario)
+        }
+    }
+
+    func testScopedDesktopStopsAfterEffectWhenOwnedWindowChanges() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, effects = 0, scopeValid = true
+        let tools = desktopTestTools(perform: { _ in effects += 1; scopeValid = false })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals > 1 { return .init(response: "candidate", action: .reportCompletion("Done")) }
+            return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        })
+        do {
+            _ = try await executor.execute(taskID: "changed-owned-window", prompt: "Click", trustedUserPrompt: "Click", tools: tools, progress: { _ in })
+            XCTFail("A changed owned window must stop before the next proposal or completion")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 1)
+    }
+
+    func testScopedCompletionUsesOwnedWindowPixelsAndHandoffDoesNotNeedPixelEquality() async throws {
+        for scenario in ["outside completion", "inside completion", "outside handoff"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+            let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+            let changedRect = scenario == "inside completion" ? CGRect(x: 200, y: 100, width: 30, height: 30)
+                : CGRect(x: 10, y: 10, width: 30, height: 30)
+            var changed = false, effects = 0, proposals = 0
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+                canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+                designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+            let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+                launchGeneration: 1, codeIdentity: code)!
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, actionPerformer: { _ in effects += 1 },
+                screenProvider: {
+                    let base = CIImage(color: .black).cropped(to: display)
+                    let image = changed ? CIImage(color: .blue).cropped(to: changedRect).composited(over: base) : base
+                    return .init(image: image, displayBounds: display, frontmostWindowBounds: window)
+                }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+                authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+                planningAccessibilityIdentityProvider: { "safari-window" },
+                frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                changed = true
+                if scenario == "outside handoff" { return .init(response: "Pause", decision: .handoff("Please review the sign-in page.")) }
+                return .init(response: "Done", action: .reportCompletion("The requested page is open."))
+            }, surfaceScopeCheck: { _ in })
+            let result = try await executor.execute(taskID: scenario, prompt: "Open the requested page.",
+                trustedUserPrompt: "Open the requested page.", tools: tools, progress: { _ in })
+            if scenario == "inside completion" {
+                XCTAssertEqual(result, .userInterventionRequired("I could not verify completion in the task window. Please check it before continuing."))
+            } else if scenario == "outside handoff" {
+                XCTAssertEqual(result, .userInterventionRequired("Please review the sign-in page."))
+            } else {
+                XCTAssertEqual(result, .completed("The requested page is open."))
+            }
+            XCTAssertEqual(effects, 0, scenario)
+            XCTAssertEqual(proposals, 1, "A terminal decision must not trigger more actions")
+        }
+    }
+
+    func testScopedDesktopCompletesOnlyAfterValidatorAccepts() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, checks = 0, scopeChecks = 0
+        let tools = desktopTestTools()
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "candidate", action: .reportCompletion("Verified"))
+        }, surfaceScopeCheck: { _ in scopeChecks += 1 }, completeCheck: { answer in
+            checks += 1
+            XCTAssertEqual(answer, "Verified")
+            return true
+        })
+        let result = try await executor.execute(taskID: "verified-completion-candidate", prompt: "Finish", trustedUserPrompt: "Finish", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Verified"))
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(checks, 1)
+        XCTAssertGreaterThan(scopeChecks, 0)
+    }
+
+    func testScopedDesktopRequiresCompletionValidatorAcceptance() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, checks = 0
+        let tools = desktopTestTools()
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals == 1 { return .init(response: "candidate", action: .reportCompletion("Done")) }
+            return .init(response: "handoff", decision: .handoff("Please inspect the page."))
+        }, surfaceScopeCheck: { _ in }, completeCheck: { answer in
+            checks += 1
+            XCTAssertEqual(answer, "Done")
+            return false
+        })
+        let result = try await executor.execute(taskID: "completion-candidate", prompt: "Finish", trustedUserPrompt: "Finish", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Please inspect the page."))
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(checks, 1)
+    }
+
     func testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities() throws {
         let image = try ComputerUseDesktopImage(observation: .init(
             image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
@@ -1488,7 +1612,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
         let actions = try XCTUnwrap(properties["action"] as? [String: Any])
         XCTAssertEqual(Set(try XCTUnwrap(actions["enum"] as? [String])),
-            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll", "wait", "pause_and_memorize_fact", "terminate"]))
+            Set(["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll", "wait", "pause_and_memorize_fact", "ask_user_question", "terminate"]))
         XCTAssertEqual(function["name"] as? String, "computer_use")
         XCTAssertTrue(prompt.contains("macOS")); XCTAssertTrue(prompt.contains("Command"))
         XCTAssertTrue(prompt.contains("<tool_call>"))

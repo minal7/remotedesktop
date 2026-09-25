@@ -91,9 +91,13 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         catch { failure = error }
         let preparationLaunches = await launcher.calls
         XCTAssertNil(failure, "Preparing a tool-capable browser must not warm the computer-use model")
-        XCTAssertTrue(prepared?.executor is ComputerUseFaraBrowserExecutor)
+        XCTAssertTrue(prepared?.executor is ComputerUseDefaultBrowserExecutor)
         XCTAssertEqual(prepared?.runtimeWasActivated, false)
         XCTAssertEqual(preparationLaunches, 0)
+        let defaultBrowser = try loader.prepareDefaultBrowser(receipt: fixture.receipt)
+        XCTAssertTrue(defaultBrowser is ComputerUseDefaultBrowserExecutor)
+        let defaultBrowserLaunches = await launcher.calls
+        XCTAssertEqual(defaultBrowserLaunches, 0)
         do {
             _ = try await loader.load(receipt: fixture.receipt, progress: { _ in })
             XCTFail("Setup must actually attempt model activation")

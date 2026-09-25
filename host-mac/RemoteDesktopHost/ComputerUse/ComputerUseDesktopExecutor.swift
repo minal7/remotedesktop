@@ -14,17 +14,26 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
     let decision: Decision
     init(response: String, decision: Decision) { self.response = response; self.decision = decision }
     init(response: String, action: ComputerUseFaraAction) { self.init(response: response, decision: .action(action)) }
-    init(_ proposal: ComputerUseFaraModel.Proposal) { self.init(response: proposal.response, action: proposal.action) }
+    init(_ proposal: ComputerUseFaraModel.Proposal) {
+        response = proposal.response
+        if case .askUser(let question) = proposal.action { decision = .handoff(question) }
+        else { decision = .action(proposal.action) }
+    }
     var action: ComputerUseFaraAction? { if case .action(let action) = decision { return action }; return nil }
 }
 
 /// Native image/action execution for trained computer-use providers. Provider
 /// request profiles remain separate; this adapter admits shared native effects.
-/// Not selected by the production loader until native model acceptance passes.
+/// The default-browser wrapper supplies task-window scope for browser work.
 @MainActor
 final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
     typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseDesktopProposal
-    enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, unsupportedAction, invalidApproval, stepLimit, authentication }
+    /// Optional task-owned window guard. Nil checks bracket observations/effects;
+    /// action checks run immediately before approval or dispatch.
+    typealias SurfaceScopeCheck = @MainActor @Sendable (ComputerUsePredictedAction?) throws -> Void
+    /// Optional task-specific verifier, run after the model sees a fresh screenshot.
+    typealias CompleteCheck = @MainActor @Sendable (String) async throws -> Bool
+    enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
         let fingerprint: ComputerUsePlanningStateFingerprint
@@ -65,6 +74,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     }
     private let store: ComputerUseTaskJournalStore
     private let propose: Propose
+    private let surfaceScopeCheck: SurfaceScopeCheck?
+    private let completeCheck: CompleteCheck?
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
@@ -81,8 +92,31 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     let readyDetail = "Native desktop execution is available"
 
     init(journalDirectory: URL, propose: @escaping Propose,
+         surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
-        store = try .init(directory: journalDirectory); self.propose = propose; self.finishRun = finishRun
+        store = try .init(directory: journalDirectory); self.propose = propose
+        self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck; self.finishRun = finishRun
+    }
+
+    private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
+        guard let surfaceScopeCheck else { return }
+        do { try surfaceScopeCheck(action) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw Failure.scopedSurfaceChanged }
+    }
+
+    private func verifyCompletionCandidate(_ answer: String, observation: Observation,
+                                           tools: ComputerUseHostTools,
+                                           assertOwnership: () throws -> Void) async throws {
+        guard surfaceScopeCheck != nil || completeCheck != nil else { return }
+        if surfaceScopeCheck != nil { try checkScopedSurface() }
+        guard let completeCheck else { return }
+        let accepted = try await completeCheck(answer)
+        try Task.checkCancellation()
+        try assertOwnership()
+        try revalidate(observation, action: nil, tools: tools)
+        try checkScopedSurface()
+        guard accepted else { throw Failure.completionUnverified }
     }
 
     func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
@@ -186,6 +220,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         self.lastRevalidationDiagnostic = ["changedDisplayBounds": String(describing: changed),
                             "changedPixelBounds": String(describing: changedPixels), "fieldPixelBounds": String(describing: fieldPixels)]
                     })
+            } else if surfaceScopeCheck != nil, let window = expected.fingerprint.frontmostWindowBounds,
+                      expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint) {
+                matches = try expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
             } else { matches = expected.fingerprint == fresh.fingerprint }
         default: matches = expected.fingerprint == fresh.fingerprint
         }
@@ -262,7 +299,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         defer { lease.release() }
         while session.turns < 64 {
             try Task.checkCancellation(); try lease.assertOwnership()
+            try checkScopedSurface()
             let observation = try observe(tools, includeControls: true)
+            try checkScopedSurface()
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
                 surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
                 focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls)
@@ -271,24 +310,42 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership()
             do {
                 let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
-                try revalidate(observation, action: action, tools: tools)
+                if case .handoff = proposal.decision {
+                    try checkScopedSurface()
+                } else {
+                    do { try revalidate(observation, action: action, tools: tools) }
+                    catch Failure.changedScreen {
+                        if surfaceScopeCheck != nil, case .action(.reportCompletion) = proposal.decision {
+                            record(proposal, observation: observation, session: session); return .userInterventionRequired("I could not verify completion in the task window. Please check it before continuing.")
+                        }
+                        throw Failure.changedScreen
+                    }
+                    try checkScopedSurface()
+                }
                 if let action {
                     if case .typeText = action, try !tools.focusedTypingTargetIsEditable(providerAction: action) { throw Failure.changedScreen }
                     guard try !tools.actionIsObstructedByTransientSystemOverlay(action) else { throw Failure.changedScreen }
+                    try checkScopedSurface(action)
                     let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
                     if let reason = tools.approvalReason(for: action) {
+                        try checkScopedSurface(action)
                         let pending = Approval(taskID: taskID, proposal: proposal, action: action,
                             observation: observation, fingerprint: fingerprint, message: reason)
                         session.approval = pending
                         return pending.result
                     }
+                    try checkScopedSurface(action)
                     progress("Using the desktop…")
                     try await dispatch(proposal, action: action, observation: observation, fingerprint: fingerprint,
                         session: session, tools: tools, assertOwnership: { try lease.assertOwnership() })
                 } else {
                     switch proposal.decision {
                     case .completionStatus(let success):
-                        if success { return try complete("The model reported completion.", session: session) }
+                        if success {
+                            try await verifyCompletionCandidate("The model reported completion.", observation: observation,
+                                tools: tools, assertOwnership: { try lease.assertOwnership() })
+                            return try complete("The model reported completion.", session: session)
+                        }
                         let result = ComputerUseExecutionResult.unableToComplete("The model reported that it could not complete the task.")
                         session.terminal = result; return result
                     case .handoff(let message):
@@ -297,7 +354,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         record(proposal, observation: observation, session: session)
                         session.actionError = nil; session.rejected = 0
                         return .userInterventionRequired(message)
-                    case .action(.reportCompletion(let answer)): return try complete(answer, session: session)
+                    case .action(.reportCompletion(let answer)):
+                        try await verifyCompletionCandidate(answer, observation: observation,
+                            tools: tools, assertOwnership: { try lease.assertOwnership() })
+                        return try complete(answer, session: session)
                     case .action(.wait(let seconds)): try await Task.sleep(for: .seconds(seconds))
                     case .action(.remember): break
                     default: throw Failure.unsupportedAction
@@ -308,7 +368,14 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 // Retain the dispatched action before yielding to the other
                 // process. Cancellation here must not lose its history or
                 // reuse its journal ID after Resume.
-                if action != nil { try await Task.sleep(for: .milliseconds(100)) }
+                if action != nil {
+                    try checkScopedSurface()
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+            } catch Failure.completionUnverified {
+                record(proposal, observation: observation, session: session)
+                session.actionError = "The reported completion was not verified by the scoped surface. Inspect current evidence before reporting completion."
+                session.rejected += 1
             } catch Failure.changedScreen {
                 record(proposal, observation: observation, session: session)
                 session.actionError = "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action."
@@ -332,6 +399,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                           tools: ComputerUseHostTools, approved: Bool = false, willBeginEffect: () -> Void = {},
                           assertOwnership: () throws -> Void) async throws {
         try revalidate(observation, action: action, tools: tools)
+        try checkScopedSurface(action)
         let actionID = ComputerUseTaskContract.digest([session.journal.taskID, "native-dispatch", String(session.turns)])
         let lease = try store.acquireExecution(taskID: actionID, expected: nil)
         defer { lease.release() }
@@ -342,10 +410,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         do {
             try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: {
                 try assertOwnership(); try lease.assertOwnership(); try self.checkAuthentication(tools)
+                try self.checkScopedSurface(action)
                 if !approved, tools.approvalReason(for: action) != nil { throw Failure.invalidApproval }
                 try self.store.save(attempted, replacing: nil)
                 began = true; willBeginEffect()
             })
+            try checkScopedSurface()
             var verified = attempted; verified.statuses = [.verified]
             try store.save(verified, replacing: attempted)
         } catch {

@@ -86,7 +86,16 @@ enum ComputerUseFaraAction: Equatable, Sendable {
                 return .pointer(kind, point)
             }
             switch action {
-            case "type": try keys("text"); return try .typeText(string("text", permitsEmpty: true))
+            case "type":
+                // Fara 1.5 types at the current focus even when it supplies
+                // coordinates. Validate that metadata without inventing a click.
+                if args["coordinate"] != nil {
+                    try keys("text", "coordinate")
+                    guard case .array(let coordinate)? = args["coordinate"], coordinate.count == 2 else { throw Failure.invalidResponse }
+                    let point = try Point(x: number(coordinate[0]), y: number(coordinate[1]))
+                    guard (0...1000).contains(point.x), (0...1000).contains(point.y) else { throw Failure.invalidResponse }
+                } else { try keys("text") }
+                return try .typeText(string("text", permitsEmpty: true))
             case "key":
                 try keys("keys")
                 guard case .array(let values)? = args["keys"], (1...8).contains(values.count) else { throw Failure.invalidResponse }

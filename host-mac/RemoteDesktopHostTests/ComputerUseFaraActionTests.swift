@@ -6,6 +6,66 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseFaraActionTests: XCTestCase {
+    @MainActor
+    func testOptInDefaultBrowserFaraStopsAtGoogleSignIn() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_DEFAULT_BROWSER_FARA_DRIVE_HANDOFF"] == "1" else {
+            throw XCTSkip("Opt-in: actual Fara navigation in one task-owned default-browser window; stop at Google sign-in")
+        }
+        let began = ContinuousClock.now
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let responseURL = environment["DEFAULT_BROWSER_FARA_RESPONSE_PATH"].map { URL(fileURLWithPath: $0) }
+        let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { _, response in
+            if let responseURL { try? response.prefix(65_536).write(to: responseURL, options: .atomic) }
+        })
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserDrive-" + UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0
+        var proposedActions: [String] = []
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: directory,
+            propose: { input in
+                proposals += 1
+                let endpoint = try await runtime.activateFara(inputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                proposedActions.append(String(describing: proposal.action).prefix(256).description)
+                return .init(proposal)
+            }, finishRun: { await runtime.shutdown() })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let taskID = UUID().uuidString
+        let goal = "Open https://drive.google.com in the default browser and show my files. If sign-in is required, hand control back to me so I can log in. Do not choose an account, enter credentials, upload a file, or interact with any sign-in control."
+        let operation = Task { @MainActor in
+            try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+        }
+        let remaining = max(Int64(1), 80 - (ContinuousClock.now - began).components.seconds)
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(remaining))
+            operation.cancel()
+        }
+        var result: ComputerUseExecutionResult?
+        var executionError: Error?
+        do { result = try await operation.value } catch { executionError = error }
+        deadline.cancel()
+        await runtime.shutdown()
+        let workerStop = await runtime.lastWorkerStop
+        let window = try XCTUnwrap(executor.retainedWindowForDiagnostics,
+            "No retained window. Result=\(String(describing: result)), error=\(String(describing: executionError)), proposals=\(proposals), actions=\(proposedActions.suffix(8)), workerStop=\(String(describing: workerStop)), sessionFailure=\(String(describing: executor.lastSessionFailureForDiagnostics))")
+        let page = try XCTUnwrap(ComputerUseDefaultBrowserPageReader().read(
+            window: window.accessibilityElement, application: window.application, mayAct: { true }),
+            "No HTTPS page. Result=\(String(describing: result)), error=\(String(describing: executionError)), proposals=\(proposals), actions=\(proposedActions.suffix(8)), workerStop=\(String(describing: workerStop)), sessionFailure=\(String(describing: executor.lastSessionFailureForDiagnostics))")
+        let host = try XCTUnwrap(URL(string: page.url)?.host?.lowercased())
+        let axText = (page.renderedAXText + " " + page.controls.map(\.label).joined(separator: " ")).lowercased()
+        XCTAssertEqual(host, "accounts.google.com")
+        XCTAssertTrue(axText.contains("choose an account"),
+            "Handoff must precede selecting an account or starting passkey authentication.")
+        if case .userInterventionRequired = result { } else {
+            XCTFail("The browser must hand off at sign-in. Result: \(String(describing: result)); error: \(String(describing: executionError)); proposals=\(proposals), actions=\(proposedActions.suffix(8)), workerStop=\(String(describing: workerStop))")
+        }
+        XCTAssertGreaterThan(proposals, 0)
+        XCTAssertLessThan(ContinuousClock.now - began, .seconds(85))
+    }
+
     func testBrowserModelRetainsExactClarificationsIndependentlyOfHistory() throws {
         let original = "Find the page for cafe\u{301}.", answer = "  東京 😀\n  "
         let goal = try ComputerUseUnresolvedTextGoal(userRequest: original)
@@ -1913,6 +1973,22 @@ final class ComputerUseFaraActionTests: XCTestCase {
         _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: boundary)
         boundary.observedPage = page
         XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: boundary))
+    }
+
+    func testDesktopFaraQuestionMapsToExactUserHandoff() throws {
+        let question = "Please sign in, then tell me when you’re ready. 東京 😀"
+        let tool = ComputerUseFaraModel.desktopToolSchema()
+        let function = try XCTUnwrap(tool["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let action = try XCTUnwrap(properties["action"] as? [String: Any])
+        XCTAssertTrue(try XCTUnwrap(action["enum"] as? [String]).contains("ask_user_question"))
+        XCTAssertEqual((properties["question"] as? [String: Any])?["type"] as? String, "string")
+        let json = try JSONSerialization.data(withJSONObject: ["action": "ask_user_question", "question": question])
+        let decoded = try ComputerUseFaraAction.decode(call(String(decoding: json, as: UTF8.self)))
+        let proposal = ComputerUseDesktopProposal(.init(response: "", action: decoded))
+        XCTAssertEqual(proposal.decision, .handoff(question))
+        XCTAssertThrowsError(try ComputerUseFaraAction.decode(call(#"{"action":"ask_user_question","question":""}"#)))
     }
 
     func testFaraBrowserRequestAdvertisesImplementedToolsAndBoundedReading() throws {
@@ -7397,6 +7473,42 @@ final class ComputerUseFaraActionTests: XCTestCase {
         }
     }
 
+    func testDesktopModelRequestKeepsOnlyCurrentScreenshotAndRetainsTextHistory() throws {
+        func png(_ color: NSColor) throws -> Data {
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+            bitmap.setColor(color, atX: 0, y: 0)
+            return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        }
+        let priorPNG = try png(.red), currentPNG = try png(.blue)
+        let responses = ["First action response.\n" + call(#"{"action":"type","text":"https://example.com"}"#),
+                         "Second action response.\n" + call(#"{"action":"key","keys":["Return"]}"#)]
+        let history = [
+            ComputerUseFaraModel.Step(screenshotPNG: priorPNG, response: responses[0],
+                resultObservation: .init(currentURL: nil, userResponse: nil, actionError: nil,
+                    focusedEditor: "Address bar"), focusedEditor: "Address bar"),
+            ComputerUseFaraModel.Step(screenshotPNG: priorPNG, response: responses[1], focusedEditor: "Search field")
+        ]
+        let input = ComputerUseFaraModel.Input(goal: "Open the requested page.", screenshotPNG: currentPNG,
+            surface: .desktop, history: history, focusedEditor: "Current search field")
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "test-only-token")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.filter { $0["role"] as? String == "assistant" }.compactMap { $0["content"] as? String }, responses)
+        let observations = messages.filter { $0["role"] as? String == "user" }.compactMap { $0["content"] as? [[String: Any]] }
+        let imageParts = observations.flatMap { $0 }.filter { $0["type"] as? String == "image_url" }
+        XCTAssertEqual(imageParts.count, 1)
+        XCTAssertEqual((imageParts.first?["image_url"] as? [String: String])?["url"],
+            "data:image/png;base64," + currentPNG.base64EncodedString())
+        let text = observations.flatMap { $0 }.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        XCTAssertTrue(text.contains("Current search field"))
+        XCTAssertTrue(text.contains("previous_action_result"))
+        XCTAssertTrue(text.contains("Address bar"))
+    }
+
     func testModelRequestPreservesGoalAndActionHistoryWithOnlyLatestThreeImages() throws {
         let png = try smallPNG()
         let click = call(#"{"action":"left_click","coordinate":[392,540]}"#)
@@ -7664,6 +7776,16 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertTrue(text.utf8.elementsEqual(payload.utf8))
     }
 
+    func testTypeActionAcceptsInertBoundedCoordinateAndPreservesExactText() throws {
+        let payload = "  https://drive.google.com 東京 e\u{301} 😀  "
+        for coordinate in [[0.0, 0.0], [347.5, 1000.0]] {
+            let arguments = try JSONSerialization.data(withJSONObject: ["action": "type", "text": payload, "coordinate": coordinate])
+            let action = try ComputerUseFaraAction.decode(call(String(decoding: arguments, as: UTF8.self)))
+            guard case .typeText(let text) = action else { return XCTFail("Type metadata cannot create a pointer action") }
+            XCTAssertTrue(text.utf8.elementsEqual(payload.utf8))
+        }
+    }
+
     func testRejectsMalformedMultipleUnknownAndAmbiguousCalls() throws {
         let valid = call(#"{"action":"left_click","coordinate":[500,250]}"#)
         let invalid = ["", valid + valid, "Run this: " + valid, String(valid.dropLast()),
@@ -7675,6 +7797,11 @@ final class ComputerUseFaraActionTests: XCTestCase {
             call(#"{"action":"left_click","coordinate":[1,2,3]}"#),
             call(#"{"action":"left_click","coordinate":[1,2],"text":"unrelated"}"#),
             call(#"{"action":"type"}"#), call(#"{"action":"key","keys":[]}"#),
+            call(#"{"action":"type","text":"x","coordinate":[true,0]}"#),
+            call(#"{"action":"type","text":"x","coordinate":[0]}"#),
+            call(#"{"action":"type","text":"x","coordinate":[0,1001]}"#),
+            call(#"{"action":"type","text":"x","coordinate":null}"#),
+            call(#"{"action":"type","text":"x","coordinate":[0,0],"extra":true}"#),
             call(#"{"action":"visit_url","url":"/relative/path"}"#),
             call(#"{"action":"visit_url","url":"https:"}"#),
             call(#"{"action":"visit_url","url":" https://example.com/"}"#),

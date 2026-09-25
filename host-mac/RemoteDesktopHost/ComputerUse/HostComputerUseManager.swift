@@ -1194,6 +1194,12 @@ final class ComputerUseHostTools {
                 && screenProvider == nil
     }
 
+    /// Session adapters must not carry permission across asynchronous work.
+    func requireActive() throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+    }
+
     func frontmostApplicationName() -> String? {
         frontmostApplicationSnapshot().policyName
     }
@@ -1238,17 +1244,9 @@ final class ComputerUseHostTools {
 
     func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        guard browserNavigationTask != nil else { return nil }
         let workflow = try ComputerUseBrowserWorkflowRequest.compile(prompt)
         guard workflow != nil || ComputerUseBrowserNavigationRequest.urls(in: prompt) != nil else { return nil }
-        if browserNavigationTask == nil {
-            // App-hosted tests opt into an isolated loopback fixture explicitly;
-            // unrelated routing tests must not open websites on the user's Mac.
-            guard !HostRuntimeContext.isRunningUnitTests else { return nil }
-            browserNavigationTask = ComputerUseBrowserNavigationTask(
-                browser: ComputerUseOwnedBrowser(mayAct: mayAct),
-                journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
-            publishOwnedBrowserTaskControls()
-        }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         if let workflow {
@@ -4548,7 +4546,7 @@ final class HostComputerUseManager: ObservableObject {
                 clientPool: MCPClientPool(), browserStepPlanner: browserPlanner, browserExecutorFactory: {
                     let receipt = await modelInstaller.currentInstallation()
                     try Task.checkCancellation()
-                    return try modelLoader.prepareBrowser(receipt: receipt)
+                    return try modelLoader.prepareDefaultBrowser(receipt: receipt)
                 })
         }
         self.taskLedger = taskLedger
