@@ -12,6 +12,7 @@
 		E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */; };
 		F7191DAA5A805A98C4E9BA8A /* GUI-OWL-DESKTOP-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */; };
 		FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */; };
+		A8A8D2FB53D070204240D08E /* ComputerUseDefaultBrowserTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */; };
 		BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */; };
 		B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */; };
 		E4FF598034094C418706CA54 /* ComputerUseSignInNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */; };
@@ -153,6 +154,7 @@
 		2BB4F312F1FA16AD43D21ECB /* FoundationMCPJSONSchemaBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87DBA79B150564718516A5FE /* FoundationMCPJSONSchemaBridge.swift */; };
 		2C84B8552294904C28B88A11 /* CloudKitLocalComputerUsePairing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70C70BF18419F7BA2ABFFE05 /* CloudKitLocalComputerUsePairing.swift */; };
 		2D764A643B95E19294CC2B4C /* ComputerUseTaskExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6E26041B6B11353B84FD406 /* ComputerUseTaskExecution.swift */; };
+		0102E78A605EE49D219A30A7 /* ComputerUseDefaultBrowserTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */; };
 		2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */; };
 		2F34B7B243FAEA2CFCA96DCA /* ComputerUseTextTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027DBC19074EFB6AB175D55 /* ComputerUseTextTask.swift */; };
 		2F8D30B0C5CB5F9100627C63 /* MacControlMCPInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0EED9EA8BD57F31F7C87F4C /* MacControlMCPInstaller.swift */; };
@@ -314,6 +316,7 @@
 		E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		43F4BEDF58D72B271F2FCA64 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "GUI-OWL-DESKTOP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
 		8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraBrowserExecutor.swift; sourceTree = "<group>"; };
+		893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserTarget.swift; sourceTree = "<group>"; };
 		D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDesktopExecutor.swift; sourceTree = "<group>"; };
 		B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
 		B384199838D14515AD5ED678 /* ComputerUseSignInNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSignInNavigation.swift; sourceTree = "<group>"; };
@@ -411,6 +414,7 @@
 		4386734ED5C4565BC0F3E3B5 /* SemanticNativeToolWireContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticNativeToolWireContractTests.swift; sourceTree = "<group>"; };
 		4770C8CE9BED4CC5EFB3A726 /* BonjourAdvertiser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BonjourAdvertiser.swift; sourceTree = "<group>"; };
 		48B0DBDEE13640A9F60DC878 /* ICEConfigFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICEConfigFetcher.swift; sourceTree = "<group>"; };
+		9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserTargetTests.swift; sourceTree = "<group>"; };
 		49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFirstComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogo.swift; sourceTree = "<group>"; };
 		4CAC6DA38D1E1900403297AA /* ComputerUseTextTaskTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextTaskTests.swift; sourceTree = "<group>"; };
@@ -767,6 +771,7 @@
 				9998D2A9BBCC15FA929764EA /* LocalComputerUseTransportTests.swift */,
 				EF30648C9B8BB3F139DCD4CA /* MacControlMCPInstallerTests.swift */,
 				9EE79F7708D562EA715453FD /* MCPApprovalPresentationTests.swift */,
+				9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */,
 				49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */,
 				C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */,
 				5420CDBF7C04AA9EB6330CC3 /* OSAtlasAcceptanceFixtureRenderer.swift */,
@@ -798,6 +803,7 @@
 				599F0814729D3FB33406E113 /* ComputerUseHoloModel.swift */,
 				2E6BEDCF0F6EE2C343DAE2C3 /* ComputerUseGUIOwlModel.swift */,
 				8F77E3EEA241298A7AD7D926 /* ComputerUseFaraBrowserExecutor.swift */,
+				893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */,
 				D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */,
 				99ED4432B2B249D56CD6DEAC /* ComputerUseBrowserSearchPlanner.swift */,
 				470BA959CA234D685362D54F /* ComputerUseBrowserLinkPlanner.swift */,
@@ -1218,6 +1224,7 @@
 				54D17A53E353BCEC918766FD /* LlamaSemanticActionRouterTests.swift in Sources */,
 				304E0EE72F59C9714A1B7FD2 /* LocalComputerUseTransportTests.swift in Sources */,
 				9B16F67C2F12C6B2EC4E993E /* MCPApprovalPresentationTests.swift in Sources */,
+				0102E78A605EE49D219A30A7 /* ComputerUseDefaultBrowserTargetTests.swift in Sources */,
 				2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */,
 				37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */,
 				2042D882CA5FC124D16E9A9C /* MacControlMCPInstallerTests.swift in Sources */,
@@ -1257,6 +1264,7 @@
 				090C570A456F35A34DC7A76B /* ComputerUseHoloModel.swift in Sources */,
 				50E760FE6946EEC28FF48631 /* ComputerUseGUIOwlModel.swift in Sources */,
 				FD5DB3A204176EF358AFA09E /* ComputerUseFaraBrowserExecutor.swift in Sources */,
+				A8A8D2FB53D070204240D08E /* ComputerUseDefaultBrowserTarget.swift in Sources */,
 				BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */,
 				118C3A0AD32CF1720A773392 /* ComputerUseBrowserSearchPlanner.swift in Sources */,
 				0DFDF6E26E89800D0C96BE6B /* ComputerUseBrowserLinkPlanner.swift in Sources */,

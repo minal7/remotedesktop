@@ -1,0 +1,113 @@
+{
+  "date": "2026-09-24",
+  "baseCommit": "4bd563c",
+  "component": "Default HTTPS browser resolution and exact task/application/window binding",
+  "implemented": true,
+  "compiled": true,
+  "tested": "Six focused GREEN methods; one live read-only Launch Services check",
+  "accepted": "Component only; production routing and real Drive E2E are not accepted",
+  "runs": [
+    {
+      "name": "default-browser-target-red01",
+      "exitCode": 65,
+      "runnerSHA256": "a1075361f8d6d5bf64949783a58f37a58a0c72c266a13636fe52b1bbf6f46fd9",
+      "ids": [
+        "ComputerUseDefaultBrowserTargetTests/testTargetUsesDynamicallyResolvedHTTPSHandlerAndPinsObservedWindow",
+        "ComputerUseDefaultBrowserTargetTests/testMissingHTTPSHandlerFailsClosed",
+        "ComputerUseDefaultBrowserTargetTests/testRunningIdentityMustMatchResolvedHandlerBundleAndCodePath",
+        "ComputerUseDefaultBrowserTargetTests/testAmbiguousOrMissingWindowAndStaleTaskOrWindowAreRejected"
+      ],
+      "passed": 1,
+      "failed": 3,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "runtimeWarnings": [],
+      "sourceAudit": {
+        "sourceCount": 23,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "commandRecord": ".build/repair-verification/default-browser-target-red01-command.json",
+      "resultBundle": ".build/repair-verification/default-browser-target-red01.xcresult",
+      "sources": {
+        "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "c55ba48549c3c166121ef87b15ebbf2bb772cd4ac6b4fceb0778fa83a8071516",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserTarget.swift": "0ec73af260b817eb6dc54e40a7bf4781d36f8e7f267b750e8dbc021632e6d1e7",
+        "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserTargetTests.swift": "2fc0763ae6420383d7f5b9a15b76b1327de075f97d07b59500fe36927c9e753e"
+      }
+    },
+    {
+      "name": "default-browser-target-green01",
+      "exitCode": 0,
+      "runnerSHA256": "732b3dc9ad0a198d3d3d91730c6f80759c3a683c4aa731bd37b834f6644a205d",
+      "ids": [
+        "ComputerUseDefaultBrowserTargetTests/testTargetUsesDynamicallyResolvedHTTPSHandlerAndPinsObservedWindow",
+        "ComputerUseDefaultBrowserTargetTests/testMissingHTTPSHandlerFailsClosed",
+        "ComputerUseDefaultBrowserTargetTests/testInvalidURLsAndPrecancelledTaskNeverLaunch",
+        "ComputerUseDefaultBrowserTargetTests/testDifferentBundleIDOrCanonicalPathIsRejected",
+        "ComputerUseDefaultBrowserTargetTests/testMissingRunningCodeProofIsRejected",
+        "ComputerUseDefaultBrowserTargetTests/testMissingWindowAndStaleTaskWindowOrReusedPIDAreRejected"
+      ],
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "runtimeWarnings": [],
+      "sourceAudit": {
+        "sourceCount": 23,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "commandRecord": ".build/repair-verification/default-browser-target-green01-command.json",
+      "resultBundle": ".build/repair-verification/default-browser-target-green01.xcresult",
+      "sources": {
+        "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "c55ba48549c3c166121ef87b15ebbf2bb772cd4ac6b4fceb0778fa83a8071516",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserTarget.swift": "1177925d7d1717eb9b7522912fd31d192e0e31b408726254535158a899fd5259",
+        "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserTargetTests.swift": "698874d141e3f67262d6808f6e6bafd0eaec7cd99c39a857d71a2de6c5fe40c1"
+      }
+    },
+    {
+      "name": "default-browser-target-live01",
+      "exitCode": 0,
+      "runnerSHA256": "9fbbc1c17c1dbe52715a587dd9b2c6de48acd453c8310082aa432859e737d99d",
+      "ids": [
+        "ComputerUseDefaultBrowserTargetTests/testLiveDefaultHTTPSHandlerResolutionIsOptInAndReadOnly",
+        "ComputerUseDefaultBrowserTargetTests/testLiveForegroundIdentityIsOptInAndSkippedUnlessDefaultHandlerIsFrontmost"
+      ],
+      "passed": 1,
+      "failed": 0,
+      "skipped": 1,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [],
+      "sourceAudit": {
+        "sourceCount": 23,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "commandRecord": ".build/repair-verification/default-browser-target-live01-command.json",
+      "resultBundle": ".build/repair-verification/default-browser-target-live01.xcresult",
+      "sources": {
+        "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "c55ba48549c3c166121ef87b15ebbf2bb772cd4ac6b4fceb0778fa83a8071516",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserTarget.swift": "1177925d7d1717eb9b7522912fd31d192e0e31b408726254535158a899fd5259",
+        "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserTargetTests.swift": "698874d141e3f67262d6808f6e6bafd0eaec7cd99c39a857d71a2de6c5fe40c1"
+      }
+    }
+  ],
+  "liveLimit": "Foreground AX identity probe skipped because the default browser was not frontmost at XCTest sampling. The default-handler lookup did execute and pass. CUA separately saw the real Google Drive account chooser, with saved accounts signed out. No page input, login, upload or model inference occurred.",
+  "boundaries": [
+    "Dynamically resolve the HTTPS browser; no Safari/Chrome routing whitelist.",
+    "App identity includes code proof, canonical path, process and launch generation.",
+    "Window identity is only a prerequisite; it does not identify a browser tab/document or authorize page actions.",
+    "No production launcher or executor is connected. The resolver requires a caller-supplied opener.",
+    "Native AX observation is bounded, checks unique focused-window membership among multiple windows and revalidates focus/geometry/application. The live AX code is not yet accepted.",
+    "Existing owned-WebKit browser route remains in production source and must be replaced before further E2E. No further owned-browser/mock E2E was run."
+  ],
+  "next": [
+    "Connect a task-owned window/page controller for the default browser at the actual production browser factory; remove the earlier owned-browser interception for ordinary browser requests.",
+    "Native AX/MCP actions first; Fara through the existing desktop adapter only for capability gaps, with one runtime worker.",
+    "Add a native browser file-picker adapter retaining the selected catalog candidate and exact user choice.",
+    "After user sign-in, run the app/local-model task against real Google Drive and independently download/read back the one newly created remote file item. Do not use HTTP POST count as the Drive oracle."
+  ]
+}
