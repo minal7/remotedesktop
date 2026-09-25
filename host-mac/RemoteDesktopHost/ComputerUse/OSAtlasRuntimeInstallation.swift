@@ -424,6 +424,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let runtime: OSAtlasLlamaRuntime
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
+    private let localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
     private let browserActionAttestationLedger:
         ComputerUseBrowserActionAttestationLedger
 
@@ -435,6 +436,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("NativeDesktop", isDirectory: true),
+        localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory? = nil,
         browserActionAttestationLedger:
             ComputerUseBrowserActionAttestationLedger =
                 ComputerUseBrowserActionAttestationLedger()
@@ -444,6 +446,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.runtime = runtime
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
+        self.localFileCatalogFactory = localFileCatalogFactory
         self.browserActionAttestationLedger =
             browserActionAttestationLedger
     }
@@ -487,14 +490,21 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
 
     private func makeFaraExecutor(resolveInputs: @escaping @MainActor @Sendable () throws -> ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
         let runtime = self.runtime
+        let propose: ComputerUseFaraBrowserExecutor.Propose = { input in
+            let endpoint = try await runtime.activateFara(resolveInputs())
+            return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
+        }
+        let readPage: ComputerUseFaraBrowserExecutor.ReadPage = { reading in
+            let endpoint = try await runtime.activateFara(resolveInputs())
+            return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
+        }
+        if let localFileCatalogFactory {
+            return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
+                propose: propose, localFileCatalogFactory: localFileCatalogFactory,
+                readPage: readPage, finishRun: { await runtime.shutdown() })
+        }
         return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
-            propose: { input in
-                let endpoint = try await runtime.activateFara(resolveInputs())
-                return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
-            }, readPage: { reading in
-                let endpoint = try await runtime.activateFara(resolveInputs())
-                return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
-            }, finishRun: { await runtime.shutdown() })
+            propose: propose, readPage: readPage, finishRun: { await runtime.shutdown() })
     }
 
     func load(

@@ -2279,6 +2279,307 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertNil(plan.assessment)
     }
 
+    func testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraFileCatalog-" + UUID().uuidString)
+        let downloads = directory.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/search": .init(body: "<h1>Search results</h1>")])
+        let base = try await server.start(); defer { server.stop() }
+        let files: [(String, String, TimeInterval)] = [
+            ("Old deck.pptx", "old", 1_700_000_000), ("Lower deck.pptx", "lower", 1_705_000_000),
+            ("Middle deck.pptx", "middle", 1_710_000_000), ("Top deck.pptx", "top", 1_720_000_000),
+            ("Newer notes.txt", "notes", 1_730_000_000)
+        ]
+        for (name, contents, modified) in files {
+            let url = downloads.appendingPathComponent(name)
+            try Data(contents.utf8).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: modified)], ofItemAtPath: url.path)
+        }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: true, mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let taskID = "fara-file-list-" + UUID().uuidString
+        let pageURL = base.appendingPathComponent("search")
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        var factoryCalls = 0, plannerCalls = 0, initialCalls = 0, visualCalls = 0
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("executor"),
+            propose: { _ in visualCalls += 1; XCTFail("File metadata operations must not request visual fallback"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { input, observation in
+                plannerCalls += 1
+                let sessionIdentity: String
+                switch observation {
+                case .initial(let initial): sessionIdentity = initial.sessionIdentity
+                case .page(let page): sessionIdentity = page.sessionIdentity
+                }
+                switch plannerCalls {
+                case 1:
+                    guard case .initial(let initial) = observation else {
+                        XCTFail("The first proposal should use the initial observation")
+                        return .noProposal
+                    }
+                    initialCalls += 1
+                    XCTAssertNil(input.currentURL)
+                    XCTAssertEqual(initial.taskID, taskID)
+                    XCTAssertEqual(factoryCalls, 0, "Catalog construction/scanning is lazy until listFiles")
+                    let empty = try XCTUnwrap(input.localFileCatalog)
+                    XCTAssertTrue(empty.page.candidates.isEmpty)
+                    XCTAssertFalse(empty.page.isComplete, "Unscanned is not the same as a complete empty directory")
+                    return .proposal(.init(response: "Open search results.", action: .visitURL(pageURL)))
+                case 2:
+                    guard case .page(let pageObservation) = observation else {
+                        XCTFail("Catalog discovery should run on the loaded page")
+                        return .noProposal
+                    }
+                    XCTAssertEqual(input.currentURL, pageURL)
+                    XCTAssertEqual(factoryCalls, 0, "Catalog construction and scanning begin only when listFiles is requested")
+                    return .localFileOperation(.listFiles(query: query, cursor: nil), rootTaskID: taskID,
+                        sessionIdentity: pageObservation.sessionIdentity)
+                case 3:
+                    XCTAssertEqual(factoryCalls, 1)
+                    let page = try XCTUnwrap(input.localFileCatalog)
+                    XCTAssertEqual(page.query, query)
+                    XCTAssertEqual(page.page.candidates.map(\.displayName), ["Top deck.pptx", "Middle deck.pptx"])
+                    let cursor = try XCTUnwrap(page.page.nextCursor)
+                    return .localFileOperation(.listFiles(query: query, cursor: cursor), rootTaskID: taskID,
+                        sessionIdentity: sessionIdentity)
+                case 4:
+                    let page = try XCTUnwrap(input.localFileCatalog)
+                    XCTAssertEqual(page.query, query)
+                    XCTAssertEqual(page.page.candidates.map(\.displayName), ["Lower deck.pptx", "Old deck.pptx"])
+                    XCTAssertTrue(page.page.isComplete)
+                    let ids = page.page.candidates.map(\.id)
+                    return .localFileOperation(.askFile(question: "Which presentation should I transfer?", candidateIDs: ids),
+                        rootTaskID: taskID, sessionIdentity: sessionIdentity)
+                default:
+                    XCTFail("A loaded-page askFile must return the clarification immediately")
+                    return .noProposal
+                }
+            },
+            localFileCatalogFactory: { rootTaskID in
+                factoryCalls += 1
+                XCTAssertEqual(rootTaskID, taskID)
+                return try ComputerUseLocalFileCatalog(taskID: rootTaskID, approvedDirectory: downloads, pageSize: 2)
+            })
+
+        let question = "Which presentation should I transfer?"
+        let result = try await executor.execute(taskID: taskID, prompt: "Find the most recently modified presentation.",
+            trustedUserPrompt: "Find the most recently modified presentation.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .clarificationRequired(question))
+        let choices = try XCTUnwrap(executor.clarification(taskID: taskID)?.choices)
+        XCTAssertEqual(choices.map(\.label), ["Lower deck.pptx", "Old deck.pptx"])
+        XCTAssertTrue(choices.allSatisfy { $0.detail?.contains("bytes") == true })
+        XCTAssertTrue(choices.allSatisfy { $0.detail?.contains("Modified") == true || $0.detail?.contains("Created") == true })
+        XCTAssertEqual(factoryCalls, 1); XCTAssertEqual(plannerCalls, 4); XCTAssertEqual(initialCalls, 1)
+        XCTAssertEqual(server.count("/search"), 1)
+        XCTAssertEqual(visualCalls, 0)
+    }
+
+    func testFaraBrowserFileChoiceUsesTypedContinuationAndRejectsForeignAndStaleChoices() async throws {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraFileChoice-" + UUID().uuidString)
+        let downloads = directory.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for (name, body) in [("Alpha deck.pptx", "alpha"), ("Beta deck.pptx", "beta"),
+                             ("Gamma deck.pptx", "gamma"), ("Spec.xlsx", "spec")] {
+            try Data(body.utf8).write(to: downloads.appendingPathComponent(name))
+        }
+        let browser = ComputerUseOwnedBrowser(presentsWindow: true, mayAct: { true }); defer { browser.close() }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let taskID = "fara-file-choice-" + UUID().uuidString
+        let goal = "Ask me which presentation file to transfer. Do not transfer it yet."
+        var factoryCalls = 0, plannerCalls = 0, visualCalls = 0
+        var expectedCandidate: ComputerUseLocalFileCatalog.Candidate?
+        var otherCandidate: ComputerUseLocalFileCatalog.Candidate?
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("executor"),
+            propose: { _ in visualCalls += 1; XCTFail("File choice handling must not request visual fallback"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { input, observation in
+                plannerCalls += 1
+                let sessionIdentity: String
+                switch observation {
+                case .initial(let initial): sessionIdentity = initial.sessionIdentity
+                case .page(let page): sessionIdentity = page.sessionIdentity
+                }
+                switch plannerCalls {
+                case 1:
+                    XCTAssertNil(input.currentURL)
+                    XCTAssertEqual(factoryCalls, 0)
+                    return .localFileOperation(.listFiles(query: .init(fileKind: .presentation), cursor: nil),
+                        rootTaskID: taskID, sessionIdentity: sessionIdentity)
+                case 2:
+                    let listing = try XCTUnwrap(input.localFileCatalog)
+                    let sortedCandidates = listing.page.candidates.sorted { $0.displayName < $1.displayName }
+                    XCTAssertEqual(sortedCandidates.map(\.displayName), ["Alpha deck.pptx", "Beta deck.pptx", "Gamma deck.pptx"])
+                    let ids = sortedCandidates.prefix(2).map(\.id)
+                    expectedCandidate = try XCTUnwrap(sortedCandidates.first { $0.displayName == "Alpha deck.pptx" })
+                    otherCandidate = try XCTUnwrap(sortedCandidates.first { $0.displayName == "Gamma deck.pptx" })
+                    return .localFileOperation(.askFile(question: "Which presentation should I transfer?", candidateIDs: ids),
+                        rootTaskID: taskID, sessionIdentity: sessionIdentity)
+                case 3:
+                    XCTAssertEqual(input.goal, goal)
+                    XCTAssertEqual(input.clarifiedGoal?.userTurns, [goal], "A choice label is typed data, not a new goal instruction")
+                    XCTAssertNil(input.userResponse, "Do not append a filename to free-text user turns")
+                    let selected = try XCTUnwrap(input.localFileCatalog?.selectedCandidate)
+                    XCTAssertEqual(selected, expectedCandidate, "Resume must carry the exact chosen candidate in typed context")
+                    return .proposal(.init(response: "No transfer performed.", action: .askUser("No transfer performed.")))
+                case 4:
+                    XCTAssertEqual(input.localFileCatalog?.selectedCandidate, expectedCandidate,
+                        "A text clarification cannot silently discard the exact prior human file choice")
+                    let other = try XCTUnwrap(otherCandidate)
+                    let selectedURL = downloads.appendingPathComponent(try XCTUnwrap(expectedCandidate).displayName)
+                    try FileManager.default.removeItem(at: selectedURL)
+                    try Data("changed after the user selected this file".utf8).write(to: selectedURL)
+                    return .localFileOperation(.selectFile(candidateID: other.id), rootTaskID: taskID, sessionIdentity: sessionIdentity)
+                default:
+                    XCTFail("A model cannot replace a human-selected file by nominating another candidate")
+                    return .noProposal
+                }
+            },
+            localFileCatalogFactory: { rootTaskID in
+                factoryCalls += 1
+                XCTAssertEqual(rootTaskID, taskID)
+                return try ComputerUseLocalFileCatalog(taskID: rootTaskID, approvedDirectory: downloads, pageSize: 8)
+            })
+
+        let initial = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(initial, .clarificationRequired("Which presentation should I transfer?"))
+        XCTAssertEqual(factoryCalls, 1); XCTAssertEqual(plannerCalls, 2)
+        let pending = try XCTUnwrap(executor.clarification(taskID: taskID))
+        let choices = try XCTUnwrap(pending.choices)
+        XCTAssertEqual(choices.map(\.label), ["Alpha deck.pptx", "Beta deck.pptx"])
+        XCTAssertEqual(choices.count, 2)
+        let staleChoice = try XCTUnwrap(choices.first { $0.label == "Beta deck.pptx" })
+        let foreignChoice = try ComputerUseClarificationChoice(id: "foreign-candidate", label: staleChoice.label)
+        var foreignChoiceRejected = false
+        do {
+            _ = try await executor.continueClarification(taskID: "foreign-answer", originatingTaskID: taskID,
+                goal: pending.goal, selectedChoice: foreignChoice, progress: { _ in })
+        } catch { foreignChoiceRejected = true }
+        XCTAssertTrue(foreignChoiceRejected, "A choice ID outside the offered page must be rejected")
+        XCTAssertEqual(try executor.clarification(taskID: taskID), pending)
+        XCTAssertEqual(plannerCalls, 2); XCTAssertEqual(visualCalls, 0)
+
+        let replacedURL = downloads.appendingPathComponent(staleChoice.label)
+        try FileManager.default.removeItem(at: replacedURL)
+        try Data("replacement content with a different file identity".utf8).write(to: replacedURL)
+        var staleCandidateRejected = false
+        do {
+            _ = try await executor.continueClarification(taskID: "stale-answer", originatingTaskID: taskID,
+                goal: pending.goal, selectedChoice: staleChoice, progress: { _ in })
+        } catch { staleCandidateRejected = true }
+        XCTAssertTrue(staleCandidateRejected, "The catalog identity must be revalidated when a user selects a file")
+        XCTAssertEqual(try executor.clarification(taskID: taskID), pending, "A stale choice cannot consume the live question")
+        XCTAssertEqual(plannerCalls, 2); XCTAssertEqual(visualCalls, 0)
+
+        let selectedChoice = try XCTUnwrap(choices.first { $0.label == "Alpha deck.pptx" })
+        XCTAssertEqual(selectedChoice.id, expectedCandidate?.id)
+        let resumed = try await executor.continueClarification(taskID: "resume-choice", originatingTaskID: taskID,
+            goal: pending.goal, selectedChoice: selectedChoice, progress: { _ in })
+        XCTAssertEqual(resumed, .clarificationRequired("No transfer performed."))
+        XCTAssertEqual(plannerCalls, 3); XCTAssertEqual(visualCalls, 0)
+        let nextQuestion = try XCTUnwrap(executor.clarification(taskID: "resume-choice"))
+        XCTAssertNil(nextQuestion.choices)
+        var staleChoiceRejected = false
+        do {
+            _ = try await executor.continueClarification(taskID: "resume-stale", originatingTaskID: "resume-choice",
+                goal: nextQuestion.goal, selectedChoice: selectedChoice, progress: { _ in })
+        } catch { staleChoiceRejected = true }
+        XCTAssertTrue(staleChoiceRejected, "A file choice from the completed question must be rejected as stale")
+        XCTAssertEqual(try executor.clarification(taskID: "resume-choice"), nextQuestion)
+        XCTAssertEqual(plannerCalls, 3); XCTAssertEqual(visualCalls, 0)
+        let textGoal = try nextQuestion.goal.answering(nextQuestion.question, with: "Keep the selected file.")
+        var replacementFailure: ComputerUseFaraBrowserExecutor.Failure?
+        do {
+            _ = try await executor.continueClarification(taskID: "resume-text", originatingTaskID: "resume-choice",
+                goal: textGoal, progress: { _ in })
+        } catch let failure as ComputerUseFaraBrowserExecutor.Failure { replacementFailure = failure }
+        XCTAssertEqual(replacementFailure, .selectedFileStale,
+            "A changed user-selected file must fail closed rather than silently substituting another candidate")
+        XCTAssertTrue(ComputerUseFaraBrowserExecutor.Failure.selectedFileStale.errorDescription?.contains("choose a file again") == true)
+        XCTAssertEqual(plannerCalls, 4); XCTAssertEqual(visualCalls, 0)
+    }
+
+    func testNativeDirectFilePlannerOmitsCursorForFirstPageQuery() async throws {
+        let candidate = localFileCandidate(id: "deck-first", name: "First page deck.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [candidate], isComplete: false,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false))
+        let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "presentation", "sortField": "", "sortDirection": ""
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        var proposalError: Error?
+        do {
+            _ = try await planner.propose(context)
+        } catch {
+            proposalError = error
+        }
+        XCTAssertNil(proposalError, "Omitting cursor must mean the first page of a new query")
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let tool = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "listFiles" })
+        let function = try XCTUnwrap(tool["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        XCTAssertNil(properties["cursor"], "A first-page request must not advertise a fake empty-string cursor")
+        XCTAssertFalse((parameters["required"] as? [String] ?? []).contains("cursor"))
+    }
+
+    func testNativeDirectFilePlannerOffersOnlyOptionalCurrentCursorForNextPage() async throws {
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let candidate = localFileCandidate(id: "deck-page", name: "Next page deck.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: query, page: .init(candidates: [candidate], isComplete: false,
+            nextCursor: "cursor-live", hasTiedSortValues: false, hasMissingSortValues: false))
+        let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending", "cursor": "cursor-live"
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .listFiles(let actualQuery, "cursor-live")? = plan.localFileOperation else {
+            return XCTFail("Expected the current query-bound next-page cursor")
+        }
+        XCTAssertEqual(actualQuery, query)
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let tool = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "listFiles" })
+        let parameters = try XCTUnwrap((tool["function"] as? [String: Any])?["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        XCTAssertEqual((properties["cursor"] as? [String: Any])?["enum"] as? [String], ["cursor-live"])
+        XCTAssertFalse((parameters["required"] as? [String] ?? []).contains("cursor"),
+            "The model can start a fresh query by omitting the optional continuation cursor")
+    }
+
+    func testNativeDirectFilePlannerRejectsSuppliedEmptyAndStaleCursors() async throws {
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let candidate = localFileCandidate(id: "deck-page", name: "Next page deck.pptx", ext: "pptx")
+        let context = try nativeLocalFileContext(query: query, page: .init(candidates: [candidate], isComplete: false,
+            nextCursor: "cursor-live", hasTiedSortValues: false, hasMissingSortValues: false))
+        for invalidCursor in ["", "[]", "stale-cursor"] {
+            let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+                "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending", "cursor": invalidCursor
+            ])
+            var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [response]))
+            planner.usesDirectActionPlanning = true
+            do {
+                _ = try await planner.propose(context)
+                XCTFail("A supplied cursor must exactly match the current nonempty cursor; got \(invalidCursor.debugDescription)")
+            } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+        }
+    }
+
     func testNativeDirectFilePlannerProjectsMetadataAndDecodesTypedCatalogQuery() async throws {
         let first = localFileCandidate(id: "deck-a", name: "Quarterly deck.pptx", ext: "pptx")
         let second = localFileCandidate(id: "sheet-b", name: "Budget.xlsx", ext: "xlsx")
@@ -2286,7 +2587,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             nextCursor: nil, hasTiedSortValues: true, hasMissingSortValues: false)
         let context = try nativeLocalFileContext(query: .init(), page: page)
         let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
-            "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending", "cursor": ""
+            "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending"
         ])
         let transport = NativeStepQueueFixtureTransport(responses: [response])
         var planner = try nativeStepPlanner(transport: transport)
@@ -2329,6 +2630,156 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         XCTAssertEqual(taskID, "root-task")
         XCTAssertEqual(sessionID, "owned-session")
+    }
+
+    func testNativeDirectFilePlannerUsesCurrentSelectedCandidateAndObservedChooserTrigger() async throws {
+        let candidate = localFileCandidate(id: "deck-current", name: "Quarterly deck.pptx", ext: "pptx")
+        let button = ComputerUseBrowserPageSnapshot.Control(id: "c7", containerID: "g1",
+            label: "Choose file", kind: "button", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let ariaButton = ComputerUseBrowserPageSnapshot.Control(id: "c8", containerID: "g1",
+            label: "Choose file", kind: "aria-button", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let visibleFile = ComputerUseBrowserPageSnapshot.Control(id: "c9", containerID: "g1",
+            label: "File picker", kind: "file", name: "file", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let unownedSubmit = ComputerUseBrowserPageSnapshot.Control(id: "c10", containerID: "g1",
+            label: "Choose file", kind: "submit", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let formSubmit = ComputerUseBrowserPageSnapshot.Control(id: "c11", containerID: "g1",
+            label: "Submit form", kind: "submit", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [],
+            form: .init(id: "f1", method: "post", action: "", target: "", encoding: "", noValidate: false))
+        let disabledButton = ComputerUseBrowserPageSnapshot.Control(id: "c12", containerID: "g1",
+            label: "Disabled", kind: "button", name: "", disabled: true, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [candidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: candidate, controls: [button, ariaButton, visibleFile, unownedSubmit, formSubmit, disabledButton])
+        let response = try nativeBrowserFunctionEnvelope("selectLocalFile", arguments: [
+            "candidateID": "deck-current", "triggerControlID": "c7"
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .selectLocalFile(candidateID: "deck-current", triggerControlID: "c7")? = plan.localFileOperation else {
+            return XCTFail("Expected a host-scoped selected candidate and current chooser-trigger pair")
+        }
+        XCTAssertNil(plan.directCompletion, "Choosing a file input is not an upload result")
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let tool = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "selectLocalFile" })
+        let function = try XCTUnwrap(tool["function"] as? [String: Any])
+        let properties = try XCTUnwrap((function["parameters"] as? [String: Any])?["properties"] as? [String: Any])
+        XCTAssertEqual((properties["candidateID"] as? [String: Any])?["enum"] as? [String], ["deck-current"])
+        XCTAssertEqual((properties["triggerControlID"] as? [String: Any])?["enum"] as? [String],
+            ["c10", "c7", "c8", "c9"])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let capture = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+        XCTAssertTrue(capture.contains("Quarterly deck.pptx"))
+        XCTAssertFalse(capture.contains("/Users/"), "Planner context must not expose local paths")
+    }
+
+    func testNativeDirectFilePlannerRejectsStaleReferencesAndWithholdsImpossibleTools() async throws {
+        let candidate = localFileCandidate(id: "deck-current", name: "Quarterly deck.pptx", ext: "pptx")
+        let currentInput = ComputerUseBrowserPageSnapshot.Control(id: "c20", containerID: "g1",
+            label: "Choose file", kind: "button", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let context = try nativeLocalFileContext(query: .init(), page: .init(candidates: [candidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: candidate, controls: [currentInput])
+        let stale = try nativeBrowserFunctionEnvelope("selectLocalFile", arguments: [
+            "candidateID": "deck-current", "triggerControlID": "c99"
+        ])
+        var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [stale]))
+        planner.usesDirectActionPlanning = true
+        do {
+            _ = try await planner.propose(context)
+            XCTFail("A prior-capture trigger must be rejected")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBrowserGoalPlanError, .invalidResponse)
+        }
+
+        let disabledInput = ComputerUseBrowserPageSnapshot.Control(id: "c12", containerID: "g1",
+            label: "Disabled", kind: "button", name: "", disabled: true, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let noSelection = try nativeLocalFileContext(query: .init(), page: .init(candidates: [candidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false), controls: [disabledInput])
+        let list = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "any", "sortField": "", "sortDirection": ""
+        ])
+        let absentTransport = NativeStepQueueFixtureTransport(responses: [list])
+        var absentPlanner = try nativeStepPlanner(transport: absentTransport)
+        absentPlanner.usesDirectActionPlanning = true
+        _ = try await absentPlanner.propose(noSelection)
+        let absentSnapshot = await absentTransport.snapshot()
+        let absentBody = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(absentSnapshot.requests.first)) as? [String: Any])
+        let absentTools = try XCTUnwrap(absentBody["tools"] as? [[String: Any]])
+        XCTAssertFalse(absentTools.contains { ($0["function"] as? [String: Any])?["name"] as? String == "selectLocalFile" })
+        XCTAssertFalse(absentTools.contains { ($0["function"] as? [String: Any])?["name"] as? String == "askFile" },
+            "A one-candidate page cannot advertise a multiple-choice operation")
+
+        let nextPageCandidate = localFileCandidate(id: "deck-next-page", name: "Next page deck.pptx", ext: "pptx")
+        let pagedContext = try nativeLocalFileContext(query: .init(), page: .init(candidates: [nextPageCandidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: candidate, controls: [currentInput])
+        let retainedResponse = try nativeBrowserFunctionEnvelope("selectLocalFile", arguments: [
+            "candidateID": "deck-current", "triggerControlID": "c20"
+        ])
+        var retainedPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [retainedResponse]))
+        retainedPlanner.usesDirectActionPlanning = true
+        let retainedPlan = try await retainedPlanner.propose(pagedContext)
+        guard case .selectLocalFile(candidateID: "deck-current", triggerControlID: "c20")? = retainedPlan.localFileOperation else {
+            return XCTFail("The host-retained selection should survive catalog cursor paging")
+        }
+        XCTAssertNil(retainedPlan.directCompletion)
+    }
+
+    func testNativeDirectInitialFileCatalogUsesToolRouteWithoutAnswerOrSyntheticPageProof() async throws {
+        let candidate = localFileCandidate(id: "deck-a", name: "Quarterly deck.pptx", ext: "pptx")
+        let other = localFileCandidate(id: "deck-b", name: "Older presentation.pptx", ext: "pptx")
+        let input = ComputerUseFaraModel.Input(goal: "Upload my presentation to Drive at https://drive.google.com/drive/my-drive.", screenshotPNG: Data())
+        var catalogInput = input
+        catalogInput.localFileCatalog = .init(query: .init(), page: .init(candidates: [candidate, other], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false))
+        let context = try ComputerUseMCPBrowserStepPlanner().context(catalogInput, page: nil, wholePage: true)
+        let response = try nativeBrowserFunctionEnvelope("askFile", arguments: [
+            "question": "Which presentation should I upload?", "candidateIDs": ["deck-a", "deck-b"]
+        ])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .askFile("Which presentation should I upload?", ["deck-a", "deck-b"])? = plan.localFileOperation else {
+            return XCTFail("Initial catalog work should use the native tool planner")
+        }
+        XCTAssertNil(plan.directCompletion)
+        XCTAssertNil(context.currentDocument, "Initial metadata operation must not fabricate a browser document")
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let names = Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
+        XCTAssertTrue(names.contains("listFiles"))
+        XCTAssertTrue(names.contains("askFile"))
+        XCTAssertTrue(names.contains("search"), "Catalog availability must not trap initial browser navigation")
+        XCTAssertTrue(names.contains("openLink"), "The initial route should preserve a supplied Drive URL")
+        XCTAssertFalse(names.contains("answer"), "Page-free initial metadata cannot complete the task")
+        XCTAssertFalse(names.contains("reviewGoal"))
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let capture = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+        XCTAssertTrue(capture.contains("initialObservation"))
+        XCTAssertTrue(capture.contains("Quarterly deck.pptx"))
+        XCTAssertTrue(capture.contains("\"availableGoalEffects\":[]"))
+
+        let openLinkResponse = try nativeBrowserFunctionEnvelope("openLink", arguments: ["reference": "user-url-1"])
+        var navigationPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [openLinkResponse]))
+        navigationPlanner.usesDirectActionPlanning = true
+        let navigationPlan = try await navigationPlanner.propose(context)
+        XCTAssertEqual(navigationPlan.kind, .openLink, "Native catalog availability must not block initial navigation")
+        XCTAssertEqual(navigationPlan.reference, "user-url-1")
+        XCTAssertNil(navigationPlan.directCompletion)
     }
 
     func testNativeDirectFilePlannerAsksForExactOfferedChoicesAndRejectsUnboundChoices() async throws {
@@ -3676,12 +4127,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     }
 
     private func nativeLocalFileContext(query: ComputerUseLocalFileCatalog.Query,
-        page: ComputerUseLocalFileCatalog.Page) throws -> ComputerUseMCPBrowserStepPlanner.Context {
+        page: ComputerUseLocalFileCatalog.Page,
+        selectedCandidate: ComputerUseLocalFileCatalog.Candidate? = nil,
+        controls: [ComputerUseBrowserPageSnapshot.Control] = []) throws -> ComputerUseMCPBrowserStepPlanner.Context {
         var input = ComputerUseFaraModel.Input(goal: "Upload the most recent presentation from Downloads to my default Google Drive account.",
             screenshotPNG: Data(), currentURL: URL(string: "https://drive.google.com/drive/my-drive"))
-        input.localFileCatalog = .init(query: query, page: page)
+        input.localFileCatalog = .init(query: query, page: page, selectedCandidate: selectedCandidate)
         var context = try ComputerUseMCPBrowserStepPlanner().context(input,
-            page: compactReadingPage(text: "Google Drive upload page is open.", label: "Google Drive"), wholePage: true)
+            page: compactReadingPage(text: "Google Drive upload page is open.", label: "Google Drive", controls: controls), wholePage: true)
         let currentURL = try XCTUnwrap(input.currentURL)
         let taskID = "native-local-file-planner-task"
         let contextID = "native-local-file-planner-document"
@@ -3950,10 +4403,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertNil(try ComputerUseMCPBrowserStepPlanner.compactReading(reordered), "A compact tree cannot silently reorder captured text")
     }
 
-    private func compactReadingPage(text: String, label: String, tooltip: String? = nil) -> ComputerUseBrowserPageSnapshot {
+    private func compactReadingPage(text: String, label: String, tooltip: String? = nil,
+                                    controls: [ComputerUseBrowserPageSnapshot.Control] = []) -> ComputerUseBrowserPageSnapshot {
         .init(id: String(repeating: "a", count: 32), texts: [.init(id: "t1", containerID: "g1", text: text, tooltip: tooltip)],
             links: [.init(id: "l1", label: label, destination: "https://example.org/details", textIDs: ["t1"], containerID: "g1")],
-            truncated: false, omittedEmbeddedContent: false, containers: [.init(id: "g1", parentID: nil, kind: "p")], omittedStructure: false)
+            controls: controls, truncated: false, omittedEmbeddedContent: false,
+            containers: [.init(id: "g1", parentID: nil, kind: "p")], omittedStructure: false)
     }
 
     func testOptInMCPBrowserClarificationSurvivesNavigationAndHistoryEviction() async throws {
@@ -4538,6 +4993,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             resumeHarnessBudgetSeconds: 80, localFormSearch: true)
     }
 
+    func testOptInManagedNativeFileUploadUsesExternalOracleBytes() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MANAGED_NATIVE_FILE_UPLOAD"] == "1" else {
+            throw XCTSkip("Opt-in: actual managed native file upload to a controlled loopback page")
+        }
+        try await runMCPBrowserHostWithoutInstalledModelPackage(publicCase: nil, useNativeText: true,
+            resumeHarnessBudgetSeconds: 80, localFileUpload: true, usesDirectActionPlanning: true)
+    }
+
     func testOptInManagedNativeFormSearchReportsObservedHeadingWithDirectActionPlanning() async throws {
         guard ProcessInfo.processInfo.environment["RUN_MANAGED_NATIVE_FORM_SEARCH_DIRECT"] == "1" else {
             throw XCTSkip("Opt-in: verified shared-runtime native direct browser form search against a controlled local page")
@@ -4647,6 +5110,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                                                preloadLoadedPage: Bool = false,
                                                                resumeHarnessBudgetSeconds: TimeInterval = 75,
                                                                localFormSearch: Bool = false,
+                                                               localFileUpload: Bool = false,
                                                                usesDirectActionPlanning: Bool = false) async throws {
         var publicGoal: String?, expectedPatterns: [String] = [], questionPatterns: [String] = [], expectedHost: String?
         if let publicCase {
@@ -4668,13 +5132,15 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
         }
         let environment = ProcessInfo.processInfo.environment
-        guard localFormSearch || environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
+        guard localFormSearch || localFileUpload || environment["RUN_MCP_BROWSER_LOOP"] == "1" else {
             throw XCTSkip("Opt-in: real helper and Apple planner through HostComputerUseManager without model packages")
         }
-        let outputPath = localFormSearch
-            ? try XCTUnwrap(environment[usesDirectActionPlanning
-                ? "MANAGED_NATIVE_FORM_SEARCH_DIRECT_DIRECTORY" : "MANAGED_NATIVE_FORM_SEARCH_DIRECTORY"])
-            : try XCTUnwrap(environment["MCP_BROWSER_LOOP_DIRECTORY"])
+        let outputPath = localFileUpload
+            ? try XCTUnwrap(environment["MANAGED_NATIVE_FILE_UPLOAD_DIRECTORY"])
+            : localFormSearch
+                ? try XCTUnwrap(environment[usesDirectActionPlanning
+                    ? "MANAGED_NATIVE_FORM_SEARCH_DIRECT_DIRECTORY" : "MANAGED_NATIVE_FORM_SEARCH_DIRECTORY"])
+                : try XCTUnwrap(environment["MCP_BROWSER_LOOP_DIRECTORY"])
         let output = URL(fileURLWithPath: outputPath)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
         let formSearchPath = "/search?query=Apollo+11"
@@ -4689,12 +5155,48 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             <!doctype html><h1>Apollo 11 Mission Record: Eagle Landing</h1>
             <p>Mission archive entry.</p>
             """
+        let uploadPath = "/upload"
+        let fileUploadPage = """
+            <!doctype html><title>File upload fixture</title><h1>File upload target</h1>
+            <button id="upload-trigger" type="button">Choose file</button>
+            <input id="file" type="file" hidden>
+            <p id="result">Choose a file to upload.</p>
+            <script>
+              const trigger=document.querySelector('#upload-trigger'), input=document.querySelector('#file'), result=document.querySelector('#result');
+              trigger.addEventListener('click',()=>input.click());
+              input.addEventListener('change',async()=>{
+                const file=input.files && input.files[0]; if(!file)return;
+                const response=await fetch('/upload',{method:'POST',body:file});
+                if(response.ok) result.textContent='Upload accepted; file received.';
+              });
+            </script>
+            """
+        let fileUploadFixtureDirectory = localFileUpload
+            ? URL(fileURLWithPath: try XCTUnwrap(environment["MANAGED_NATIVE_FILE_UPLOAD_DOWNLOADS"]), isDirectory: true)
+            : nil
+        let expectedUploadBytes: Data?
+        if let fileUploadFixtureDirectory {
+            let oracleURL = URL(fileURLWithPath: try XCTUnwrap(environment["MANAGED_NATIVE_FILE_UPLOAD_ORACLE"]))
+            let oracle = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: oracleURL)) as? [String: Any])
+            let latestName = try XCTUnwrap(oracle["latestPresentation"] as? String)
+            let entry = try XCTUnwrap((oracle["files"] as? [[String: Any]])?.first { $0["name"] as? String == latestName })
+            let expectedSize = try XCTUnwrap(entry["size"] as? Int)
+            let expectedSHA256 = try XCTUnwrap(entry["sha256"] as? String)
+            let expectedURL = fileUploadFixtureDirectory.appendingPathComponent(latestName)
+            let bytes = try Data(contentsOf: expectedURL)
+            XCTAssertEqual(bytes.count, expectedSize, "The fixture must match its frozen external oracle")
+            XCTAssertEqual(Self.sha256(bytes), expectedSHA256, "The fixture must match its frozen external oracle")
+            expectedUploadBytes = bytes
+        } else {
+            expectedUploadBytes = nil
+        }
         let server = try OwnedBrowserHTTPFixture(routes: [
-            "/index": .init(body: localFormSearch ? formSearchPage : "<!doctype html><h1>Rail timetable</h1><a href='/details'>Night train to Harbor City — details</a>"),
+            "/index": .init(body: localFileUpload ? fileUploadPage : (localFormSearch ? formSearchPage : "<!doctype html><h1>Rail timetable</h1><a href='/details'>Night train to Harbor City — details</a>")),
             "/details": .init(body: "<!doctype html><h1>Night train to Harbor City</h1><p>Departure time: 21:45</p><p>Platform: 6</p>"),
             "/seeded-city": .init(body: "<!doctype html><h1>San Francisco BART youth fares</h1><p>This local transit guide covers BART in San Francisco.</p><a href='/seeded-city-details'>Youth fare details</a>"),
             "/seeded-city-details": .init(body: "<!doctype html><h1>BART youth fare details</h1><p>Example local page content.</p>"),
-            formSearchPath: .init(body: formResultPage)])
+            formSearchPath: .init(body: formResultPage),
+            uploadPath: .init(status: 201, body: "Upload accepted; file received.")])
         let base = try await server.start(); defer { server.stop() }
         let installedHelper = await MacControlMCPInstaller().currentInstallation()
         let helperReceipt = try XCTUnwrap(installedHelper)
@@ -4704,13 +5206,24 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let native = MobileInitiationModelInstaller(receipt: verifiedNativeReceipt ?? nativeReceipt, alreadyInstalled: useNativeText)
         let launchGuard = PreparationRejectingLauncher()
         let modelRuntime = useNativeText ? OSAtlasLlamaRuntime.shared : OSAtlasLlamaRuntime(launcher: launchGuard)
-        let loader = OSAtlasVisualExecutorLoader(runtime: modelRuntime, faraJournalDirectory: output.appendingPathComponent("task"))
+        let testFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
+        if localFileUpload {
+            guard let fileUploadFixtureDirectory else { throw ComputerUseLocalFileCatalog.Failure.invalidDirectory }
+            testFileCatalogFactory = { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: fileUploadFixtureDirectory, pageSize: 8)
+            }
+        } else {
+            testFileCatalogFactory = nil
+        }
+        let loader = OSAtlasVisualExecutorLoader(runtime: modelRuntime,
+            faraJournalDirectory: output.appendingPathComponent("task"),
+            localFileCatalogFactory: testFileCatalogFactory)
         let channel = MobileInitiationTestChannel()
         let plannerTrace = MCPBrowserLoopTrace()
         let inspectExchange: (@Sendable (Data, Data, Int) -> Void)?
-        if publicCase != nil || localFormSearch {
+        if publicCase != nil || localFormSearch || localFileUpload {
             inspectExchange = { request, response, tokens in
-                if localFormSearch {
+                if localFormSearch || localFileUpload {
                     var safe: [String: Any] = ["inputTokens": tokens]
                     if let requestRoot = try? JSONSerialization.jsonObject(with: request) as? [String: Any] {
                         if let format = requestRoot["response_format"] as? [String: Any],
@@ -4730,6 +5243,15 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                 if let finish = choice["finish_reason"] { item["finish_reason"] = finish }
                                 if let message = choice["message"] as? [String: Any] {
                                     var messageProjection: [String: Any] = [:]
+                                    if localFileUpload, let content = message["content"] as? String {
+                                        var bounded = Data(content.utf8.prefix(16_384))
+                                        while String(data: bounded, encoding: .utf8) == nil, !bounded.isEmpty {
+                                            bounded.removeLast()
+                                        }
+                                        messageProjection["assistantContent"] = String(data: bounded, encoding: .utf8) ?? ""
+                                        messageProjection["assistantContentUTF8Bytes"] = bounded.count
+                                        messageProjection["assistantContentTruncated"] = bounded.count < content.utf8.count
+                                    }
                                     if let calls = message["tool_calls"] as? [[String: Any]] {
                                         messageProjection["tool_calls"] = calls.compactMap { call -> [String: Any]? in
                                             guard let function = call["function"] as? [String: Any],
@@ -4744,7 +5266,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                         if let object = structured as? [String: Any],
                                            Set(object.keys) == ["name", "arguments"],
                                            let name = object["name"] as? String,
-                                           ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal"].contains(name),
+                                           ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal", "listFiles", "selectFile", "askFile", "selectLocalFile"].contains(name),
                                            let arguments = object["arguments"],
                                            let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
                                            let argumentText = String(data: argumentData, encoding: .utf8),
@@ -4760,7 +5282,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                                               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                                               Set(object.keys) == ["name", "arguments"],
                                               let name = object["name"] as? String,
-                                              ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal"].contains(name),
+                                              ["openLink", "search", "askUser", "wait", "answer", "incomplete", "visualFallback", "submitForm", "inspectRecords", "reviewGoal", "listFiles", "selectFile", "askFile", "selectLocalFile"].contains(name),
                                               let arguments = object["arguments"],
                                               let argumentData = try? JSONSerialization.data(withJSONObject: arguments, options: [.sortedKeys, .withoutEscapingSlashes]),
                                               let argumentText = String(data: argumentData, encoding: .utf8),
@@ -4815,7 +5337,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         var browser: ComputerUseOwnedBrowser?
         let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("ledger.json"))
         let inspectCatalogue: (@Sendable (ComputerUseBrowserPageSnapshot, URL) throws -> Void)?
-        if localFormSearch {
+        if localFormSearch || localFileUpload {
             inspectCatalogue = nil
         } else {
             inspectCatalogue = { snapshot, source in
@@ -4831,10 +5353,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
         }
         let mcpPlanner: any MCPProposalPlanning
-        if localFormSearch { mcpPlanner = AppleFoundationMCPPlanner() }
+        if localFormSearch || localFileUpload { mcpPlanner = AppleFoundationMCPPlanner() }
         else { mcpPlanner = MobileInitiationObservedPlanner(trace: plannerTrace) }
         let inspectProposal: (@Sendable (String) -> Void)?
-        if localFormSearch { inspectProposal = nil }
+        if localFormSearch || localFileUpload { inspectProposal = nil }
         else { inspectProposal = { plannerTrace.append($0) } }
         var browserStepPlanner = ComputerUseMCPBrowserStepPlanner(inspectProposal: inspectProposal,
             inspectCatalogue: inspectCatalogue, inspectExchange: inspectExchange)
@@ -4905,14 +5427,16 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         let prompt = ComputerUseEnvelope(id: "mcp-browser-no-package-" + UUID().uuidString,
             senderID: "IOS-PEER", targetID: "HOST-ID", pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
-            body: publicGoal ?? (localFormSearch
-                ? "Open \(base.appendingPathComponent("index").absoluteString). Use its Search field to look up Apollo 11, then report the heading from the resulting page."
-                : "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform."))
+            body: publicGoal ?? (localFileUpload
+                ? "Open \(base.appendingPathComponent("index").absoluteString). Upload the latest presentation in Downloads to this page, then confirm what the page reports."
+                : (localFormSearch
+                    ? "Open \(base.appendingPathComponent("index").absoluteString). Use its Search field to look up Apollo 11, then report the heading from the resulting page."
+                    : "Open \(base.appendingPathComponent("index").absoluteString). Find the night train to Harbor City, follow its details link, and report its departure time and platform.")))
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         var terminal: ComputerUseTaskUpdate?
         for _ in 0 ..< (preloadLoadedPage ? 450 : resumePollLimit) {
             if preloadLoadedPage && Date().timeIntervalSince(started) >= 45 { break }
-            if localFormSearch && Date().timeIntervalSince(started) >= 80 { break }
+            if (localFormSearch || localFileUpload) && Date().timeIntervalSince(started) >= 80 { break }
             if clarificationAnswer != nil && Date().timeIntervalSince(started) >= resumeHarnessBudgetSeconds { break }
             terminal = await channel.taskUpdates().first { $0.taskID == prompt.id && $0.outcome != nil }
             if terminal != nil { break }
@@ -4937,6 +5461,11 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
         }
         let localFormCompletedInspectedExchanges = localFormSearch ? plannerTrace.items.filter { item in
+            guard let data = item.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+            return object["inputTokens"] as? Int != nil
+        }.count : 0
+        let localFileUploadCompletedInspectedExchanges = localFileUpload ? plannerTrace.items.filter { item in
             guard let data = item.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
             return object["inputTokens"] as? Int != nil
@@ -4983,7 +5512,13 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }.count
         let loadedDeadlineExceeded = preloadLoadedPage && terminal == nil && Date().timeIntervalSince(started) >= 45
         let terminalSummary: Any
-        if localFormSearch {
+        if localFileUpload {
+            let answer = terminal?.text ?? ""
+            terminalSummary = ["outcome": terminal?.outcome?.rawValue ?? "missing",
+                "terminalText": answer,
+                "answerUTF8Bytes": answer.utf8.count,
+                "containsFreshUploadResult": answer.contains("Upload accepted; file received.")]
+        } else if localFormSearch {
             let answer = terminal?.text ?? ""
             terminalSummary = ["outcome": terminal?.outcome?.rawValue ?? "missing",
                 "answerUTF8Bytes": answer.utf8.count,
@@ -5012,11 +5547,16 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "plannerTrace": plannerTrace.items,
             "usesNativeTextModel": useNativeText,
             "localFormSearch": localFormSearch,
+            "localFileUpload": localFileUpload,
+            "uploadRequestCount": localFileUpload ? server.count(uploadPath) : NSNull(),
+            "uploadBodyMatchesExternalLatestPresentation": localFileUpload
+                ? (server.requestBody(for: uploadPath) == expectedUploadBytes) : NSNull(),
             "usesDirectActionPlanning": usesDirectActionPlanning,
             "expectedFormRequestPath": localFormSearch ? (formSearchPath as Any) : NSNull(),
             "formRequestCount": localFormSearch ? server.count(formSearchPath) : NSNull(),
-            "nativeFunctionNames": localFormSearch ? nativeFunctionNames : [],
-            "completedInspectedModelExchanges": localFormSearch ? localFormCompletedInspectedExchanges : NSNull(),
+            "nativeFunctionNames": (localFormSearch || localFileUpload) ? nativeFunctionNames : [],
+            "completedInspectedModelExchanges": localFormSearch ? (localFormCompletedInspectedExchanges as Any)
+                : (localFileUpload ? (localFileUploadCompletedInspectedExchanges as Any) : NSNull()),
             "localFormHarnessBudgetSeconds": localFormSearch ? 80 : NSNull(),
             "expectedInitialClarification": expectedInitialClarification,
             "initialNativePlannerCalls": initialPlannerCalls,
@@ -5128,6 +5668,16 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             }
             XCTAssertEqual(finalURL?.host, expectedHost)
             XCTAssertTrue(server.requestedPaths.isEmpty)
+        } else if localFileUpload {
+            XCTAssertEqual(server.count(uploadPath), 1, "Exactly one actual file POST must reach the fixture")
+            XCTAssertEqual(server.requestBody(for: uploadPath), expectedUploadBytes,
+                "The server must receive the exact bytes named by the frozen external oracle")
+            XCTAssertEqual(terminal?.outcome, .taskCompleted,
+                "A fresh visible result is not task completion unless native completion admits it")
+            XCTAssertTrue(terminal?.text.contains("Upload accepted; file received.") == true,
+                "Completion must use the fresh result rendered only after the server accepted the POST")
+            XCTAssertEqual(originalBrowserTaskID, prompt.id)
+            XCTAssertEqual(finalBrowserTaskID, prompt.id)
         } else if localFormSearch {
             XCTAssertEqual(terminal?.outcome, .taskCompleted)
             XCTAssertTrue(terminal?.text.contains("Apollo 11 Mission Record: Eagle Landing") == true)

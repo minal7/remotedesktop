@@ -31,6 +31,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private enum PlannedStep: Sendable {
         case proposal(PlannedProposal)
         case nativeFormSubmission(plan: ComputerUseMCPBrowserStepPlanner.FormSubmission, authorityDigest: String)
+        case localFileOperation(ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation, rootTaskID: String, sessionIdentity: String)
     }
     private struct PendingNativeFormSubmission: Sendable {
         let plan: ComputerUseMCPBrowserStepPlanner.FormSubmission
@@ -39,9 +40,18 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let operationID: String
         var receipt: ComputerUseBrowserNavigationReceipt?
     }
+    private struct PendingLocalFileSelection {
+        let candidate: ComputerUseLocalFileCatalog.Candidate
+        let triggerControlID: String
+        let observation: ComputerUseOwnedBrowser.AgentObservation
+        let operationID: String
+        let key: String
+        var wasSupplied = false
+    }
     typealias ProposeUsingTools = @MainActor @Sendable (ComputerUseFaraModel.Input, ToolObservation) async throws -> ToolPlan
+    typealias LocalFileCatalogFactory = @MainActor (String) throws -> ComputerUseLocalFileCatalog
     enum Failure: Error, LocalizedError, Equatable {
-        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion, visualModelUnavailable
+        case changedTask, recoveredTask, uncertainAction, unsupportedAction, stepLimit, browserChanged, invalidApproval, invalidQuestion, selectedFileStale, selectedFileChangeNeedsConfirmation, fileAlreadySupplied, visualModelUnavailable
         var errorDescription: String? {
             switch self {
             case .changedTask: return "The original request changed. Start a new task with the complete request."
@@ -52,6 +62,9 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             case .browserChanged: return "The task's browser session changed. Check the page before starting another request."
             case .invalidApproval: return "This approval no longer matches the pending browser action."
             case .invalidQuestion: return "This answer no longer matches the browser's pending question. Start a new request with the complete instruction."
+            case .selectedFileStale: return "The selected file changed. Ask the user to choose a file again before continuing."
+            case .selectedFileChangeNeedsConfirmation: return "A different file was nominated after the user's choice. Ask the user to choose again before changing it."
+            case .fileAlreadySupplied: return "This file was already supplied to the current page control. Check the page before trying again."
             case .visualModelUnavailable: return "This browser step needs a compatible visual model that is not set up. The task has not completed."
             }
         }
@@ -91,6 +104,14 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         var approval: PendingApproval?
         var pendingNativeFormSubmission: PendingNativeFormSubmission?
         var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
+        var localFileCatalog: ComputerUseLocalFileCatalog?
+        var localFileContext: ComputerUseMCPBrowserStepPlanner.LocalFileContext?
+        var selectedLocalFile: ComputerUseLocalFileCatalog.Candidate?
+        var userSelectedLocalFileID: String?
+        var pendingFileChoiceCandidates: [String: ComputerUseLocalFileCatalog.Candidate]?
+        var selectedFileChoice: ComputerUseClarificationChoice?
+        var pendingLocalFileSelection: PendingLocalFileSelection?
+        var suppliedLocalFileSelectionKeys = Set<String>()
         var isStarting = false
         init(taskID: String, goal: String, browserIdentity: String, journal: ComputerUseTaskJournal) {
             self.taskID = taskID; self.goal = goal; self.browserIdentity = browserIdentity; self.journal = journal
@@ -101,6 +122,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private let propose: Propose
     private let readPage: ReadPage
     private let proposeUsingTools: ProposeUsingTools?
+    private let localFileCatalogFactory: LocalFileCatalogFactory
     private let searchProvider: ComputerUseBrowserSearchProvider
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker.shared
@@ -110,11 +132,17 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private var isExecuting = false
     init(journalDirectory: URL, searchProvider: ComputerUseBrowserSearchProvider? = nil, propose: @escaping Propose,
          proposeUsingTools: ProposeUsingTools? = nil,
+         localFileCatalogFactory: @escaping LocalFileCatalogFactory = { taskID in
+             let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                 ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+             return try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: downloads, pageSize: 8)
+         },
          readPage: @escaping ReadPage = { _ in throw Failure.unsupportedAction },
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}, now: @escaping @MainActor () -> Date = Date.init) throws {
         store = try .init(directory: journalDirectory)
         self.propose = propose
         self.proposeUsingTools = proposeUsingTools
+        self.localFileCatalogFactory = localFileCatalogFactory
         self.readPage = readPage
         self.searchProvider = try searchProvider ?? .init(endpoint: URL(string: "https://www.bing.com/search")!, queryParameter: "q", queryFormat: .faraBing)
         self.finishRun = finishRun
@@ -140,17 +168,44 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal,
+            selectedChoice: nil, progress: progress)
+    }
+
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
         try Task.checkCancellation()
         guard let session, let tools = sessionTools, taskID != originatingTaskID else { throw Failure.invalidQuestion }
         if session.executionTaskID == taskID {
-            guard session.answerOriginID == originatingTaskID, session.clarifiedGoal == goal else { throw Failure.invalidQuestion }
+            guard session.answerOriginID == originatingTaskID, session.clarifiedGoal == goal,
+                  session.selectedFileChoice == selectedChoice else { throw Failure.invalidQuestion }
         } else {
-            guard session.executionTaskID == originatingTaskID, let pending = try clarification(taskID: originatingTaskID),
-                  let answer = goal.userTurns.last, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  answer.utf8.count <= 8_192, try pending.goal.answering(pending.question, with: answer) == goal else { throw Failure.invalidQuestion }
+            guard session.executionTaskID == originatingTaskID, let pending = try clarification(taskID: originatingTaskID) else {
+                throw Failure.invalidQuestion
+            }
+            let selectedCandidate: ComputerUseLocalFileCatalog.Candidate?
+            let answer: String?
+            if let selectedChoice {
+                guard pending.choices?.contains(selectedChoice) == true,
+                      let candidate = session.pendingFileChoiceCandidates?[selectedChoice.id],
+                      candidate.id == selectedChoice.id, goal == pending.goal else { throw Failure.invalidQuestion }
+                guard let catalog = session.localFileCatalog else { throw Failure.invalidQuestion }
+                do { _ = try catalog.resolve(candidateID: candidate.id, taskID: session.taskID) }
+                catch { throw Failure.invalidQuestion }
+                selectedCandidate = candidate
+                answer = nil
+            } else {
+                guard let text = goal.userTurns.last, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      text.utf8.count <= 8_192, try pending.goal.answering(pending.question, with: text) == goal else {
+                    throw Failure.invalidQuestion
+                }
+                selectedCandidate = session.selectedLocalFile
+                answer = text
+            }
             // Bind the new transport request to the original browser before any
-            // suspension. A replay cannot consume this answer twice or reset work.
+            // suspension. A replay cannot consume a choice twice or reset work.
             try tools.bindOwnedBrowserAgentContinuation(rootTaskID: session.taskID, executionTaskID: taskID,
                 previousExecutionTaskID: originatingTaskID, sessionIdentity: session.browserIdentity)
             session.executionTaskID = taskID
@@ -158,6 +213,14 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             session.clarifiedGoal = goal
             session.observedNativeGETSubmissions.removeAll()
             session.userResponse = answer
+            session.selectedLocalFile = selectedCandidate
+            if selectedChoice != nil { session.userSelectedLocalFileID = selectedCandidate?.id }
+            session.selectedFileChoice = selectedChoice
+            session.pendingFileChoiceCandidates = nil
+            if let localFileContext = session.localFileContext {
+                session.localFileContext = .init(query: localFileContext.query, page: localFileContext.page,
+                    selectedCandidate: selectedCandidate)
+            }
             session.question = nil
         }
         return try await execute(taskID: session.taskID, prompt: session.goal, trustedUserPrompt: session.goal, tools: tools, progress: progress)
@@ -328,8 +391,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 case .nativeFormSubmission(let plan, let authorityDigest):
                     guard case .page = observation else { throw Failure.unsupportedAction }
                     return .nativeFormSubmission(plan: plan, authorityDigest: authorityDigest)
-                case .localFileOperation:
-                    throw Failure.unsupportedAction
+                case .localFileOperation(let operation, let rootTaskID, let sessionIdentity):
+                    return .localFileOperation(operation, rootTaskID: rootTaskID, sessionIdentity: sessionIdentity)
                 case .handoff(let directive):
                     guard input.surface == .browser else { throw Failure.unsupportedAction }
                     try directive.validate()
@@ -358,8 +421,15 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         try lease.assertOwnership()
         progress("Reading the browser…")
         let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.png, history: session.history,
-            userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal)
+            userResponse: session.userResponse, actionError: session.actionError, clarifiedGoal: session.clarifiedGoal,
+            localFileCatalog: modelFileContext(for: session))
         let planned = try await nextProposal(input, observation: .initial(observation), tools: tools)
+        try Task.checkCancellation(); try lease.assertOwnership()
+        if case .localFileOperation(let operation, let rootTaskID, let sessionIdentity) = planned {
+            try applyLocalFileOperation(operation, rootTaskID: rootTaskID, sessionIdentity: sessionIdentity,
+                observation: .initial(observation), session: session, tools: tools)
+            return
+        }
         guard case .proposal(let proposalPlan) = planned else { throw Failure.unsupportedAction }
         if proposalPlan.nativeReadCompletion != nil { throw Failure.unsupportedAction }
         let proposal = proposalPlan.proposal
@@ -416,6 +486,244 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             throw error
         }
+    }
+
+    private func dispatchSelectedLocalFile(candidateID: String, triggerControlID: String,
+        rootTaskID: String, sessionIdentity: String, observation: ComputerUseOwnedBrowser.AgentObservation,
+        session: Session, tools: ComputerUseHostTools, assertRootOwnership: () throws -> Void) async throws
+        -> ComputerUseOwnedBrowser.AgentObservation {
+        guard rootTaskID == session.taskID, sessionIdentity == session.browserIdentity,
+              observation.approvalPageEvidence.document.taskID == session.taskID,
+              observation.sessionIdentity == session.browserIdentity,
+              tools.matchesOwnedBrowserAgentSession(taskID: session.taskID, identity: session.browserIdentity),
+              let selected = session.selectedLocalFile, selected.id == candidateID,
+              let catalog = session.localFileCatalog else { throw Failure.browserChanged }
+        // `selected` is host-retained and may come from an earlier catalog page.
+        // Resolve by exact scoped ID again without requiring it on the current page.
+        let candidate = selected
+        do { _ = try catalog.resolve(candidateID: candidateID, taskID: session.taskID) }
+        catch { throw Failure.selectedFileStale }
+        // This idle-only memory check must precede native input, which marks the
+        // browser agent operation busy. The native click path revalidates its target.
+        try Task.checkCancellation(); try assertRootOwnership()
+        try tools.validateOwnedBrowserAgentMemoryObservation(observation)
+        let key = Self.localFileSelectionKey(candidateID: candidateID, triggerControlID: triggerControlID, observation: observation)
+        guard !session.suppliedLocalFileSelectionKeys.contains(key), session.pendingLocalFileSelection == nil else {
+            throw Failure.fileAlreadySupplied
+        }
+        let operationID = ComputerUseTaskContract.digest([session.journal.taskID, "native-local-file-selection-v1", key])
+        let dispatchLease = try store.acquireExecution(taskID: operationID, expected: nil)
+        defer { dispatchLease.release() }
+        let attempted = ComputerUseTaskJournal(taskID: operationID, promptDigest: session.journal.promptDigest,
+            contractDigest: ComputerUseTaskContract.digest([observation.authorityDigest, candidateID, triggerControlID]),
+            stepIDs: ["local-file-supply-returned"], statuses: [.attempted])
+        session.pendingLocalFileSelection = .init(candidate: candidate, triggerControlID: triggerControlID,
+            observation: observation, operationID: operationID, key: key)
+        var began = false
+        do {
+            try await tools.selectOwnedBrowserLocalFile(taskID: session.taskID, triggerControlID: triggerControlID,
+                observation: observation, operationID: operationID, resolve: {
+                    try catalog.resolve(candidateID: candidateID, taskID: session.taskID)
+                }, willBeginEffect: {
+                    try Task.checkCancellation(); try assertRootOwnership(); try dispatchLease.assertOwnership()
+                    guard tools.matchesOwnedBrowserAgentSession(taskID: session.taskID, identity: session.browserIdentity) else {
+                        throw Failure.browserChanged
+                    }
+                    try self.store.save(attempted, replacing: nil)
+                    began = true
+                })
+            guard began else { throw Failure.browserChanged }
+            // The API return means the native picker callback accepted the file. Retain this
+            // before any cancellation/lease check or fresh-capture suspension so Resume
+            // reports it without replaying the one-use chooser.
+            session.pendingLocalFileSelection?.wasSupplied = true
+            session.suppliedLocalFileSelectionKeys.insert(key)
+            try Task.checkCancellation(); try assertRootOwnership()
+            var verified = attempted; verified.statuses = [.verified]
+            try store.save(verified, replacing: attempted)
+            let fresh = try await tools.captureOwnedBrowserAgentObservation(taskID: session.taskID, preserving: observation)
+            try Task.checkCancellation(); try assertRootOwnership()
+            guard fresh.sessionIdentity == session.browserIdentity,
+                  tools.matchesOwnedBrowserAgentSession(taskID: session.taskID, identity: session.browserIdentity) else {
+                throw Failure.browserChanged
+            }
+            try finalizeSuppliedLocalFileSelection(session: session, freshObservation: fresh)
+            return fresh
+        } catch {
+            if !began {
+                session.pendingLocalFileSelection = nil
+            } else if session.pendingLocalFileSelection?.wasSupplied != true {
+                var uncertain = attempted; uncertain.statuses = [.uncertain]
+                try? store.save(uncertain, replacing: attempted)
+                session.terminal = .unableToComplete(Failure.uncertainAction.localizedDescription)
+            }
+            throw error
+        }
+    }
+
+    private static func localFileSelectionKey(candidateID: String, triggerControlID: String,
+        observation: ComputerUseOwnedBrowser.AgentObservation) -> String {
+        let evidence = observation.approvalPageEvidence
+        let document = evidence.document
+        return ComputerUseTaskContract.digest([document.taskID, observation.sessionIdentity,
+            document.contextID, document.generation.description, document.operationID, document.committedURL.absoluteString,
+            evidence.documentID, candidateID, triggerControlID])
+    }
+
+    /// A returned chooser callback is retained until fresh capture succeeds.
+    /// It records only file supply to the page, never remote upload success.
+    private func finalizeSuppliedLocalFileSelection(session: Session,
+        freshObservation: ComputerUseOwnedBrowser.AgentObservation) throws {
+        guard let pending = session.pendingLocalFileSelection, pending.wasSupplied else { return }
+        guard freshObservation.approvalPageEvidence.document.taskID == session.taskID,
+              freshObservation.sessionIdentity == session.browserIdentity else { throw Failure.browserChanged }
+        let responseObject: [String: Any] = [
+            "name": "selectLocalFile",
+            "arguments": ["candidateID": pending.candidate.id, "triggerControlID": pending.triggerControlID],
+            "result": ["status": "fileSuppliedToPage"]
+        ]
+        let responseData = try JSONSerialization.data(withJSONObject: responseObject,
+            options: [.sortedKeys, .withoutEscapingSlashes])
+        let response = String(decoding: responseData, as: UTF8.self)
+        if !session.history.isEmpty {
+            session.history[session.history.count - 1].resultObservation = .init(currentURL: freshObservation.currentURL,
+                userResponse: session.userResponse, actionError: session.actionError)
+        }
+        session.history.append(.init(screenshotPNG: pending.observation.png, response: response,
+            currentURL: pending.observation.currentURL, userResponse: session.userResponse, actionError: session.actionError,
+            resultObservation: .init(currentURL: freshObservation.currentURL, userResponse: nil, actionError: nil)))
+        session.pendingLocalFileSelection = nil
+        session.pageReading = nil
+        session.userResponse = nil
+        session.actionError = nil
+        session.turns += 1
+        while session.history.count > 20 {
+            guard let index = session.history.firstIndex(where: {
+                if $0.userResponse != nil { return false }
+                if case .some(.askUser(_)) = $0.action { return false }
+                return true
+            }) else { break }
+            session.history.remove(at: index)
+        }
+    }
+
+    private func modelFileContext(for session: Session) -> ComputerUseMCPBrowserStepPlanner.LocalFileContext {
+        if let context = session.localFileContext { return context }
+        return .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
+            hasTiedSortValues: false, hasMissingSortValues: false))
+    }
+
+    private func applyLocalFileOperation(_ operation: ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation,
+        rootTaskID: String, sessionIdentity: String, observation: ToolObservation,
+        session: Session, tools: ComputerUseHostTools) throws {
+        guard rootTaskID == session.taskID, sessionIdentity == session.browserIdentity,
+              observation.taskID == session.taskID,
+              tools.matchesOwnedBrowserAgentSession(taskID: session.taskID, identity: session.browserIdentity) else {
+            throw Failure.browserChanged
+        }
+        try Task.checkCancellation()
+        try validateUserSelectedFileIfNeeded(session: session)
+        let png: Data
+        let currentURL: URL?
+        switch observation {
+        case .initial(let initial): png = initial.png; currentURL = nil
+        case .page(let page): png = page.png; currentURL = page.currentURL
+        }
+        switch operation {
+        case .listFiles(let query, let cursor):
+            var catalog = try session.localFileCatalog ?? localFileCatalogFactory(session.taskID)
+            let page: ComputerUseLocalFileCatalog.Page
+            if let cursor {
+                guard let current = session.localFileContext, current.query == query,
+                      current.page.nextCursor == cursor else { throw Failure.invalidQuestion }
+                page = try catalog.nextPage(after: cursor)
+            } else {
+                guard session.userSelectedLocalFileID == nil else { throw Failure.selectedFileChangeNeedsConfirmation }
+                page = try catalog.discover(query: query)
+                session.selectedLocalFile = nil
+                session.pendingFileChoiceCandidates = nil
+            }
+            guard page.candidates.count <= 8 else { throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit }
+            session.localFileCatalog = catalog
+            session.localFileContext = .init(query: query, page: page,
+                selectedCandidate: cursor == nil ? nil : session.selectedLocalFile)
+            consumeLocalFileOperation(session: session, observation: observation)
+        case .selectFile(let candidateID):
+            let candidate = try resolveCurrentCandidate(candidateID, session: session)
+            if let userSelectedID = session.userSelectedLocalFileID, candidateID != userSelectedID {
+                throw Failure.selectedFileChangeNeedsConfirmation
+            }
+            session.selectedLocalFile = candidate
+            if let context = session.localFileContext {
+                session.localFileContext = .init(query: context.query, page: context.page, selectedCandidate: candidate)
+            }
+            consumeLocalFileOperation(session: session, observation: observation)
+        case .selectLocalFile(_, _):
+            // Upload dispatch is a separate effect path. Catalog nomination
+            // alone never authorizes a native picker action.
+            throw Failure.unsupportedAction
+        case .askFile(let question, let candidateIDs):
+            guard let context = session.localFileContext, (2...8).contains(candidateIDs.count),
+                  Set(candidateIDs).count == candidateIDs.count,
+                  !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  question.utf8.count <= 512 else { throw Failure.invalidQuestion }
+            var candidates: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
+            var choices: [ComputerUseClarificationChoice] = []
+            for id in candidateIDs {
+                guard let candidate = context.page.candidates.first(where: { $0.id == id }) else { throw Failure.invalidQuestion }
+                candidates[id] = candidate
+                var detail = "\(String(candidate.fileExtension.uppercased().prefix(64))) · \(candidate.byteCount) bytes"
+                let timestamp = ISO8601DateFormatter()
+                if let modifiedAt = candidate.modifiedAt {
+                    detail += " · Modified \(timestamp.string(from: modifiedAt))"
+                }
+                if let createdAt = candidate.createdAt {
+                    detail += " · Created \(timestamp.string(from: createdAt))"
+                }
+                choices.append(try ComputerUseClarificationChoice(id: candidate.id, label: candidate.displayName, detail: detail))
+            }
+            let proposal = ComputerUseFaraModel.Proposal(response: "The host is asking the user to choose a file.",
+                action: .askUser(question))
+            try retainQuestion(question, proposal: proposal, png: png, currentURL: currentURL,
+                choices: choices, fileCandidates: candidates, session: session, tools: tools)
+        }
+    }
+
+    /// Keep a human-selected file bound across subsequent model operations.
+    /// A stale identity fails closed and requires a fresh user choice.
+    private func validateUserSelectedFileIfNeeded(session: Session) throws {
+        guard let selectedID = session.userSelectedLocalFileID else { return }
+        guard let candidate = session.selectedLocalFile, candidate.id == selectedID,
+              let catalog = session.localFileCatalog else { throw Failure.selectedFileStale }
+        do { _ = try catalog.resolve(candidateID: selectedID, taskID: session.taskID) }
+        catch { throw Failure.selectedFileStale }
+    }
+
+    private func resolveCurrentCandidate(_ candidateID: String, session: Session) throws
+        -> ComputerUseLocalFileCatalog.Candidate {
+        guard let catalog = session.localFileCatalog, let context = session.localFileContext,
+              let candidate = context.page.candidates.first(where: { $0.id == candidateID }) else {
+            throw Failure.invalidQuestion
+        }
+        do { _ = try catalog.resolve(candidateID: candidateID, taskID: session.taskID) }
+        catch { throw Failure.invalidQuestion }
+        return candidate
+    }
+
+    private func consumeLocalFileOperation(session: Session, observation: ToolObservation) {
+        if let index = session.history.indices.last {
+            let currentURL: URL?
+            switch observation {
+            case .initial: currentURL = nil
+            case .page(let page): currentURL = page.currentURL
+            }
+            session.history[index].resultObservation = .init(currentURL: currentURL,
+                userResponse: session.userResponse, actionError: session.actionError)
+        }
+        session.userResponse = nil
+        session.actionError = nil
+        session.pageReading = nil
+        session.turns += 1
     }
 
     private func reportUnsupportedNavigation(session: Session) throws {
@@ -540,6 +848,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         let lease = try store.acquireExecution(taskID: rootID, expected: session.journal)
         defer { lease.release() }
         var observation = first
+        try Task.checkCancellation(); try lease.assertOwnership()
+        try finalizeSuppliedLocalFileSelection(session: session, freshObservation: first)
         while session.turns < 64 {
             try Task.checkCancellation(); try lease.assertOwnership()
             guard session.browserIdentity == observation.sessionIdentity else { throw Failure.browserChanged }
@@ -549,7 +859,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 userResponse: session.userResponse, actionError: session.actionError,
                 observedPage: ComputerUseFaraModel.observePageText(observation.approvalPageEvidence.page, sourceURL: observation.currentURL),
                 clarifiedGoal: session.clarifiedGoal,
-                observedNativeGETSubmissions: session.observedNativeGETSubmissions)
+                observedNativeGETSubmissions: session.observedNativeGETSubmissions,
+                localFileCatalog: modelFileContext(for: session))
             let plannedStep: PlannedStep
             if let pending = session.pendingNativeFormSubmission {
                 plannedStep = .nativeFormSubmission(plan: pending.plan, authorityDigest: pending.authorityDigest)
@@ -572,6 +883,27 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
                 try Task.checkCancellation(); try lease.assertOwnership()
                     continue
                 }
+            }
+            if case .localFileOperation(let operation, let rootTaskID, let sessionIdentity) = plannedStep {
+                try Task.checkCancellation(); try lease.assertOwnership()
+                if case .selectLocalFile(let candidateID, let triggerControlID) = operation {
+                    do {
+                        observation = try await dispatchSelectedLocalFile(candidateID: candidateID, triggerControlID: triggerControlID,
+                            rootTaskID: rootTaskID, sessionIdentity: sessionIdentity, observation: observation, session: session,
+                            tools: tools, assertRootOwnership: { try Task.checkCancellation(); try lease.assertOwnership() })
+                    } catch Failure.fileAlreadySupplied {
+                        let result = ComputerUseExecutionResult.unableToComplete(Failure.fileAlreadySupplied.localizedDescription)
+                        session.terminal = result
+                        return result
+                    }
+                    continue
+                }
+                try applyLocalFileOperation(operation, rootTaskID: rootTaskID, sessionIdentity: sessionIdentity,
+                    observation: .page(observation), session: session, tools: tools)
+                if let pending = try clarification(taskID: session.executionTaskID) {
+                    return .clarificationRequired(pending.question)
+                }
+                continue
             }
             if case .nativeFormSubmission(let plan, let authorityDigest) = plannedStep {
                 var pending: PendingNativeFormSubmission
@@ -797,6 +1129,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     }
 
     private func retainQuestion(_ question: String, proposal: ComputerUseFaraModel.Proposal, png: Data, currentURL: URL?,
+                                choices: [ComputerUseClarificationChoice]? = nil,
+                                fileCandidates: [String: ComputerUseLocalFileCatalog.Candidate]? = nil,
                                 session: Session, tools: ComputerUseHostTools) throws {
         // Publishing the question promises that its accepted answer can reach
         // at least one further proposal under the same cumulative turn budget.
@@ -807,9 +1141,11 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
         try tools.bindOwnedBrowserAgentContinuation(rootTaskID: session.taskID, executionTaskID: session.executionTaskID,
             previousExecutionTaskID: session.executionTaskID, sessionIdentity: session.browserIdentity)
         let pending = ComputerUseNativeTextExecutor.Clarification(taskID: session.executionTaskID, goal: goal, question: question,
-            scope: ComputerUseTaskContract.digest([session.browserIdentity, UUID().uuidString]), expiresAt: now().addingTimeInterval(600))
+            scope: ComputerUseTaskContract.digest([session.browserIdentity, UUID().uuidString]), expiresAt: now().addingTimeInterval(600),
+            choices: choices)
         record(proposal, png: png, currentURL: currentURL, session: session)
         session.clarifiedGoal = goal
         session.question = pending
+        session.pendingFileChoiceCandidates = fileCandidates
     }
 }

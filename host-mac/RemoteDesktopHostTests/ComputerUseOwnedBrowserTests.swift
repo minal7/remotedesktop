@@ -4400,11 +4400,11 @@ final class OwnedBrowserHTTPFixture: @unchecked Sendable {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 8_192) { [weak self] chunk, _, complete, error in
             guard let self, error == nil else { connection.cancel(); return }
             let accumulated = data + (chunk ?? Data())
-            guard accumulated.count <= 16_384,
-                  let headerRange = accumulated.range(of: Data("\r\n\r\n".utf8)) else {
+            guard let headerRange = accumulated.range(of: Data("\r\n\r\n".utf8)) else {
                 if complete || accumulated.count > 16_384 { connection.cancel() } else { self.receive(connection, data: accumulated) }
                 return
             }
+            guard headerRange.lowerBound <= 16_384 else { connection.cancel(); return }
             let headerData = accumulated[..<headerRange.lowerBound]
             guard let text = String(data: headerData, encoding: .utf8),
                   let line = text.components(separatedBy: "\r\n").first else { connection.cancel(); return }
@@ -4425,8 +4425,9 @@ final class OwnedBrowserHTTPFixture: @unchecked Sendable {
                       let parsed = Int(pair[1].trimmingCharacters(in: .whitespaces)) else { connection.cancel(); return }
                 contentLength = parsed
             } else { contentLength = 0 }
-            guard contentLength >= 0, contentLength <= 8_192 else { connection.cancel(); return }
+            guard contentLength >= 0, contentLength <= 1_048_576 else { connection.cancel(); return }
             let bodyStart = headerRange.upperBound
+            guard accumulated.count <= bodyStart + contentLength else { connection.cancel(); return }
             guard accumulated.count >= bodyStart + contentLength else {
                 if complete { connection.cancel() } else { self.receive(connection, data: accumulated) }
                 return

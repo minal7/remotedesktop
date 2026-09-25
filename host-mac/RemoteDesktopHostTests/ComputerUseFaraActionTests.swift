@@ -7515,6 +7515,116 @@ final class ComputerUseFaraActionTests: XCTestCase {
             "imageWidth": bitmap.pixelsWide, "imageHeight": bitmap.pixelsHigh, "scope": "native-WebKit-local-fictional-form-no-effects"], options: [.prettyPrinted, .sortedKeys]).write(to: oracleURL, options: .atomic)
     }
 
+    @MainActor
+    func testOptInFaraSelectLocalFileSendsOnceWithoutClaimingUploadCompletion() async throws {
+        var diagnosticStage = "activation-policy"
+        var diagnosticPlannerCalls = 0
+        var diagnosticLastProgress = "(none)"
+        do {
+        let previousPolicy = NSApp.activationPolicy(); NSApp.setActivationPolicy(.accessory)
+        defer { NSApp.setActivationPolicy(previousPolicy) }
+        diagnosticStage = "server-construction"
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/drive": .init(body: """
+                <!doctype html><title>Drive fixture</title><h1>Drive upload</h1>
+                <button type="button" id="choose" onclick="document.querySelector('#file').click()">Choose file</button>
+                <input id="file" type="file" style="display:none" onchange="fetch('/upload',{method:'POST',body:this.files[0]})">
+                """),
+            "/upload": .init(body: "accepted")
+        ])
+        diagnosticStage = "server-start"
+        let base = try await server.start(); defer { server.stop() }
+        diagnosticStage = "fixture-setup"
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FaraLocalFileDispatch-" + UUID().uuidString)
+        let downloads = directory.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bytes = Data([0, 2, 4, 8, 16, 32, 64, 128, 255])
+        try bytes.write(to: downloads.appendingPathComponent("Quarterly presentation.pptx"))
+        diagnosticStage = "browser-setup"
+        let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
+        let taskID = "fara-local-file-" + UUID().uuidString
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            browserNavigationTask: .init(browser: browser, journalDirectory: directory.appendingPathComponent("browser")))
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation)
+        var candidateID: String?
+        var triggerControlID: String?
+        var sawSuppliedFeedback = false
+        diagnosticStage = "executor-setup"
+        let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("fara"),
+            propose: { _ in XCTFail("This flow must stay in the native tool planner"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
+            proposeUsingTools: { input, observation in
+                diagnosticPlannerCalls += 1
+                diagnosticStage = "planner-call-\(diagnosticPlannerCalls)"
+                let sessionIdentity: String
+                switch observation {
+                case .initial(let initial): sessionIdentity = initial.sessionIdentity
+                case .page(let page): sessionIdentity = page.sessionIdentity
+                }
+                switch diagnosticPlannerCalls {
+                case 1:
+                    guard case .initial = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    let destination = base.appendingPathComponent("drive").absoluteString
+                    let response = self.call("{\"action\":\"visit_url\",\"url\":\"\(destination)\"}")
+                    return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
+                case 2:
+                    guard case .page = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    return .localFileOperation(.listFiles(query: query, cursor: nil), rootTaskID: taskID,
+                        sessionIdentity: sessionIdentity)
+                case 3:
+                    let files = try XCTUnwrap(input.localFileCatalog)
+                    candidateID = try XCTUnwrap(files.page.candidates.first?.id)
+                    guard case .page(let page) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
+                    let trigger = try XCTUnwrap(page.approvalPageEvidence.page.controls.first { $0.label == "Choose file" })
+                    triggerControlID = trigger.id
+                    return .localFileOperation(.selectFile(candidateID: try XCTUnwrap(candidateID)), rootTaskID: taskID,
+                        sessionIdentity: sessionIdentity)
+                case 4:
+                    let selected = try XCTUnwrap(input.localFileCatalog?.selectedCandidate)
+                    XCTAssertEqual(selected.id, candidateID)
+                    return .localFileOperation(.selectLocalFile(candidateID: selected.id,
+                        triggerControlID: try XCTUnwrap(triggerControlID)), rootTaskID: taskID,
+                        sessionIdentity: sessionIdentity)
+                case 5:
+                    let postDeadline = ContinuousClock.now + .seconds(2)
+                    while server.count("/upload") == 0 && ContinuousClock.now < postDeadline {
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                    XCTAssertEqual(server.count("/upload"), 1)
+                    let latest = input.history.last?.response ?? ""
+                    sawSuppliedFeedback = latest.localizedCaseInsensitiveContains("fileSupplied")
+                        || latest.localizedCaseInsensitiveContains("file supplied")
+                    XCTAssertTrue(sawSuppliedFeedback, "Fresh model context should describe only that the file was supplied to the page")
+                    XCTAssertFalse(latest.localizedCaseInsensitiveContains("upload completed"),
+                        "A picker callback is not evidence of remote upload completion")
+                    XCTAssertEqual(input.currentURL, base.appendingPathComponent("drive"))
+                    return .localFileOperation(.selectLocalFile(candidateID: try XCTUnwrap(candidateID),
+                        triggerControlID: try XCTUnwrap(triggerControlID)), rootTaskID: taskID,
+                        sessionIdentity: sessionIdentity)
+                default:
+                    XCTFail("The duplicate selection must be rejected before another planner call")
+                    return .noProposal
+                }
+            },
+            localFileCatalogFactory: { rootTaskID in
+                XCTAssertEqual(rootTaskID, taskID)
+                return try ComputerUseLocalFileCatalog(taskID: rootTaskID, approvedDirectory: downloads)
+            })
+
+        diagnosticStage = "executor-execute"
+        let result = try await executor.execute(taskID: taskID, prompt: "Supply the chosen file to the visible page.",
+            trustedUserPrompt: "Supply the chosen file to the visible page.", tools: tools, progress: { diagnosticLastProgress = $0 })
+        diagnosticStage = "post-execution-assertions"
+        XCTAssertEqual(diagnosticPlannerCalls, 5)
+        XCTAssertTrue(sawSuppliedFeedback)
+        XCTAssertEqual(server.count("/upload"), 1, "Repeating the same candidate at the same destination and trigger must not send it twice")
+        XCTAssertEqual(server.requestBody(for: "/upload"), bytes)
+        if case .completed = result { XCTFail("File supply alone must never complete the task") }
+        } catch {
+            XCTFail("Local file dispatcher failed at stage=\(diagnosticStage), plannerCalls=\(diagnosticPlannerCalls), lastProgress=\(diagnosticLastProgress), error=\(String(reflecting: error))")
+        }
+    }
+
     private func call(_ arguments: String) -> String {
         "<tool_call>{\"name\":\"computer_use\",\"arguments\":\(arguments)}</tool_call>"
     }
