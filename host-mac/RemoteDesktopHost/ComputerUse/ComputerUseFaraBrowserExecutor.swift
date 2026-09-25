@@ -219,7 +219,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             session.pendingFileChoiceCandidates = nil
             if let localFileContext = session.localFileContext {
                 session.localFileContext = .init(query: localFileContext.query, page: localFileContext.page,
-                    selectedCandidate: selectedCandidate)
+                    selectedCandidate: selectedCandidate, inventoryState: localFileContext.inventoryState)
             }
             session.question = nil
         }
@@ -610,7 +610,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
     private func modelFileContext(for session: Session) -> ComputerUseMCPBrowserStepPlanner.LocalFileContext {
         if let context = session.localFileContext { return context }
         return .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
-            hasTiedSortValues: false, hasMissingSortValues: false))
+            hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
     }
 
     private func applyLocalFileOperation(_ operation: ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation,
@@ -646,7 +646,7 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             guard page.candidates.count <= 8 else { throw ComputerUseMCPBrowserStepPlanner.Failure.contextLimit }
             session.localFileCatalog = catalog
             session.localFileContext = .init(query: query, page: page,
-                selectedCandidate: cursor == nil ? nil : session.selectedLocalFile)
+                selectedCandidate: cursor == nil ? nil : session.selectedLocalFile, inventoryState: .available)
             consumeLocalFileOperation(session: session, observation: observation)
         case .selectFile(let candidateID):
             let candidate = try resolveCurrentCandidate(candidateID, session: session)
@@ -655,7 +655,8 @@ final class ComputerUseFaraBrowserExecutor: ComputerUseTaskAwareExecuting, Compu
             }
             session.selectedLocalFile = candidate
             if let context = session.localFileContext {
-                session.localFileContext = .init(query: context.query, page: context.page, selectedCandidate: candidate)
+                session.localFileContext = .init(query: context.query, page: context.page, selectedCandidate: candidate,
+                    inventoryState: context.inventoryState)
             }
             consumeLocalFileOperation(session: session, observation: observation)
         case .selectLocalFile(_, _):

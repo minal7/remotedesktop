@@ -2306,6 +2306,23 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
             sort: .init(field: .modifiedAt, direction: .descending))
         var factoryCalls = 0, plannerCalls = 0, initialCalls = 0, visualCalls = 0
+        func captureLocalFiles(_ input: ComputerUseFaraModel.Input,
+                               _ observation: ComputerUseFaraBrowserExecutor.ToolObservation) async throws -> [String: Any] {
+            let context = try ComputerUseMCPBrowserStepPlanner().context(input, observation: observation)
+            let transport = NativeStepQueueFixtureTransport(responses: [try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+                "fileKind": "presentation", "sortField": "modifiedAt", "sortDirection": "descending"
+            ])])
+            var planner = try nativeStepPlanner(transport: transport)
+            planner.usesDirectActionPlanning = true
+            let plan = try await planner.propose(context)
+            guard case .listFiles? = plan.localFileOperation else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+            let snapshot = await transport.snapshot()
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let capture = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+            let captured = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capture.utf8)) as? [String: Any])
+            return try XCTUnwrap(captured["localFiles"] as? [String: Any])
+        }
         let executor = try ComputerUseFaraBrowserExecutor(journalDirectory: directory.appendingPathComponent("executor"),
             propose: { _ in visualCalls += 1; XCTFail("File metadata operations must not request visual fallback"); throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction },
             proposeUsingTools: { input, observation in
@@ -2326,6 +2343,10 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     XCTAssertEqual(initial.taskID, taskID)
                     XCTAssertEqual(factoryCalls, 0, "Catalog construction/scanning is lazy until listFiles")
                     let empty = try XCTUnwrap(input.localFileCatalog)
+                    XCTAssertEqual(empty.inventoryState, .notQueried, "Initial capture must not describe the unscanned directory as an empty listing")
+                    let capturedFiles = try await captureLocalFiles(input, observation)
+                    XCTAssertEqual(capturedFiles["state"] as? String, "notQueried")
+                    XCTAssertNil(capturedFiles["candidates"], "The actual initial model capture must not contain a result-shaped empty listing")
                     XCTAssertTrue(empty.page.candidates.isEmpty)
                     XCTAssertFalse(empty.page.isComplete, "Unscanned is not the same as a complete empty directory")
                     return .proposal(.init(response: "Open search results.", action: .visitURL(pageURL)))
@@ -2335,12 +2356,18 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                         return .noProposal
                     }
                     XCTAssertEqual(input.currentURL, pageURL)
+                    XCTAssertEqual(input.localFileCatalog?.inventoryState, .notQueried,
+                        "The first loaded-page capture still precedes any catalog query")
+                    let capturedFiles = try await captureLocalFiles(input, observation)
+                    XCTAssertEqual(capturedFiles["state"] as? String, "notQueried")
+                    XCTAssertNil(capturedFiles["candidates"], "The loaded page is not evidence that the file catalog was queried")
                     XCTAssertEqual(factoryCalls, 0, "Catalog construction and scanning begin only when listFiles is requested")
                     return .localFileOperation(.listFiles(query: query, cursor: nil), rootTaskID: taskID,
                         sessionIdentity: pageObservation.sessionIdentity)
                 case 3:
                     XCTAssertEqual(factoryCalls, 1)
                     let page = try XCTUnwrap(input.localFileCatalog)
+                    XCTAssertEqual(page.inventoryState, .available)
                     XCTAssertEqual(page.query, query)
                     XCTAssertEqual(page.page.candidates.map(\.displayName), ["Top deck.pptx", "Middle deck.pptx"])
                     let cursor = try XCTUnwrap(page.page.nextCursor)
@@ -2503,6 +2530,107 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "A changed user-selected file must fail closed rather than silently substituting another candidate")
         XCTAssertTrue(ComputerUseFaraBrowserExecutor.Failure.selectedFileStale.errorDescription?.contains("choose a file again") == true)
         XCTAssertEqual(plannerCalls, 4); XCTAssertEqual(visualCalls, 0)
+    }
+
+    func testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty() async throws {
+        func proposal(_ context: ComputerUseMCPBrowserStepPlanner.Context, fileKind: String = "any", cursor: String? = nil) async throws
+            -> (files: [String: Any], toolNames: Set<String>, cursorOffered: Bool) {
+            var arguments: [String: Any] = ["fileKind": fileKind, "sortField": "", "sortDirection": ""]
+            if let cursor { arguments["cursor"] = cursor }
+            let transport = NativeStepQueueFixtureTransport(responses: [try nativeBrowserFunctionEnvelope("listFiles", arguments: arguments)])
+            var planner = try nativeStepPlanner(transport: transport)
+            planner.usesDirectActionPlanning = true
+            let plan = try await planner.propose(context)
+            guard case .listFiles? = plan.localFileOperation else { throw ComputerUseBrowserGoalPlanError.invalidResponse }
+            let snapshot = await transport.snapshot()
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let capture = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+            let captureObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(capture.utf8)) as? [String: Any])
+            let files = try XCTUnwrap(captureObject["localFiles"] as? [String: Any])
+            let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+            let names = Set(try tools.map { try XCTUnwrap(($0["function"] as? [String: Any])?["name"] as? String) })
+            let listTool = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "listFiles" })
+            let properties = try XCTUnwrap((listTool["function"] as? [String: Any])?["parameters"] as? [String: Any])
+            return (files, names, (properties["properties"] as? [String: Any])?["cursor"] != nil)
+        }
+
+        let placeholder = ComputerUseLocalFileCatalog.Page(candidates: [], isComplete: false, nextCursor: nil,
+            hasTiedSortValues: false, hasMissingSortValues: false)
+        let notQueriedInput = ComputerUseFaraModel.Input(goal: "Upload the latest presentation in Downloads to this page.",
+            screenshotPNG: Data(), localFileCatalog: .init(query: .init(), page: placeholder, inventoryState: .notQueried))
+        let initial = try ComputerUseMCPBrowserStepPlanner().context(notQueriedInput, page: nil)
+        XCTAssertTrue(initial.isInitialObservation)
+        let initialProjection = try await proposal(initial, fileKind: "presentation")
+        XCTAssertEqual(initialProjection.files["state"] as? String, "notQueried")
+        XCTAssertEqual(initialProjection.files["directoryName"] as? String, "Downloads")
+        for resultKey in ["query", "candidates", "isComplete", "nextCursor", "hasTiedSortValues", "hasMissingSortValues", "selectedCandidate"] {
+            XCTAssertNil(initialProjection.files[resultKey], "Unqueried inventory must omit result field \(resultKey)")
+        }
+        XCTAssertTrue(initialProjection.toolNames.contains("listFiles"))
+        XCTAssertFalse(initialProjection.toolNames.contains("selectFile"))
+        XCTAssertFalse(initialProjection.toolNames.contains("askFile"))
+        XCTAssertFalse(initialProjection.toolNames.contains("answer"))
+
+        let loadedUnqueried = try nativeLocalFileContext(query: .init(), page: placeholder, inventoryState: .notQueried)
+        let loadedProjection = try await proposal(loadedUnqueried, fileKind: "presentation")
+        XCTAssertEqual(loadedProjection.files["state"] as? String, "notQueried")
+        XCTAssertTrue(loadedProjection.toolNames.contains("listFiles"))
+        XCTAssertFalse(loadedProjection.toolNames.contains("selectFile"))
+        XCTAssertFalse(loadedProjection.toolNames.contains("askFile"))
+
+        let actualEmpty = try nativeLocalFileContext(query: .init(fileKind: .presentation),
+            page: .init(candidates: [], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .available)
+        let emptyProjection = try await proposal(actualEmpty, fileKind: "presentation")
+        XCTAssertEqual(emptyProjection.files["state"] as? String, "available")
+        XCTAssertEqual((emptyProjection.files["query"] as? [String: Any])?["fileKind"] as? String, "presentation")
+        XCTAssertEqual((emptyProjection.files["candidates"] as? [Any])?.count, 0)
+        XCTAssertEqual(emptyProjection.files["isComplete"] as? Bool, true,
+            "A complete empty result is different from an unqueried catalog")
+        XCTAssertFalse(emptyProjection.toolNames.contains("selectFile"))
+        XCTAssertFalse(emptyProjection.toolNames.contains("askFile"))
+
+        let first = localFileCandidate(id: "unqueried-a", name: "Alpha.pptx", ext: "pptx")
+        let second = localFileCandidate(id: "unqueried-b", name: "Beta.pptx", ext: "pptx")
+        let observedButton = ComputerUseBrowserPageSnapshot.Control(id: "c90", containerID: "g1",
+            label: "Choose", kind: "button", name: "", disabled: false, readOnly: false,
+            required: false, multiple: false, constraints: [:], options: [])
+        let inconsistent = try nativeLocalFileContext(query: .init(),
+            page: .init(candidates: [first, second], isComplete: true, nextCursor: "injected-cursor",
+                hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: first, inventoryState: .notQueried, controls: [observedButton])
+        let inconsistentProjection = try await proposal(inconsistent)
+        XCTAssertFalse(inconsistentProjection.toolNames.contains("selectFile"))
+        XCTAssertFalse(inconsistentProjection.toolNames.contains("askFile"))
+        XCTAssertFalse(inconsistentProjection.toolNames.contains("selectLocalFile"))
+        XCTAssertFalse(inconsistentProjection.cursorOffered, "An unqueried catalog cannot offer an injected continuation cursor")
+        let forgedCursorTransport = NativeStepQueueFixtureTransport(responses: [try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "any", "sortField": "", "sortDirection": "", "cursor": "injected-cursor"
+        ])])
+        var forgedCursorPlanner = try nativeStepPlanner(transport: forgedCursorTransport)
+        forgedCursorPlanner.usesDirectActionPlanning = true
+        do {
+            _ = try await forgedCursorPlanner.propose(inconsistent)
+            XCTFail("A notQueried catalog cannot accept an injected continuation cursor")
+        } catch let error as ComputerUseBrowserGoalPlanError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+        for (name, arguments) in [
+            ("selectFile", ["candidateID": "unqueried-a"] as [String: Any]),
+            ("askFile", ["question": "Choose", "candidateIDs": ["unqueried-a", "unqueried-b"]] as [String: Any]),
+            ("selectLocalFile", ["candidateID": "unqueried-a", "triggerControlID": "c90"] as [String: Any])
+        ] {
+            let transport = NativeStepQueueFixtureTransport(responses: [try nativeBrowserFunctionEnvelope(name, arguments: arguments)])
+            var invalidPlanner = try nativeStepPlanner(transport: transport)
+            invalidPlanner.usesDirectActionPlanning = true
+            do {
+                _ = try await invalidPlanner.propose(inconsistent)
+                XCTFail("An explicitly unqueried catalog cannot authorize \(name), even with injected candidate fields")
+            } catch let error as ComputerUseBrowserGoalPlanError {
+                XCTAssertEqual(error, .invalidResponse)
+            }
+        }
     }
 
     func testNativeDirectFilePlannerOmitsCursorForFirstPageQuery() async throws {
@@ -4129,10 +4257,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     private func nativeLocalFileContext(query: ComputerUseLocalFileCatalog.Query,
         page: ComputerUseLocalFileCatalog.Page,
         selectedCandidate: ComputerUseLocalFileCatalog.Candidate? = nil,
+        inventoryState: ComputerUseMCPBrowserStepPlanner.LocalFileContext.InventoryState = .available,
         controls: [ComputerUseBrowserPageSnapshot.Control] = []) throws -> ComputerUseMCPBrowserStepPlanner.Context {
         var input = ComputerUseFaraModel.Input(goal: "Upload the most recent presentation from Downloads to my default Google Drive account.",
             screenshotPNG: Data(), currentURL: URL(string: "https://drive.google.com/drive/my-drive"))
-        input.localFileCatalog = .init(query: query, page: page, selectedCandidate: selectedCandidate)
+        input.localFileCatalog = .init(query: query, page: page, selectedCandidate: selectedCandidate,
+            inventoryState: inventoryState)
         var context = try ComputerUseMCPBrowserStepPlanner().context(input,
             page: compactReadingPage(text: "Google Drive upload page is open.", label: "Google Drive", controls: controls), wholePage: true)
         let currentURL = try XCTUnwrap(input.currentURL)
@@ -5226,6 +5356,29 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 if localFormSearch || localFileUpload {
                     var safe: [String: Any] = ["inputTokens": tokens]
                     if let requestRoot = try? JSONSerialization.jsonObject(with: request) as? [String: Any] {
+                        if localFileUpload,
+                           let messages = requestRoot["messages"] as? [[String: Any]],
+                           let captureMessage = messages.first(where: {
+                               $0["role"] as? String == "tool" && $0["name"] as? String == "captureNativeBrowser"
+                           }),
+                           let captureText = captureMessage["content"] as? String,
+                           let captureData = captureText.data(using: .utf8),
+                           let captureObject = try? JSONSerialization.jsonObject(with: captureData) as? [String: Any] {
+                            let allowedCaptureKeys: Set<String> = ["page", "reading", "texts", "availableGoalEffects", "captureScope", "currentURL"]
+                            let pageInput = captureObject.filter { allowedCaptureKeys.contains($0.key) }
+                            if let pageInputData = try? JSONSerialization.data(withJSONObject: pageInput,
+                                options: [.sortedKeys, .withoutEscapingSlashes]) {
+                                let retained = Data(pageInputData.prefix(16_384))
+                                var validUTF8 = retained
+                                while String(data: validUTF8, encoding: .utf8) == nil, !validUTF8.isEmpty {
+                                    validUTF8.removeLast()
+                                }
+                                safe["modelInputPageCaptureJSONPrefix"] = String(data: validUTF8, encoding: .utf8) ?? ""
+                                safe["modelInputPageCaptureUTF8Bytes"] = pageInputData.count
+                                safe["modelInputPageCaptureRetainedUTF8Bytes"] = validUTF8.count
+                                safe["modelInputPageCaptureTruncated"] = validUTF8.count < pageInputData.count
+                            }
+                        }
                         if let format = requestRoot["response_format"] as? [String: Any],
                            let jsonSchema = format["json_schema"] as? [String: Any],
                            let schemaName = jsonSchema["name"] as? String {
@@ -5298,7 +5451,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     if let data = try? JSONSerialization.data(withJSONObject: safe, options: [.sortedKeys]) {
                         plannerTrace.append(String(decoding: data, as: UTF8.self))
                     }
-                    _ = request // Do not retain page-bearing requests or model narrative.
+                    _ = request // Full requests stay unretained; local file fixtures retain only bounded diagnostic projections.
                     return
                 }
                 let safeResponse: [String: Any]

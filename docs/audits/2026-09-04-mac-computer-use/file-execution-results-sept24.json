@@ -2718,16 +2718,572 @@
         "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
         "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
       }
+    },
+    {
+      "name": "native-managed-file-upload-sept24-04",
+      "status": "failed-unqueried-catalog-misread-as-empty",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+      ],
+      "command": {
+        "name": "native-managed-file-upload-sept24-04",
+        "ids": [
+          "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+        ],
+        "requiredSources": [
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift",
+          "protocol/Swift/ComputerUseProtocol.swift"
+        ],
+        "environment": {
+          "DEVELOPER_DIR": "/Applications/Xcode-beta.app/Contents/Developer",
+          "TEST_RUNNER_RUN_MANAGED_NATIVE_FILE_UPLOAD": "1",
+          "TEST_RUNNER_MANAGED_NATIVE_FILE_UPLOAD_DIRECTORY": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04",
+          "TEST_RUNNER_MANAGED_NATIVE_FILE_UPLOAD_DOWNLOADS": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/file-transfer-fixtures-sept24-v1/Downloads",
+          "TEST_RUNNER_MANAGED_NATIVE_FILE_UPLOAD_ORACLE": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/file-transfer-fixtures-sept24-v1/external-oracle.json",
+          "TEST_RUNNER_RUN_FARA_NATIVE_BROWSER_INPUT": "1",
+          "TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS": "1"
+        },
+        "outputDirectory": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04",
+        "resultBundlePath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04.xcresult",
+        "externalOraclePath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/file-transfer-fixtures-sept24-v1/external-oracle.json",
+        "externalOracleSHA256": "a8f75d048f4cb599f1f313a8b69b4b485f1bf14b2bbca080d4bd33d8017ad5e6",
+        "testCreatesOutputDirectory": true,
+        "outputDirectoryMustBeAbsent": true,
+        "fixtureScope": "Actual managed host, helper, native local model and owned browser. Disposable approved Downloads directory; neutral loopback upload page. External fixture bytes and SHA never enter model prompt. Exactly one POST and completed task required. Not Drive or email acceptance.",
+        "inference": true,
+        "runnerSHA256": "3dfb7b85cb3aa3179f70d6291326f95ecb29fc59b1d8777bdf13254d5f498217",
+        "qualification": "Run only after cursor regression GREEN; actual managed native loop and frozen external fixture oracle.",
+        "changeUnderTest": "First-page listFiles cursor omitted from tool schema; exact current continuation is optional. Same model, resource profile, upload fixture and independent bytes oracle.",
+        "executionState": "finished",
+        "preparedOnly": false,
+        "args": [
+          "xcodebuild",
+          "-quiet",
+          "test",
+          "-project",
+          "host-mac/RemoteDesktopHost.xcodeproj",
+          "-scheme",
+          "RemoteDesktopHost",
+          "-configuration",
+          "Debug",
+          "-destination",
+          "platform=macOS,arch=arm64",
+          "-derivedDataPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification",
+          "-clonedSourcePackagesDirPath",
+          "/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopHost-ahnjyfdatxipxnduxwczwbsqliuv/SourcePackages",
+          "-onlyUsePackageVersionsFromResolvedFile",
+          "-skipPackageUpdates",
+          "-jobs",
+          "1",
+          "-parallel-testing-enabled",
+          "NO",
+          "-test-timeouts-enabled",
+          "YES",
+          "-maximum-test-execution-time-allowance",
+          "90",
+          "CONFIGURATION_BUILD_DIR=/Users/michael/Library/Developer/Xcode/DerivedData/RemoteDesktopRepairVerification/Build/Products/CaptureProbe",
+          "PRODUCT_BUNDLE_IDENTIFIER=com.threadmark.remotedesktop.$(PRODUCT_NAME:rfc1034identifier).capture-probe",
+          "CODE_SIGN_STYLE=Manual",
+          "CODE_SIGN_IDENTITY=857DFBE5FB6BE1CAD96F1ACF4CFF712743E7B078",
+          "CODE_SIGN_ENTITLEMENTS=",
+          "PROVISIONING_PROFILE_SPECIFIER=",
+          "PROVISIONING_PROFILE=",
+          "-resultBundlePath",
+          "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04.xcresult",
+          "-only-testing:RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+        ],
+        "buildConfigSHA256": "66891e6654e4a62394769ff87fbe9ef808b41c886ff44a521fb8ac0d56dc4294",
+        "buildConfigSources": [
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift",
+          "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift",
+          "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift",
+          "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift"
+        ],
+        "requiredSnapshotSourceCount": 21,
+        "sourceSHA256": {
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "3ddb5fa3d6f26e93a5eaae4146a9d7d1e1490a274171aa7f6756edcd91e99cbd",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "a5427a9527b10495b32364e28732bd67bbecde922aa29d2d2ce1c0e978be2f4f",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
+          "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+          "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+          "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+          "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "bbda6bee068cdc14ff645a0f7ad468af339a2e8c64e24ab8a92cfc0f84f5f804",
+          "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+          "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+          "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "00d58f9bda5b60337adf8d3ec587399599ebf73a9d3913c62771f79299f8e0f0",
+          "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "06bbcff427b880edf3b0ef1f0f7d21bc2d9a834f3b600f3eb71f1f3616cf6ea6",
+          "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "b497f687926019b97ea471edb213f072ed886fbbdca52fd13b65ebf57a72490d",
+          "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+          "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+          "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+        },
+        "sourceSnapshotPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04-sources",
+        "testSourceIDPresentAtInvocation": true,
+        "exitCode": 65,
+        "logPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/native-managed-file-upload-sept24-04.log"
+      },
+      "runnerSHA256": "3dfb7b85cb3aa3179f70d6291326f95ecb29fc59b1d8777bdf13254d5f498217",
+      "summary": {
+        "devicesAndConfigurations": [
+          {
+            "device": {
+              "architecture": "arm64",
+              "deviceId": "00006021-000821AC02BB401E",
+              "deviceName": "My Mac",
+              "modelName": "MacBook Pro",
+              "osBuildNumber": "26A5406e",
+              "osVersion": "27.0",
+              "platform": "macOS"
+            },
+            "expectedFailures": 0,
+            "failedTests": 1,
+            "passedTests": 0,
+            "skippedTests": 0,
+            "testPlanConfiguration": {
+              "configurationId": "1",
+              "configurationName": "Test Scheme Action"
+            }
+          }
+        ],
+        "environmentDescription": "RemoteDesktopHost · Built with macOS 27.0",
+        "expectedFailures": 0,
+        "failedTests": 1,
+        "finishTime": 1790296518.261,
+        "passedTests": 0,
+        "result": "Failed",
+        "runtimeWarnings": [
+          {
+            "issueType": "Runtime Warning",
+            "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+          }
+        ],
+        "skippedTests": 0,
+        "startTime": 1790296484.217,
+        "statistics": [],
+        "testFailures": [
+          {
+            "failureText": "XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - Exactly one actual file POST must reach the fixture",
+            "targetName": "RemoteDesktopHostTests",
+            "testIdentifier": 1,
+            "testIdentifierString": "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes()",
+            "testIdentifierURL": "test://com.apple.xcode/RemoteDesktopHost/RemoteDesktopHostTests/ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes",
+            "testName": "testOptInManagedNativeFileUploadUsesExternalOracleBytes()"
+          }
+        ],
+        "title": "Test - RemoteDesktopHost",
+        "topInsights": [],
+        "totalTestCount": 1
+      },
+      "build": {
+        "actionTitle": "Testing project RemoteDesktopHost with scheme RemoteDesktopHost",
+        "analyzerWarningCount": 0,
+        "analyzerWarnings": [],
+        "destination": {
+          "architecture": "arm64",
+          "deviceId": "00006021-000821AC02BB401E",
+          "deviceName": "My Mac",
+          "modelName": "MacBook Pro",
+          "osBuildNumber": "26A5406e",
+          "osVersion": "27.0",
+          "platform": "macOS"
+        },
+        "endTime": 1790296518.261,
+        "errorCount": 0,
+        "errors": [],
+        "startTime": 1790296484.217,
+        "status": "succeeded",
+        "warningCount": 0,
+        "warnings": []
+      },
+      "sourceAudit": {
+        "sourceCount": 21,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "sourceSHA256": {
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "3ddb5fa3d6f26e93a5eaae4146a9d7d1e1490a274171aa7f6756edcd91e99cbd",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c16db4a22f054204106bad21bd8f267e6c7dbf2e330655727b334cfd54070f98",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "a5427a9527b10495b32364e28732bd67bbecde922aa29d2d2ce1c0e978be2f4f",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
+        "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
+        "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "5de2f07cc6f6672ed22eec6d392f3282d83a2b67ada69fef503281c5ccb303f9",
+        "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "cef10bd66274bf672714a1a09bbf6877cef6782cf0f2082ff371b2c72d6c5d61",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+        "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "bbda6bee068cdc14ff645a0f7ad468af339a2e8c64e24ab8a92cfc0f84f5f804",
+        "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
+        "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
+        "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "00d58f9bda5b60337adf8d3ec587399599ebf73a9d3913c62771f79299f8e0f0",
+        "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "06bbcff427b880edf3b0ef1f0f7d21bc2d9a834f3b600f3eb71f1f3616cf6ea6",
+        "host-mac/RemoteDesktopHostTests/ComputerUseOwnedBrowserTests.swift": "b497f687926019b97ea471edb213f072ed886fbbdca52fd13b65ebf57a72490d",
+        "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+        "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "b66549b8d7e3795462849c19be4d956c9db06811de750996ef9ef3496e2f0d58",
+        "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
+      },
+      "managedResult": {
+        "browserCaptureStage": "complete",
+        "completedInspectedModelExchanges": 2,
+        "expectedFormRequestPath": null,
+        "expectedInitialClarification": false,
+        "finalBrowserTaskID": "mcp-browser-no-package-B3C8CCB2-5D88-425B-BB25-594EAF0FED41",
+        "finalURL": "http://127.0.0.1:63915/index",
+        "formRequestCount": null,
+        "goal": "Open http://127.0.0.1:63915/index. Upload the latest presentation in Downloads to this page, then confirm what the page reports.",
+        "initialNativePlannerCalls": 0,
+        "initialStagePlannerCalls": 0,
+        "loadedPageDeadlineExceeded": false,
+        "localFileUpload": true,
+        "localFormHarnessBudgetSeconds": null,
+        "localFormSearch": false,
+        "maximumObservedWorkers": 1,
+        "modelLaunchAttempts": 0,
+        "nativeFunctionNames": [
+          "openLink",
+          "askUser"
+        ],
+        "nativeInstalls": 0,
+        "pathsBeforeGoal": [],
+        "plannerTrace": [
+          "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"reference\\\":\\\"user-url-1\\\"}\",\"name\":\"openLink\"}}]}}],\"inputTokens\":1252,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"listFiles\"],\"usage\":{\"completion_tokens\":194,\"prompt_tokens\":1252,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":1446}}",
+          "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"text\\\":\\\"The page http:\\/\\/127.0.0.1:63915\\/index is loaded and displays a file upload interface. However, the Downloads folder currently shows no files available for upload. Would you like to check if there are presentation files elsewhere, or would you prefer to provide a file path to upload directly?\\\"}\",\"name\":\"askUser\"}}]}}],\"inputTokens\":2000,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\"],\"usage\":{\"completion_tokens\":176,\"prompt_tokens\":2000,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":2176}}"
+        ],
+        "preloadedPageURL": null,
+        "requestedPaths": [
+          "/index"
+        ],
+        "resumeDeadlineExceeded": false,
+        "resumeHarnessBudgetSeconds": 80,
+        "scope": "default HostComputerUseManager composition and production browser loader; installed real helper; isolated transport, ledger and browser; verified installed native text model and shared managed runtime; missing visual model receipt",
+        "seconds": 16.86659801006317,
+        "terminal": {
+          "answerUTF8Bytes": 292,
+          "containsFreshUploadResult": false,
+          "outcome": "userInterventionRequired",
+          "terminalText": "The page http://127.0.0.1:63915/index is loaded and displays a file upload interface. However, the Downloads folder currently shows no files available for upload. Would you like to check if there are presentation files elsewhere, or would you prefer to provide a file path to upload directly?"
+        },
+        "totalPlannerCalls": 0,
+        "uploadBodyMatchesExternalLatestPresentation": false,
+        "uploadRequestCount": 0,
+        "usesDirectActionPlanning": true,
+        "usesNativeTextModel": true,
+        "visualInstalls": 0,
+        "workerSamples": 142
+      }
     }
   ],
-  "currentResult": "Nine catalog/planner/choice checks pass. The focused dispatcher RED reached the intended unsupported-action boundary; after GREEN, one scripted executor test posts exact fixture bytes once and suppresses a repeated same candidate/document/trigger. Managed model run01 returned an invalid initial plan before navigation and sent zero POSTs. Run02 failed to compile before tests or inference. Run03 made two valid native calls (openLink, then listFiles) but supplied cursor \"[]\" on the first page; the planner rejected the resulting plan, with zero POSTs. Stale selected-file recovery through a fresh user choice remains absent at every candidate count. No Drive upload or email attachment is accepted.",
+  "currentResult": "The explicit unqueried catalog state is implemented and component-verified: GREEN01 passed 13/14 with one failing synthetic observed-control ID (c-unqueried); GREEN02 changed only that test fixture ID and passed 2/2. Across both GREEN batches, 14 distinct relevant methods passed. RED01 did not reach tests because of test-source compile errors; RED02 exposed a genuine executor expectation failure and also had a wrongly routed legacy projection setup failure; RED03 passed its positive control and failed both unqueried-state checks. Managed run05 posted the exact latest presentation but failed with empty answer effectReference; its actual supplied post-upload capture is unknown. Diagnostic run06 (test-only bounded 16 KiB trace) also posted exact oracle bytes and confirms the fifth request received a fresh, untruncated capture saying “Upload accepted; file received.” The model quoted it but cited only the navigation URL, classified upload as information, and included a modified timestamp unsupported by selected-page evidence; host rejected the answer. No controlled workflow is fully accepted.",
   "limitations": [
     "Managed model run01 did not navigate; its initial planner exchange had no valid assistant message. Run03 navigated to the local fixture and made a listFiles call, but passed invalid first-page cursor \"[]\" and ended unableToComplete with zero POSTs.",
-    "The one-POST dispatcher result comes from a scripted planner fixture. It proves the native chooser/executor dispatch leg and duplicate suppression, not natural-language file selection, Google Drive upload completion, or semantic goal coverage.",
+    "The earlier one-POST dispatcher result came from a scripted planner fixture and proves only chooser/executor dispatch plus duplicate suppression. Managed run05 is separate model-driven evidence: it sent one external-oracle-matched POST, but did not satisfy task completion.",
     "A stale user-selected candidate fails closed, but no fresh multiple-choice recovery is offered, whether one or several candidates remain.",
     "The app-owned browser profile is ephemeral; a default-account Drive login and remote readback remain untested.",
-    "No email attachment workflow is accepted."
+    "No email attachment workflow is accepted.",
+    "Run05’s actual supplied post-upload capture remains unknown. Run06 confirms fresh page text in that diagnostic run only; the model quoted it but supplied unsupported evidence references and a modified timestamp, so the host rejected completion. Do not infer a timing race or stale capture for run05.",
+    "The direct experimental planner remains default-off. The production profile is ephemeral; page chooser observation does not prove remote success; stale selection has no automatic recovery at any candidate count; browser projection is main-frame-only; catalog scope is Downloads-only; a TOCTOU gap remains.",
+    "No Drive/mail/live-account workflow, phone choice interaction, full controlled E2E pass, production readiness or model promotion is established.",
+    "Run06 differs from run05 by test-only bounded page-capture tracing. Its trace establishes the capture supplied to the model in this test, but the unsupported answer evidence and failed terminal assertion leave the complete workflow unaccepted.",
+    "Next: minimally connect file-supply completion to typed evidence and require answer references supported by fresh page capture. The run06 artifacts do not support adding a timing delay."
   ],
   "preparedManagedTest": "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes",
-  "cursorContract": "First-page requests omit cursor. A continuation may use only the optional exact current host cursor for the same query. Three regression RED failures; thirteen related GREEN checks pass. Actual managed rerun04 pending."
+  "cursorContract": "First-page requests omit cursor; continuations use only the exact current host cursor for the same query. The explicit unqueried file catalog state is now implemented. GREEN01: 13 pass, 1 fail caused by invalid synthetic observed-control ID c-unqueried. GREEN02 corrected only the test fixture ID and passed 2/2. Fourteen distinct relevant methods pass across GREEN batches. Managed run05 matches one exact latest-presentation POST to the external oracle, but terminal completion fails; the model reports stale page text and invalid answer evidence.",
+  "catalogStateCheckpoints": [
+    {
+      "name": "native-file-catalog-state-red01",
+      "runnerSHA256": "821ae168c32b0c46acfa17c649d9a310b476e91e2de62d7943954e41de587168",
+      "qualification": "RED: explicit unqueried catalog status, production field scaffold plus projection/executor regressions; no inference.",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage"
+      ],
+      "durationSeconds": 76.875,
+      "result": "unknown",
+      "passedTests": 0,
+      "failedTests": 0,
+      "totalTestCount": 0,
+      "build": {
+        "status": "failed",
+        "errorCount": 4,
+        "warningCount": 24
+      },
+      "sourceAudit": {
+        "sourceCount": 26,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "compilerErrors": [
+        "Missing argument for parameter 'responses' in call",
+        "Failed to produce diagnostic for expression; please submit a bug report (https://swift.org/contributing/#reporting-bugs)",
+        "Missing argument for parameter 'responses' in call"
+      ]
+    },
+    {
+      "name": "native-file-catalog-state-red02",
+      "runnerSHA256": "48d1949f66ea7b12593cd05ff5c2b2986b339d88e7d3f0249dc2af00b0b74ad1",
+      "qualification": "RED: explicit unqueried catalog status, production field scaffold plus projection/executor regressions; no inference.",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage"
+      ],
+      "durationSeconds": 54.925,
+      "result": "Failed",
+      "passedTests": 0,
+      "failedTests": 2,
+      "totalTestCount": 2,
+      "build": {
+        "status": "succeeded",
+        "errorCount": 0,
+        "warningCount": 20
+      },
+      "sourceAudit": {
+        "sourceCount": 26,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "failureDetails": [
+        "XCTAssertEqual failed: (\"available\") is not equal to (\"notQueried\") - Initial capture must not describe the unscanned directory as an empty listing",
+        "failed: caught error: \"invalidResponse\""
+      ]
+    },
+    {
+      "name": "native-file-catalog-state-red03",
+      "runnerSHA256": "2ca72ee617b2c580b15e7b311b4b7aa9fd5dc9b8e02160523655a5c3f302151e",
+      "qualification": "RED: actual native request projection and lazy executor state; existing valid native file action is a positive control. No inference.",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerUsesCurrentSelectedCandidateAndObservedChooserTrigger"
+      ],
+      "durationSeconds": 30.871,
+      "result": "Failed",
+      "passedTests": 1,
+      "failedTests": 2,
+      "totalTestCount": 3,
+      "build": {
+        "status": "succeeded",
+        "errorCount": 0,
+        "warningCount": 9
+      },
+      "sourceAudit": {
+        "sourceCount": 26,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "failureDetails": [
+        "XCTAssertEqual failed: (\"available\") is not equal to (\"notQueried\") - Initial capture must not describe the unscanned directory as an empty listing",
+        "XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(\"notQueried\")\")"
+      ]
+    },
+    {
+      "name": "native-file-catalog-state-green01",
+      "runnerSHA256": "afb1af6539cb005991fb47eba939233868dd0787747c3315d628bb536077087e",
+      "qualification": "GREEN: explicit lazy catalog state, actual native request projection and 13 related cursor/file/choice/native-dispatch checks. No inference.",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerOmitsCursorForFirstPageQuery",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerOffersOnlyOptionalCurrentCursorForNextPage",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerRejectsSuppliedEmptyAndStaleCursors",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerUsesCurrentSelectedCandidateAndObservedChooserTrigger",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerRejectsStaleReferencesAndWithholdsImpossibleTools",
+        "ComputerUseMobileInitiationTests/testNativeDirectInitialFileCatalogUsesToolRouteWithoutAnswerOrSyntheticPageProof",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileChoiceUsesTypedContinuationAndRejectsForeignAndStaleChoices",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerProjectsMetadataAndDecodesTypedCatalogQuery",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerSelectsOnlyOfferedCandidateAndBuildsScopedToolPlan",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerAsksForExactOfferedChoicesAndRejectsUnboundChoices",
+        "ComputerUseMobileInitiationTests/testNativeDirectFilePlannerRejectsUnboundCatalogOperations",
+        "ComputerUseFaraActionTests/testOptInFaraSelectLocalFileSendsOnceWithoutClaimingUploadCompletion"
+      ],
+      "durationSeconds": 74.126,
+      "result": "Failed",
+      "passedTests": 13,
+      "failedTests": 1,
+      "totalTestCount": 14,
+      "build": {
+        "status": "succeeded",
+        "errorCount": 0,
+        "warningCount": 28
+      },
+      "sourceAudit": {
+        "sourceCount": 26,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "failureDetails": [
+        "failed: caught error: \"browserChanged\""
+      ]
+    },
+    {
+      "name": "native-file-catalog-state-green02",
+      "runnerSHA256": "ce8760c8de31e3a640740d65b56c4d57bcfb830f8ca548d1f4f230e4837e890a",
+      "qualification": "Rerun projection and actual lazy catalog request after test-only observed-control ID correction; production unchanged from GREEN01, whose other13checks passed.",
+      "testIDs": [
+        "ComputerUseMobileInitiationTests/testNativeDirectFileCatalogDistinguishesUnqueriedFromCompletedEmpty",
+        "ComputerUseMobileInitiationTests/testFaraBrowserFileCatalogPagesAndAsksFromLoadedPage"
+      ],
+      "durationSeconds": 25.195,
+      "result": "Passed",
+      "passedTests": 2,
+      "failedTests": 0,
+      "totalTestCount": 2,
+      "build": {
+        "status": "succeeded",
+        "errorCount": 0,
+        "warningCount": 9
+      },
+      "sourceAudit": {
+        "sourceCount": 26,
+        "sourceUnchanged": true,
+        "changed": []
+      }
+    }
+  ],
+  "latestManagedRun05": {
+    "name": "native-managed-file-upload-sept24-05",
+    "runnerSHA256": "bf7ae4914ce0d7048709dcb1276c6e84d27e3f3327d154dd2091b74344775b4e",
+    "qualification": "Run only after explicit unqueried catalog state regression GREEN; actual managed loop and frozen external oracle.",
+    "testIDs": [
+      "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+    ],
+    "durationSeconds": 65.791,
+    "result": "Failed",
+    "passedTests": 0,
+    "failedTests": 1,
+    "build": {
+      "status": "succeeded",
+      "errorCount": 0,
+      "warningCount": 0
+    },
+    "sourceAudit": {
+      "sourceCount": 21,
+      "sourceUnchanged": true,
+      "changed": []
+    },
+    "runtimeWarnings": [
+      {
+        "issueType": "Runtime Warning",
+        "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+      }
+    ],
+    "managedResult": {
+      "seconds": 49.49540901184082,
+      "maximumObservedWorkers": 1,
+      "workerSamples": 417,
+      "nativeFunctionNames": [
+        "openLink",
+        "listFiles",
+        "selectFile",
+        "selectLocalFile",
+        "answer"
+      ],
+      "uploadRequestCount": 1,
+      "uploadBodyMatchesExternalLatestPresentation": true,
+      "terminalOutcome": "unableToComplete",
+      "terminalText": "I couldn't complete that task: The local planner did not return a complete, valid browser plan.",
+      "containsFreshUploadResult": false,
+      "requestedPaths": [
+        "/index",
+        "/upload"
+      ],
+      "plannerTrace": [
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"reference\\\":\\\"user-url-1\\\"}\",\"name\":\"openLink\"}}]}}],\"inputTokens\":1261,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"listFiles\"],\"usage\":{\"completion_tokens\":123,\"prompt_tokens\":1261,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":1384}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"fileKind\\\":\\\"presentation\\\",\\\"sortDirection\\\":\\\"descending\\\",\\\"sortField\\\":\\\"modifiedAt\\\"}\",\"name\":\"listFiles\"}}]}}],\"inputTokens\":2009,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\"],\"usage\":{\"completion_tokens\":119,\"prompt_tokens\":2009,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":2128}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"candidateID\\\":\\\"0a895828-2fd8-44dc-a777-551785c74672\\\"}\",\"name\":\"selectFile\"}}]}}],\"inputTokens\":2675,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\"],\"usage\":{\"completion_tokens\":282,\"prompt_tokens\":2675,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":2957}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"candidateID\\\":\\\"0a895828-2fd8-44dc-a777-551785c74672\\\",\\\"triggerControlID\\\":\\\"c1\\\"}\",\"name\":\"selectLocalFile\"}}]}}],\"inputTokens\":2964,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\",\"selectLocalFile\"],\"usage\":{\"completion_tokens\":281,\"prompt_tokens\":2964,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":3245}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"objective\\\":\\\"Open the local file catalog to identify the latest presentation, then confirm the upload status on the target page\\\",\\\"constraints\\\":[\\\"Use listFiles to find the latest presentation\\\", \\\"Upload the selected file using selectLocalFile\\\", \\\"Confirm what the page reports after upload\\\"],\\\"text\\\":\\\"I have opened http:\\/\\/127.0.0.1:63921\\/index and identified the latest presentation in Downloads as \\\\\\\"Launch plan.pptx\\\\\\\" (modified 2026-09-23T12:00:00Z). The file has been supplied to the page using the upload control (c1). The page currently shows a file upload target with the message \\\\\\\"Choose a file to upload.\\\\\\\" However, I need to wait for or check what confirmation the page provides after the upload is complete.\\\",\\\"outcomes\\\":[{\\\"instruction\\\": \\\"Show the latest presentation from Downloads\\\", \\\"kind\\\": \\\"information\\\", \\\"evidence\\\": [\\\"source\\\"], \\\"effectReference\\\": \\\"navigation:6275b5061b88c86a7d32d853048087ba00f5561163e8ddee4d1c6b153a5b09db\\\"}, {\\\"instruction\\\": \\\"Confirm the upload status\\\", \\\"kind\\\": \\\"action\\\", \\\"evidence\\\": [\\\"source\\\"], \\\"effectReference\\\": \\\"\\\"}]}\",\"name\":\"answer\"}}]}}],\"inputTokens\":3065,\"model\":\"native-form-planner-v2\",\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\",\"selectLocalFile\"],\"usage\":{\"completion_tokens\":797,\"prompt_tokens\":3065,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":3862}}"
+      ]
+    },
+    "interpretation": "Exactly one POST matched the external oracle: Launch plan.pptx, 28,273 bytes. The final answer action was invalid (empty effectReference); taskCompleted assertion failed. The model reported the pre-upload text “Choose a file to upload.” Run05 did not retain the actual supplied post-upload capture, so its record alone cannot establish whether the text reflected stale capture or unsupported reporting; run06 does not retroactively resolve run05 input."
+  },
+  "latestManagedRun06": {
+    "name": "native-managed-file-upload-sept24-06",
+    "runnerSHA256": "91404a7ddb620a3b6f015a1959dfa6a83a49af3b1f6edab4ffb21ffc09ace4b5",
+    "qualification": "Diagnostic rerun after actual single exact-byte upload in run05; same program, model, fixture and oracle except test-only bounded capture tracing.",
+    "testIDs": [
+      "ComputerUseMobileInitiationTests/testOptInManagedNativeFileUploadUsesExternalOracleBytes"
+    ],
+    "durationSeconds": 87.799,
+    "result": "Failed",
+    "passedTests": 0,
+    "failedTests": 1,
+    "totalTestCount": 1,
+    "build": {
+      "status": "succeeded",
+      "errorCount": 0,
+      "warningCount": 9
+    },
+    "sourceAudit": {
+      "sourceCount": 21,
+      "sourceUnchanged": true,
+      "changed": []
+    },
+    "runtimeWarnings": [
+      {
+        "issueType": "Runtime Warning",
+        "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+      }
+    ],
+    "managedResult": {
+      "seconds": 49.11592495441437,
+      "maximumObservedWorkers": 1,
+      "workerSamples": 400,
+      "nativeFunctionNames": [
+        "openLink",
+        "listFiles",
+        "selectFile",
+        "selectLocalFile",
+        "answer"
+      ],
+      "uploadRequestCount": 1,
+      "uploadBodyMatchesExternalLatestPresentation": true,
+      "terminalOutcome": "unableToComplete",
+      "terminalText": "I couldn't complete that task: The proposed answer contains a number, date or source that the current records do not support. The task has not completed.",
+      "containsFreshUploadResult": false,
+      "requestedPaths": [
+        "/index",
+        "/upload"
+      ],
+      "plannerTrace": [
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"reference\\\":\\\"user-url-1\\\"}\",\"name\":\"openLink\"}}]}}],\"inputTokens\":1261,\"model\":\"native-form-planner-v2\",\"modelInputPageCaptureJSONPrefix\":\"{\\\"availableGoalEffects\\\":[],\\\"captureScope\\\":\\\"initialObservation\\\"}\",\"modelInputPageCaptureRetainedUTF8Bytes\":63,\"modelInputPageCaptureTruncated\":false,\"modelInputPageCaptureUTF8Bytes\":63,\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"listFiles\"],\"usage\":{\"completion_tokens\":123,\"prompt_tokens\":1261,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":1384}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"fileKind\\\":\\\"presentation\\\",\\\"sortDirection\\\":\\\"descending\\\",\\\"sortField\\\":\\\"modifiedAt\\\"}\",\"name\":\"listFiles\"}}]}}],\"inputTokens\":1991,\"model\":\"native-form-planner-v2\",\"modelInputPageCaptureJSONPrefix\":\"{\\\"availableGoalEffects\\\":[{\\\"committedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"reference\\\":\\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\",\\\"requestedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"type\\\":\\\"openURL\\\"}],\\\"captureScope\\\":\\\"completePage\\\",\\\"page\\\":{\\\"controls\\\":[{\\\"disabled\\\":false,\\\"formID\\\":null,\\\"id\\\":\\\"c1\\\",\\\"kind\\\":\\\"button\\\",\\\"label\\\":\\\"Choose file\\\",\\\"method\\\":null,\\\"readOnly\\\":false,\\\"required\\\":false}],\\\"omittedEmbeddedContent\\\":false,\\\"omittedStructure\\\":false,\\\"reading\\\":[{\\\"html\\\":[{\\\"body\\\":[{\\\"h1\\\":[{\\\"t1\\\":\\\"File upload target\\\"}]},{\\\"t2\\\":\\\"Choose file\\\"},{\\\"p\\\":[{\\\"t3\\\":\\\"Choose a file to upload.\\\"}]}]}]}],\\\"recordWindow\\\":{\\\"number\\\":1,\\\"otherCapturedLinks\\\":0,\\\"otherCapturedTexts\\\":0,\\\"total\\\":1},\\\"truncated\\\":false,\\\"url\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\"}}\",\"modelInputPageCaptureRetainedUTF8Bytes\":737,\"modelInputPageCaptureTruncated\":false,\"modelInputPageCaptureUTF8Bytes\":737,\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\"],\"usage\":{\"completion_tokens\":119,\"prompt_tokens\":1991,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":2110}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"candidateID\\\":\\\"51ea31a1-a2c4-4eac-ac43-7fb94255b3b3\\\"}\",\"name\":\"selectFile\"}}]}}],\"inputTokens\":2642,\"model\":\"native-form-planner-v2\",\"modelInputPageCaptureJSONPrefix\":\"{\\\"availableGoalEffects\\\":[{\\\"committedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"reference\\\":\\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\",\\\"requestedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"type\\\":\\\"openURL\\\"}],\\\"captureScope\\\":\\\"completePage\\\",\\\"page\\\":{\\\"controls\\\":[{\\\"disabled\\\":false,\\\"formID\\\":null,\\\"id\\\":\\\"c1\\\",\\\"kind\\\":\\\"button\\\",\\\"label\\\":\\\"Choose file\\\",\\\"method\\\":null,\\\"readOnly\\\":false,\\\"required\\\":false}],\\\"omittedEmbeddedContent\\\":false,\\\"omittedStructure\\\":false,\\\"reading\\\":[{\\\"html\\\":[{\\\"body\\\":[{\\\"h1\\\":[{\\\"t1\\\":\\\"File upload target\\\"}]},{\\\"t2\\\":\\\"Choose file\\\"},{\\\"p\\\":[{\\\"t3\\\":\\\"Choose a file to upload.\\\"}]}]}]}],\\\"recordWindow\\\":{\\\"number\\\":1,\\\"otherCapturedLinks\\\":0,\\\"otherCapturedTexts\\\":0,\\\"total\\\":1},\\\"truncated\\\":false,\\\"url\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\"}}\",\"modelInputPageCaptureRetainedUTF8Bytes\":737,\"modelInputPageCaptureTruncated\":false,\"modelInputPageCaptureUTF8Bytes\":737,\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\"],\"usage\":{\"completion_tokens\":408,\"prompt_tokens\":2642,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":3050}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"candidateID\\\":\\\"51ea31a1-a2c4-4eac-ac43-7fb94255b3b3\\\",\\\"triggerControlID\\\":\\\"c1\\\"}\",\"name\":\"selectLocalFile\"}}]}}],\"inputTokens\":2925,\"model\":\"native-form-planner-v2\",\"modelInputPageCaptureJSONPrefix\":\"{\\\"availableGoalEffects\\\":[{\\\"committedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"reference\\\":\\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\",\\\"requestedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"type\\\":\\\"openURL\\\"}],\\\"captureScope\\\":\\\"completePage\\\",\\\"page\\\":{\\\"controls\\\":[{\\\"disabled\\\":false,\\\"formID\\\":null,\\\"id\\\":\\\"c1\\\",\\\"kind\\\":\\\"button\\\",\\\"label\\\":\\\"Choose file\\\",\\\"method\\\":null,\\\"readOnly\\\":false,\\\"required\\\":false}],\\\"omittedEmbeddedContent\\\":false,\\\"omittedStructure\\\":false,\\\"reading\\\":[{\\\"html\\\":[{\\\"body\\\":[{\\\"h1\\\":[{\\\"t1\\\":\\\"File upload target\\\"}]},{\\\"t2\\\":\\\"Choose file\\\"},{\\\"p\\\":[{\\\"t3\\\":\\\"Choose a file to upload.\\\"}]}]}]}],\\\"recordWindow\\\":{\\\"number\\\":1,\\\"otherCapturedLinks\\\":0,\\\"otherCapturedTexts\\\":0,\\\"total\\\":1},\\\"truncated\\\":false,\\\"url\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\"}}\",\"modelInputPageCaptureRetainedUTF8Bytes\":737,\"modelInputPageCaptureTruncated\":false,\"modelInputPageCaptureUTF8Bytes\":737,\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\",\"selectLocalFile\"],\"usage\":{\"completion_tokens\":273,\"prompt_tokens\":2925,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":3198}}",
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"assistantContent\":\"\",\"assistantContentTruncated\":false,\"assistantContentUTF8Bytes\":0,\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"objective\\\":\\\"Open the local URL, upload the latest presentation to it, and confirm what the page reports about the upload status.\\\",\\\"constraints\\\":[\\\"Use the latest presentation from Downloads folder\\\", \\\"Confirm the upload result reported by the page\\\"],\\\"text\\\":\\\"The page http:\\/\\/127.0.0.1:63922\\/index has been opened and the latest presentation file \\\\\\\"Launch plan.pptx\\\\\\\" (modified 2026-09-23T12:00:00Z) was uploaded via the Choose file button (c1). The page confirms: \\\\\\\"Upload accepted; file received.\\\\\\\"\\\",\\\"outcomes\\\":[{\\\"instruction\\\": \\\"The latest presentation 'Launch plan.pptx' from Downloads has been uploaded to the page\\\", \\\"kind\\\": \\\"information\\\", \\\"evidence\\\": [\\\"source\\\"], \\\"effectReference\\\": \\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\"}, {\\\"instruction\\\": \\\"The page reports successful upload\\\", \\\"kind\\\": \\\"information\\\", \\\"evidence\\\": [\\\"source\\\"], \\\"effectReference\\\": \\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\"}]}\",\"name\":\"answer\"}}]}}],\"inputTokens\":3023,\"model\":\"native-form-planner-v2\",\"modelInputPageCaptureJSONPrefix\":\"{\\\"availableGoalEffects\\\":[{\\\"committedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"reference\\\":\\\"navigation:4cdccc2aaeb8c2987b21fc43cbc13c939a8ab60954385d3b160df4e1ce6aafc8\\\",\\\"requestedURL\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\",\\\"type\\\":\\\"openURL\\\"}],\\\"captureScope\\\":\\\"completePage\\\",\\\"page\\\":{\\\"controls\\\":[{\\\"disabled\\\":false,\\\"formID\\\":null,\\\"id\\\":\\\"c1\\\",\\\"kind\\\":\\\"button\\\",\\\"label\\\":\\\"Choose file\\\",\\\"method\\\":null,\\\"readOnly\\\":false,\\\"required\\\":false}],\\\"omittedEmbeddedContent\\\":false,\\\"omittedStructure\\\":false,\\\"reading\\\":[{\\\"html\\\":[{\\\"body\\\":[{\\\"h1\\\":[{\\\"t1\\\":\\\"File upload target\\\"}]},{\\\"t2\\\":\\\"Choose file\\\"},{\\\"p\\\":[{\\\"t3\\\":\\\"Upload accepted; file received.\\\"}]}]}]}],\\\"recordWindow\\\":{\\\"number\\\":1,\\\"otherCapturedLinks\\\":0,\\\"otherCapturedTexts\\\":0,\\\"total\\\":1},\\\"truncated\\\":false,\\\"url\\\":\\\"http:\\/\\/127.0.0.1:63922\\/index\\\"}}\",\"modelInputPageCaptureRetainedUTF8Bytes\":744,\"modelInputPageCaptureTruncated\":false,\"modelInputPageCaptureUTF8Bytes\":744,\"requestToolNames\":[\"openLink\",\"search\",\"askUser\",\"wait\",\"answer\",\"reviewGoal\",\"listFiles\",\"selectFile\",\"askFile\",\"selectLocalFile\"],\"usage\":{\"completion_tokens\":618,\"prompt_tokens\":3023,\"prompt_tokens_details\":{\"cached_tokens\":0},\"total_tokens\":3641}}"
+      ],
+      "boundedCaptureTraceBytes": 16384,
+      "finalModelEvidenceInterpretation": "The fifth request received a fresh, untruncated page capture containing “Upload accepted; file received.” The model quoted that confirmation, but both outcomes used only the navigation URL as their source/effect reference, classified the upload as information, and included modifiedAt 2026-09-23T12:00:00Z, which is not supported by the selected page evidence. Host rejected the answer for unsupported evidence."
+    },
+    "interpretation": "One POST matched the external oracle for Launch plan.pptx (28,273 bytes). A test-only bounded 16 KiB trace records that the fifth request received a fresh, untruncated post-upload page capture saying “Upload accepted; file received.” The model quoted this confirmation, but cited only the navigation URL for both outcomes, classified the upload as information, and included a modified timestamp unsupported by the selected page evidence. The host rejected the answer for unsupported evidence. This diagnostic run confirms exact transfer and the page message supplied to the model, but does not pass task completion.",
+    "testOnlyDiagnosticPatchSHA256": "fc74ca3aeea830e92e0d6bfc25a2620bd1fb348b9c5d1b27bcf95c28b59cea52"
+  }
 }
