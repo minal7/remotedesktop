@@ -1,11 +1,11 @@
 {
   "date": "2026-09-24",
-  "scope": "Default-browser local Fara navigation and login handoff only",
+  "scope": "Default-browser local Fara navigation/login, native file selection, and real Drive transfer diagnostics; full app completion remains unaccepted.",
   "status": {
     "implemented": true,
     "compiled": true,
     "tested": true,
-    "accepted": "Navigation/login-handoff slice only; full app/phone/file upload and production readiness remain unaccepted"
+    "accepted": "One app-completed real-Drive upload slice from a test-preopened Drive page, with fresh completion evidence and independent exact-byte readback; startup navigation, full natural-request acceptance, phone interaction and production readiness remain unaccepted."
   },
   "defaultBrowser": "com.apple.Safari",
   "model": "Fara1.5-4B Q4_K_M",
@@ -222,6 +222,253 @@
       "buildWarnings": 0,
       "note": "Real local Fara screenshot/action loop PASS: default Safari opens Drive and returns userInterventionRequired; independent native AX requires Choose an account before account selection/passkey. No credentials/upload.",
       "summarySHA256": "995f693471601860add74ff486c54c82101f1003b614a33b277f6d3f3ca745b8"
+    },
+    {
+      "run": "default-browser-rejection-diagnostic-green01",
+      "testResult": "Passed",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "note": "Passive exact rejection-pair/history diagnostic; no guard change, inference or UI. All 40 source hashes unchanged.",
+      "summarySHA256": "0bd14f6c7bd471d2029234773c7f239f5eff42098f3f136ce3046a0ba3a6e079"
+    },
+    {
+      "run": "default-browser-drive-upload-live17",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Early Fara StartPage run: Dock Downloads click rejected by full-display pixel revalidation despite screenMatches=true; later unrelated blank/start-page click requested approval for unidentified target. 0 nativeControlCalls, 0 nativeFileCalls and 0 upload effects. Not a reproduction of live16 menu failure. One existing main-thread runtime warning; all 40 source hashes unchanged.",
+      "summarySHA256": "d8c9c5b81099161efa181c64195f8ff5566dd318cd9dfc1b73f380ae7b7f007f",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live17-all-test-issues.json",
+      "attachments": [
+        {
+          "uuid": "4C27FBB7-F64F-4AE4-9284-F661E59C956F",
+          "kind": "expected screenshot"
+        },
+        {
+          "uuid": "3FCC8234-082A-4511-8150-8FE0F53E4F68",
+          "kind": "fresh screenshot"
+        },
+        {
+          "uuid": "4D0485A5-61EA-4BA1-9B16-44693C2CAD3F",
+          "kind": "screenshot metadata"
+        }
+      ],
+      "testIssues": [
+        "Runtime Warning: This method should not be called on the main thread as it may lead to UI unresponsiveness.",
+        "XCTAssertTrue failed - No exact selected-file handoff. Result=approvalRequired(Click an unidentified item; approval required); nativeCalls=0; nativeControlCalls=0; two pointer proposals; rejected because observed screen, target or focus changed; diagnostic screenMatches=true and pointerRequiresFullDisplayMatch=true.",
+        "XCTAssertEqual failed: (\"0\") is not equal to (\"1\").",
+        "Completion validator did not retain fresh exact-file evidence; nativeCalls=0; nativeControlCalls=0; uploadEffects=0; result=approvalRequired for unidentified click."
+      ],
+      "finding": ""
+    },
+    {
+      "run": "default-browser-drive-upload-live18",
+      "testResult": "Not Run",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "failed",
+      "buildErrors": 8,
+      "buildWarnings": 13,
+      "note": "Compile-only failure: nested setup helper missed @MainActor. No tests executed; 41 source hashes unchanged. Root added the actor annotation before live19.",
+      "summarySHA256": "51264d9ff27613bafb24a7b11dc28332f515f9267206f90413ec225c8041b3db",
+      "buildSHA256": "644acf9e0a7d5f9776d9549514301c210ae87bebd87fca4431b7a64cc73e23fd"
+    },
+    {
+      "run": "default-browser-drive-upload-live19",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 13,
+      "note": "Test-only scripted native navigation starts on actual Drive; original goal and exact-file oracle unchanged, so no startup-navigation acceptance. Fara retries File upload after pixel-context rejection and exact requested file selection succeeds. Native Return is then rejected after focused-AX identity changes; Fara clicks wrong file row [422,462] and receives unidentified-target approval. Zero uploads. One known runtime warning; 41 source hashes unchanged. All three issues retained.",
+      "summarySHA256": "5d60dc904821cafca3c5035ec466b26b37887f77a4eb2a9ac0daad3322dba2e4",
+      "buildSHA256": "f98f1f7006b4886eeca3e99bcbfabf35c64fb8fdfe72827f4e1eed259b48f0c4",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live19-all-test-issues.json",
+      "attachments": [
+        {
+          "id": "6A188B58-7754-4A5C-9114-EED2EB0F6613",
+          "name": "Diagnostic scripted Drive start-page setup (excluded from acceptance)"
+        },
+        {
+          "id": "43A49083-B2D0-4093-8707-2E88C533A7B4",
+          "name": "Revalidation pair 1 expected observation"
+        },
+        {
+          "id": "68726BD3-1A33-419E-AB03-4F3040690338",
+          "name": "Revalidation pair 1 fresh rejected observation"
+        },
+        {
+          "id": "1293847A-16F0-48E6-A6E1-A991A62EB881",
+          "name": "Revalidation pair 1 metadata"
+        },
+        {
+          "id": "6379686A-F0BB-4AC5-A021-7C7006603921",
+          "name": "Revalidation pair 2 expected observation"
+        },
+        {
+          "id": "455F0809-5063-47BB-82A8-0CA90FC94AF9",
+          "name": "Revalidation pair 2 fresh rejected observation"
+        },
+        {
+          "id": "7F5E7604-33DF-4BAF-8B2A-77B78DDDDA1E",
+          "name": "Revalidation pair 2 metadata"
+        }
+      ],
+      "qualifications": [
+        "Pair 1 shows New Folder row highlight changed while File upload target remained. Pair 2 key Return had focusMatches=false and screenMatches=true. Do not claim adding AXMenuItem will fix this: full AX also omits menu items and exposes only expanded New Folder button."
+      ]
+    },
+    {
+      "run": "default-browser-selected-panel-red01",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 4,
+      "note": "Expected behavioral RED: current native picker state was missing from the current user observation. 41 source hashes unchanged.",
+      "summarySHA256": "e2870a77ca7bc4f6dbd151c77973beb7348483dfd25f57b91206297f67f2f74f"
+    },
+    {
+      "run": "default-browser-selected-panel-green01",
+      "testResult": "Passed",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 39,
+      "note": "Selected-panel context is available in the current observation; focused component checks pass. 41 source hashes unchanged.",
+      "summarySHA256": "08a0d1676d1f8b4fd39f9cc7d58d5bf15928b9107775b4ed8834a875a9b56539"
+    },
+    {
+      "run": "default-browser-drive-upload-live20",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Test-only scripted navigation to actual Drive; exact goal and file oracle unchanged. Fara recognized the exact file as selected and pressed Upload (nativeCalls=2, nativeControlCalls=7, uploadEffects=1). Independent exact-name Safari download matches 28,273 source bytes and SHA-256. App completion failed: native planner restarted New after upload and model output ended before verification. No completion acceptance; startup navigation is not validated. One known runtime warning; 41 source hashes unchanged.",
+      "summarySHA256": "48c4c8664ac1c5b33df16573b20ee31c15dc93539c11e29052e1b1e625c099ca",
+      "buildSHA256": "2726f0aa105ba8e2df9e108ee059e1336d51197510aa953d1ed552ddf030c3e5",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live20-all-test-issues.json",
+      "readbackPath": ".build/repair-verification/default-browser-drive-upload-live20-independent-readback.json",
+      "filename": "Remote Desktop E2E 601F01A1-583B-4D16-81FD-706DCE0E077E.pptx",
+      "remoteFileID": "1QpaULojJRB_t-hiCRvWv9cio2Z8FUrxq",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "nativePlannerRequestAttachment": "0D678276-ECA9-4064-8563-8917B40B1E91",
+      "qualification": "Observed native input had upload-complete plus exact filename but only boolean host_file_selection_available, no resolved candidate identity. Native planner’s next decision restarted New; model had planned search verification but response ended before a validated result. No auto-completion or guard relaxation.",
+      "nativeCalls": 2,
+      "nativeControlCalls": 7,
+      "uploadEffects": 1,
+      "selectedExactFile": true
+    },
+    {
+      "run": "default-browser-selected-file-context-red01",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 4,
+      "note": "Expected RED: native page planner did not include only the resolved selected-file identity for page verification. 41 sources unchanged.",
+      "summarySHA256": "3181feccd10d272d43b5eddb3acc21e4f877ccc9a36465ace3b7424e1938547d"
+    },
+    {
+      "run": "default-browser-selected-file-context-green01",
+      "testResult": "Passed",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 6,
+      "note": "Selected-file context and concise output grammar pass focused checks; no inference. 41 sources unchanged.",
+      "summarySHA256": "baa2ca540ffac532db241c75f1346364f964c83ae0457f131740579594ba5105"
+    },
+    {
+      "run": "default-browser-drive-upload-live21",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Test-only scripted start on actual Drive. Before selection handoff, native response proposed selectFile with a 35-character ID; matching native request capture is missing, so active enum membership is unverified. Two native calls, three native controls, zero uploads. Component completion path was not reached; startup navigation remains unaccepted. One known runtime warning; 41 sources unchanged.",
+      "summarySHA256": "6bd8dbd660c8a717a2b328ade5ce62e80849736f3e186400570f332e4b5c83cc",
+      "buildSHA256": "43b69d3faa2332e517304fceca3087078c89ab6896476a4b088b9e9b4f796d4e",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live21-all-test-issues.json",
+      "lastNativeResponseAttachment": "25F70B25-4A8F-4D9B-BCA0-A209D6999E9B",
+      "missingEvidence": "No matching native request capture; do not claim exact active tool enum/schema from response alone.",
+      "uploadEffects": 0
+    },
+    {
+      "run": "native-file-object-arguments-red01",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 10,
+      "note": "Expected RED: native file operation needed a nested request object instead of flat scalar arguments.",
+      "summarySHA256": "03ed61047ad23a59a7c474347539de6db03a62b6e9a52be1b2f0c593179b7782"
+    },
+    {
+      "run": "native-file-object-arguments-green01",
+      "testResult": "Passed",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 13,
+      "note": "Nested native file-tool argument wrapper passes two metadata-model calls and three existing non-native guards.",
+      "summarySHA256": "f8ae7e44ce547d8523714c66e6bbd0f4145e34812ee9d9674cc30380e16ca99b"
+    },
+    {
+      "run": "default-browser-drive-upload-live22",
+      "testResult": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "First app-completed live upload slice: exact newest file selected, one upload, host completion verified fresh exact-name evidence plus one upload and picker dismissal; independent exact-name Safari download matches source bytes. Starts from test-only scripted Drive page; startup navigation and natural-language start remain unaccepted. One known main-thread runtime warning; 41 source hashes unchanged.",
+      "summarySHA256": "1ccf67530e5ac01bd69451030056b47092fac76841a4356c146e68f57e86b7dc",
+      "buildSHA256": "72d044ed71d87d5546f60e010e67fa5f475220362559397761f14d32dde7a35c",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live22-all-test-issues.json",
+      "readbackPath": ".build/repair-verification/default-browser-drive-upload-live22-independent-readback.json",
+      "filename": "Remote Desktop E2E 5432205A-24C3-4717-AE64-DE6CD2E29172.pptx",
+      "remoteFileID": "1uO_70ZwPRoTKVj2Wujft3TLH06iQRy6u",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "completionEvidenceAttachment": "602C8875-04D4-407D-B847-12BFD179F061",
+      "nativeFileRequestAttachment": "721D4390-1B23-4A93-A9EE-A50042DA433D",
+      "nativeFileResponseAttachment": "47364E00-CCAC-4F4C-84AF-A06339A5148D",
+      "selectedCandidateID": "b31451b3-8b10-436a-89a9-c60bf3d3d110",
+      "nativePageContextAttachment": "95430FF3-B01D-4E2C-8BE7-80B63C024EC1",
+      "nativePageResponseAttachment": "6E8BF8D4-14A3-4271-AD1E-F7CD0896332D"
     }
   ],
   "limitations": [
@@ -249,9 +496,9 @@
       "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope.",
       "Rejected desktop-action feedback and rejection count now survive passive wait/remember. Successful dispatched input clears them. Explicit feedback says no mouse/keyboard input was sent; waiting cannot complete a rejected action. Existing pixel, task/window, approval and dispatch gates unchanged."
     ],
-    "latestFocusedRun": "default-browser-control-history-green01",
-    "latestLiveRun": "default-browser-drive-upload-live16",
-    "latestLiveFailure": "File upload click rejected on changed pointer context with no native target frame, then model treats rejected click as focus and proposes Return. Zero uploads.",
+    "latestFocusedRun": "native-file-object-arguments-green01",
+    "latestLiveRun": "default-browser-drive-upload-live22",
+    "latestLiveFailure": "Live22 is a passing app-completed upload slice from a test-preopened Drive page; startup navigation and full natural request remain outside its acceptance.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
@@ -260,7 +507,13 @@
       "Drive upload, email-to-self, phone choice interaction, general production readiness and the 12 GB whole-Mac target remain unaccepted. Installed host unchanged.",
       "Live03 adds opt-in screenshots and per-step proposals only. Its observed failure is model instruction-following/planning, not a stale or wrong screenshot. No broader model/configuration changes were made.",
       "Live12 uses test-only initial native goal delegation; do not claim default original-goal or broader production acceptance from that one run. Independent exact-byte remote readback is verified.",
-      "Catalog discovery now runs under granted Downloads access and real transfers prove that path. Actual phone choices, email-to-self, general completion reliability, deployment and the 12 GB whole-Mac target remain unaccepted."
+      "Catalog discovery now runs under granted Downloads access and real transfers prove that path. Actual phone choices, email-to-self, general completion reliability, deployment and the 12 GB whole-Mac target remain unaccepted.",
+      "Live17 is an early StartPage failure, not a live16 menu reproduction: Dock Downloads was rejected as outside-window, then an unrelated blank/start-page click requested approval for an unidentified target; zero native-control/file calls and uploads. The reported image difference was limited to the clock-area box while screenMatches remained true. Do not infer the cause of live16 menu failure from this run.",
+      "Live18 is a build-only failure: missing @MainActor on nested setup helper, 8 errors/13 warnings, no tests executed; root fixed it before live19. Live19 uses test-only scripted native navigation on actual Drive, selects the exact requested file, then is rejected on Return after focus identity changes and a later wrong file-row click. No upload or startup-navigation acceptance. The captured AX view omits menu items and exposes only the expanded New Folder button; do not claim that adding AXMenuItem will resolve this case.",
+      "Selected-panel GREEN01 passes 5/5 component checks. Live20 has one independently verified exact physical upload/readback, but not app completion. Current native input included upload-complete and exact filename, yet only boolean host_file_selection_available without resolved candidate identity; the planner restarted New, and the model output ended before verification. Next pass selected-candidate metadata into scoped page planning; do not auto-complete or relax guards. Live20 starts from actual Drive via test-only navigation and does not validate startup navigation.",
+      "Selected-file-context RED/GREEN passes 5/5 focused tests. This component result is distinct from chooser selected-state preservation. Live21 failed before selection handoff: its last native response proposed selectFile with a 35-character ID, but the matching request capture is missing, so the active tool schema/enum is not proven. No fuzzy ID recovery or guard relaxation; inspect exact runtime grammar. The current-selection completion path was not exercised.",
+      "Live22 is the first app-completed real-Drive upload slice: exact newest candidate selected, one admitted upload, fresh host completion check, and independent exact-byte Safari readback. Initial Drive navigation was test-only scripted; natural-language startup and general production readiness remain unaccepted. Nested object arguments for native file tools passed focused RED/GREEN tests; standalone pinned Qwen probe independently reproduced flat scalar enum failure and exact-ID preservation with nested object wrapper.",
+      "The accepted live22 upload slice starts from a test-preopened Drive page. Earlier live12/13/14 reached physical uploads without the later scripted setup, so a startup-navigation failure on current code is not established. Run the blank-browser workflow with DRIVE_START_ON_PAGE disabled before proposing a hook."
     ],
     "sourceSHA256": {
       "TODO.md": "a2b63071a74867e48d1d95d8d9246864fbf909a7d932b25465578efef417dfc3",
@@ -1012,6 +1265,208 @@
         "sourceUnchanged": true,
         "sourceCount": 37,
         "runnerSHA256": "7916d6d253c8b50add02dcb7166ee3e702c334692efd5f552fd492c300e6b7f2"
+      },
+      {
+        "run": "default-browser-rejection-diagnostic-green01",
+        "result": "Passed",
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 23,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 40,
+        "runnerSHA256": "b1f9beb326bd7814a7b459350c675e46aba8ba262985b4c3f1e0e3572d95f07b"
+      },
+      {
+        "run": "default-browser-drive-upload-live17",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 40,
+        "runnerSHA256": "776ed194ef0fd0e79bd1039431dfd0253faf52252074a482f8d23e36a9fe5697",
+        "finding": "Early Fara StartPage failure: Dock Downloads click rejected as outside retained browser window despite screenMatches=true; clock-area image-difference box reported at 1482,9,1529,19 in 1536x992. Subsequent unrelated blank/start-page click requested unidentified-target approval. 0 nativeControlCalls, 0 nativeFileCalls and 0 upload effects. Not live16 menu reproduction; no cause inferred for that earlier menu failure.",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live17-all-test-issues.json",
+        "attachments": [
+          {
+            "uuid": "4C27FBB7-F64F-4AE4-9284-F661E59C956F",
+            "kind": "expected screenshot"
+          },
+          {
+            "uuid": "3FCC8234-082A-4511-8150-8FE0F53E4F68",
+            "kind": "fresh screenshot"
+          },
+          {
+            "uuid": "4D0485A5-61EA-4BA1-9B16-44693C2CAD3F",
+            "kind": "screenshot metadata"
+          }
+        ],
+        "testIssues": [
+          "Runtime Warning: This method should not be called on the main thread as it may lead to UI unresponsiveness.",
+          "XCTAssertTrue failed - No exact selected-file handoff. Result=approvalRequired(Click an unidentified item; approval required); nativeCalls=0; nativeControlCalls=0; two pointer proposals; rejected because observed screen, target or focus changed; diagnostic screenMatches=true and pointerRequiresFullDisplayMatch=true.",
+          "XCTAssertEqual failed: (\"0\") is not equal to (\"1\").",
+          "Completion validator did not retain fresh exact-file evidence; nativeCalls=0; nativeControlCalls=0; uploadEffects=0; result=approvalRequired for unidentified click."
+        ],
+        "note": ""
+      },
+      {
+        "run": "default-browser-drive-upload-live18",
+        "result": "BuildFailed",
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 8,
+        "buildWarnings": 13,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "ed2c8a9c6d6be034aabdfd8dcbb991d503302675b99104904b70ad0669d546ab",
+        "finding": "Compile-only failure from nested setup helper missing @MainActor; no tests executed. Root added the actor annotation before live19."
+      },
+      {
+        "run": "default-browser-drive-upload-live19",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 13,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "81d0f1bf78248d1c67967d5b117652619a17d5ec50f7e109f50082088638cb76",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live19-all-test-issues.json",
+        "finding": "Test-only scripted native navigation starts on actual Drive; original goal/oracle unchanged, so this does not qualify startup navigation. Fara retries File upload after context rejection and exact file selection succeeds; native Return is rejected after focused-AX identity change; subsequent wrong file-row click requests unidentified-target approval. Zero uploads."
+      },
+      {
+        "run": "default-browser-selected-panel-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "46de37e25fe34b192d28d809788e4de263b1e350c4e7b139c6fe5df0bb919902"
+      },
+      {
+        "run": "default-browser-selected-panel-green01",
+        "result": "Passed",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 39,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "3ac32fd9401e82434274b9fe0b98f4b714105e80a279884c3fea2a9e68060840"
+      },
+      {
+        "run": "default-browser-drive-upload-live20",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "9183dd0b6262f70b7d7d0909744620aff16850e50a7a61afb036a9790770f0bf",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live20-all-test-issues.json",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live20-independent-readback.json",
+        "uploadEffects": 1,
+        "selectedExactFile": true,
+        "remoteFileID": "1QpaULojJRB_t-hiCRvWv9cio2Z8FUrxq",
+        "bytes": 28273,
+        "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+        "finding": "Test-only scripted native start on actual Drive; Fara recognized exact file selected and uploaded it. Independent exact-name Safari download matches source bytes. App completion failed when native planner restarted New and model response ended before verification.",
+        "nativeCalls": 2,
+        "nativeControlCalls": 7,
+        "note": ""
+      },
+      {
+        "run": "default-browser-selected-file-context-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "f630eee189770aee3218ec959b76a41881d32a9717c50e4ef77c40b00b605ca2"
+      },
+      {
+        "run": "default-browser-selected-file-context-green01",
+        "result": "Passed",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 6,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "258ddf45ee11f145d2359e16dcd1cb96cd8e5881a00cf48fde70cf260f8e2d56"
+      },
+      {
+        "run": "default-browser-drive-upload-live21",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "fb3db559dc20d894c949ef0bb20e2a875289441c0be8d67c03082b262335117e",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live21-all-test-issues.json",
+        "finding": "Failed before selected-file handoff: native response proposed selectFile with 35-character candidate ID, but matching request capture is absent. NativeCalls=2, nativeControlCalls=3, uploads=0. Selected-candidate completion path not exercised; test-only scripted start does not qualify startup navigation."
+      },
+      {
+        "run": "native-file-object-arguments-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 10,
+        "runnerSHA256": "69fa035fb2fcde7dfaba7dd87d8eb0c4db2293c6e67a137e820d1e785d4a1872"
+      },
+      {
+        "run": "native-file-object-arguments-green01",
+        "result": "Passed",
+        "passed": 4,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 13,
+        "runnerSHA256": "8ce7534ff7d543afbd5a7211199009a4101c08b524763d481305b029d50ab69b"
+      },
+      {
+        "run": "default-browser-drive-upload-live22",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "cbbadc0f769e7b2b43e1d1662850988371e8a924ceb3a1b0e8fdd54e5c44a96b",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live22-independent-readback.json",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live22-all-test-issues.json",
+        "finding": "App-completed exact upload and independent readback passed from test-preopened Drive; no startup-navigation acceptance."
       }
     ],
     "delegationDiagnostic": {
@@ -1052,7 +1507,7 @@
       "accepted": false
     },
     "nativeControlProbe": {
-      "status": "Three exact physical transfers independently byte-verified in live12/13/14. Picker continuation repaired; raw native history removed after RED/GREEN. Live15/16 remain failed whole tasks with zero uploads. Native delegation helps one captured menu decision but remains experimental.",
+      "status": "Live22 completes the first app-driven exact-file upload slice and independent readback from a test-preopened Drive page. Startup navigation/full natural request remain unaccepted. Prior physical transfers live12/13/14/20 lacked app completion. Live15/16/17/19/21 have zero uploads; live18 did not compile.",
       "runs": [
         {
           "run": "default-browser-native-control-live01",
@@ -1089,6 +1544,191 @@
           "sourceCount": 37,
           "sourceUnchanged": true,
           "finding": "Same read-only real Drive probe with 1024-token bound returned the exact observed enabled New control ID. No control executed; no upload."
+        },
+        {
+          "run": "default-browser-drive-upload-live17",
+          "result": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 40,
+          "sourceUnchanged": true,
+          "finding": "Fara StartPage Dock Downloads click rejected by full-display pixel revalidation despite screenMatches=true; later unrelated blank/start-page click requested unidentified-target approval. No native-control/file calls, no upload. Distinct from live16 menu failure.",
+          "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live17-all-test-issues.json",
+          "attachments": [
+            {
+              "uuid": "4C27FBB7-F64F-4AE4-9284-F661E59C956F",
+              "kind": "expected screenshot"
+            },
+            {
+              "uuid": "3FCC8234-082A-4511-8150-8FE0F53E4F68",
+              "kind": "fresh screenshot"
+            },
+            {
+              "uuid": "4D0485A5-61EA-4BA1-9B16-44693C2CAD3F",
+              "kind": "screenshot metadata"
+            }
+          ],
+          "testIssues": [
+            "Runtime Warning: This method should not be called on the main thread as it may lead to UI unresponsiveness.",
+            "XCTAssertTrue failed - No exact selected-file handoff. Result=approvalRequired(Click an unidentified item; approval required); nativeCalls=0; nativeControlCalls=0; two pointer proposals; rejected because observed screen, target or focus changed; diagnostic screenMatches=true and pointerRequiresFullDisplayMatch=true.",
+            "XCTAssertEqual failed: (\"0\") is not equal to (\"1\").",
+            "Completion validator did not retain fresh exact-file evidence; nativeCalls=0; nativeControlCalls=0; uploadEffects=0; result=approvalRequired for unidentified click."
+          ],
+          "note": ""
+        },
+        {
+          "run": "default-browser-drive-upload-live18",
+          "testResult": "Not Run",
+          "passed": 0,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "failed",
+          "buildErrors": 8,
+          "buildWarnings": 13,
+          "note": "Compile-only failure: nested setup helper missed @MainActor. No tests executed; 41 source hashes unchanged. Root added the actor annotation before live19.",
+          "summarySHA256": "51264d9ff27613bafb24a7b11dc28332f515f9267206f90413ec225c8041b3db",
+          "buildSHA256": "644acf9e0a7d5f9776d9549514301c210ae87bebd87fca4431b7a64cc73e23fd"
+        },
+        {
+          "run": "default-browser-drive-upload-live19",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 13,
+          "note": "Test-only scripted native navigation starts on actual Drive; original goal and exact-file oracle unchanged, so no startup-navigation acceptance. Fara retries File upload after pixel-context rejection and exact requested file selection succeeds. Native Return is then rejected after focused-AX identity changes; Fara clicks wrong file row [422,462] and receives unidentified-target approval. Zero uploads. One known runtime warning; 41 source hashes unchanged. All three issues retained.",
+          "summarySHA256": "5d60dc904821cafca3c5035ec466b26b37887f77a4eb2a9ac0daad3322dba2e4",
+          "buildSHA256": "f98f1f7006b4886eeca3e99bcbfabf35c64fb8fdfe72827f4e1eed259b48f0c4",
+          "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live19-all-test-issues.json",
+          "attachments": [
+            {
+              "id": "6A188B58-7754-4A5C-9114-EED2EB0F6613",
+              "name": "Diagnostic scripted Drive start-page setup (excluded from acceptance)"
+            },
+            {
+              "id": "43A49083-B2D0-4093-8707-2E88C533A7B4",
+              "name": "Revalidation pair 1 expected observation"
+            },
+            {
+              "id": "68726BD3-1A33-419E-AB03-4F3040690338",
+              "name": "Revalidation pair 1 fresh rejected observation"
+            },
+            {
+              "id": "1293847A-16F0-48E6-A6E1-A991A62EB881",
+              "name": "Revalidation pair 1 metadata"
+            },
+            {
+              "id": "6379686A-F0BB-4AC5-A021-7C7006603921",
+              "name": "Revalidation pair 2 expected observation"
+            },
+            {
+              "id": "455F0809-5063-47BB-82A8-0CA90FC94AF9",
+              "name": "Revalidation pair 2 fresh rejected observation"
+            },
+            {
+              "id": "7F5E7604-33DF-4BAF-8B2A-77B78DDDDA1E",
+              "name": "Revalidation pair 2 metadata"
+            }
+          ],
+          "qualifications": [
+            "Pair 1 shows New Folder row highlight changed while File upload target remained. Pair 2 key Return had focusMatches=false and screenMatches=true. Do not claim adding AXMenuItem will fix this: full AX also omits menu items and exposes only expanded New Folder button."
+          ]
+        },
+        {
+          "run": "default-browser-selected-panel-red01",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 4,
+          "note": "Expected behavioral RED: current native picker state was missing from the current user observation. 41 source hashes unchanged.",
+          "summarySHA256": "e2870a77ca7bc4f6dbd151c77973beb7348483dfd25f57b91206297f67f2f74f"
+        },
+        {
+          "run": "default-browser-selected-panel-green01",
+          "testResult": "Passed",
+          "passed": 5,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 39,
+          "note": "Selected-panel context is available in the current observation; focused component checks pass. 41 source hashes unchanged.",
+          "summarySHA256": "08a0d1676d1f8b4fd39f9cc7d58d5bf15928b9107775b4ed8834a875a9b56539"
+        },
+        {
+          "run": "default-browser-drive-upload-live20",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "note": "Test-only scripted navigation to actual Drive; exact goal and file oracle unchanged. Fara recognized the exact file as selected and pressed Upload (nativeCalls=2, nativeControlCalls=7, uploadEffects=1). Independent exact-name Safari download matches 28,273 source bytes and SHA-256. App completion failed: native planner restarted New after upload and model output ended before verification. No completion acceptance; startup navigation is not validated. One known runtime warning; 41 source hashes unchanged.",
+          "summarySHA256": "48c4c8664ac1c5b33df16573b20ee31c15dc93539c11e29052e1b1e625c099ca",
+          "buildSHA256": "2726f0aa105ba8e2df9e108ee059e1336d51197510aa953d1ed552ddf030c3e5",
+          "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live20-all-test-issues.json",
+          "readbackPath": ".build/repair-verification/default-browser-drive-upload-live20-independent-readback.json",
+          "filename": "Remote Desktop E2E 601F01A1-583B-4D16-81FD-706DCE0E077E.pptx",
+          "remoteFileID": "1QpaULojJRB_t-hiCRvWv9cio2Z8FUrxq",
+          "bytes": 28273,
+          "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+          "matchesSourceBytes": true,
+          "nativePlannerRequestAttachment": "0D678276-ECA9-4064-8563-8917B40B1E91",
+          "qualification": "Observed native input had upload-complete plus exact filename but only boolean host_file_selection_available, no resolved candidate identity. Native planner’s next decision restarted New; model had planned search verification but response ended before a validated result. No auto-completion or guard relaxation.",
+          "nativeCalls": 2,
+          "nativeControlCalls": 7,
+          "uploadEffects": 1,
+          "selectedExactFile": true
+        },
+        {
+          "run": "default-browser-selected-file-context-red01",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 4,
+          "note": "Expected RED: native page planner did not include only the resolved selected-file identity for page verification. 41 sources unchanged.",
+          "summarySHA256": "3181feccd10d272d43b5eddb3acc21e4f877ccc9a36465ace3b7424e1938547d"
+        },
+        {
+          "run": "default-browser-selected-file-context-green01",
+          "testResult": "Passed",
+          "passed": 5,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 6,
+          "note": "Selected-file context and concise output grammar pass focused checks; no inference. 41 sources unchanged.",
+          "summarySHA256": "baa2ca540ffac532db241c75f1346364f964c83ae0457f131740579594ba5105"
+        },
+        {
+          "run": "default-browser-drive-upload-live21",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "note": "Test-only scripted start on actual Drive. Before selection handoff, native response proposed selectFile with a 35-character ID; matching native request capture is missing, so active enum membership is unverified. Two native calls, three native controls, zero uploads. Component completion path was not reached; startup navigation remains unaccepted. One known runtime warning; 41 sources unchanged.",
+          "summarySHA256": "6bd8dbd660c8a717a2b328ade5ce62e80849736f3e186400570f332e4b5c83cc",
+          "buildSHA256": "43b69d3faa2332e517304fceca3087078c89ab6896476a4b088b9e9b4f796d4e",
+          "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live21-all-test-issues.json",
+          "lastNativeResponseAttachment": "25F70B25-4A8F-4D9B-BCA0-A209D6999E9B",
+          "missingEvidence": "No matching native request capture; do not claim exact active tool enum/schema from response alone.",
+          "uploadEffects": 0
         }
       ],
       "model": "Installed nativeTextV2, native-form-planner-v2 alias, one local runtime",
@@ -1105,7 +1745,7 @@
       },
       "actionExecuted": false,
       "coordinateReview": "Independent review of live08 screenshot and host normalized-coordinate mapping found no offset/scaling error. The returned points correspond to the wrong controls actually clicked.",
-      "next": "Inspect actual before/after frames at a rejected dispatch and evaluate truthful model recovery on the retained rejected-action case; preserve no-replay and target checks. Do not promote captured-state delegation as production or repeat whole upload unchanged.",
+      "next": "Rerun the full workflow from a blank browser with test-only DRIVE_START_ON_PAGE disabled against live22 code. Consider a startup-navigation hook only if the observed result warrants it; preserve exact selection, single-upload policy and fresh completion checks.",
       "integrationRuns": [
         {
           "run": "default-browser-native-controls-red01",
@@ -1593,6 +2233,26 @@
         }
       ]
     },
-    "latestDiagnosticRun": "default-browser-pointer-read-probe01"
+    "latestDiagnosticRun": "default-browser-rejection-diagnostic-green01",
+    "passiveRejectionDiagnostic": {
+      "run": "default-browser-rejection-diagnostic-green01",
+      "passed": 4,
+      "failed": 0,
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "runtimeWarnings": 0,
+      "sourceCount": 40,
+      "sourceUnchanged": true,
+      "qualification": "Passive exact rejection-pair seam; unchanged guard. Confirms rejection feedback and uncertain dispatch controls only; no inference/UI.",
+      "runnerSHA256": "b1f9beb326bd7814a7b459350c675e46aba8ba262985b4c3f1e0e3572d95f07b"
+    },
+    "nativeFileEnumProbe": {
+      "artifactDirectory": ".build/repair-verification/native-file-enum-probe/run02",
+      "status": "responses-collected-unqualified",
+      "model": "pinned Qwen native-form-planner-v2 (Fara companion runtime b9992)",
+      "finding": "Same adversarial malformed ID: flat scalar enum arguments returned a 35-character candidate ID; wrapping the unchanged schema in an object returned the exact 36-character allowed ID. Two calls took 8.26s and 8.20s; worker 17.46s, peak sampled process memory 3366240256 bytes, one worker, clean exit and credential removal; no UI/effects.",
+      "limitations": "Run01 failed preflight against an old signed runtime hash. Run02 packaged binary was pin/version/codesign verified. A three-request invocation was rejected by max-two guard before startup. This is protocol evidence, not semantic task acceptance.",
+      "hostEffects": 0
+    }
   }
 }

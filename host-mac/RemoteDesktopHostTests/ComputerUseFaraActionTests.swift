@@ -8033,6 +8033,27 @@ final class ComputerUseFaraActionTests: XCTestCase {
                 let names = Set(tools.compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
                 XCTAssertTrue(names.isSubset(of: ["askUser", "listFiles", "selectFile", "askFile", "incomplete"]))
                 XCTAssertTrue(names.contains("listFiles"))
+                for tool in tools {
+                    let function = try XCTUnwrap(tool["function"] as? [String: Any])
+                    let name = try XCTUnwrap(function["name"] as? String)
+                    let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
+                    let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+                    XCTAssertEqual(Set(properties.keys), ["request"], "Native file operation \(name) should use a nested request object")
+                    XCTAssertEqual(parameters["required"] as? [String], ["request"])
+                    XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
+                    let nested = try XCTUnwrap(properties["request"] as? [String: Any])
+                    XCTAssertEqual(nested["type"] as? String, "object")
+                    XCTAssertEqual(nested["additionalProperties"] as? Bool, false)
+                    let nestedProperties = try XCTUnwrap(nested["properties"] as? [String: Any])
+                    if name == "selectFile" {
+                        let candidateID = try XCTUnwrap(nestedProperties["candidateID"] as? [String: Any])
+                        XCTAssertEqual(candidateID["enum"] as? [String], ["fixture-falcon", "fixture-harbor"])
+                    } else if name == "askFile" {
+                        let candidateIDs = try XCTUnwrap(nestedProperties["candidateIDs"] as? [String: Any])
+                        let items = try XCTUnwrap(candidateIDs["items"] as? [String: Any])
+                        XCTAssertEqual(items["enum"] as? [String], ["fixture-falcon", "fixture-harbor"])
+                    }
+                }
             }
             await runtime.shutdown()
         } catch {

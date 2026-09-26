@@ -146,6 +146,61 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertFalse(contextText.contains("Upload\",\"role\""), "No Upload control is in the current observed page")
     }
 
+    func testRequestIncludesOnlyResolvedFileIdentityForPageVerification() throws {
+        let displayName = String(repeating: "é", count: 130) + ".pptx"
+        let candidate = ComputerUseLocalFileCatalog.Candidate(
+            id: "resolved-candidate-17", displayName: displayName,
+            contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+            byteCount: 28_273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let catalogPage = ComputerUseLocalFileCatalog.Page(candidates: [candidate], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false)
+        var input = makeInput()
+        input.localFileCatalog = .init(
+            query: .init(fileKind: .presentation), page: catalogPage,
+            selectedCandidate: candidate, inventoryState: .available)
+        input.selectedLocalFilePath = "/Users/fixture/Downloads/secret-local-path.pptx"
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Use the current page to verify the upload."}"#)))
+        let request = try planner.makeRequest(input: input, page: page(controls: [], renderedAXText: "1 upload complete"))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let system = try XCTUnwrap(messages.first?["content"] as? String)
+        let selectedContext = try XCTUnwrap(messages.last?["content"] as? String)
+
+        XCTAssertTrue(selectedContext.contains("resolved-candidate-17"))
+        XCTAssertTrue(selectedContext.contains(displayName))
+        XCTAssertFalse(selectedContext.contains("/Users/"), "The planner receives no local path")
+        XCTAssertFalse(selectedContext.contains("selectedLocalFilePath"))
+        let selectedContextJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(selectedContext.utf8)) as? [String: Any])
+        XCTAssertEqual(selectedContextJSON["selected_file"] as? [String: String], [
+            "id": "resolved-candidate-17", "displayName": displayName,
+        ])
+        XCTAssertTrue(system.localizedCaseInsensitiveContains("untrusted"))
+        XCTAssertTrue(system.localizedCaseInsensitiveContains("verify"))
+        XCTAssertTrue(system.localizedCaseInsensitiveContains("visualFallback"))
+        let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+        let jsonSchema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        let branches = try XCTUnwrap(schema["oneOf"] as? [[String: Any]])
+        for branch in branches {
+            let properties = try XCTUnwrap(branch["properties"] as? [String: Any])
+            let explanation = try XCTUnwrap(properties["explanation"] as? [String: Any])
+            XCTAssertEqual(explanation["maxLength"] as? Int, 128)
+        }
+
+        input.localFileCatalog = .init(
+            query: .init(fileKind: .presentation), page: catalogPage,
+            selectedCandidate: nil, inventoryState: .available)
+        let unselectedRequest = try planner.makeRequest(input: input, page: page(controls: []))
+        let unselectedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(unselectedRequest.httpBody)) as? [String: Any])
+        let unselectedMessages = try XCTUnwrap(unselectedBody["messages"] as? [[String: Any]])
+        let unselectedContext = try XCTUnwrap(unselectedMessages.last?["content"] as? String)
+        XCTAssertFalse(unselectedContext.contains("resolved-candidate-17"))
+        XCTAssertFalse(unselectedContext.contains(displayName))
+        let unselectedContextJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(unselectedContext.utf8)) as? [String: Any])
+        XCTAssertTrue(unselectedContextJSON["selected_file"] is NSNull)
+    }
+
     func testUnfinishedOrForeignModelEnvelopeIsRejected() async throws {
         let page = try page(controls: [.init(id: "enabled", role: "AXButton", label: "New", frame: CGRect(x: 1, y: 2, width: 3, height: 4), enabled: true)])
         let content = #"{"outcome":"pressControl","control_id":"enabled","explanation":"Open the menu."}"#

@@ -6,6 +6,13 @@ typealias ComputerUseDefaultBrowserFileCatalogFactory = @MainActor (String) thro
 /// Keyboard admission for a retained browser window. No shortcut here can
 /// create, close, or switch a browser tab/window or application.
 enum ComputerUseDefaultBrowserActionScope {
+    static func candidateIsSelected(panel: ComputerUseDefaultBrowserSession.FileOpenPanel,
+                                    candidateURL: URL?) -> Bool {
+        guard !panel.isNavigatingPath, let candidateURL, panel.selectedFileURLs.count == 1 else { return false }
+        return panel.selectedFileURLs[0].standardizedFileURL.resolvingSymlinksInPath()
+            == candidateURL.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
     /// The model has already resolved the user's file. Navigate the native
     /// picker from its current AX state without guessing a visible file row.
     static func nativeSelectionProposal(panel: ComputerUseDefaultBrowserSession.FileOpenPanel,
@@ -87,6 +94,7 @@ enum ComputerUseDefaultBrowserActionScope {
 final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
     ComputerUseTextClarificationContinuing {
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
+    typealias RevalidationFailureObserver = ComputerUseDesktopExecutor.RevalidationFailureObserver
     typealias NativeFilePlanner = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseMCPBrowserStepPlanner.Plan?
     typealias NativeControlPlanner = @MainActor @Sendable (ComputerUseFaraModel.Input,
         ComputerUseDefaultBrowserPageReader.Observation) async throws -> ComputerUseDefaultBrowserControlPlan
@@ -180,6 +188,14 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 enriched.localFileCatalog = advertiseFilePicker ? Self.notQueriedFileContext : nil
             }
             enriched.selectedLocalFilePath = session.currentFileOpenPanel == nil ? nil : try selectedFileURL()?.path
+            if let panel = session.currentFileOpenPanel {
+                enriched.nativeOpenPanelSelection = .init(
+                    candidateSelected: ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel,
+                        candidateURL: try selectedFileURL()),
+                    primaryActionEnabled: panel.primaryActionEnabled == true)
+            } else {
+                enriched.nativeOpenPanelSelection = nil
+            }
             return enriched
         }
 
@@ -321,6 +337,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
          pageReader: ComputerUseDefaultBrowserPageReader? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {},
          completionCheck: CompletionCheck? = nil,
+         revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileCatalogFactory: @escaping LocalFileCatalogFactory = { taskID in
              let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
                  ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
@@ -429,7 +446,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 do { try scope.check(action, tools) }
                 catch is CancellationError { throw CancellationError() }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            }, completeCheck: completionCheck,
+            }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) }, finishRun: finishRun)
     }
 

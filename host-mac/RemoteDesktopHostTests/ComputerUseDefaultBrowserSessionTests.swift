@@ -564,6 +564,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         let usesNativeDelegation = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
         let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
+        let startsOnDrivePage = uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
         let began = ContinuousClock.now
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
@@ -573,6 +574,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
         let responseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("DefaultBrowserPickerResponse-" + UUID().uuidString + ".json")
+        let nativeFileRequestURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserPickerNativeFileRequest-" + UUID().uuidString + ".json")
         let nativeResponseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("DefaultBrowserPickerNativeResponse-" + UUID().uuidString + ".json")
         let nativeControlRequestURL = FileManager.default.temporaryDirectory
@@ -581,6 +584,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             .appendingPathComponent("DefaultBrowserPickerNativeControlResponse-" + UUID().uuidString + ".json")
         defer {
             try? FileManager.default.removeItem(at: responseURL)
+            try? FileManager.default.removeItem(at: nativeFileRequestURL)
             try? FileManager.default.removeItem(at: nativeResponseURL)
             try? FileManager.default.removeItem(at: nativeControlRequestURL)
             try? FileManager.default.removeItem(at: nativeControlResponseURL)
@@ -621,7 +625,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         } else { try (pdfData as Data).write(to: expectedURL) }
         let session = try ComputerUseDefaultBrowserSession(journalDirectory: directory)
         let nativeSteps = ComputerUseRuntimeBrowserStepPlanner(inputs: nativeInputs, runtime: runtime,
-            inspectExchange: { _, response, _ in
+            inspectExchange: { request, response, _ in
+                try? request.prefix(65_536).write(to: nativeFileRequestURL, options: .atomic)
                 try? response.prefix(65_536).write(to: nativeResponseURL, options: .atomic)
             })
         let nativeFileSelectionPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativeSteps })
@@ -636,6 +641,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var selectedBeforeUpload = false
         var observedRequestedPage = false
         var uploadEffects = 0
+        var revalidationPairCount = 0
         var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int, pickerDismissed: Bool)?
         var pickerOpeningEffects = 0
         var delegatedWorkerGoal: String?
@@ -682,6 +688,33 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         } else {
             nativeControlPlanner = nil
         }
+        let revalidationFailureObserver: ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
+        if uploadToDrive {
+            revalidationFailureObserver = { expected, fresh, action, diagnostic in
+                guard revalidationPairCount < 4 else { return }
+                revalidationPairCount += 1
+                for (name, image) in [("Expected observation", expected), ("Fresh rejected observation", fresh)] {
+                    let attachment = XCTAttachment(data: image.png, uniformTypeIdentifier: "public.png")
+                    attachment.name = "Revalidation pair \(revalidationPairCount): \(name)"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                }
+                let facts: [String: Any] = ["pair": revalidationPairCount, "action": String(describing: action),
+                    "diagnostic": diagnostic,
+                    "expectedDisplayBounds": String(describing: expected.displayBounds),
+                    "freshDisplayBounds": String(describing: fresh.displayBounds),
+                    "expectedPixelSize": "\(expected.pixelWidth)x\(expected.pixelHeight)",
+                    "freshPixelSize": "\(fresh.pixelWidth)x\(fresh.pixelHeight)"]
+                if let data = try? JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys]) {
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    attachment.name = "Revalidation pair \(revalidationPairCount) metadata"
+                    attachment.lifetime = .keepAlways
+                    self.add(attachment)
+                }
+            }
+        } else {
+            revalidationFailureObserver = nil
+        }
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: directory, session: session,
             propose: { input in
                 if let error = input.actionError { actionErrors.append(error) }
@@ -725,6 +758,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         nativeControls: input.nativeControls, clarifiedGoal: input.clarifiedGoal)
                     workerInput.localFileCatalog = input.localFileCatalog
                     workerInput.selectedLocalFilePath = input.selectedLocalFilePath
+                    workerInput.nativeOpenPanelSelection = input.nativeOpenPanelSelection
                     workerInput.desktopDisplayBounds = input.desktopDisplayBounds
                     faraInput = workerInput
                 } else {
@@ -742,11 +776,68 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 nativeCalls += 1
                 if uploadToDrive { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
                 return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
-            }, nativeControlPlanner: nativeControlPlanner, completionCheck: { _ in try remoteUploadConfirmed() }, localFileCatalogFactory: { taskID in
+            }, nativeControlPlanner: nativeControlPlanner, completionCheck: { _ in try remoteUploadConfirmed() },
+            revalidationFailureObserver: revalidationFailureObserver, localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: uploadToDrive ? downloads : fixtureRoot, pageSize: 8)
             })
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        var startPageSetupEvidence: String?
         let operation = Task { @MainActor in
+            if startsOnDrivePage {
+                let ownedWindow = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+                var setupActions: [String] = []
+                @MainActor func dispatchSetupAction(_ action: ComputerUsePredictedAction, label: String) async throws {
+                    for attempt in 0..<3 {
+                        try session.validate(taskID: taskID, goal: goal, tools: tools)
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+                        var began = false
+                        do {
+                            try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: {
+                                try session.validate(taskID: taskID, goal: goal, tools: tools)
+                                try Task.checkCancellation()
+                                try tools.requireActive()
+                                began = true
+                            })
+                            try Task.checkCancellation()
+                            try tools.requireActive()
+                            try session.validate(taskID: taskID, goal: goal, tools: tools)
+                            setupActions.append(label)
+                            return
+                        } catch ComputerUseHostTools.ToolError.approvalTargetChanged where !began && attempt < 2 {
+                            // Retry only a rejected pre-effect fingerprint; never replay dispatched input.
+                            try await Task.sleep(for: .milliseconds(150))
+                        }
+                    }
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                try await dispatchSetupAction(ComputerUseNativeKeyChord.action(["Command", "l"]), label: "focus-location")
+                try await dispatchSetupAction(.typeText("https://drive.google.com"), label: "type-drive-url")
+                try await dispatchSetupAction(ComputerUseNativeKeyChord.action(["Return"]), label: "navigate-once")
+
+                let reader = ComputerUseDefaultBrowserPageReader(access: .live)
+                let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+                var observedPage: ComputerUseDefaultBrowserPageReader.Observation?
+                while ContinuousClock.now < deadline {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try session.validate(taskID: taskID, goal: goal, tools: tools)
+                    if let page = try reader.read(window: ownedWindow.accessibilityElement,
+                                                  application: ownedWindow.application,
+                                                  mayAct: { true }),
+                       URLComponents(string: page.url)?.host?.lowercased() == "drive.google.com" {
+                        observedPage = page
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(250))
+                }
+                guard let observedPage else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+                startPageSetupEvidence = "Diagnostic scripted start-page setup only; this navigation is excluded from task acceptance. "
+                    + "taskID=\(taskID) windowID=\(ownedWindow.id) actions=\(setupActions) "
+                    + "observedHost=\(URLComponents(string: observedPage.url)?.host ?? "") "
+                    + "observedPath=\(URLComponents(string: observedPage.url)?.path ?? "/")"
+            }
             if usesNativeDelegation {
                 delegatedWorkerGoal = try await makeNativeDelegatedBrowserWorkerGoal(
                     originalGoal: goal, nativeInputs: nativeInputs, runtime: runtime) { label, data in
@@ -802,12 +893,23 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         if uploadToDrive {
             let fixture = XCTAttachment(string: "Disposable fixture: \(name); admitted upload effects: \(uploadEffects)")
             fixture.name = "Real Drive readback target"; fixture.lifetime = .keepAlways; add(fixture)
+            if let startPageSetupEvidence {
+                let setup = XCTAttachment(string: startPageSetupEvidence)
+                setup.name = "Diagnostic scripted Drive start-page setup (excluded from acceptance)"
+                setup.lifetime = .keepAlways; add(setup)
+            }
         }
         if let data = try? Data(contentsOf: nativeResponseURL) {
             let response = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
             response.name = "Raw native file selection response"
             response.lifetime = .keepAlways
             add(response)
+        }
+        if let data = try? Data(contentsOf: nativeFileRequestURL) {
+            let request = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            request.name = "Raw native file selection request (body only; no credentials)"
+            request.lifetime = .keepAlways
+            add(request)
         }
         if let data = try? Data(contentsOf: nativeControlRequestURL) {
             let request = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")

@@ -618,6 +618,18 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
             }
             tools.append(objectTool("incomplete", "End without success if the host catalog cannot identify a safe file choice; state what remains.",
                 ["text": stringProperty()], ["text"]))
+            // b9992's Qwen tagged-string tool grammar bypasses enums on flat
+            // string arguments. Nest native file-choice fields
+            // under an object argument so opaque candidate IDs stay exact.
+            for index in tools.indices {
+                guard var function = tools[index]["function"] as? [String: Any],
+                      let parameters = function["parameters"] as? [String: Any] else {
+                    throw ComputerUseBrowserGoalPlanError.invalidResponse
+                }
+                function["parameters"] = ["type": "object", "properties": ["request": parameters],
+                    "required": ["request"], "additionalProperties": false]
+                tools[index]["function"] = function
+            }
         }
         let captureCallID = "capture-native-browser-ed"
         let instructions: String
@@ -889,9 +901,33 @@ struct ComputerUseLocalTextBrowserStepPlanner: ComputerUseNativeBrowserStepPlann
             throw ComputerUseBrowserGoalPlanError.invalidResponse
         }
         var argumentParser = StrictSemanticJSONParser(arguments, maximumValueCount: 128)
-        guard case .object(let args) = try argumentParser.parse(),
-              Set(required).isSubset(of: Set(args.keys)), Set(args.keys).isSubset(of: Set(properties.keys)) else {
+        guard case .object(let outerArgs) = try argumentParser.parse() else {
             throw ComputerUseBrowserGoalPlanError.invalidResponse
+        }
+        let args: [String: MCPJSONValue]
+        if context.isNativeFileSelection {
+            guard Set(properties.keys) == ["request"], required == ["request"],
+                  let requestSchema = properties["request"] as? [String: Any],
+                  requestSchema["type"] as? String == "object",
+                  requestSchema["additionalProperties"] as? Bool == false,
+                  let nestedProperties = requestSchema["properties"] as? [String: Any],
+                  let nestedRequired = requestSchema["required"] as? [String],
+                  case .object(let nestedArgs)? = outerArgs["request"], Set(outerArgs.keys) == ["request"] else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            guard Set(nestedRequired).count == nestedRequired.count,
+                  Set(nestedRequired).isSubset(of: Set(nestedProperties.keys)),
+                  Set(nestedRequired).isSubset(of: Set(nestedArgs.keys)),
+                  Set(nestedArgs.keys).isSubset(of: Set(nestedProperties.keys)) else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            args = nestedArgs
+        } else {
+            guard Set(required).isSubset(of: Set(outerArgs.keys)),
+                  Set(outerArgs.keys).isSubset(of: Set(properties.keys)) else {
+                throw ComputerUseBrowserGoalPlanError.invalidResponse
+            }
+            args = outerArgs
         }
         var reference = ""
         var text = ""

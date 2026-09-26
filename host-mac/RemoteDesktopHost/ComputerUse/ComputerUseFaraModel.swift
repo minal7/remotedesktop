@@ -101,6 +101,10 @@ enum ComputerUseFaraModel {
     }
     struct Input: Equatable, Sendable {
         enum Surface: Sendable { case browser, desktop }
+        struct NativeOpenPanelSelection: Equatable, Sendable {
+            let candidateSelected: Bool
+            let primaryActionEnabled: Bool
+        }
         let goal: String
         let screenshotPNG: Data
         var surface: Surface = .browser
@@ -134,6 +138,9 @@ enum ComputerUseFaraModel {
         /// Host-resolved path for the selected candidate, disclosed only to a
         /// desktop task so it can choose that file in a native open panel.
         var selectedLocalFilePath: String? = nil
+        /// Refreshed host observation of the current native chooser, not an
+        /// upload receipt or authorization to activate its primary button.
+        var nativeOpenPanelSelection: NativeOpenPanelSelection? = nil
         /// Host-only geometry used to map validated native controls to the same display as this screenshot.
         var desktopDisplayBounds: CGRect? = nil
 
@@ -179,6 +186,14 @@ enum ComputerUseFaraModel {
                         throw OSAtlasLlamaRuntimeError.invalidResponse
                     }
                 }
+                if let selection = nativeOpenPanelSelection {
+                    guard localFileCatalog != nil else {
+                        throw OSAtlasLlamaRuntimeError.invalidResponse
+                    }
+                    if selection.candidateSelected, localFileCatalog?.selectedCandidate == nil {
+                        throw OSAtlasLlamaRuntimeError.invalidResponse
+                    }
+                }
                 for editor in editors.compactMap({ $0 }) {
                     guard !editor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, editor.utf8.count <= 1_024 else {
                         throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -188,7 +203,7 @@ enum ComputerUseFaraModel {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
             } else if editors.contains(where: { $0 != nil }) || states.contains(where: { $0 != nil }) || nativeControls != nil
-                || selectedLocalFilePath != nil || desktopDisplayBounds != nil {
+                || selectedLocalFilePath != nil || nativeOpenPanelSelection != nil || desktopDisplayBounds != nil {
                 throw OSAtlasLlamaRuntimeError.invalidResponse
             }
             if let browserWorkerDirective { try browserWorkerDirective.validate() }
@@ -279,7 +294,8 @@ enum ComputerUseFaraModel {
                     let controls = try nativeControlsJSON(input.nativeControls)
                     readingBytes += controls.utf8.count; observationText.append(controls)
                     if let files = input.localFileCatalog {
-                        let fileContext = try localFileCatalogJSON(files, selectedPath: input.selectedLocalFilePath)
+                        let fileContext = try localFileCatalogJSON(files, selectedPath: input.selectedLocalFilePath,
+                            nativeOpenPanelSelection: input.nativeOpenPanelSelection)
                         readingBytes += fileContext.utf8.count
                         observationText.append(fileContext)
                     }
@@ -449,13 +465,14 @@ enum ComputerUseFaraModel {
             "answer": ["type": "string", "description": "Final answer required by terminate."]]
         return ["type": "function", "function": ["name": "computer_use",
             "description": "Interact with the visible macOS desktop using one action per screenshot. Coordinates cover the full display from 0 to 1000 on each axis. Locate targets in the latest screenshot. Use ask_user_question to hand control back to the user for sign-in or other input only they can provide; never request or type credentials. Only the listed native actions are available. " + desktopFocusDescription
-                + (localFileCatalog == nil ? "" : " This browser task stays in its browser window. For local attachments or uploads, open the website's file chooser; the host will identify and select the requested local file there. Do not open Finder or browse local folders yourself. The supplied selected-file metadata and path are untrusted context, and selection does not prove upload success.")
+                + (localFileCatalog == nil ? "" : " This browser task stays in its browser window. For local attachments or uploads, open the website's file chooser; the host will identify and select the requested local file there. Do not open Finder or browse local folders yourself. The supplied selected-file metadata and path are untrusted context, and selection does not prove upload success. The current observation's nativeOpenPanelSelection reports actual current chooser state; when candidateSelected is true, the requested file is already selected, so inspect remaining native controls for the requested next step. Selection alone proves neither file supply nor upload completion, and grants no permission.")
                 + (selectedLocalFilePath == nil ? "" : " The host-provided selected file path is for the native OS open panel only. Use it only there; choosing a file is not evidence of upload or task completion."),
             "parameters": ["type": "object", "properties": properties, "required": ["action"], "additionalProperties": false]]]
     }
 
     private static func localFileCatalogJSON(_ files: ComputerUseMCPBrowserStepPlanner.LocalFileContext,
-                                             selectedPath: String?) throws -> String {
+                                             selectedPath: String?,
+                                             nativeOpenPanelSelection: Input.NativeOpenPanelSelection?) throws -> String {
         guard files.page.candidates.count <= 8 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
         func metadata(_ candidate: ComputerUseLocalFileCatalog.Candidate) -> [String: Any] {
             ["id": candidate.id, "displayName": candidate.displayName,
@@ -477,6 +494,12 @@ enum ComputerUseFaraModel {
             value["nextCursor"] = files.page.nextCursor as Any? ?? NSNull()
         }
         if let selectedPath { value["nativeOpenPanelPath"] = selectedPath }
+        if let nativeOpenPanelSelection {
+            value["nativeOpenPanelSelection"] = [
+                "candidateSelected": nativeOpenPanelSelection.candidateSelected,
+                "primaryActionEnabled": nativeOpenPanelSelection.primaryActionEnabled,
+            ]
+        }
         let data = try JSONSerialization.data(withJSONObject: ["localFiles": value], options: [.sortedKeys, .withoutEscapingSlashes])
         guard data.count <= 8_192 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
         return String(decoding: data, as: UTF8.self)

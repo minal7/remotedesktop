@@ -88,6 +88,23 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 calls += 1
                 XCTAssertEqual(input.goal, goal)
                 XCTAssertTrue(input.history.isEmpty, "Native catalog plans must not enter Fara's action history")
+                let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+                    baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                let body = try XCTUnwrap(request.httpBody)
+                let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                let messages = try XCTUnwrap(payload["messages"] as? [[String: Any]])
+                let userContent = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+                let observation = try XCTUnwrap(userContent.compactMap { $0["text"] as? String }
+                    .first(where: { $0.contains("\"localFiles\"") }))
+                let fileLine = try XCTUnwrap(observation.components(separatedBy: "\n")
+                    .first(where: { $0.contains("\"localFiles\"") }))
+                let filePayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fileLine.utf8)) as? [String: Any])
+                let localFiles = try XCTUnwrap(filePayload["localFiles"] as? [String: Any])
+                let panel = try XCTUnwrap(localFiles["nativeOpenPanelSelection"] as? [String: Any],
+                    "Current native picker state must be in the current user observation, separate from the catalog choice")
+                XCTAssertEqual(panel["candidateSelected"] as? Bool, true)
+                XCTAssertEqual(panel["primaryActionEnabled"] as? Bool, true)
                 sawOriginalGoal = input.goal == goal && input.localFileCatalog?.selectedCandidate?.id == candidateIDs.first
                 return .init(response: "handoff", decision: .handoff("Ready for the next step."))
             }, nativeFilePlanner: { input in
@@ -190,6 +207,28 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             panel: selected, selectedURL: URL(fileURLWithPath: "/tmp/other.pptx")))
     }
 
+    func testCurrentPanelSelectionRequiresExactSingleResolvedCandidate() {
+        let element = AXUIElementCreateSystemWide()
+        let candidate = URL(fileURLWithPath: "/tmp/Selected.pptx")
+        func panel(selected: [URL], navigating: Bool = false) -> ComputerUseDefaultBrowserSession.FileOpenPanel {
+            .init(parentWindowID: "window", parentWindowElement: element, accessibilityElement: element,
+                bounds: CGRect(x: 0, y: 0, width: 800, height: 600), isFocused: true,
+                goToFolderBounds: navigating ? CGRect(x: 100, y: 100, width: 300, height: 100) : nil,
+                pathTextFieldElement: navigating ? element : nil, selectedFileURLs: selected,
+                primaryActionElement: element, primaryActionBounds: nil, primaryActionEnabled: true)
+        }
+        XCTAssertTrue(ComputerUseDefaultBrowserActionScope.candidateIsSelected(
+            panel: panel(selected: [candidate]), candidateURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.candidateIsSelected(
+            panel: panel(selected: [URL(fileURLWithPath: "/tmp/Other.pptx")]), candidateURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.candidateIsSelected(
+            panel: panel(selected: [candidate, URL(fileURLWithPath: "/tmp/Other.pptx")]), candidateURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.candidateIsSelected(
+            panel: panel(selected: [candidate], navigating: true), candidateURL: candidate))
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.candidateIsSelected(
+            panel: panel(selected: [candidate]), candidateURL: nil))
+    }
+
     func testNativeFilePlannerTakesOverOnlyForAnObservedUnselectedPicker() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
@@ -234,6 +273,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 XCTAssertEqual(input.localFileCatalog?.inventoryState, .notQueried,
                     "Advertise host file selection before the browser model chooses its next step")
                 XCTAssertNil(input.selectedLocalFilePath)
+                XCTAssertNil(input.nativeOpenPanelSelection, "No current panel means no current chooser-selection observation")
                 return .init(response: "", decision: .handoff("Open the website's file chooser."))
             }, nativeFilePlanner: { input in
                 nativeCalls += 1
@@ -2015,6 +2055,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
             var changed = false, calls = 0, effects = 0
+            var rejectionPairs: [(ComputerUseDesktopImage, ComputerUseDesktopImage, ComputerUsePredictedAction?, [String: String])] = []
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
                 approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: "editor", frame: target) },
                 actionPerformer: { _ in effects += 1 }, screenProvider: {
@@ -2034,9 +2075,17 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 }
                 XCTAssertEqual(calls, 2, name); XCTAssertEqual(input.actionError == nil, admitted, name)
                 return .init(response: "done", action: .reportCompletion("Checked"))
+            }, revalidationFailureObserver: { expected, fresh, action, diagnostic in
+                rejectionPairs.append((expected, fresh, action, diagnostic))
             })
             let result = try await executor.execute(taskID: "pointer-region", prompt: "Click Query", trustedUserPrompt: "Click Query", tools: tools, progress: { _ in })
             XCTAssertEqual(result, .completed("Checked"), name); XCTAssertEqual(effects, admitted ? 1 : 0, name)
+            XCTAssertEqual(rejectionPairs.count, admitted ? 0 : 1, name)
+            if !admitted, let pair = rejectionPairs.first {
+                XCTAssertNotEqual(pair.0.png, pair.1.png, name)
+                XCTAssertNotNil(pair.2, name)
+                XCTAssertEqual(pair.3["screenMatches"], "false", name)
+            }
         }
     }
 

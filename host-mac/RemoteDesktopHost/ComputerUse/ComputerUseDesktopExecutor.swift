@@ -39,6 +39,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     typealias SurfaceScopeCheck = @MainActor @Sendable (ComputerUsePredictedAction?) throws -> Void
     /// Optional task-specific verifier, run after the model sees a fresh screenshot.
     typealias CompleteCheck = @MainActor @Sendable (String) async throws -> Bool
+    /// Passive observer for an already-captured failed revalidation pair.
+    typealias RevalidationFailureObserver = @MainActor
+        (ComputerUseDesktopImage, ComputerUseDesktopImage, ComputerUsePredictedAction?, [String: String]) -> Void
     /// A host-owned, non-input operation. Nil means the operation was handled
     /// and the next loop must obtain a fresh observation before proposing again.
     typealias LocalFileOperationHandler = @MainActor @Sendable
@@ -86,6 +89,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let propose: Propose
     private let surfaceScopeCheck: SurfaceScopeCheck?
     private let completeCheck: CompleteCheck?
+    private let revalidationFailureObserver: RevalidationFailureObserver?
     private let localFileOperationHandler: LocalFileOperationHandler?
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
@@ -104,10 +108,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     init(journalDirectory: URL, propose: @escaping Propose,
          surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
+         revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileOperationHandler: LocalFileOperationHandler? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
+        self.revalidationFailureObserver = revalidationFailureObserver
         self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
     }
 
@@ -279,6 +285,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 "editableAuthorityMatches": String(expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint)),
                 "textFrameBefore": String(describing: expected.focusedTextFrame), "textFrameAfter": String(describing: fresh.focusedTextFrame),
                 "window": String(describing: expected.fingerprint.frontmostWindowBounds)]) { _, value in value }
+            revalidationFailureObserver?(expected.image, fresh.image, action, lastRevalidationDiagnostic)
             throw Failure.changedScreen
         }
     }
