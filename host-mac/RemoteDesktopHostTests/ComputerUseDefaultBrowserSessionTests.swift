@@ -313,8 +313,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
                 }
                 guard proposals.count < (uploadToDrive ? 20 : 12) else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
+                if uploadToDrive {
+                    let frame = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
+                    frame.name = "Drive step \(proposals.count) input"; frame.lifetime = .keepAlways; self.add(frame)
+                }
                 let endpoint = try await runtime.activateFara(faraInputs)
                 let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                if uploadToDrive {
+                    let trace = XCTAttachment(string: "Previous action error: \(input.actionError ?? "none")\n"
+                        + proposal.response + "\n" + (try ComputerUseFaraModel.nativeControlsJSON(input.nativeControls)))
+                    trace.name = "Drive step \(proposals.count) proposal and native controls"; trace.lifetime = .keepAlways; self.add(trace)
+                }
                 proposals.append(String(describing: proposal.action).prefix(256).description)
                 return .init(proposal)
             }, nativeFilePlanner: { input in

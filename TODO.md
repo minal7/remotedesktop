@@ -9,10 +9,10 @@
 | Default-browser route and retained task window | Yes | Mac | Focused checks and real Safari navigation/login handoff pass | Navigation slice |
 | Native text and picker execution | Yes | Mac | 23 lifecycle/input checks and 3 keyboard geometry checks pass; exact file selected in earlier picker live11, whose final page-read assertion failed | Components only |
 | File interpretation, candidate choice and choice UI | Yes | Mac and iOS app | Native model lists/selects the newest presentation; 4 current capability/choice checks pass; phone interaction pending | Components only |
-| Default-account Drive upload and fresh readback | Connected | Mac | Real Drive live01/live02 fail before the chooser/catalog; zero admitted uploads | No |
+| Default-account Drive upload and fresh readback | Connected | Mac | Real Drive live01–live03 fail before the chooser/catalog; zero admitted uploads | No |
 | Email attachment to verified own account | Pending | Pending | Not run | No |
 
-Next: inspect the model's menu observations and rejected clicks on real Drive, fix the observed interaction failure, then verify one exact disposable upload and independent download/readback. Keep work on this single workflow. No further architecture or model expansion until it works.
+Next: fix the browser worker's task handling. Live03 records the correct Drive screenshot, but Fara chooses unrelated navigation despite the file-picker capability instructions. Verify one exact disposable upload and independent download/readback after that failure is fixed. Keep work on this single workflow. No further architecture or model expansion until it works.
 
 [Checkpoint evidence](docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json) preserves failed and passing runs. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md) defines the full outcome. The installed host is unchanged; general production readiness and the 12 GB whole-Mac target remain unaccepted.
 

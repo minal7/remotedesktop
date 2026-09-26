@@ -1,6 +1,6 @@
 # File selection and transfer acceptance — September 24
 
-The application must perform this workflow with local models and native tools through the Mac default browser on a real website. Codex may prepare disposable files and inspect results, but must not upload in place of the application. Current September 25 status: Safari is signed into Google Drive; native file-selection/input repairs compile and pass focused checks, but real Drive live02 fails during menu interaction before catalog selection. No real upload or readback is accepted. The [single current tracker](../../../TODO.md) and [checkpoint evidence](default-browser-loop-results-sept24.json) own current status; earlier checkpoints below are historical.
+The application must perform this workflow with local models and native tools through the Mac default browser on a real website. Codex may prepare disposable files and inspect results, but must not upload in place of the application. Current September 25 status: Safari is signed into Google Drive; native file-selection/input repairs compile and pass focused checks, but real Drive live03 fails during browser task handling before catalog selection. No real upload or readback is accepted. The [single current tracker](../../../TODO.md) and [checkpoint evidence](default-browser-loop-results-sept24.json) own current status; earlier checkpoints below are historical.
 
 ## Required behavior
 
@@ -69,3 +69,5 @@ Live12 acceptance is limited to navigation and yielding at the account chooser. 
 
 
 Latest default-browser checkpoint (September 25): 23 lifecycle/input regressions, 3 keyboard geometry checks including the real picker, and 4 capability/choice checks pass. A real picker selected the exact file in live11, but the test then tried to read the page behind the modal; subsequent runs exposed a planner invalid response and offscreen keyboard checkpoint. Those results remain separate. The keyboard failure was reproduced and repaired. The browser now receives its native file-selection capability before navigation. Real Drive live02 still cycles through New/New folder and rejected clicks before stopping at an unidentified target; nativeCalls=0 and uploadEffects=0. Inspect that observed menu/action failure next. No upload, readback, email or general readiness is accepted.
+
+Live03 records each model screenshot and proposal. It confirms that Fara receives the real Drive Home screenshot but chooses unrelated folder/browser navigation, then an out-of-scope Alt+Left chord. The host hands control back; nativeCalls=0 and uploadEffects=0. Build succeeds, the real test fails, and all 32 invocation source hashes remain unchanged. This is the next bounded failure to address.
