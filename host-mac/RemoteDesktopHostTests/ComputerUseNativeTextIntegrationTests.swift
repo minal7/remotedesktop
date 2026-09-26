@@ -2687,6 +2687,103 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 1)
     }
 
+    func testSuccessfulDispatchObserverRunsOnceOnlyAfterInputReturnsVerified() async throws {
+        // Ordinary native dispatch reports only after its verified journal save.
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var calls = 0, effects = 0
+            var observed: [ComputerUsePredictedAction] = []
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                calls += 1
+                if calls == 1 { return .init(response: "tab", action: .key(["Tab"])) }
+                return .init(response: "handoff", decision: .handoff("Review the current field."))
+            }, onSuccessfulDispatch: { observed.append($0) })
+            let result = try await executor.execute(taskID: "observer-ordinary", prompt: "Continue",
+                trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .userInterventionRequired("Review the current field."))
+            XCTAssertEqual(effects, 1)
+            XCTAssertEqual(observed, [.key(usage: 0x2B, modifiers: 0)])
+        }
+
+        // An approval request alone reports no dispatch. A successful approved
+        // dispatch reports once; retrying the same continuation cannot replay it.
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var effects = 0
+            var observed: [ComputerUsePredictedAction] = []
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                .init(response: "return", action: .key(["Return"]))
+            }, onSuccessfulDispatch: { observed.append($0) })
+            let pending = try await executor.execute(taskID: "observer-approved", prompt: "Submit",
+                trustedUserPrompt: "Submit", tools: tools, progress: { _ in })
+            guard case .approvalRequired(_, let action, let continuation) = pending else {
+                return XCTFail("Expected pending approval")
+            }
+            XCTAssertTrue(observed.isEmpty, "Approval pending is not evidence that input was dispatched")
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+            try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+                tools: tools, willBeginEffect: {})
+            XCTAssertEqual(effects, 1)
+            XCTAssertEqual(observed, [.key(usage: 0x28, modifiers: 0)])
+            do {
+                try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+                    tools: tools, willBeginEffect: {})
+                XCTFail("A completed approval continuation must not replay input")
+            } catch {}
+            XCTAssertEqual(effects, 1)
+            XCTAssertEqual(observed, [.key(usage: 0x28, modifiers: 0)])
+        }
+
+        // Rejected-before-input and throwing-after-begin dispatches never report
+        // a successful completion; the latter remains uncertain and cannot replay.
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var focus = "first", calls = 0, effects = 0
+            var observed: [ComputerUsePredictedAction] = []
+            let tools = desktopTestTools(focus: { focus }, perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                calls += 1
+                if calls == 1 { focus = "changed"; return .init(response: "tab", action: .key(["Tab"])) }
+                XCTAssertTrue(observed.isEmpty)
+                return .init(response: "handoff", decision: .handoff("Review the current field."))
+            }, onSuccessfulDispatch: { observed.append($0) })
+            _ = try await executor.execute(taskID: "observer-rejected", prompt: "Continue",
+                trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+            XCTAssertEqual(effects, 0)
+            XCTAssertTrue(observed.isEmpty)
+        }
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var calls = 0, effects = 0
+            var observed: [ComputerUsePredictedAction] = []
+            let tools = desktopTestTools(perform: { _ in
+                effects += 1
+                throw ComputerUseHostTools.ToolError.approvalTargetChanged
+            })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                calls += 1
+                return .init(response: "tab", action: .key(["Tab"]))
+            }, onSuccessfulDispatch: { observed.append($0) })
+            do {
+                _ = try await executor.execute(taskID: "observer-uncertain", prompt: "Continue",
+                    trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+                XCTFail("A post-input dispatch error must remain uncertain")
+            } catch ComputerUseHostTools.ToolError.approvalTargetChanged {}
+            let resumed = try await executor.execute(taskID: "observer-uncertain", prompt: "Continue",
+                trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+            guard case .unableToComplete = resumed else { return XCTFail("Uncertain input must not replay") }
+            XCTAssertEqual(effects, 1)
+            XCTAssertEqual(calls, 1)
+            XCTAssertTrue(observed.isEmpty, "An uncertain effect is not a successful dispatch receipt")
+        }
+    }
+
     func testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2716,8 +2813,14 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             case 4:
                 XCTAssertEqual(input.actionError, rejectedFeedback,
                     "A passive remember step must not clear an unresolved rejected-action result")
-                return .init(response: "fresh key", action: .key(["a"]))
+                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             case 5:
+                XCTAssertEqual(input.actionError, rejectedFeedback,
+                    "Refreshing a specialist's screenshot must preserve unresolved rejection feedback")
+                XCTAssertEqual(input.history.count, 3, "A host observation refresh is not a model action")
+                XCTAssertEqual(effects, 0, "Refreshing the screen must not replay the rejected input")
+                return .init(response: "fresh key", action: .key(["a"]))
+            case 6:
                 XCTAssertNil(input.actionError, "A successfully dispatched input resolves the prior rejection")
                 XCTAssertEqual(input.history.last?.action, .key(["a"]))
                 return .init(response: "done", action: .reportCompletion("Done"))
@@ -2725,7 +2828,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }
         })
         let result = try await executor.execute(taskID: "feedback", prompt: "Use the current field", trustedUserPrompt: "Use the current field", tools: tools, progress: { _ in })
-        XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(calls, 5); XCTAssertEqual(effects, 1)
+        XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(calls, 6); XCTAssertEqual(effects, 1)
     }
 
     func testDesktopImagePreservesOrientationAndFullOffsetDisplayCoordinates() throws {

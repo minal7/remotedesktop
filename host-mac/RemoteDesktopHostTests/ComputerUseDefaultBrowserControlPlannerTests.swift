@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import AppKit
 @testable import RemoteDesktopHost
 
 @MainActor
@@ -172,9 +173,11 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertFalse(selectedContext.contains("/Users/"), "The planner receives no local path")
         XCTAssertFalse(selectedContext.contains("selectedLocalFilePath"))
         let selectedContextJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(selectedContext.utf8)) as? [String: Any])
-        XCTAssertEqual(selectedContextJSON["selected_file"] as? [String: String], [
-            "id": "resolved-candidate-17", "displayName": displayName,
-        ])
+        let selectedFile = try XCTUnwrap(selectedContextJSON["selected_file"] as? [String: Any])
+        XCTAssertEqual(selectedFile["id"] as? String, "resolved-candidate-17")
+        XCTAssertEqual(selectedFile["displayName"] as? String, displayName)
+        XCTAssertEqual(selectedFile["pickerConfirmationDispatched"] as? Bool, false)
+        XCTAssertEqual(selectedFile.count, 3)
         XCTAssertTrue(system.localizedCaseInsensitiveContains("untrusted"))
         XCTAssertTrue(system.localizedCaseInsensitiveContains("verify"))
         XCTAssertTrue(system.localizedCaseInsensitiveContains("visualFallback"))
@@ -199,6 +202,87 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertFalse(unselectedContext.contains(displayName))
         let unselectedContextJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(unselectedContext.utf8)) as? [String: Any])
         XCTAssertTrue(unselectedContextJSON["selected_file"] is NSNull)
+    }
+
+    func testSelectedCandidateContextDistinguishesPickerSelectionFromDispatchedConfirmation() throws {
+        let candidate = ComputerUseLocalFileCatalog.Candidate(
+            id: "candidate-before-open", displayName: "Quarterly Presentation.pptx",
+            contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+            byteCount: 28_273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        var input = makeInput()
+        input.localFileCatalog = .init(
+            query: .init(fileKind: .presentation),
+            page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: candidate, inventoryState: .available)
+        input.selectedLocalFilePath = "/Users/fixture/Downloads/Quarterly Presentation.pptx"
+        input.nativeOpenPanelSelection = .init(candidateSelected: true, primaryActionEnabled: true)
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Verify the current page."}"#)))
+        let request = try planner.makeRequest(input: input, page: page(controls: [], renderedAXText: "File selected"))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let context = try XCTUnwrap(messages.last?["content"] as? String)
+        let contextJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(context.utf8)) as? [String: Any])
+        let selectedFile = try XCTUnwrap(contextJSON["selected_file"] as? [String: Any])
+
+        XCTAssertEqual(selectedFile["id"] as? String, "candidate-before-open")
+        XCTAssertEqual(selectedFile["displayName"] as? String, candidate.displayName)
+        XCTAssertEqual(selectedFile["pickerConfirmationDispatched"] as? Bool, false,
+            "AX reports only that the exact file is selected; the host has not sent the picker confirmation")
+        XCTAssertFalse(context.contains("/Users/"), "No local path may enter browser-planner context")
+
+        input.hostDispatchedLocalFileConfirmationCandidateID = candidate.id
+        let dispatchedRequest = try planner.makeRequest(input: input, page: page(controls: [], renderedAXText: "Starting upload"))
+        let dispatchedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(dispatchedRequest.httpBody)) as? [String: Any])
+        let dispatchedMessages = try XCTUnwrap(dispatchedBody["messages"] as? [[String: Any]])
+        let dispatchedContext = try XCTUnwrap(dispatchedMessages.last?["content"] as? String)
+        let dispatchedJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(dispatchedContext.utf8)) as? [String: Any])
+        let dispatchedFile = try XCTUnwrap(dispatchedJSON["selected_file"] as? [String: Any])
+        XCTAssertEqual(dispatchedFile["pickerConfirmationDispatched"] as? Bool, true)
+
+        input.hostDispatchedLocalFileConfirmationCandidateID = "different-candidate"
+        XCTAssertThrowsError(try planner.makeRequest(input: input, page: page(controls: [])),
+            "A dispatched confirmation for another file must be rejected")
+        input.hostDispatchedLocalFileConfirmationCandidateID = candidate.id
+        input.localFileCatalog = nil
+        XCTAssertThrowsError(try planner.makeRequest(input: input, page: page(controls: [])),
+            "A confirmation without its current selected candidate must be rejected")
+    }
+
+    func testFaraLocalFilesProjectionCarriesOnlyMatchingPickerDispatchProgress() throws {
+        let candidate = ComputerUseLocalFileCatalog.Candidate(
+            id: "candidate-progress", displayName: "Quarterly Presentation.pptx",
+            contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+            byteCount: 28_273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let localFiles = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
+            query: .init(fileKind: .presentation),
+            page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: candidate)
+        var input = ComputerUseFaraModel.Input(goal: "Upload the selected presentation", screenshotPNG: try smallPNG(), surface: .desktop)
+        input.localFileCatalog = localFiles
+        input.hostDispatchedLocalFileConfirmationCandidateID = candidate.id
+        input.nativeOpenPanelSelection = .init(candidateSelected: true, primaryActionEnabled: true)
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let blocks = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+        let localFilesText = try XCTUnwrap(blocks.compactMap { $0["text"] as? String }
+            .flatMap { $0.split(separator: "\n").map(String.init) }
+            .first { $0.hasPrefix("{\"localFiles\"") })
+        let projected = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(localFilesText.utf8)) as? [String: Any])
+        let files = try XCTUnwrap(projected["localFiles"] as? [String: Any])
+        let selected = try XCTUnwrap(files["selectedCandidate"] as? [String: Any])
+        XCTAssertEqual(selected["pickerConfirmationDispatched"] as? Bool, true)
+        let panelSelection = try XCTUnwrap(files["nativeOpenPanelSelection"] as? [String: Bool])
+        XCTAssertEqual(panelSelection, ["candidateSelected": true, "primaryActionEnabled": true])
+        XCTAssertFalse(localFilesText.contains("/Users/"))
+
+        input.hostDispatchedLocalFileConfirmationCandidateID = "other-candidate"
+        XCTAssertThrowsError(try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input))
     }
 
     func testUnfinishedOrForeignModelEnvelopeIsRejected() async throws {
@@ -226,6 +310,13 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             history: [.init(screenshotPNG: Data([2]), response: "Rejected upload click", actionError: "No input was sent.",
                 action: .pointer(.leftClick, .init(x: 37, y: 96)))],
             actionError: "The upload click was rejected. No input was sent.")
+    }
+
+    private func smallPNG() throws -> Data {
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        return try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
     }
 
     private func page(controls: [ComputerUseDefaultBrowserPageReader.Control],

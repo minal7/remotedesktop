@@ -8,6 +8,8 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
         case action(ComputerUseFaraAction)
         case completionStatus(success: Bool)
         case handoff(String)
+        /// Reobserve without treating old pixels as an action or model-history step.
+        case refreshObservation
         case unsupported
     }
     let response: String
@@ -46,6 +48,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// and the next loop must obtain a fresh observation before proposing again.
     typealias LocalFileOperationHandler = @MainActor @Sendable
         (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws -> ComputerUseExecutionResult?
+    /// Called only after native input returned and its dispatch journal was verified.
+    typealias SuccessfulDispatchHandler = @MainActor @Sendable (ComputerUsePredictedAction) -> Void
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -91,6 +95,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let completeCheck: CompleteCheck?
     private let revalidationFailureObserver: RevalidationFailureObserver?
     private let localFileOperationHandler: LocalFileOperationHandler?
+    private let onSuccessfulDispatch: SuccessfulDispatchHandler
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
@@ -110,11 +115,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileOperationHandler: LocalFileOperationHandler? = nil,
+         onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
         self.revalidationFailureObserver = revalidationFailureObserver
         self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
+        self.onSuccessfulDispatch = onSuccessfulDispatch
     }
 
     private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
@@ -366,6 +373,14 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             var preservesRejectedActionFeedback = false
             try Task.checkCancellation(); try lease.assertOwnership()
+            if case .refreshObservation = proposal.decision {
+                // A planner may need a new frame after a long, read-only inference.
+                // Refresh without validating the now-stale pixels or recording a
+                // fictional action; task and retained-surface authority still apply.
+                try checkScopedSurface()
+                session.turns += 1
+                continue
+            }
             do {
                 let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
                 if case .handoff = proposal.decision {
@@ -437,6 +452,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         record(proposal, observation: observation, session: session)
                         session.actionError = nil; session.rejected = 0
                         return .userInterventionRequired(message)
+                    case .refreshObservation: throw Failure.unsupportedAction
                     case .action(.reportCompletion(let answer)):
                         try await verifyCompletionCandidate(answer, observation: observation,
                             tools: tools, assertOwnership: { try lease.assertOwnership() })
@@ -507,6 +523,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             // surface at the next observation, before proposing further input.
             var verified = attempted; verified.statuses = [.verified]
             try store.save(verified, replacing: attempted)
+            onSuccessfulDispatch(action)
         } catch {
             if !approved, !began, case ComputerUseHostTools.ToolError.approvalTargetChanged = error {
                 lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-dispatch"

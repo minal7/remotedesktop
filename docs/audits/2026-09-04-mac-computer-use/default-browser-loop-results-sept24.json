@@ -469,6 +469,110 @@
       "selectedCandidateID": "b31451b3-8b10-436a-89a9-c60bf3d3d110",
       "nativePageContextAttachment": "95430FF3-B01D-4E2C-8BE7-80B63C024EC1",
       "nativePageResponseAttachment": "6E8BF8D4-14A3-4271-AD1E-F7CD0896332D"
+    },
+    {
+      "run": "default-browser-drive-upload-live23",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Blank browser, native delegation ON, no scripted start. One admitted exact upload and independent byte-matched readback, then 240-second timeout/cancellation in native planning after post-upload Fara wait. Test-only advice, bounded auto-approvals and custom completion oracle; not production-route or task-completion acceptance. One known runtime warning; 40 source hashes unchanged.",
+      "summarySHA256": "404167e4f538e3feab9027cd3a0da17cd8de2426820928bcf92673c8326c4aaf",
+      "buildSHA256": "9e89b66babc6632bedc781cbcfeeb66327e2fce263b26c5326c9aae8e3d22ec8",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live23-all-test-issues.json",
+      "readbackPath": ".build/repair-verification/default-browser-drive-upload-live23-independent-readback.json",
+      "filename": "Remote Desktop E2E CEC6E545-4544-44DE-B370-D311156E7B6B.pptx",
+      "remoteID": "1jMtDKYFcrtvyb6UPgk9eGA5ri9_MwjvS",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "runnerSHA256": "462e608de3085b8984948b0b6dbff35fc59492dd6a4c8b308601f09b8fa30582"
+    },
+    {
+      "run": "default-browser-drive-upload-live24",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Blank browser, test delegation and scripted start disabled. Fara’s File upload click was rejected by pixel revalidation; subsequent model output emitted ten repeated Tab key entries instead of a chord and failed invalidResponse. nativeCalls=0, nativeControlCalls=6, uploadEffects=0. Cause of pixel rejection remains under review; no repair is claimed. One known runtime warning; 40 source hashes unchanged.",
+      "summarySHA256": "2a61e2e01ab2570f15a0fac01ebf162d042161e170f39380e147314c1fef2b11",
+      "buildSHA256": "ab5f19851299a089bb21dea32de36338c7fa8581632886c5dc20a86dafbb3adf",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live24-all-test-issues.json",
+      "attachments": [
+        {
+          "id": "62584449-4DB8-4A30-8873-5210E0CEA6A3",
+          "name": "Raw Fara response at native picker handoff"
+        },
+        {
+          "id": "3A3CE476-33FF-4F57-86F3-EE76A25EA813",
+          "name": "Revalidation pair 2 expected observation"
+        },
+        {
+          "id": "7AF7D2D6-BDB9-40EC-8BD9-8468C805E7C7",
+          "name": "Revalidation pair 2 fresh rejected observation"
+        },
+        {
+          "id": "3D8E5042-52E6-4BAC-A303-328963FFCFA6",
+          "name": "Revalidation pair 2 metadata"
+        }
+      ],
+      "runnerSHA256": "50a6e50c3a0e2ca78f642903f89b3e38e0d61212ad4ea7272714dcdf84b9c35a"
+    },
+    {
+      "run": "default-browser-fresh-fallback-red01",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 13,
+      "note": "Expected RED: native planner and visual fallback reused the stale 4,193-byte desktop screenshot after the native delay. 41 source hashes unchanged.",
+      "summarySHA256": "b34b8ff5bf56bedd749900ccf15fc5b456939f117140e35be054e1b7d291e109"
+    },
+    {
+      "run": "default-browser-fresh-fallback-green01",
+      "testResult": "Passed",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 21,
+      "note": "Host-only refreshObservation and one-shot scope fallback pass 6/6. Fresh screenshot, file-panel priority, rejection context and guard behavior covered; no extra inference/action. 41 source hashes unchanged.",
+      "summarySHA256": "6da176b62b988e18f93b668ddc8d279dcff05c53618dd667105707c1d0502601"
+    },
+    {
+      "run": "default-browser-drive-upload-live25",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "note": "Blank browser, original Fara input, no scripted start or native delegation. Exact selected-file upload admitted once and independent byte readback matches source, but the app timed out in native planning. The trace shows New proposed twice after upload while Fara saw the success toast and proposed My Drive/search verification. Test is direct-executor with bounded approvals/custom completion oracle, not production host-route acceptance. One known main-thread runtime warning; 41 source hashes unchanged.",
+      "summarySHA256": "439448ccef47e1eec7b44af7ea94083b26ee873d1cb3f92e1ec56dce907c7c44",
+      "buildSHA256": "e97297a1969e37bd741612c6ed60a0403627fdee9ac1e51775f50ea5318ad7a2",
+      "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live25-all-test-issues.json",
+      "readbackPath": ".build/repair-verification/default-browser-drive-upload-live25-independent-readback.json",
+      "filename": "Remote Desktop E2E 2383DD1C-C8E5-4DF7-8A56-38F5E18958EF.pptx",
+      "remoteID": "1jVIkJIhPgJJWGR1PX1O49_hCNerAhXYg",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "nativePlannerTraceAttachment": "63B996D6-7108-41ED-B9D1-AA5502009245",
+      "faraProposalAttachments": [
+        "EA05CCD3-42D2-4F95-A387-4D50A39DC607",
+        "E2150CA3-1BFC-42C3-B375-7AB8645810AB"
+      ],
+      "runnerSHA256": "0c7b51c62ddbbdb3900f06721f79342a395a678687d9150a1706a305cbe0c5fa"
     }
   ],
   "limitations": [
@@ -496,9 +600,9 @@
       "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope.",
       "Rejected desktop-action feedback and rejection count now survive passive wait/remember. Successful dispatched input clears them. Explicit feedback says no mouse/keyboard input was sent; waiting cannot complete a rejected action. Existing pixel, task/window, approval and dispatch gates unchanged."
     ],
-    "latestFocusedRun": "native-file-object-arguments-green01",
-    "latestLiveRun": "default-browser-drive-upload-live22",
-    "latestLiveFailure": "Live22 is a passing app-completed upload slice from a test-preopened Drive page; startup navigation and full natural request remain outside its acceptance.",
+    "latestFocusedRun": "default-browser-picker-ready-green01",
+    "latestLiveRun": "default-browser-drive-upload-live28",
+    "latestLiveFailure": "No failure in live28: one blank-start direct-executor real-Drive run passed exact-file selection, one-upload completion, fresh host evidence and independent byte-matched readback. This accepts only that scoped slice; production MCPFirst/HostManager, paired iOS composer, email, ambiguity handling and 12 GB whole-machine qualification remain open.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
@@ -513,7 +617,19 @@
       "Selected-panel GREEN01 passes 5/5 component checks. Live20 has one independently verified exact physical upload/readback, but not app completion. Current native input included upload-complete and exact filename, yet only boolean host_file_selection_available without resolved candidate identity; the planner restarted New, and the model output ended before verification. Next pass selected-candidate metadata into scoped page planning; do not auto-complete or relax guards. Live20 starts from actual Drive via test-only navigation and does not validate startup navigation.",
       "Selected-file-context RED/GREEN passes 5/5 focused tests. This component result is distinct from chooser selected-state preservation. Live21 failed before selection handoff: its last native response proposed selectFile with a 35-character ID, but the matching request capture is missing, so the active tool schema/enum is not proven. No fuzzy ID recovery or guard relaxation; inspect exact runtime grammar. The current-selection completion path was not exercised.",
       "Live22 is the first app-completed real-Drive upload slice: exact newest candidate selected, one admitted upload, fresh host completion check, and independent exact-byte Safari readback. Initial Drive navigation was test-only scripted; natural-language startup and general production readiness remain unaccepted. Nested object arguments for native file tools passed focused RED/GREEN tests; standalone pinned Qwen probe independently reproduced flat scalar enum failure and exact-ID preservation with nested object wrapper.",
-      "The accepted live22 upload slice starts from a test-preopened Drive page. Earlier live12/13/14 reached physical uploads without the later scripted setup, so a startup-navigation failure on current code is not established. Run the blank-browser workflow with DRIVE_START_ON_PAGE disabled before proposing a hook."
+      "The accepted live22 upload slice starts from a test-preopened Drive page. Earlier live12/13/14 reached physical uploads without the later scripted setup, so a startup-navigation failure on current code is not established. Run the blank-browser workflow with DRIVE_START_ON_PAGE disabled before proposing a hook.",
+      "Live23 blank-start achieved one physical exact upload/readback with test-only native delegation but timed out during native planning after upload; it did not complete the task and used bounded test approvals/custom completion checks.",
+      "Live24 blank-start without native delegation/scripted start failed before selection: File upload click rejected by pixel revalidation; subsequent repeated Tab output failed invalidResponse. Zero uploads; rejection cause unresolved. Do not claim an instruction repair or startup hook before diagnosing the retained pair.",
+      "Fresh native-to-visual screenshot fallback RED/GREEN: stale 4,193-byte screenshot reproduced; host-only refreshObservation repair passes 6/6 with no guard/input changes, synthetic action, or extra inference.",
+      "Live25 confirms the fresh screenshot fallback component but not task completion: one physical exact upload/readback occurred, then native planner proposed New twice after upload while Fara attempted My Drive/search verification; test timed out. This direct-executor probe uses bounded approvals/custom completion oracle and does not accept production host-route behavior.",
+      "Next candidate only: pass bound selected-candidate progress to native planning as progress, not upload proof; it is not implemented or tested yet.",
+      "Picker-progress RED/GREEN: RED01 expected the missing pickerConfirmationDispatched=false marker; GREEN01 passed 6/7 but its remaining test fixture failed invalidVisionInput; GREEN02 corrected only that fixture and passed 7/7. All batches had 0 build errors, 41 source hashes unchanged; GREEN02 had 4 compiler warnings and no runtime warnings. The marker proves only dispatch progress for the bound selected candidate, never upload success.",
+      "Live26 is the first blank-start original-Fara run with this marker: exact selection and one physical upload, then independent exact-name readback matched 28,273 bytes and SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. The app test timed out before completion. Native context contained the selected filename and “upload complete”; native planner then made one New decision and five visual fallbacks, Fara navigated Recent/My Drive and clicked New, and its final action memorized the toast. Do not count this as app completion.",
+      "The live26 real-site probe uses a direct executor with bounded test approvals/custom completion checks; the paired iOS task-composer to production HostManager route is not yet tested. A bounded 300-second diagnostic is the next step; no production-route or 12 GB acceptance follows.",
+      "Live27 blank-start original-prompt direct-executor run selected target3757F980-E44F-4591-AA21-2CA052DFDD0F.pptx under candidate ID 9cbd1131-041a-49e9-8a57-f96ec3484f15, then Fara redundantly clicked its already-highlighted row to confirm selection before Upload. The app returned approvalRequired for an unidentified target; the test harness did not approve because this action was outside its bounded exact-upload allowance. nativeCalls=2, nativeControlCalls=3, uploadEffects=0. No upload/readback occurred. Do not infer that more time fixes completion.",
+      "The selected-file wording clarification passes its focused readiness check 3/3; it preserves all guards. This does not qualify the production route.",
+      "Live28 is the first accepted blank-start direct-executor real-Drive exact-file upload/completion/readback slice. It used blank Safari, the original goal, and no native advice or scripted startup. Fresh host page evidence showed the exact filename, one upload-complete message, and a dismissed picker; Fara terminated and the app completed. Independent exact-name Safari readback found one My Drive item owned by the account and matched all 28,273 bytes with fixture SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. One run only; direct executor, bounded test approvals, and custom completion check.",
+      "Live28 does not qualify production MCPFirst/HostManager routing or paired iOS task-composer integration; email, ambiguity handling, general reliability, and 12 GB whole-machine acceptance remain open."
     ],
     "sourceSHA256": {
       "TODO.md": "a2b63071a74867e48d1d95d8d9246864fbf909a7d932b25465578efef417dfc3",
@@ -1467,6 +1583,201 @@
         "readbackPath": ".build/repair-verification/default-browser-drive-upload-live22-independent-readback.json",
         "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live22-all-test-issues.json",
         "finding": "App-completed exact upload and independent readback passed from test-preopened Drive; no startup-navigation acceptance."
+      },
+      {
+        "run": "default-browser-drive-upload-live23",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 40,
+        "runnerSHA256": "462e608de3085b8984948b0b6dbff35fc59492dd6a4c8b308601f09b8fa30582",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live23-independent-readback.json",
+        "finding": "Blank browser with test-only native delegation: one physical exact upload and independent readback, then timeout/cancellation in native planning after post-upload wait. No app task completion; bounded test approvals/custom completion oracle."
+      },
+      {
+        "run": "default-browser-drive-upload-live24",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 40,
+        "runnerSHA256": "50a6e50c3a0e2ca78f642903f89b3e38e0d61212ad4ea7272714dcdf84b9c35a",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live24-all-test-issues.json",
+        "finding": "Blank browser with test delegation and scripted start disabled. File upload click rejected by pixel revalidation; Fara then emitted repeated Tab key entries, invalidResponse. nativeCalls=0, nativeControlCalls=6, uploadEffects=0; rejection cause unresolved."
+      },
+      {
+        "run": "default-browser-fresh-fallback-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 13,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "02259b3e3e01e7bdf4d5fef6c4e9cc3c29c91ce31f45c517011302555a265f27"
+      },
+      {
+        "run": "default-browser-fresh-fallback-green01",
+        "result": "Passed",
+        "passed": 6,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 21,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "fbff362e904277d3a9d9b05f2b55a9f3ac0a4154edc7a7a4b472701f0237c6e9"
+      },
+      {
+        "run": "default-browser-drive-upload-live25",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "0c7b51c62ddbbdb3900f06721f79342a395a678687d9150a1706a305cbe0c5fa",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live25-all-test-issues.json",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live25-independent-readback.json",
+        "admittedUploadEffects": 1,
+        "bytes": 28273,
+        "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+        "finding": "Blank start, original Fara input, no scripted start/delegation. Exact single upload and independent readback passed. App timed out in native planning after upload; native planner proposed New twice, while Fara had seen toast success and tried My Drive/search."
+      },
+      {
+        "run": "default-browser-picker-progress-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "e165e00f9d73d6356b55aa2c415fe03de25200225b1cd32c0038afa26bd09c36",
+        "finding": "Expected RED: selected-candidate context lacked pickerConfirmationDispatched=false."
+      },
+      {
+        "run": "default-browser-picker-progress-green01",
+        "result": "Failed",
+        "passed": 6,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 41,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "9b4f54e6e64b833f824ff9e4f0ad96654a943db5f88aa9a4dd47eb33688556eb",
+        "finding": "Initial GREEN reached 6/7; the sole failure was invalidVisionInput from an invalid test image fixture."
+      },
+      {
+        "run": "default-browser-picker-progress-green02",
+        "result": "Passed",
+        "passed": 7,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "97cab401419ba69d8771c4d1001353ad42f2ced7ce0a17db7a87216b33cf6d43",
+        "finding": "Corrected only the invalidVisionInput fixture; seven picker-progress checks pass. Marker records dispatch progress for the exact selected candidate and does not prove upload success."
+      },
+      {
+        "run": "default-browser-drive-upload-live26",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "bf2fd6e176150739788ed5ebf0d7a6cc53bd993a80a31415d04058e191883a2b",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live26-all-test-issues.json",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live26-independent-readback.json",
+        "lastNativeInputAttachment": "0E085B68-4229-4331-9321-7A949A856E0D",
+        "selectedCandidateID": "257f18c5-540c-43af-ab85-f333014e4ac2",
+        "pickerConfirmationDispatched": true,
+        "nativeContextEvidence": "current-page rendered AX text length 235 includes exact selected filename and “upload complete”; selected-candidate dispatch marker matches the exact candidate",
+        "admittedUploadEffects": 1,
+        "fileName": "Remote Desktop E2E 7BB67DB3-A40E-4899-8483-728BD568A58C.pptx",
+        "remoteID": "1NPucjtrP8OPfG13bxrcbAg69OvipdGjs",
+        "bytes": 28273,
+        "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+        "independentReadback": true,
+        "byteMatched": true,
+        "appCompleted": false,
+        "finding": "Blank-start run with original Fara input, no test-only advice or scripted start. Exact selected file, one upload and independent byte-matched readback succeeded. The picker-progress marker reached native planning; after the current-page context included the exact filename and “upload complete,” native decisions were initial New then five visual fallbacks. Fara then clicked Recent, My Drive, New and memorized the success toast; the test timed out before app completion. Direct executor uses bounded test approvals/custom completion checks and does not qualify the production host route."
+      },
+      {
+        "run": "default-browser-drive-upload-live27",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 13,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "799033a5ff0f13fd0f72a930339f6f19ed4055be851ad2d6218a30f2066bae7d",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live27-all-test-issues.json",
+        "candidateID": "9cbd1131-041a-49e9-8a57-f96ec3484f15",
+        "fileName": "target3757F980-E44F-4591-AA21-2CA052DFDD0F.pptx",
+        "nativeCalls": 2,
+        "nativeControlCalls": 3,
+        "uploadEffects": 0,
+        "finding": "Blank-start original-prompt direct-executor run. Exact candidate selected; Fara then redundantly clicked the already-highlighted file row at [463,608] (mapped to [800,679]) with rationale to confirm before Upload. The app returned approvalRequired for an unidentified target. The test harness did not approve because the action fell outside its bounded exact-upload allowance. No upload or byte readback. This is a correct user-handoff boundary, not evidence that more time would resolve completion."
+      },
+      {
+        "run": "default-browser-picker-ready-green01",
+        "result": "Passed",
+        "passed": 3,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 15,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "2448c318491578a536d9c820fee3c8581a5b2adc063c7f77781b1ffd919d0a9e",
+        "finding": "Selected-file wording readiness check passes 3/3; it clarifies host-provided selected state without changing guards."
+      },
+      {
+        "run": "default-browser-drive-upload-live28",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 41,
+        "runnerSHA256": "43b8d4c95c42f0280cbccdb344820533031059d09dbf7ab8a098ca0e0d7b8989",
+        "allTestIssuesPath": ".build/repair-verification/default-browser-drive-upload-live28-all-test-issues.json",
+        "readbackPath": ".build/repair-verification/default-browser-drive-upload-live28-independent-readback.json",
+        "elapsedSeconds": 199.107,
+        "candidateID": "2e0d088b-67cb-4c34-9e34-35a92b1ed243",
+        "admittedUploadEffects": 1,
+        "fileName": "Remote Desktop E2E 2830D651-7214-4B49-83DA-3334393C9902.pptx",
+        "remoteID": "1yG9M8om72j_qcYxSNUqDZkwQthUk7K7s",
+        "bytes": 28273,
+        "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+        "independentReadback": true,
+        "byteMatched": true,
+        "appCompleted": true,
+        "scopeAccepted": true,
+        "acceptanceScope": "One blank-start direct-executor real-Drive upload/completion/readback slice; not production MCPFirst/HostManager or paired iOS composer route.",
+        "finding": "Blank Safari start with original goal, no native advice or scripted startup. Exact candidate selected; Fara uploaded, remembered, then terminated. Fresh host page evidence had the exact filename, one “upload complete” message and picker dismissed; completion validator admitted one upload. Independent Safari exact-name search/download found one My Drive item owned by the account and matched all 28,273 bytes and fixture SHA-256. This is one scoped passing run using direct executor, bounded test approvals and custom completion check; production host route, paired iOS composer, email, ambiguity and 12 GB whole-machine qualification remain open."
       }
     ],
     "delegationDiagnostic": {
@@ -1507,7 +1818,7 @@
       "accepted": false
     },
     "nativeControlProbe": {
-      "status": "Live22 completes the first app-driven exact-file upload slice and independent readback from a test-preopened Drive page. Startup navigation/full natural request remain unaccepted. Prior physical transfers live12/13/14/20 lacked app completion. Live15/16/17/19/21 have zero uploads; live18 did not compile.",
+      "status": "Live22 is the app-completed selected-file slice from a test-preopened page. Blank-start live23/25 each physically uploaded/read back one exact file but timed out in native planning after upload; live23 used test-only advice, live25 original Fara input. Both direct-executor tests use bounded approvals/custom completion checks, not production host-route acceptance. Live24 blank-start without delegation failed before upload.",
       "runs": [
         {
           "run": "default-browser-native-control-live01",
@@ -1745,7 +2056,7 @@
       },
       "actionExecuted": false,
       "coordinateReview": "Independent review of live08 screenshot and host normalized-coordinate mapping found no offset/scaling error. The returned points correspond to the wrong controls actually clicked.",
-      "next": "Rerun the full workflow from a blank browser with test-only DRIVE_START_ON_PAGE disabled against live22 code. Consider a startup-navigation hook only if the observed result warrants it; preserve exact selection, single-upload policy and fresh completion checks.",
+      "next": "Test bounded selected-candidate progress as input to native planning after file confirmation; it is not upload proof and is not implemented. Preserve fresh screenshot, exact identity, one-upload enforcement and completion checks.",
       "integrationRuns": [
         {
           "run": "default-browser-native-controls-red01",
@@ -2233,7 +2544,7 @@
         }
       ]
     },
-    "latestDiagnosticRun": "default-browser-rejection-diagnostic-green01",
+    "latestDiagnosticRun": "default-browser-picker-progress-green02",
     "passiveRejectionDiagnostic": {
       "run": "default-browser-rejection-diagnostic-green01",
       "passed": 4,
@@ -2253,6 +2564,16 @@
       "finding": "Same adversarial malformed ID: flat scalar enum arguments returned a 35-character candidate ID; wrapping the unchanged schema in an object returned the exact 36-character allowed ID. Two calls took 8.26s and 8.20s; worker 17.46s, peak sampled process memory 3366240256 bytes, one worker, clean exit and credential removal; no UI/effects.",
       "limitations": "Run01 failed preflight against an old signed runtime hash. Run02 packaged binary was pin/version/codesign verified. A three-request invocation was rejected by max-two guard before startup. This is protocol evidence, not semantic task acceptance.",
       "hostEffects": 0
-    }
-  }
+    },
+    "latestLiveOutcome": {
+      "run": "default-browser-drive-upload-live28",
+      "result": "Passed",
+      "acceptedScope": "Blank-start direct-executor real-Drive exact-file upload, app completion and independent readback",
+      "overallWorkflowAccepted": false,
+      "productionHostRouteAccepted": false
+    },
+    "acceptedScope": "One blank-start direct-executor real-Drive upload/completion/readback slice (live28)",
+    "acceptedScopeQualified": true
+  },
+  "latestScopeNote": "The historical top-level latest record remains the default-browser navigation/login baseline. Later Drive outcomes are in fileSelectionCheckpoint.latestLiveRun and runs. Live28 passes one scoped blank-start direct-executor real-Drive upload/completion/readback slice; overall production workflow acceptance remains false because production MCPFirst/HostManager, paired iOS composer, email, ambiguity and whole-machine qualification are open."
 }

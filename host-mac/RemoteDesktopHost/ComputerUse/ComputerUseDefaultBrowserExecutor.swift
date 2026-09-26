@@ -13,6 +13,21 @@ enum ComputerUseDefaultBrowserActionScope {
             == candidateURL.standardizedFileURL.resolvingSymlinksInPath()
     }
 
+    static func confirmationCandidateID(action: ComputerUsePredictedAction, candidateID: String,
+        panel: ComputerUseDefaultBrowserSession.FileOpenPanel, candidateURL: URL?) -> String? {
+        guard (1...128).contains(candidateID.utf8.count), panel.primaryActionEnabled == true,
+              candidateIsSelected(panel: panel, candidateURL: candidateURL) else { return nil }
+        switch action {
+        case .key(let usage, let modifiers) where usage == 0x28 && modifiers == 0:
+            return candidateID
+        case .click(let x, let y, let button, let count):
+            guard button == 1, count == 1, let bounds = panel.primaryActionBounds,
+                  bounds.contains(CGPoint(x: x, y: y)) else { return nil }
+            return candidateID
+        default: return nil
+        }
+    }
+
     /// The model has already resolved the user's file. Navigate the native
     /// picker from its current AX state without guessing a visible file row.
     static func nativeSelectionProposal(panel: ComputerUseDefaultBrowserSession.FileOpenPanel,
@@ -125,6 +140,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var clarificationNonce: UUID?
         var clarificationRetired = false
         var nativeFileOperationReady = false
+        var visualFallbackPending = false
+        private var pendingPickerConfirmation: (candidateID: String, action: ComputerUsePredictedAction)?
+        var dispatchedPickerConfirmationCandidateID: String?
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
@@ -135,7 +153,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             self.tools = tools
             if let taskID, taskID != id { throw Failure.taskAlreadyBound }
             if let previousGoal = self.goal, !previousGoal.utf8.elementsEqual(goal.utf8) { throw Failure.taskAlreadyBound }
+            let isNewTask = taskID == nil
             taskID = id; self.goal = goal
+            pendingPickerConfirmation = nil
+            if isNewTask { dispatchedPickerConfirmationCandidateID = nil }
+            visualFallbackPending = false
             if executionTaskID == nil { executionTaskID = id }
             if window != nil {
                 try session.validate(taskID: id, goal: goal, tools: tools)
@@ -146,6 +168,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             attempted = true; window = try await session.ensure(taskID: id, goal: goal, tools: tools)
         }
         func check(_ action: ComputerUsePredictedAction?, _ tools: ComputerUseHostTools) throws {
+            pendingPickerConfirmation = nil
             guard let taskID, let goal else { throw Failure.noRetainedWindow }
             lastSessionFailureForDiagnostics = nil
             do { try session.validate(taskID: taskID, goal: goal, tools: tools) }
@@ -164,9 +187,23 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         panel: panel, selectedURL: selectedURL) else {
                     throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                 }
+                if let action, let selectedCandidate,
+                   let candidateID = ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+                    action: action, candidateID: selectedCandidate.id, panel: panel, candidateURL: selectedURL) {
+                    pendingPickerConfirmation = (candidateID, action)
+                }
             } else if !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
+        }
+
+        func successfulDispatch(_ action: ComputerUsePredictedAction) {
+            guard let pendingPickerConfirmation, pendingPickerConfirmation.action == action else {
+                self.pendingPickerConfirmation = nil
+                return
+            }
+            dispatchedPickerConfirmationCandidateID = pendingPickerConfirmation.candidateID
+            self.pendingPickerConfirmation = nil
         }
 
         func modelInput(_ input: ComputerUseFaraModel.Input,
@@ -188,6 +225,12 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 enriched.localFileCatalog = advertiseFilePicker ? Self.notQueriedFileContext : nil
             }
             enriched.selectedLocalFilePath = session.currentFileOpenPanel == nil ? nil : try selectedFileURL()?.path
+            if let selectedCandidate,
+               dispatchedPickerConfirmationCandidateID == selectedCandidate.id {
+                enriched.hostDispatchedLocalFileConfirmationCandidateID = selectedCandidate.id
+            } else {
+                enriched.hostDispatchedLocalFileConfirmationCandidateID = nil
+            }
             if let panel = session.currentFileOpenPanel {
                 enriched.nativeOpenPanelSelection = .init(
                     candidateSelected: ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel,
@@ -236,7 +279,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     catalog = discovery.catalog
                     page = discovery.page
-                    if userSelectedCandidateID == nil { selectedCandidate = nil }
+                    if userSelectedCandidateID == nil {
+                        selectedCandidate = nil
+                        dispatchedPickerConfirmationCandidateID = nil
+                    }
                 }
                 guard page.candidates.count <= 8 else { throw Failure.invalidFileChoice }
                 fileCatalog = catalog
@@ -245,6 +291,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 let candidate = try currentCandidate(candidateID, taskID: taskID)
                 if let userSelectedCandidateID, userSelectedCandidateID != candidateID {
                     throw Failure.selectedFileChangeNeedsConfirmation
+                }
+                if dispatchedPickerConfirmationCandidateID != candidateID {
+                    dispatchedPickerConfirmationCandidateID = nil
                 }
                 selectedCandidate = candidate
                 if let context = fileContext {
@@ -351,6 +400,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         self.scope = scope
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
             scope.nativeFileOperationReady = false
+            if scope.session.currentFileOpenPanel != nil { scope.visualFallbackPending = false }
             if scope.session.currentFileOpenPanel != nil && scope.selectedCandidate == nil {
                 guard let nativeFilePlanner else {
                     return .init(response: "", decision: .handoff("Choose a file in the native picker before continuing."),
@@ -390,6 +440,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             // A selected candidate with no host navigation proposal must return to the
             // visual planner for the explicitly guarded final Open action.
             if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
+            if scope.visualFallbackPending {
+                scope.visualFallbackPending = false
+                return try await propose(enriched)
+            }
             guard let nativeControlPlanner, let tools = scope.tools,
                   let window = scope.session.currentWindow else { return try await propose(enriched) }
             try scope.check(nil, tools)
@@ -403,10 +457,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             do { plan = try await nativeControlPlanner(enriched, page) }
             catch is CancellationError { throw CancellationError() }
             catch let error as ComputerUseDefaultBrowserControlPlanError where error == .invalidProposal {
-                // A malformed semantic response proposes no action. Let the existing screenshot
-                // planner handle this same observed state after confirming the task scope remains valid.
+                // A malformed semantic response proposes no action. Refresh the
+                // screenshot before the visual planner without replaying an action.
                 try scope.check(nil, tools)
-                return try await propose(enriched)
+                scope.visualFallbackPending = true
+                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             }
             catch {
                 return .init(response: "", decision: .handoff("The current page controls could not be verified. Review the browser window, then choose Resume."),
@@ -418,8 +473,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 return .init(response: "", decision: .handoff(message.isEmpty
                     ? "The page needs your input before continuing." : message), includeInModelHistory: false)
             case .visualFallback(let reason):
-                _ = reason // The visual model receives the unchanged goal, screenshot and prior feedback.
-                return try await propose(enriched)
+                _ = reason
+                scope.visualFallbackPending = true
+                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             case .pressControl(let controlID, _):
                 guard let bounds = scope.session.currentActionBounds,
                       let center = try scope.pageReader.validatedControlCenter(observation: page, controlID: controlID,
@@ -447,7 +503,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch is CancellationError { throw CancellationError() }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
-            localFileOperationHandler: { try await scope.apply($0) }, finishRun: finishRun)
+            localFileOperationHandler: { try await scope.apply($0) },
+            onSuccessfulDispatch: { scope.successfulDispatch($0) }, finishRun: finishRun)
     }
 
     private static func nativeControlHistoryResponse(_ action: ComputerUseFaraAction) throws -> String {
@@ -575,6 +632,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                   let candidate = scope.pendingChoiceCandidates[selectedChoice.id],
                   candidate.id == selectedChoice.id else { throw Failure.invalidFileChoice }
             _ = try scope.resolve(candidate, taskID: rootTaskID)
+            if scope.dispatchedPickerConfirmationCandidateID != candidate.id {
+                scope.dispatchedPickerConfirmationCandidateID = nil
+            }
             scope.selectedCandidate = candidate
             scope.userSelectedCandidateID = candidate.id
             scope.selectedChoice = selectedChoice

@@ -23,6 +23,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var fileOpenPanel: ComputerUseDefaultBrowserSession.FileOpenPanel?
         var hasUnrecognizedSheets = false
         var additionalAction: ((ComputerUsePredictedAction) throws -> Void)?
+        var screenColor = CIColor.black
 
         func snapshot(application: ComputerUseApplicationIdentity) -> ComputerUseDefaultBrowserSession.WindowSnapshot {
             .init(application: application, windows: windows, focusedWindowID: focusedID,
@@ -241,6 +242,37 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.currentActionBounds, parentBounds)
     }
 
+    func testPickerConfirmationEligibilityBindsOnlyEnabledExactSelectedCandidate() throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let selectedURL = URL(fileURLWithPath: "/fixture/selected.pptx")
+        let primaryBounds = CGRect(x: 520, y: 430, width: 90, height: 32)
+        let panel = fixture.fileOpenPanel(parentWindowID: "new", bounds: CGRect(x: 200, y: 150, width: 700, height: 500),
+            focused: true, selectedFileURLs: [selectedURL], primaryActionBounds: primaryBounds,
+            primaryActionEnabled: true)
+        let click = ComputerUsePredictedAction.click(x: 550, y: 445, button: 1, count: 1)
+        let enter = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+
+        XCTAssertEqual(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: click, candidateID: "candidate-1", panel: panel, candidateURL: selectedURL), "candidate-1")
+        XCTAssertEqual(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: enter, candidateID: "candidate-1", panel: panel, candidateURL: selectedURL), "candidate-1")
+        XCTAssertNil(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: click, candidateID: "candidate-1", panel: panel, candidateURL: URL(fileURLWithPath: "/fixture/other.pptx")))
+        XCTAssertNil(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: .click(x: 400, y: 445, button: 1, count: 1), candidateID: "candidate-1", panel: panel, candidateURL: selectedURL))
+        XCTAssertNil(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: .key(usage: 0x29, modifiers: 0), candidateID: "candidate-1", panel: panel, candidateURL: selectedURL))
+        XCTAssertNil(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: .click(x: 550, y: 445, button: 1, count: 1), candidateID: "candidate-1", panel: fixture.fileOpenPanel(
+                parentWindowID: "new", bounds: panel.bounds, focused: true, selectedFileURLs: [selectedURL],
+                primaryActionBounds: primaryBounds, primaryActionEnabled: false), candidateURL: selectedURL))
+        XCTAssertNil(ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
+            action: .click(x: 550, y: 445, button: 1, count: 1), candidateID: "candidate-1", panel: fixture.fileOpenPanel(
+                parentWindowID: "new", bounds: panel.bounds, focused: true, goToFolderBounds: CGRect(x: 250, y: 200, width: 300, height: 200),
+                selectedFileURLs: [selectedURL], primaryActionBounds: primaryBounds, primaryActionEnabled: true), candidateURL: selectedURL))
+    }
+
     func testFileOpenPanelMustBelongToRetainedWindowAndHaveNoOtherSheets() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -333,6 +365,83 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(observedVisualInput.desktopDisplayBounds, observedNativeInput.desktopDisplayBounds)
         XCTAssertEqual(observedVisualInput.goal, goal)
         XCTAssertEqual(fixture.desktop.keyCount, 1, "Fallback planning must not dispatch a native action")
+    }
+
+    func testNativeVisualFallbackRefreshesObservationBeforeFaraWithoutSyntheticAction() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-visual-fallback-fresh-observation"
+        let goal = "Open the upload menu, then continue from the screenshot"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+        var nativeCalls = 0, visualCalls = 0
+        var nativeInput: ComputerUseFaraModel.Input?
+        var visualInput: ComputerUseFaraModel.Input?
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInput = input
+                XCTAssertEqual(input.goal, goal)
+                return .init(response: "handoff", decision: .handoff("Review the current screenshot."))
+            }, nativeControlPlanner: { input, _ in
+                nativeCalls += 1
+                nativeInput = input
+                fixture.desktop.screenColor = CIColor.white
+                return .visualFallback("The next menu item requires screenshot inspection.")
+            }, pageReader: reader)
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the current screenshot."))
+        XCTAssertEqual(nativeCalls, 1, "The screenshot fallback must not repeat native inference")
+        XCTAssertEqual(visualCalls, 1)
+        let observedNativeInput = try XCTUnwrap(nativeInput)
+        let observedVisualInput = try XCTUnwrap(visualInput)
+        XCTAssertEqual(observedNativeInput.goal, goal)
+        XCTAssertEqual(observedVisualInput.goal, observedNativeInput.goal)
+        XCTAssertNotEqual(observedVisualInput.screenshotPNG, observedNativeInput.screenshotPNG,
+            "Fara must receive a fresh desktop capture after the native planner's delay")
+        XCTAssertEqual(observedVisualInput.history, observedNativeInput.history,
+            "A refresh is observation-only and must not add a synthetic action")
+        XCTAssertEqual(observedVisualInput.actionError, observedNativeInput.actionError,
+            "An observation refresh must not fabricate rejected-action feedback")
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the original session Cmd+N may have sent input")
+    }
+
+    func testNativeFilePanelTakesPriorityOverPendingVisualFallback() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-visual-fallback-file-panel-priority"
+        let goal = "Upload the selected presentation and verify completion"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        var visualCalls = 0, nativeControlCalls = 0, nativeFileCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { _ in
+                visualCalls += 1
+                return .init(response: "fallback", decision: .handoff("Unexpected visual fallback"))
+            }, nativeFilePlanner: { _ in
+                nativeFileCalls += 1
+                return nil
+            }, nativeControlPlanner: { _, _ in
+                nativeControlCalls += 1
+                fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: retained.id,
+                    bounds: CGRect(x: 200, y: 150, width: 700, height: 500), focused: true)
+                return .visualFallback("The browser menu needs visual inspection.")
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The native file chooser needs your input before continuing."))
+        XCTAssertEqual(nativeControlCalls, 1)
+        XCTAssertEqual(nativeFileCalls, 1, "A newly visible native chooser takes priority over screenshot fallback")
+        XCTAssertEqual(visualCalls, 0, "Do not call Fara on the stale page screenshot when a native picker appeared")
+        XCTAssertEqual(fixture.desktop.keyCount, 1)
     }
 
     func testNativeControlPlannerClicksValidatedCenterUsingNonzeroDisplayOrigin() async throws {
@@ -759,6 +868,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     workerInput.localFileCatalog = input.localFileCatalog
                     workerInput.selectedLocalFilePath = input.selectedLocalFilePath
                     workerInput.nativeOpenPanelSelection = input.nativeOpenPanelSelection
+                    workerInput.hostDispatchedLocalFileConfirmationCandidateID = input.hostDispatchedLocalFileConfirmationCandidateID
                     workerInput.desktopDisplayBounds = input.desktopDisplayBounds
                     faraInput = workerInput
                 } else {
@@ -882,6 +992,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }
             return result
         }
+        // The real site path makes serial native and visual model calls, followed by completion verification.
         let timeLimit: Int64 = uploadToDrive ? 240 : 150
         let remaining = max(Int64(1), timeLimit - (ContinuousClock.now - began).components.seconds)
         let deadline = Task { try? await Task.sleep(for: .seconds(remaining)); operation.cancel() }
@@ -1387,7 +1498,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         }
                     }
                 }, screenProvider: {
-                    .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    .init(image: CIImage(color: desktop.screenColor).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
                         displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
                         frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
                 }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
