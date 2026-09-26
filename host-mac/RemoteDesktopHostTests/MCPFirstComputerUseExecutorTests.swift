@@ -6,6 +6,11 @@ import WebKit
 
 @MainActor
 final class MCPFirstComputerUseExecutorTests: XCTestCase {
+    private enum ProductionDriveRouteProbeStop: Error {
+        case browserRouteReached
+        case unexpectedHostInput
+    }
+
     private func assertNativePlannerFailure(
         _ result: Result<ComputerUseExecutionResult, Error>,
         expected: AppleFoundationMCPPlannerError = .noProposal,
@@ -57,6 +62,85 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             }
         }
     }
+
+#if canImport(FoundationModels)
+    @available(macOS 26.0, *)
+    func testOptInProductionDrivePromptSelectsDefaultBrowserRouteWithoutDispatch() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_PRODUCTION_DRIVE_ROUTING_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_PRODUCTION_DRIVE_ROUTING_PROBE=1 to run the real local planner and mac-control route probe.")
+        }
+        let helperPath = try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"])
+        let planner = AppleFoundationMCPPlanner()
+        guard planner.availability() == .available else {
+            throw XCTSkip("The installed Apple Foundation Model is unavailable: \(planner.availability())")
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ProductionDriveRoutingProbe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let helperState = directory.appendingPathComponent("helper-state", isDirectory: true)
+        let pool = MCPClientPool(sessionFactory: { binary, generation in
+            MCPClientSession(
+                validatedBinary: binary,
+                processGeneration: generation,
+                stateDirectory: helperState)
+        })
+        let fallback = StubVisualExecutor(result: .unableToComplete("Unexpected visual fallback"))
+        var browserFactoryCalls = 0
+        var progressMessages: [String] = []
+        let executor: MCPFirstComputerUseExecutor
+        let discoveredTools: [String]
+        do {
+            executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath: helperPath),
+                visualFallback: fallback,
+                clientPool: pool,
+                browserExecutorFactory: {
+                    browserFactoryCalls += 1
+                    throw ProductionDriveRouteProbeStop.browserRouteReached
+                })
+            discoveredTools = try await pool.allowedTools().map(\.toolName).sorted()
+        } catch {
+            await pool.cancelAll()
+            throw error
+        }
+        let goal = "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
+        var hostInputAttempts = 0
+        let tools = ComputerUseHostTools(
+            injector: InputInjector(),
+            mayAct: { true },
+            actionPerformer: { _ in
+                hostInputAttempts += 1
+                throw ProductionDriveRouteProbeStop.unexpectedHostInput
+            })
+        let execution = await captureExecution {
+            try await executor.execute(
+                taskID: "production-drive-routing-probe",
+                prompt: goal,
+                trustedUserPrompt: goal,
+                tools: tools,
+                progress: { progressMessages.append($0) })
+        }
+        executor.cancelMCPWork()
+        await pool.cancelAll()
+
+        let attachment = XCTAttachment(string: "Planner availability: \(planner.availability())\nHelper: \(helperPath)\nDiscovered tools: \(discoveredTools)\nBrowser factory calls: \(browserFactoryCalls)\nVisual fallback calls: \(fallback.callCount)\nHost input attempts intercepted before injection: \(hostInputAttempts)\nProgress: \(progressMessages)\nExecution: \(String(reflecting: execution))")
+        attachment.name = "Production Drive prompt routing stopped before browser input"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        XCTAssertGreaterThan(discoveredTools.count, 1, "The actual installed helper catalog must be discovered.")
+        XCTAssertEqual(browserFactoryCalls, 1, "The real Apple planner should route this upload task to the default-browser factory exactly once.")
+        XCTAssertEqual(fallback.callCount, 0, "This probe stops at route selection; visual inference is not part of this checkpoint.")
+        XCTAssertEqual(hostInputAttempts, 0, "No host input should occur before the browser factory stop.")
+        guard case .failure(let error) = execution,
+              let stop = error as? ProductionDriveRouteProbeStop,
+              case .browserRouteReached = stop else {
+            return XCTFail("Expected the browser factory stop sentinel after real browser routing; got \(execution).")
+        }
+    }
+#endif
 
     func testRestrictedNativeResumeCannotFallThroughWhenNativeLaterDeclines() async throws {
         var nativeCalls = 0, desktopLoads = 0

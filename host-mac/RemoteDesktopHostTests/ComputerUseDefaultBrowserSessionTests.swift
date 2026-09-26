@@ -529,6 +529,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: true)
     }
 
+    func testOptInProductionCompositionDefaultBrowserUploadsLatestPresentationToRealDrive() async throws {
+        try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true)
+    }
+
     func testOptInCapturedBrowserMenuNativeControlsComparison() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_CAPTURED_BROWSER_MENU_COMPARISON"] == "1" else {
@@ -666,14 +670,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
-    private func runDefaultBrowserFileProbe(uploadToDrive: Bool) async throws {
+    private func runDefaultBrowserFileProbe(uploadToDrive: Bool, productionComposition: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1" else {
+        let enabled = productionComposition
+            ? environment["RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
+            : environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1"
+        guard enabled else {
             throw XCTSkip("Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
-        let usesNativeDelegation = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
+        guard !productionComposition || uploadToDrive else { throw XCTSkip("Production composition probe covers Drive upload only") }
+        let usesNativeDelegation = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
         let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
-        let startsOnDrivePage = uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
+        let startsOnDrivePage = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
         let began = ContinuousClock.now
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
@@ -693,12 +701,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             .appendingPathComponent("DefaultBrowserPickerNativeControlResponse-" + UUID().uuidString + ".json")
         defer {
             try? FileManager.default.removeItem(at: responseURL)
+            try? FileManager.default.removeItem(at: responseURL.appendingPathExtension("request"))
             try? FileManager.default.removeItem(at: nativeFileRequestURL)
             try? FileManager.default.removeItem(at: nativeResponseURL)
             try? FileManager.default.removeItem(at: nativeControlRequestURL)
             try? FileManager.default.removeItem(at: nativeControlResponseURL)
         }
-        let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { _, response in
+        let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { request, response in
+            if request.count <= 16 * 1_024 * 1_024 {
+                try? request.write(to: responseURL.appendingPathExtension("request"), options: .atomic)
+            }
             try? response.prefix(65_536).write(to: responseURL, options: .atomic)
         })
         let directory = FileManager.default.temporaryDirectory
@@ -746,18 +758,60 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var proposals: [String] = []
         var actionErrors: [String] = []
         var nativeCalls = 0, nativeControlCalls = 0
+        var nativeCatalogTrace: [String] = []
         var nativeControlTraces: [String] = []
         var selectedBeforeUpload = false
         var observedRequestedPage = false
+        var observedPageURL: String?
         var uploadEffects = 0
         var revalidationPairCount = 0
         var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int, pickerDismissed: Bool)?
         var pickerOpeningEffects = 0
         var delegatedWorkerGoal: String?
+        var productionBrowserExecutor: ComputerUseDefaultBrowserExecutor?
+        var productionMCPExecutor: MCPFirstComputerUseExecutor?
+        var productionBrowserFactoryCalls = 0
+        func retainedBrowserWindow() -> ComputerUseDefaultBrowserSession.Window? {
+            productionBrowserExecutor?.retainedWindowForDiagnostics ?? session.currentWindow
+        }
+        func currentFilePanel() throws -> ComputerUseDefaultBrowserSession.FileOpenPanel? {
+            guard productionComposition else { return session.currentFileOpenPanel }
+            guard let window = productionBrowserExecutor?.retainedWindowForDiagnostics else { return nil }
+            let snapshot = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(window.application)
+            guard let panel = snapshot.fileOpenPanel, panel.parentWindowID == window.id,
+                  let parent = snapshot.windows.first(where: { $0.id == window.id }),
+                  CFEqual(panel.parentWindowElement, parent.accessibilityElement) else { return nil }
+            return panel
+        }
+        func freshlyObservedBrowserURL() throws -> String? {
+            guard let window = retainedBrowserWindow() else { return nil }
+            if let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
+                application: window.application, mayAct: { true }) { return page.url }
+            guard productionComposition else { return nil }
+            let snapshot = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(window.application)
+            guard let freshWindow = snapshot.windows.first(where: { $0.id == window.id }) else { return nil }
+            if let panel = snapshot.fileOpenPanel {
+                guard panel.parentWindowID == window.id, CFEqual(panel.parentWindowElement, freshWindow.accessibilityElement) else { return nil }
+            }
+            let pageElement = snapshot.fileOpenPanel?.parentWindowElement ?? freshWindow.accessibilityElement
+            for attribute in ["AXURL", kAXDocumentAttribute as String] {
+                AXUIElementSetMessagingTimeout(pageElement, 0.15)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(pageElement, attribute as CFString, &value) == .success else {
+                    continue
+                }
+                let urlText = (value as? URL)?.absoluteString ?? value as? String
+                if let urlText, let url = URLComponents(string: urlText), url.scheme == "https", url.host != nil {
+                    return urlText
+                }
+            }
+            return try ComputerUseDefaultBrowserPageReader().read(window: freshWindow.accessibilityElement,
+                application: freshWindow.application, mayAct: { true })?.url
+        }
         func remoteUploadConfirmed() throws -> Bool {
             acceptedUploadEvidence = nil
-            guard uploadToDrive, uploadEffects == 1, session.currentFileOpenPanel == nil,
-                  let window = session.currentWindow,
+            guard uploadToDrive, uploadEffects == 1, try currentFilePanel() == nil,
+                  let window = retainedBrowserWindow(),
                   let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
                     application: window.application, mayAct: { true }),
                   URL(string: page.url)?.host == "drive.google.com",
@@ -824,7 +878,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         } else {
             revalidationFailureObserver = nil
         }
-        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: directory, session: session,
+        let directExecutor = try ComputerUseDefaultBrowserExecutor(journalDirectory: directory, session: session,
             propose: { input in
                 if let error = input.actionError { actionErrors.append(error) }
                 if session.currentFileOpenPanel == nil, let window = session.currentWindow,
@@ -886,11 +940,93 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 nativeCalls += 1
                 if uploadToDrive { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
                 return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
-            }, nativeControlPlanner: nativeControlPlanner, completionCheck: { _ in try remoteUploadConfirmed() },
+            }, nativeControlPlanner: nativeControlPlanner,
+            completionCheck: productionComposition ? nil : { _ in try remoteUploadConfirmed() },
             revalidationFailureObserver: revalidationFailureObserver, localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: uploadToDrive ? downloads : fixtureRoot, pageSize: 8)
             })
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let taskExecutor: any ComputerUseExecuting
+        var productionClientPool: MCPClientPool?
+        var helperCatalogNames: [String] = []
+        var routeProgress: [String] = []
+        if productionComposition {
+            let helperPath = try XCTUnwrap(environment["MAC_CONTROL_HELPER_PATH"])
+            let helperURL = URL(fileURLWithPath: helperPath)
+            let faraReceipt = ComputerUseInstallationReceipt(
+                installationVersion: ComputerUseArtifactManifest.fara15.installationVersion,
+                modelVariant: .fara15_4B,
+                modelDirectory: faraInputs.modelURL.deletingLastPathComponent().path,
+                installedAt: Date())
+            let loader = OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: directory)
+            let nativeInstaller = ComputerUseInstaller.nativeText()
+            let nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs = {
+                guard let current = await nativeInstaller.currentInstallation() else { return nil }
+                let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                return try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+                    receipt: current, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+            }
+            let nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner = { input in
+                nativeCalls += 1
+                XCTAssertEqual(input.goal, goal, "The native file planner retains the complete original user goal")
+                let candidates = input.localFileCatalog?.page.candidates.map(\.displayName) ?? []
+                nativeCatalogTrace.append("state=\(String(describing: input.localFileCatalog?.inventoryState)) candidates=\(candidates)")
+                return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
+            }
+            let pool = MCPClientPool()
+            productionClientPool = pool
+            let failFastFallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+                throw ComputerUseDesktopExecutor.Failure.stepLimit
+            }, desktopFactory: { _ in throw ComputerUseDesktopExecutor.Failure.stepLimit })
+            let loaded: MCPFirstComputerUseExecutor
+            do {
+                loaded = try await MCPFirstComputerUseExecutor.load(
+                    binaryURL: helperURL,
+                    visualFallback: failFastFallback,
+                    planner: AppleFoundationMCPPlanner(),
+                    clientPool: pool,
+                    browserStepPlanner: nativeFileSelectionPlanner,
+                    browserExecutorFactory: {
+                        productionBrowserFactoryCalls += 1
+                        let created = try loader.prepareDefaultBrowser(receipt: faraReceipt,
+                            nativeFilePlanner: nativeFilePlanner, nativeControlInputs: nativeControlInputs)
+                        guard let prepared = created as? ComputerUseDefaultBrowserExecutor else {
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                        productionBrowserExecutor = prepared
+                        return prepared
+                    })
+                helperCatalogNames = try await pool.allowedTools().map(\.toolName).sorted()
+            } catch {
+                await pool.cancelAll()
+                await runtime.shutdown()
+                throw error
+            }
+            taskExecutor = loaded
+            productionMCPExecutor = loaded
+        } else {
+            taskExecutor = directExecutor
+        }
+        func performApproved(_ continuation: ComputerUseVisualApprovalContinuation,
+            action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+            willBeginEffect: @escaping () -> Void) async throws {
+            if let productionMCPExecutor {
+                try await productionMCPExecutor.performApprovedVisualAction(continuation, action: action,
+                    fingerprint: fingerprint, tools: tools, willBeginEffect: willBeginEffect)
+            } else {
+                try await directExecutor.performApprovedVisualAction(continuation, action: action,
+                    fingerprint: fingerprint, tools: tools, willBeginEffect: willBeginEffect)
+            }
+        }
+        func continueApproved(_ continuation: ComputerUseVisualApprovalContinuation,
+            action: ComputerUsePredictedAction) async throws -> ComputerUseExecutionResult {
+            if let productionMCPExecutor {
+                return try await productionMCPExecutor.continueAfterApprovedVisualAction(continuation,
+                    action: action, tools: tools, progress: { _ in })
+            }
+            return try await directExecutor.continueAfterApprovedVisualAction(continuation,
+                action: action, tools: tools, progress: { _ in })
+        }
         var startPageSetupEvidence: String?
         let operation = Task { @MainActor in
             if startsOnDrivePage {
@@ -956,28 +1092,40 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         attachment.lifetime = .keepAlways; self.add(attachment)
                     }
             }
-            var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
-                tools: tools, progress: { _ in })
+            var result = try await taskExecutor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { routeProgress.append($0) })
             while uploadToDrive, case .approvalRequired(let message, let action, let continuation) = result {
-                if session.currentFileOpenPanel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
+                let panel = try currentFilePanel()
+                let window = retainedBrowserWindow()
+                if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
                    message.localizedCaseInsensitiveContains("file upload"),
-                   case .click(let x, let y, 1, 1) = action, let window = session.currentWindow,
+                   case .click(let x, let y, 1, 1) = action, let window,
                    window.identity.bounds.contains(CGPoint(x: x, y: y)),
-                   let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
-                    application: window.application, mayAct: { true }), URL(string: page.url)?.host == "drive.google.com" {
+                   let pageURL = try freshlyObservedBrowserURL(), URL(string: pageURL)?.host == "drive.google.com" {
+                    observedRequestedPage = true
+                    observedPageURL = pageURL
                     let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
-                    try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
-                        tools: tools, willBeginEffect: { pickerOpeningEffects += 1 })
-                    result = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
-                        tools: tools, progress: { _ in })
+                    try await performApproved(continuation, action: action, fingerprint: fingerprint,
+                        willBeginEffect: { pickerOpeningEffects += 1 })
+                    result = try await continueApproved(continuation, action: action)
                     continue
+                }
+                if let panel, panel.selectedFileURLs.map(\.standardizedFileURL) == [expectedURL.standardizedFileURL],
+                   panel.primaryActionEnabled == true, !panel.isNavigatingPath {
+                    selectedBeforeUpload = true
                 }
                 // The user authorized this disposable real-site upload. Admit
                 // only the exact test file's primary picker action, once.
+                let actualPageURL = try freshlyObservedBrowserURL()
+                if URL(string: actualPageURL ?? "")?.host == "drive.google.com" {
+                    observedRequestedPage = true
+                    observedPageURL = actualPageURL
+                }
                 guard observedRequestedPage, selectedBeforeUpload, uploadEffects == 0,
-                      let panel = session.currentFileOpenPanel, !panel.isNavigatingPath,
+                      let panel, !panel.isNavigatingPath,
                       panel.selectedFileURLs.map(\.standardizedFileURL) == [expectedURL.standardizedFileURL],
                       panel.primaryActionEnabled == true else { return result }
+                selectedBeforeUpload = true
                 switch action {
                 case .key(usage: 0x28, modifiers: 0): break
                 case .click(let x, let y, 1, 1):
@@ -985,21 +1133,34 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 default: return result
                 }
                 let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
-                try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
-                    tools: tools, willBeginEffect: { uploadEffects += 1 })
-                result = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
-                    tools: tools, progress: { _ in })
+                try await performApproved(continuation, action: action, fingerprint: fingerprint,
+                    willBeginEffect: { uploadEffects += 1 })
+                result = try await continueApproved(continuation, action: action)
             }
             return result
         }
         // The real site path makes serial native and visual model calls, followed by completion verification.
-        let timeLimit: Int64 = uploadToDrive ? 240 : 150
+        let timeLimit: Int64 = uploadToDrive ? (productionComposition ? 300 : 240) : 150
         let remaining = max(Int64(1), timeLimit - (ContinuousClock.now - began).components.seconds)
         let deadline = Task { try? await Task.sleep(for: .seconds(remaining)); operation.cancel() }
         var result: ComputerUseExecutionResult?
         var failure: Error?
         do { result = try await operation.value } catch { failure = error }
         deadline.cancel()
+        if productionComposition, result != nil {
+            do {
+                _ = try remoteUploadConfirmed()
+                if let window = retainedBrowserWindow(),
+                   let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
+                    application: window.application, mayAct: { true }),
+                   URL(string: page.url)?.host == "drive.google.com" {
+                    observedRequestedPage = true
+                    observedPageURL = page.url
+                }
+            } catch { failure = error }
+        }
+        productionMCPExecutor?.cancelMCPWork()
+        await productionClientPool?.cancelAll()
         await runtime.shutdown()
         if uploadToDrive {
             let fixture = XCTAttachment(string: "Disposable fixture: \(name); admitted upload effects: \(uploadEffects)")
@@ -1042,11 +1203,24 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         if let data = try? Data(contentsOf: responseURL) {
             let response = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-            response.name = "Raw Fara response at native picker handoff"
+            response.name = productionComposition ? "Final production-composition Fara response" : "Raw Fara response at native picker handoff"
             response.lifetime = .keepAlways
             add(response)
         }
-        XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(String(describing: executor.lastSessionFailureForDiagnostics)); nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(executor.lastActionDiagnosticForTests)")
+        if productionComposition, let data = try? Data(contentsOf: responseURL.appendingPathExtension("request")) {
+            let request = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            request.name = "Final production-composition Fara request (body only)"
+            request.lifetime = .keepAlways
+            add(request)
+        }
+        if productionComposition {
+            let summary = XCTAttachment(string: "Task: \(goal)\nResult: \(String(describing: result))\nError: \(String(describing: failure))\nBrowser factory calls: \(productionBrowserFactoryCalls)\nHelper catalog: \(helperCatalogNames)\nNative file calls: \(nativeCalls)\nNative control calls: \(nativeControlCalls)\nNative catalog: \(nativeCatalogTrace)\nObserved page URL: \(String(describing: observedPageURL))\nExact selected file observed: \(selectedBeforeUpload)\nAdmitted upload effects: \(uploadEffects)\nProgress: \(routeProgress)\nFresh completion evidence: \(String(describing: acceptedUploadEvidence?.url))")
+            summary.name = "Production MCP-first real Drive upload outcome"
+            summary.lifetime = .keepAlways
+            add(summary)
+        }
+        let activeBrowserExecutor = productionBrowserExecutor ?? directExecutor
+        XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(activeBrowserExecutor.lastSessionFailureForDiagnostics); nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(activeBrowserExecutor.lastActionDiagnosticForTests)")
         guard let result else { XCTFail("No result; error=\(String(describing: failure))"); return }
         if uploadToDrive {
             XCTAssertEqual(uploadEffects, 1)
@@ -1065,7 +1239,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertTrue(evidence.renderedAXText.lowercased().contains("upload complete"))
             if case .completed = result { } else { XCTFail("Expected completed real upload; got \(result), error=\(String(describing: failure))") }
         } else if case .userInterventionRequired = result { } else { XCTFail("Expected handoff before picker Upload; got \(result), error=\(String(describing: failure))") }
-        XCTAssertNotNil(executor.retainedWindowForDiagnostics)
+        XCTAssertEqual(productionBrowserFactoryCalls, productionComposition ? 1 : 0,
+            "The genuine Apple planner must enter the browser factory exactly once")
+        XCTAssertNotNil(activeBrowserExecutor.retainedWindowForDiagnostics)
         XCTAssertTrue(observedRequestedPage, "Verify the real destination before opening its modal picker")
         let attachment = XCTAttachment(string: proposals.joined(separator: "\n"))
         attachment.lifetime = .keepAlways

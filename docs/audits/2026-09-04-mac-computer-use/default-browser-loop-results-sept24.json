@@ -629,7 +629,10 @@
       "Live27 blank-start original-prompt direct-executor run selected target3757F980-E44F-4591-AA21-2CA052DFDD0F.pptx under candidate ID 9cbd1131-041a-49e9-8a57-f96ec3484f15, then Fara redundantly clicked its already-highlighted row to confirm selection before Upload. The app returned approvalRequired for an unidentified target; the test harness did not approve because this action was outside its bounded exact-upload allowance. nativeCalls=2, nativeControlCalls=3, uploadEffects=0. No upload/readback occurred. Do not infer that more time fixes completion.",
       "The selected-file wording clarification passes its focused readiness check 3/3; it preserves all guards. This does not qualify the production route.",
       "Live28 is the first accepted blank-start direct-executor real-Drive exact-file upload/completion/readback slice. It used blank Safari, the original goal, and no native advice or scripted startup. Fresh host page evidence showed the exact filename, one upload-complete message, and a dismissed picker; Fara terminated and the app completed. Independent exact-name Safari readback found one My Drive item owned by the account and matched all 28,273 bytes with fixture SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. One run only; direct executor, bounded test approvals, and custom completion check.",
-      "Live28 does not qualify production MCPFirst/HostManager routing or paired iOS task-composer integration; email, ambiguity handling, general reliability, and 12 GB whole-machine acceptance remain open."
+      "Live28 does not qualify production MCPFirst/HostManager routing or paired iOS task-composer integration; email, ambiguity handling, general reliability, and 12 GB whole-machine acceptance remain open.",
+      "Read-only production routing live02 passes the original Drive goal through the actual Apple Foundation planner and installed mac-control-mcp 0.8.2 real 30-tool catalog to the default-browser factory once, with no visual fallback, host input or effects. It accepts only production Mac browser-route selection before effects; full execution, upload, app completion and paired iOS HostManager integration remain unqualified. The preceding live01 stopped in harness preflight before planner/factory invocation and is not a route result.",
+      "Production upload attempts live01–04 compiled and ran with 42 source hashes unchanged, but none admitted an upload or readback. Live01 selected the exact presentation and reached Upload, but its harness lacked observedRequestedPage proof wiring. Live02/03 returned approvalRequired for unidentified clicks before picker open; live03’s captured model input is the actual Drive page while its description targets Safari Downloads, proving a model-targeting error for that run only. Live04 included the trial conditional chooser prompt but opened Workspace Marketplace and requested approval for an unidentified close click; reject that prompt trial. Direct-executor nativeControlCalls/proposals/actionErrors counters do not cover the production loader and cannot establish no model/control attempts.",
+      "Next production-upload investigation: inspect actual native page-planner decisions before more prompt/model changes. The prompt trial from live04 is rejected. Production full task/HostManager integration and paired iOS route remain unqualified."
     ],
     "sourceSHA256": {
       "TODO.md": "a2b63071a74867e48d1d95d8d9246864fbf909a7d932b25465578efef417dfc3",
@@ -1778,6 +1781,147 @@
         "scopeAccepted": true,
         "acceptanceScope": "One blank-start direct-executor real-Drive upload/completion/readback slice; not production MCPFirst/HostManager or paired iOS composer route.",
         "finding": "Blank Safari start with original goal, no native advice or scripted startup. Exact candidate selected; Fara uploaded, remembered, then terminated. Fresh host page evidence had the exact filename, one “upload complete” message and picker dismissed; completion validator admitted one upload. Independent Safari exact-name search/download found one My Drive item owned by the account and matched all 28,273 bytes and fixture SHA-256. This is one scoped passing run using direct executor, bounded test approvals and custom completion check; production host route, paired iOS composer, email, ambiguity and 12 GB whole-machine qualification remain open."
+      },
+      {
+        "run": "production-router-availability-live01",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 43,
+        "runnerSHA256": "fdecf0ea48c5aa04ab528299a263b8636a12ae3be2e67195137487e96e819545",
+        "finding": "Read-only production router availability check passed."
+      },
+      {
+        "run": "production-drive-routing-live01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 43,
+        "runnerSHA256": "3d09a3383aa86a3b6cd81200b795e3d8e44ef369cd60f1bf7c9d792bd2659be0",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-routing-live01-all-test-issues.json",
+        "finding": "Initial test harness returned ToolError.paused before planning (factoryCalls=0). This was harness preflight/cleanup behavior, not a model or route result; only the harness was corrected for the succeeding run."
+      },
+      {
+        "run": "production-drive-routing-live02",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 43,
+        "runnerSHA256": "69313954e65cd6bfa851b0df0b69e0791a8ed1d4d7ed47b4cc0647bcf4da41ee",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-routing-live02-all-test-issues.json",
+        "routeEvidenceAttachment": "B167A522-57F4-4CE4-8212-D193574618A1",
+        "planner": "Actual Apple Foundation planner with installed mac-control-mcp 0.8.2 real 30-tool catalog",
+        "browserFactoryCalls": 1,
+        "visualFallbackCalls": 0,
+        "hostInputCalls": 0,
+        "effectsDispatched": false,
+        "finding": "Original Drive upload goal passed through the production Mac planner/router and selected the default-browser factory exactly once before any effects. Progress planning then browsertools routing were observed; the factory threw a pre-effect sentinel. This accepts only production Mac browser-route selection before effects, not upload, full HostManager execution or app completion."
+      },
+      {
+        "run": "production-drive-upload-live01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 15,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 42,
+        "runnerSHA256": "bd4932f4389d9a590d6033c704adc9af096870a12bbf309c78b5831b79f5742d",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-upload-live01-all-test-issues.json",
+        "productionBrowserFactoryCalls": 1,
+        "uploadEffects": 0,
+        "readback": false,
+        "productionWorkflowAccepted": false,
+        "finding": "The actual production route selected the exact presentation; browser factory=1 and native file calls=2. The primary Upload action reached approval, but the harness lacked observedRequestedPage wiring, so it admitted no upload. Corrected harness evidence belongs to later runs; this run is not an application model failure.",
+        "nativeFileCalls": 2,
+        "harnessIssue": "observedRequestedPage was not wired; run had no upload, not a full app failure."
+      },
+      {
+        "run": "production-drive-upload-live02",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 15,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 42,
+        "runnerSHA256": "9f69bc902bc482a9c7210081b4e54d8e80c42696365e97ae4bb3705e6d4545d1",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-upload-live02-all-test-issues.json",
+        "productionBrowserFactoryCalls": 1,
+        "uploadEffects": 0,
+        "readback": false,
+        "productionWorkflowAccepted": false,
+        "finding": "Drive URL was observed and browser factory=1. Before the picker opened, the app returned approvalRequired for unidentified click (1534,293). No upload. Do not interpret direct-executor instrumentation fields nativeControlCalls/proposals/actionErrors as complete production-loader telemetry.",
+        "observedDriveURL": true,
+        "approvalRequiredClick": {
+          "x": 1534,
+          "y": 293
+        }
+      },
+      {
+        "run": "production-drive-upload-live03",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 15,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 42,
+        "runnerSHA256": "35f77ae8aff5efd52449ad14e6dc22d0a7b119fdb1c0eed1c4f0f8a73136e2f5",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-upload-live03-all-test-issues.json",
+        "productionBrowserFactoryCalls": 1,
+        "uploadEffects": 0,
+        "readback": false,
+        "productionWorkflowAccepted": false,
+        "finding": "Drive URL was observed and browser factory=1. No picker or upload; approvalRequired for unidentified click (1513,330). Captured final model input shows the proper Drive screen, while Fara describes a Safari Downloads folder: model-targeting error established for this run only. Direct-executor nativeControlCalls/proposals/actionErrors fields are not complete production-loader telemetry.",
+        "observedDriveURL": true,
+        "approvalRequiredClick": {
+          "x": 1513,
+          "y": 330
+        },
+        "modelInputAttachment": "BC6767A6-CE8C-4BFE-BBD1-DAF4BCED9561",
+        "modelInputImage": ".build/repair-verification/production-drive-upload-live03-attachments/final-model-input.png",
+        "modelFindingScope": "This run only: screenshot is the proper Drive page; model invents a Downloads folder control on that page."
+      },
+      {
+        "run": "production-drive-upload-live04",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "buildErrors": 0,
+        "buildWarnings": 2,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 42,
+        "runnerSHA256": "74fe867198b93546e04893672246df2468e6dd2f60d61d595bd8020a07525ccb",
+        "allTestIssuesPath": ".build/repair-verification/production-drive-upload-live04-all-test-issues.json",
+        "productionBrowserFactoryCalls": 1,
+        "uploadEffects": 0,
+        "readback": false,
+        "productionWorkflowAccepted": false,
+        "finding": "Trial conditional native-chooser prompt is present in the captured request, but Fara opened Workspace Marketplace instead of the picker, then received approvalRequired for unidentified close click (1444,166). No upload/readback. Prompt trial is rejected; do not treat it as a fix. Direct-executor instrumentation fields are not complete production-loader telemetry.",
+        "trialPrompt": "conditional native chooser guidance",
+        "openedSite": "Workspace Marketplace",
+        "approvalRequiredClick": {
+          "x": 1444,
+          "y": 166
+        },
+        "trialAccepted": false
       }
     ],
     "delegationDiagnostic": {
@@ -2573,7 +2717,29 @@
       "productionHostRouteAccepted": false
     },
     "acceptedScope": "One blank-start direct-executor real-Drive upload/completion/readback slice (live28)",
-    "acceptedScopeQualified": true
+    "acceptedScopeQualified": true,
+    "latestProductionRouterRun": "production-drive-routing-live02",
+    "productionRouterScope": {
+      "result": "Passed",
+      "acceptedScope": "Original Drive goal selected production Mac default-browser factory through actual Apple planner before effects",
+      "browserFactoryCalls": 1,
+      "visualFallbackCalls": 0,
+      "hostInputCalls": 0,
+      "effectsDispatched": false,
+      "fullProductionExecutionAccepted": false,
+      "sourceCount": 43,
+      "sourceUnchanged": true
+    },
+    "latestProductionUploadRun": "production-drive-upload-live04",
+    "latestProductionUploadOutcome": {
+      "result": "Failed before upload",
+      "runs": "production-drive-upload-live01..04",
+      "uploadEffects": 0,
+      "readback": false,
+      "trialConditionalChooserPrompt": "Rejected; live04 opened Workspace Marketplace instead of the picker.",
+      "next": "Inspect native page-planner decisions before further prompt/model changes.",
+      "directExecutorInstrumentationCaveat": "nativeControlCalls/proposals/actionErrors zeros are not complete telemetry in the production loader; rely on instrumented production factory/nativeFileCalls."
+    }
   },
-  "latestScopeNote": "The historical top-level latest record remains the default-browser navigation/login baseline. Later Drive outcomes are in fileSelectionCheckpoint.latestLiveRun and runs. Live28 passes one scoped blank-start direct-executor real-Drive upload/completion/readback slice; overall production workflow acceptance remains false because production MCPFirst/HostManager, paired iOS composer, email, ambiguity and whole-machine qualification are open."
+  "latestScopeNote": "Live28 passes one scoped blank-start direct-executor real-Drive upload/completion/readback slice. Read-only production-router live02 passes route selection before effects. Production-upload live01–04 have not admitted uploads; live03 proves a model-targeting error for that run, and live04 rejects the conditional chooser prompt trial. Inspect native page-planner decisions before further prompt/model changes. Full production task integration, paired iOS, email, ambiguity and whole-machine acceptance remain open."
 }
