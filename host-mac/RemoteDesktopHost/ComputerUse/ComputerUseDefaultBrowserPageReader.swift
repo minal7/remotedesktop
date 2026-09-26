@@ -12,6 +12,12 @@ final class ComputerUseDefaultBrowserPageReader {
         let label: String
         let frame: CGRect?
         let enabled: Bool?
+        let expanded: Bool?
+
+        init(id: String, role: String, label: String, frame: CGRect?, enabled: Bool?, expanded: Bool? = nil) {
+            self.id = id; self.role = role; self.label = label
+            self.frame = frame; self.enabled = enabled; self.expanded = expanded
+        }
     }
 
     struct Observation: Equatable, Sendable {
@@ -183,13 +189,15 @@ final class ComputerUseDefaultBrowserPageReader {
             if controlRoles.contains(role), controls.count < 32 {
                 let label = try string(kAXTitleAttribute as String, node) ?? string(kAXDescriptionAttribute as String, node)
                     ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
+                let rawExpanded = try value("AXExpanded", node)
+                let expanded = rawExpanded.flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? ($0 as? NSNumber)?.boolValue : nil }
                 let id = UUID().uuidString
                 let safeRole = bounded(role, to: max(0, contextByteLimit - contextBytes))
                 let safeLabel = bounded(label, to: min(256, max(0, contextByteLimit - contextBytes - safeRole.utf8.count)))
                 let cost = id.utf8.count + safeRole.utf8.count + safeLabel.utf8.count
                 if controls.count < 32, contextBytes + cost <= contextByteLimit {
                     controls.append(Control(id: id, role: safeRole, label: safeLabel,
-                                            frame: try frame(node), enabled: effectiveEnabled))
+                                            frame: try frame(node), enabled: effectiveEnabled, expanded: expanded))
                     contextBytes += cost
                     controlRefs[id] = node
                 } else { truncated = true }
@@ -266,7 +274,8 @@ final class ComputerUseDefaultBrowserPageReader {
     }
 
     private static func sameControlMetadata(_ lhs: Control, _ rhs: Control) -> Bool {
-        lhs.role == rhs.role && lhs.label == rhs.label && lhs.frame == rhs.frame && lhs.enabled == rhs.enabled
+        lhs.role == rhs.role && lhs.label == rhs.label && lhs.frame == rhs.frame
+            && lhs.enabled == rhs.enabled && lhs.expanded == rhs.expanded
     }
 
     private static func permittedCenterMetadata(_ control: Control, within bounds: CGRect) -> CGPoint? {

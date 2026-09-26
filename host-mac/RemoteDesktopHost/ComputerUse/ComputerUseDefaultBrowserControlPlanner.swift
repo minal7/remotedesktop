@@ -74,7 +74,8 @@ struct ComputerUseLocalDefaultBrowserControlPlanner: Sendable {
                   (1...64).contains(control.role.utf8.count),
                   control.label.utf8.count <= 256 else { throw ComputerUseDefaultBrowserControlPlanError.invalidInput }
             return ["id": control.id, "role": control.role, "label": control.label,
-                    "enabled": control.enabled.map { $0 as Any } ?? NSNull()]
+                    "enabled": control.enabled.map { $0 as Any } ?? NSNull(),
+                    "expanded": control.expanded.map { $0 as Any } ?? NSNull()]
         }
         let eligibleIDs = Self.eligibleControls(in: page).map(\.id)
         let recentHistory = input.history.suffix(Self.recentHistoryCount).map { step -> [String: Any] in

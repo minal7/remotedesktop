@@ -5,7 +5,7 @@
     "implemented": true,
     "compiled": true,
     "tested": true,
-    "accepted": "One app-completed real-Drive upload slice from a test-preopened Drive page, with fresh completion evidence and independent exact-byte readback; startup navigation, full natural-request acceptance, phone interaction and production readiness remain unaccepted."
+    "accepted": "One blank-start, app-completed real-Drive upload/completion/readback slice from live28 using the direct executor, original goal, no native advice or scripted startup, bounded test approvals and a custom completion check. Production MCPFirst/HostManager and paired iOS routes, email, ambiguity handling, and 12 GB whole-machine qualification remain unaccepted."
   },
   "defaultBrowser": "com.apple.Safari",
   "model": "Fara1.5-4B Q4_K_M",
@@ -573,6 +573,152 @@
         "E2150CA3-1BFC-42C3-B375-7AB8645810AB"
       ],
       "runnerSHA256": "0c7b51c62ddbbdb3900f06721f79342a395a678687d9150a1706a305cbe0c5fa"
+    },
+    {
+      "run": "default-browser-expanded-state-red01",
+      "testResult": "Failed",
+      "passed": 1,
+      "failed": 2,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 6,
+      "runtimeWarnings": 0,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "note": "Expected RED: native control request omitted AXExpanded and stale-control comparison accepted a true-to-false state change.",
+      "summaryPath": ".build/repair-verification/default-browser-expanded-state-red01-summary.json",
+      "buildPath": ".build/repair-verification/default-browser-expanded-state-red01-build.json",
+      "sourceAuditPath": ".build/repair-verification/default-browser-expanded-state-red01-source-audit.json"
+    },
+    {
+      "run": "default-browser-expanded-state-green01",
+      "testResult": "Passed",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 25,
+      "runtimeWarnings": 0,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "note": "AXExpanded true/false/unknown projection and expanded-state stale-control checks pass.",
+      "summaryPath": ".build/repair-verification/default-browser-expanded-state-green01-summary.json",
+      "buildPath": ".build/repair-verification/default-browser-expanded-state-green01-build.json",
+      "commandPath": ".build/repair-verification/default-browser-expanded-state-green01-command.json",
+      "sourceAuditPath": ".build/repair-verification/default-browser-expanded-state-green01-source-audit.json"
+    },
+    {
+      "run": "production-drive-upload-live08",
+      "testResult": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildStatus": "succeeded",
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": 1,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "nativePlannerExchanges": 8,
+      "nativeControlSummaryQualification": "Direct-executor nativeControlCalls/proposals/actionErrors counters do not instrument the production route; use captured native exchanges for this run.",
+      "nativeExchangeSequence": "Two New pressControl proposals and six visualFallback proposals; proposals do not prove dispatch. An open-menu request later showed New Folder expanded.",
+      "finalFaraProposal": "Visual click at (95,40) returned approvalRequired for an unidentified Safari sidebar target; bounded harness did not approve.",
+      "uploadEffects": 0,
+      "readback": false,
+      "note": "No upload/readback. Do not infer no native control effects from bypassed direct-executor counters.",
+      "summaryPath": ".build/repair-verification/production-drive-upload-live08-summary.json",
+      "buildPath": ".build/repair-verification/production-drive-upload-live08-build.json",
+      "sourceAuditPath": ".build/repair-verification/production-drive-upload-live08-source-audit.json",
+      "attachmentsPath": ".build/repair-verification/production-drive-upload-live08-attachments/manifest.json"
+    },
+    {
+      "run": "native-expanded-state-replay01",
+      "testResult": "Responses collected; unqualified",
+      "requests": 2,
+      "outcomes": [
+        "pressControl(New)",
+        "pressControl(New Folder)"
+      ],
+      "workerWallSeconds": 26.541878166,
+      "peakSampledProcessMemoryBytes": 3309305856,
+      "peakNamedWorkerCount": 1,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "productionChanged": false,
+      "effects": false,
+      "fixtureCaveat": "Inputs augmented New expanded=false and New Folder menu expanded=true, with other controls set to null. These fields were absent from the original captured payloads; actual live08 observations report explicit false for other controls. This is not an exact replay of live08.",
+      "note": "Original production prompt with fixture-augmented expanded state: initial New choice is appropriate; selecting the already-expanded New Folder menu is not. This shows the added state alone did not solve action selection; no prompt candidate was applied.",
+      "resultPath": ".build/repair-verification/native-expanded-state-replay01/result.json"
+    },
+    {
+      "run": "native-expanded-state-replay02",
+      "testResult": "Responses collected; unqualified",
+      "requests": 2,
+      "outcomes": [
+        "pressControl(New)",
+        "pressControl(New Folder)"
+      ],
+      "workerWallSeconds": 26.654883209,
+      "peakSampledProcessMemoryBytes": 3314761728,
+      "peakNamedWorkerCount": 1,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "productionChanged": false,
+      "effects": false,
+      "fixtureCaveat": "Inputs augmented New expanded=false and New Folder menu expanded=true, with other controls set to null. These fields were absent from the original captured payloads; actual live08 observations report explicit false for other controls. This is not an exact replay of live08.",
+      "note": "Previously rejected next-step prompt guidance plus fixture-augmented expanded state: initial New choice is appropriate; selecting the already-expanded New Folder menu remains wrong. Candidate rejected and unapplied; no browser/MCP effects.",
+      "resultPath": ".build/repair-verification/native-expanded-state-replay02/result.json"
+    },
+    {
+      "run": "native-expanded-meaning-replay01",
+      "testResult": "Responses collected; unqualified",
+      "requests": 2,
+      "outcomes": [
+        "visualFallback",
+        "visualFallback"
+      ],
+      "workerWallSeconds": 25.638592083,
+      "peakSampledProcessMemoryBytes": 3308765184,
+      "peakNamedWorkerCount": 1,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "productionChanged": false,
+      "effects": false,
+      "fixtureCaveat": "Inputs augmented New expanded=false and New Folder menu expanded=true, with other controls set to null. These fields were absent from the original captured payloads; actual live08 observations report explicit false for other controls. This is not an exact replay of live08.",
+      "note": "One-sentence meaning candidate falls back on both states; rejected/unapplied.",
+      "resultPath": ".build/repair-verification/native-expanded-meaning-replay01/result.json"
+    },
+    {
+      "run": "native-controls-granite42-live08-replay01",
+      "testResult": "Not started",
+      "status": "failed preflight",
+      "workerStarted": false,
+      "reason": "Pinned runtime hash mismatch after bundle re-signing; no model result.",
+      "note": "A fresh pin was verified before replay02; do not count this as a model failure.",
+      "resultPath": ".build/repair-verification/native-controls-granite42-live08-replay01/result.json"
+    },
+    {
+      "run": "native-controls-granite42-live08-replay02",
+      "testResult": "Responses collected; unqualified",
+      "requests": 2,
+      "outcomes": [
+        "visualFallback",
+        "visualFallback"
+      ],
+      "workerWallSeconds": 6.710051625,
+      "peakSampledProcessMemoryBytes": 2724888576,
+      "peakNamedWorkerCount": 1,
+      "ownedProcessExited": true,
+      "credentialRemoved": true,
+      "productionChanged": false,
+      "effects": false,
+      "modelSHA256": "e0406663965846ae22a403456eb826ccce5f450840491f71952f18a7cb78e7d5",
+      "runtimeSHA256": "000583cb47f01c0a79443ffac117f69b00e122a4331dfd119f5cdea9a6129105",
+      "runnerSHA256": "c78cb0e33fbb367b40e5d68c19afdc23549f3710e6b067b158fdba9dea1ae821",
+      "note": "Narrow native-control action-choice screen only. Initial Drive response missed enabled New; expanded menu fallback was appropriate because File upload was absent from the native control catalog. Inputs altered only five Granite profile paths; messages, schema, IDs and order were preserved. No browser/MCP effects or production change; no speed/RAM qualification.",
+      "resultPath": ".build/repair-verification/native-controls-granite42-live08-replay02/result.json"
     }
   ],
   "limitations": [
@@ -580,7 +726,7 @@
     "Existing main-thread runtime warning remains.",
     "12 GB whole-Mac performance acceptance not established.",
     "Native planner/catalog and native file-dialog dispatch are not connected to the default-browser route.",
-    "Google accounts remain signed out; no real upload or email was performed."
+    "No production-route upload has been accepted; live28 is one scoped direct-executor upload/completion/readback pass."
   ],
   "faraTypeCoordinateReference": "https://github.com/microsoft/fara/blob/main/src/fara/agents/fara/fara15_agent.py#L710-L752",
   "fileSelectionCheckpoint": {
@@ -2877,5 +3023,5 @@
       "modalParentWebAreaURLObserver": "compiled, not live-exercised because live07 never reached picker"
     }
   },
-  "latestScopeNote": "Live28 remains one scoped blank-start direct-executor real-Drive upload/completion/readback pass. Read-only production-router live02 passes route selection before effects. Production-upload live01–07 admitted no upload. Native trace check01 passes diagnostics, but its modal URL observer remains unexercised. Off-source replay candidate for expanded menu is rejected; next inspect AXExpanded projection. Full production execution and paired iOS route remain unqualified."
+  "latestScopeNote": "Live28 remains one scoped blank-start direct-executor real-Drive upload/completion/readback pass. Production-router live02 passes pre-effect route selection only. Production-upload live01–08 have no upload. Live08 captured eight native planner exchanges; final visual proposal returned approvalRequired and the harness did not approve it. Expanded-state projection tests pass 6/6. Qwen/Granite replays are unqualified and effect-free; the Qwen states were fixture-augmented. No model prompt candidate is accepted. Next isolate visual action selection against captured failed Drive states before further changes. Full production execution and paired iOS route remain unqualified."
 }

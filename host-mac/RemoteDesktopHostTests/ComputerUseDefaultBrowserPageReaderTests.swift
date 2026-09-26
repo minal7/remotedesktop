@@ -224,6 +224,88 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             CGPoint(x: 100, y: 80))
     }
 
+    func testValidatedControlCenterRejectsExpandedStateChangesButAcceptsStableUnknownState() throws {
+        for (initial, fresh, shouldAccept) in [
+            (true as Bool?, false as Bool?, false),
+            (false as Bool?, true as Bool?, false),
+            (true as Bool?, nil as Bool?, false),
+            (nil as Bool?, false as Bool?, false),
+            (true as Bool?, true as Bool?, true),
+            (false as Bool?, false as Bool?, true),
+            (nil as Bool?, nil as Bool?, true),
+        ] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.set("web", "AXURL", "https://example.test/" as NSString)
+            graph.set("button", kAXTitleAttribute, "Menu" as NSString)
+            graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+            graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+            if let initial { graph.set("button", "AXExpanded", NSNumber(value: initial)) }
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+            let controlID = try XCTUnwrap(observation.controls.first?.id)
+            if let fresh { graph.set("button", "AXExpanded", NSNumber(value: fresh)) }
+            else { graph.remove("button", "AXExpanded" as CFString) }
+            let center = try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                window: graph.window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true })
+            XCTAssertEqual(center != nil, shouldAccept, "initial=\(String(describing: initial)), fresh=\(String(describing: fresh))")
+        }
+    }
+
+    func testNativeControlRequestPreservesAXExpandedTrueFalseAndUnknown() throws {
+        let connection = try ComputerUseTextModelConnection(
+            baseURL: URL(string: "http://127.0.0.1:49123")!, bearerToken: "fixture-control-planner-token",
+            modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+        let planner = ComputerUseLocalDefaultBrowserControlPlanner(connection: connection)
+        let input = ComputerUseFaraModel.Input(goal: "Open the site's menu and continue.", screenshotPNG: Data([1]),
+            surface: .desktop, history: [])
+
+        for state in [true as Bool?, false as Bool?, nil as Bool?] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.set("web", "AXURL", "https://example.test/" as NSString)
+            graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+            graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+            if let state { graph.set("button", "AXExpanded", NSNumber(value: state)) }
+            let page = try XCTUnwrap(ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .read(window: graph.window, application: graph.identity, mayAct: { true }))
+            let controlID = try XCTUnwrap(page.controls.first?.id)
+            let request = try planner.makeRequest(input: input, page: page)
+            let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+            let contextText = try XCTUnwrap(messages.last?["content"] as? String)
+            let context = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contextText.utf8)) as? [String: Any])
+            let controls = try XCTUnwrap(context["observed_controls"] as? [[String: Any]])
+            let control = try XCTUnwrap(controls.first { $0["id"] as? String == controlID })
+            if let state { XCTAssertEqual(control["expanded"] as? Bool, state) }
+            else { XCTAssertTrue(control["expanded"] is NSNull) }
+            let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+            let schema = try XCTUnwrap((format["json_schema"] as? [String: Any])?["schema"] as? [String: Any])
+            let branches = try XCTUnwrap(schema["oneOf"] as? [[String: Any]])
+            let pressBranch = try XCTUnwrap(branches.first { branch in
+                (((branch["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String])?.first == "pressControl"
+            })
+            let properties = try XCTUnwrap(pressBranch["properties"] as? [String: Any])
+            let controlIDEnum = try XCTUnwrap((properties["control_id"] as? [String: Any])?["enum"] as? [String])
+            XCTAssertTrue(controlIDEnum.contains(controlID), "Expanded state is observational metadata, not a press eligibility filter")
+        }
+
+        let malformed = PageAXGraph(); malformed.makePage()
+        malformed.set("web", "AXURL", "https://example.test/" as NSString)
+        malformed.set("button", kAXTitleAttribute, "Menu" as NSString)
+        malformed.set("button", kAXEnabledAttribute, NSNumber(value: true))
+        malformed.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+        malformed.set("button", "AXExpanded", "true" as NSString)
+        let malformedPage = try XCTUnwrap(ComputerUseDefaultBrowserPageReader(access: malformed.access)
+            .read(window: malformed.window, application: malformed.identity, mayAct: { true }))
+        let malformedRequest = try planner.makeRequest(input: input, page: malformedPage)
+        let malformedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(malformedRequest.httpBody)) as? [String: Any])
+        let malformedMessages = try XCTUnwrap(malformedBody["messages"] as? [[String: Any]])
+        let malformedContext = try XCTUnwrap(malformedMessages.last?["content"] as? String)
+        let malformedJSON = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(malformedContext.utf8)) as? [String: Any])
+        let malformedControls = try XCTUnwrap(malformedJSON["observed_controls"] as? [[String: Any]])
+        let malformedControl = try XCTUnwrap(malformedControls.first)
+        XCTAssertTrue(malformedControl["expanded"] is NSNull)
+    }
+
     func testValidatedControlCenterKeepsNewestSnapshotAfterCacheEviction() throws {
         let graph = PageAXGraph(); graph.makePage()
         graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
