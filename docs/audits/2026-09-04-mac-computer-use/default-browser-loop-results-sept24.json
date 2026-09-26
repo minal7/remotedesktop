@@ -235,7 +235,7 @@
   "fileSelectionCheckpoint": {
     "implemented": true,
     "compiled": true,
-    "tested": "Native input regressions pass: 23 overflow/lifecycle checks, 3 keyboard geometry checks including the real picker, and 4 file-capability checks. Real Drive upload live02 fails before native catalog selection.",
+    "tested": "16 current focused tests pass: blocking-operation timeout/cancellation/late-result rejection, unchanged OCR worker behavior, metadata inventory/identity, async executor cancellation, native-planner and file-choice integration. Real Drive live04 reached the native chooser with test-only delegation, then timed out at Downloads permission; no upload accepted.",
     "accepted": false,
     "architecture": "One runtime worker at a time. Advertise native file-selection support before visual navigation; native planner interprets the original goal when the website opens its chooser; the native adapter enters the exact resolved path. Fara handles browser actions and the final picker action. No site-specific production rules.",
     "executionRepairs": [
@@ -243,35 +243,40 @@
       "Retain dispatched effects before a bounded native-sheet settling check; never replay input while waiting.",
       "Recover fresh text observations after AX event overflow while permanently retiring old target references.",
       "Navigate the native picker from current path-field focus/value/selection and the exact resolved file, stopping before its outer primary action.",
-      "Ignore background windows’ sheets when inspecting the focused task window; retry transient startup AX loss without repeating Cmd-N.",
+      "Ignore background windows\u2019 sheets when inspecting the focused task window; retry transient startup AX loss without repeating Cmd-N.",
       "Clip keyboard screenshot checkpoints to visible focused-control geometry: the real picker outline was 3,857 points tall, placing its original center offscreen.",
-      "Advertise host file selection before the first browser proposal; the missing capability caused a real Drive run to attempt local folder navigation."
+      "Advertise host file selection before the first browser proposal; the missing capability caused a real Drive run to attempt local folder navigation.",
+      "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope."
     ],
-    "latestFocusedRun": "default-browser-file-capability-green02",
-    "latestLiveRun": "default-browser-drive-upload-live03",
-    "latestLiveFailure": "The recorded screenshot correctly shows Drive Home. Fara ignores the advertised host file-selection capability, attempts unrelated local-folder/browser navigation, then proposes Alt+Left, outside the retained browser action scope. The host yields; nativeCalls=0 and uploadEffects=0.",
+    "latestFocusedRun": "default-browser-file-discovery-green01",
+    "latestLiveRun": "default-browser-drive-upload-live04",
+    "latestLiveFailure": "Test-only native-generated browser directive reaches actual Drive New -> File upload -> native picker; native planner requests presentation files sorted by modifiedAt descending. Host MainActor then blocks in Catalog.discover -> NSURLDirectoryEnumerator.nextObject -> open while macOS requests Downloads permission. XCTest times out at its 5-minute allowance; no upload or completed readback.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
       "File-capability GREEN01 passed 3 checks and failed an old prompt-text assertion; GREEN02 updates the assertion and passes all 4.",
       "Safari is signed into real Google Drive as independently observed on September 25; login is no longer the current blocker.",
       "Drive upload, email-to-self, phone choice interaction, general production readiness and the 12 GB whole-Mac target remain unaccepted. Installed host unchanged.",
-      "Live03 adds opt-in screenshots and per-step proposals only. Its observed failure is model instruction-following/planning, not a stale or wrong screenshot. No broader model/configuration changes were made."
+      "Live03 adds opt-in screenshots and per-step proposals only. Its observed failure is model instruction-following/planning, not a stale or wrong screenshot. No broader model/configuration changes were made.",
+      "The catalog async boundary is compiled and covered by 16 focused tests (0 failures/runtime warnings, 0 build errors, 39 build warnings). A permission-granted real upload has not run after this repair. Other synchronous file identity rechecks are outside this observed discovery-freeze repair."
     ],
     "sourceSHA256": {
+      "TODO.md": "f6a9bce3f2e11f0e24d40b79a989e9ea1483ff8bf7dcbfde0e04e5f69782a95e",
+      "docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json": "6d1f8421c62b4f25ea10352f54ff7d1e1e85904abf3c0c8a5e50522b2e4b51c9",
       "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "6f33c566ac79133a6363e8dc308c862da311aec39f4f4f1abf96fe060f5839a1",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "5ee234fa3873502eeae28833a16642e043e71eba8d3cba73fe2a12aa2a9789d3",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "4f52986986fe833aed6b7b198663e944bc9edb73fbff4327471c6ff280832da4",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserPageReader.swift": "260084ab4714d91c3b847be36763ae44fbcc97d45cf1ce71a63acb9c942b6d3e",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserSession.swift": "a802d6b6dffebd3a246bafc50c1f8d61ecff01d8ea13614802b4cf814e41e6c5",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "653d6b3882e3dc02acbe34e1b29a7b9bc5e0d4204296f714356c3042e75c45ef",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "b127095a5839982d3f552b8d61cb0cca2cb28f1a484929538558e435f99033c1",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraAction.swift": "e6cef5dee10b1997507cfd2b91fc4c2fcb8e8c0669096f57736e22361ab5a53d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "c8b955dc40a6ccdaf0220181b135f44ba207579e588138a75c95e344f7c68c3b",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "fdde3db4a6fd6bc1421b919a553e67eeb839b437d1f92551c9681366c0663688",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "d488e0ee4fb90edd0e3fdc96a5d1c6f850244d02c68cd3f72de53d9d80a24c13",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "220a4b448f8eb7b17e20208831217e863b7b44042c0e57990ff3c5407fcfcdb0",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "b816096a350f37cffc03fb5e46ec072cf78f8a0f57150a1505735e7bfa1952c8",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseObservationWorker.swift": "e4be0df960b3a0c7113aaef110aef434045d89421e678583154121c7bed49572",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
       "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "c9c0f053403eab3cb078481563c32920e2913831f364daf1199633bba8f8ce86",
@@ -282,10 +287,12 @@
       "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
       "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
       "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserPageReaderTests.swift": "9d622bafbc7da4e24f0843a9e45c3e3cf13381f2d1f63b79600aab84660784a0",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "73c8a8af08cd0da2d4c8f2725537a6326241ff07ca93c45fdf6e8b019149e66f",
-      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "01dad33e938357de56ed639de96c0c0a21bce5ebd7f181deb3fed73cf62d068f",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "22f5d195e232351a59eb5b3985c0450efc209e8d993a761f23857934de86d6b4",
+      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "3a6d23ab6475e772dc4f4ccd0148375a5917116b89adc56888a75e7781f7f121",
+      "host-mac/RemoteDesktopHostTests/ComputerUseLocalFileCatalogTests.swift": "7c7f811302d32b63bef7795459a32b2c1b8a82e50a87ac91a72c20f9881f658f",
       "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "ee9c12856ba04b570d9c9e72dad8d4d64aa38f0814a851cee6d5490c2924b18d",
-      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "10a2624988d716dc6868fdd072ae063b84add4d352181e24422cd6fa7ddc7efa",
+      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "2d5b964da312c81005a61e196159db5ed1bcc6607e5ca14f2578c36f10560ca2",
+      "host-mac/RemoteDesktopHostTests/ComputerUseObservationWorkerTests.swift": "14618de5a2fbe08f33e28181082f1380c590d77b969b3618295b393c62d02aad",
       "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
       "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
       "host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift": "68da6305073a186890e37f9c239bb73bf2039e65b0ddc010b248abedad7ea0a7",
@@ -853,7 +860,81 @@
         "buildWarnings": 12,
         "sourceUnchanged": true,
         "runnerSHA256": "6d115a2212cd3ba2322e5a9f057a82cc87c3fd5777a432d969a2a7d5af65334e"
+      },
+      {
+        "run": "default-browser-frozen-prepared-file-live01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 10,
+        "sourceUnchanged": true,
+        "runnerSHA256": "130120aebe5c05077737a0bd6102986543320dae1a98f34f18c0189a78282691"
+      },
+      {
+        "run": "default-browser-frozen-worker-subgoal-live01",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 10,
+        "sourceUnchanged": true,
+        "runnerSHA256": "2f343dbbf85e1df34a73c79371d14626a2bcac2bda084754a3c26f543ebaeb16"
+      },
+      {
+        "run": "default-browser-frozen-native-delegation-live01",
+        "result": "Passed",
+        "passed": 1,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 10,
+        "sourceUnchanged": true,
+        "runnerSHA256": "7d973fbcd61ee9c7eb086abaed5adfd5a713fb5e05ce3d32b7c79dd16f25a47d"
+      },
+      {
+        "run": "default-browser-drive-upload-live04",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 26,
+        "sourceUnchanged": true,
+        "runnerSHA256": "e704c8e8c6be6d54047a5ca11827151445d3de33098099377f7772926ef598f8"
+      },
+      {
+        "run": "default-browser-file-discovery-green01",
+        "result": "Passed",
+        "passed": 16,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 39,
+        "sourceUnchanged": true,
+        "runnerSHA256": "7531a3fea88a105d90436f49b1de98b7fb917392bcac442c2d5fa8f683508ddf"
       }
-    ]
+    ],
+    "delegationDiagnostic": {
+      "productionChanged": false,
+      "frozenScreenshotRun": "default-browser-drive-upload-live03",
+      "fullGoal": "Unqueried catalog searches within Drive; selected candidate context still clicks Downloads in the Dock. Pre-selecting the file alone is not a demonstrated fix.",
+      "manualSubgoal": "On the same screenshot, a chooser-only instruction without catalog metadata selects New at normalized [40,162].",
+      "limitations": "The manual instruction changes both task wording and file context. It proves this first action is possible, not that a native orchestrator can generate an adequate directive or complete an upload. No UI effects occurred.",
+      "next": "User must grant Downloads access; then rerun the unchanged real upload/readback outcome with the responsive discovery path. Promote browser-role delegation only after complete outcome verification.",
+      "nativeGeneratedDirective": "One native completion preserves Drive URL, default account, upload, and verification in its objective; file identification stays with host. Fara selects New at [42,162]. Verification is stated in objective but absent from the generated completion-criteria list; this remains a narrow diagnostic.",
+      "liveWorkflow": "Live04 reaches the actual chooser with six visual proposals, including two changed-screen rejections and successful re-observation/retry. Native listFiles is correct. This proves browser progression only; delegation remains opt-in test code and upload remains unaccepted.",
+      "requestBodiesIdentical": true,
+      "nativeRequestSHA256": "96881fc9c015b6df9d2309b54cf7e95bdf790ad72edf938db4623587842fca3b"
+    },
+    "permissionWaitEvidence": {
+      "request": "kTCCServiceSystemPolicyDownloadsFolder at 2026-09-25 22:20:20.634 for com.threadmark.remotedesktop.RemoteDesktopHost.capture-probe, PID1931",
+      "sample": ".build/repair-verification/default-browser-drive-upload-live04-host-sample.txt",
+      "sampleSHA256": "89876f9ac0f5a22dcfad3727251a5cf6c351cad421d509fec64e0b2bfd2dfba8",
+      "computerUseRestriction": "UserNotificationCenter app access refused by Computer Use for safety reasons; user asked to allow the Downloads request. No permission bypass attempted.",
+      "cleanup": "Timed-out test host exited; exact orphan inference worker PID2302 terminated. Own fixture triple, empty fixture directory, test journal/response temporaries and expired runtime credential artifact cleaned. Non-secret diagnostics retained; test Safari window closed, user Drive window preserved."
+    }
   }
 }

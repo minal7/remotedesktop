@@ -217,6 +217,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         guard environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1" else {
             throw XCTSkip("Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
+        let usesNativeDelegation = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
         let began = ContinuousClock.now
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
@@ -272,6 +273,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 try? response.prefix(65_536).write(to: nativeResponseURL, options: .atomic)
             })
         let nativeFileSelectionPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativeSteps })
+        let taskID = UUID().uuidString
+        let goal = uploadToDrive
+            ? "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
+            : "In the default browser, open https://translate.google.com/?sl=auto&tl=es&op=docs, choose \(name) from Downloads in the native file picker, then stop before pressing Upload. Do not submit the file."
         var proposals: [String] = []
         var actionErrors: [String] = []
         var nativeCalls = 0
@@ -279,6 +284,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var observedRequestedPage = false
         var uploadEffects = 0
         var pickerOpeningEffects = 0
+        var delegatedWorkerGoal: String?
         func remoteUploadConfirmed() throws -> Bool {
             guard uploadToDrive, uploadEffects == 1, session.currentFileOpenPanel == nil,
                   let window = session.currentWindow,
@@ -318,9 +324,25 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     frame.name = "Drive step \(proposals.count) input"; frame.lifetime = .keepAlways; self.add(frame)
                 }
                 let endpoint = try await runtime.activateFara(faraInputs)
-                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let faraInput: ComputerUseFaraModel.Input
+                if uploadToDrive, let delegatedWorkerGoal {
+                    var workerInput = ComputerUseFaraModel.Input(goal: delegatedWorkerGoal,
+                        screenshotPNG: input.screenshotPNG, surface: .desktop, history: input.history,
+                        userResponse: input.userResponse, actionError: input.actionError,
+                        focusedEditor: input.focusedEditor, focusedTextState: input.focusedTextState,
+                        nativeControls: input.nativeControls, clarifiedGoal: input.clarifiedGoal)
+                    if let files = input.localFileCatalog, case .available = files.inventoryState,
+                       files.selectedCandidate != nil {
+                        workerInput.localFileCatalog = files
+                        workerInput.selectedLocalFilePath = input.selectedLocalFilePath
+                    }
+                    faraInput = workerInput
+                } else {
+                    faraInput = input
+                }
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: faraInput)
                 if uploadToDrive {
-                    let trace = XCTAttachment(string: "Previous action error: \(input.actionError ?? "none")\n"
+                    let trace = XCTAttachment(string: "Previous action error: \(faraInput.actionError ?? "none")\n"
                         + proposal.response + "\n" + (try ComputerUseFaraModel.nativeControlsJSON(input.nativeControls)))
                     trace.name = "Drive step \(proposals.count) proposal and native controls"; trace.lifetime = .keepAlways; self.add(trace)
                 }
@@ -328,16 +350,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 return .init(proposal)
             }, nativeFilePlanner: { input in
                 nativeCalls += 1
+                if uploadToDrive { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
                 return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
             }, completionCheck: { _ in try remoteUploadConfirmed() }, localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: uploadToDrive ? downloads : fixtureRoot, pageSize: 8)
             })
-        let taskID = UUID().uuidString
-        let goal = uploadToDrive
-            ? "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
-            : "In the default browser, open https://translate.google.com/?sl=auto&tl=es&op=docs, choose \(name) from Downloads in the native file picker, then stop before pressing Upload. Do not submit the file."
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
         let operation = Task { @MainActor in
+            if usesNativeDelegation {
+                delegatedWorkerGoal = try await makeNativeDelegatedBrowserWorkerGoal(
+                    originalGoal: goal, nativeInputs: nativeInputs, runtime: runtime) { label, data in
+                        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                        attachment.name = "Real Drive native delegation \(label)"
+                        attachment.lifetime = .keepAlways; self.add(attachment)
+                    }
+            }
             var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: tools, progress: { _ in })
             while uploadToDrive, case .approvalRequired(let message, let action, let continuation) = result {

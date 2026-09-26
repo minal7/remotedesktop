@@ -7898,6 +7898,75 @@ final class ComputerUseFaraActionTests: XCTestCase {
     }
 
     @MainActor
+    func testOptInFrozenDriveNavigationWithPreparedFile() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let workerSubgoalMode = environment["FROZEN_DRIVE_WORKER_SUBGOAL"] == "1"
+        let nativeDelegationMode = environment["FROZEN_DRIVE_NATIVE_DELEGATION"] == "1"
+        guard environment["RUN_FROZEN_DRIVE_FILE_PREPARATION"] == "1"
+                || workerSubgoalMode || nativeDelegationMode else {
+            throw XCTSkip("Opt-in: frozen screenshot proposals, no browser or input effects")
+        }
+        guard !(workerSubgoalMode && nativeDelegationMode) else {
+            throw ComputerUseFaraAction.Failure.invalidResponse
+        }
+        let png = try Data(contentsOf: URL(fileURLWithPath: XCTUnwrap(environment["FROZEN_DRIVE_SCREENSHOT"])))
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: png))
+        XCTAssertEqual(bitmap.pixelsWide, 2048); XCTAssertEqual(bitmap.pixelsHigh, 1323)
+        let originalGoal = "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "prepared-presentation", displayName: "Launch plan.pptx",
+            contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
+            byteCount: 28273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let contexts: [(String, ComputerUseMCPBrowserStepPlanner.LocalFileContext?)] = workerSubgoalMode || nativeDelegationMode
+            ? [(nativeDelegationMode ? "native-delegation" : "worker-subgoal", nil)]
+            : [
+                ("unqueried", .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
+                    hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)),
+                ("prepared", .init(query: .init(fileKind: .presentation), page: .init(candidates: [candidate],
+                    isComplete: true, nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false),
+                    selectedCandidate: candidate, inventoryState: .available))
+            ]
+        let inputs = try await FaraTestAssets.inputs(environment: environment)
+        let runtime = OSAtlasLlamaRuntime()
+        do {
+            var workerGoal: String?
+            if nativeDelegationMode {
+                let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
+                let installation = try XCTUnwrap(installedReceipt)
+                let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                let nativeInputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+                    receipt: installation, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+                workerGoal = try await makeNativeDelegatedBrowserWorkerGoal(
+                    originalGoal: originalGoal, nativeInputs: nativeInputs, runtime: runtime) { label, data in
+                        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                        attachment.name = "Frozen Drive native delegation \(label)"
+                        attachment.lifetime = .keepAlways; add(attachment)
+                    }
+            }
+            let endpoint = try await runtime.activateFara(inputs)
+            for (name, files) in contexts {
+                let input = ComputerUseFaraModel.Input(
+                    goal: nativeDelegationMode ? try XCTUnwrap(workerGoal) : workerSubgoalMode
+                        ? "Open the file upload chooser on Google Drive at https://drive.google.com/ using the default signed-in account. The host will choose the local file when the chooser opens. Stop when the native file chooser is visible."
+                        : originalGoal,
+                    screenshotPNG: png, surface: .desktop, localFileCatalog: files)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                let attachment = XCTAttachment(string: proposal.response)
+                attachment.name = "Frozen Drive \(name) response (\(nativeDelegationMode ? "model-generated directive, no catalog" : workerSubgoalMode ? "no catalog, chooser subgoal" : "file preparation comparison"))"
+                attachment.lifetime = .keepAlways; add(attachment)
+                if workerSubgoalMode || nativeDelegationMode || name == "prepared" {
+                    guard case .pointer(.leftClick, let point) = proposal.action else {
+                        XCTFail("Drive upload chooser step should click the visible New button, got \(proposal.action)")
+                        throw ComputerUseFaraAction.Failure.invalidResponse
+                    }
+                    XCTAssertTrue(CGRect(x: 9, y: 139, width: 60, height: 52).contains(CGPoint(x: point.x, y: point.y)),
+                        "Choose the visible New button for the upload chooser: \(point)")
+                }
+            }
+            await runtime.shutdown()
+        } catch { await runtime.shutdown(); throw error }
+    }
+
+    @MainActor
     func testOptInNativeFileSelectionPlannerListsThenSelectsNewestPresentation() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_NATIVE_FILE_SELECTION_PROBE"] == "1" else {
@@ -7987,6 +8056,84 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: 0, height: 768))
         XCTAssertThrowsError(try ComputerUseFaraAction.Point(x: 0, y: 0).pixel(width: Int.max, height: 768))
     }
+}
+
+@MainActor
+func makeNativeDelegatedBrowserWorkerGoal(
+    originalGoal: String,
+    nativeInputs: ComputerUseNativeTextRuntimeInputs,
+    runtime: OSAtlasLlamaRuntime,
+    attachDiagnostic: @MainActor (String, Data) -> Void
+) async throws -> String {
+    try Task.checkCancellation()
+    let endpoint = try await runtime.activateNativeText(nativeInputs)
+    let completionCriteriaSchema: [String: Any] = [
+        "type": "array", "items": ["type": "string"], "minItems": 1, "maxItems": 8
+    ]
+    let directiveSchema: [String: Any] = [
+        "type": "object", "additionalProperties": false,
+        "properties": [
+            "objective": ["type": "string"],
+            "constraints": ["type": "string"],
+            "completion_criteria": completionCriteriaSchema
+        ],
+        "required": ["objective", "constraints", "completion_criteria"]
+    ]
+    let system = """
+    Create a bounded internal visual-worker directive for the complete browser-side responsibility in the original user task. The original goal is authoritative: preserve its destination, account choice, required confirmation conditions, and requested outcome and verification. The host handles local-file identification and selection when the native file chooser opens; do not direct the visual worker to inspect Downloads, Finder, or other local folders. Do not invent facts or weaken requested conditions. Return only objective, constraints, and completion_criteria in the required JSON schema. Do not include site-specific instructions or examples.
+    """
+    let userData = try JSONSerialization.data(withJSONObject: ["original_goal": originalGoal],
+        options: [.sortedKeys, .withoutEscapingSlashes])
+    let requestBody = try JSONSerialization.data(withJSONObject: [
+        "model": ComputerUseNativeTextRuntimeInputs.modelAlias,
+        "messages": [
+            ["role": "system", "content": system],
+            ["role": "user", "content": String(decoding: userData, as: UTF8.self)]
+        ],
+        "response_format": ["type": "json_schema", "json_schema": [
+            "name": "visual_worker_directive", "strict": true, "schema": directiveSchema
+        ]],
+        "chat_template_kwargs": ["enable_thinking": true], "stream": false,
+        "temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5,
+        "min_p": 0.0, "repeat_penalty": 1.0, "seed": 20260914,
+        "max_tokens": 1024, "cache_prompt": false
+    ], options: [.sortedKeys, .withoutEscapingSlashes])
+    guard requestBody.count <= 64 * 1024 else { throw ComputerUseFaraAction.Failure.invalidResponse }
+    attachDiagnostic("request (no credentials)", requestBody)
+    var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
+    request.httpMethod = "POST"; request.timeoutInterval = 45
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
+    request.httpBody = requestBody
+    let (responseData, response) = try await URLSession.shared.data(for: request)
+    try Task.checkCancellation()
+    attachDiagnostic("response", Data(responseData.prefix(65_536)))
+    guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+          !responseData.isEmpty, responseData.count <= 256 * 1024,
+          let responseJSON = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+          responseJSON["model"] as? String == ComputerUseNativeTextRuntimeInputs.modelAlias,
+          let choices = responseJSON["choices"] as? [[String: Any]], choices.count == 1,
+          choices[0]["finish_reason"] as? String == "stop",
+          let message = choices[0]["message"] as? [String: Any],
+          message["tool_calls"] == nil || message["tool_calls"] is NSNull,
+          let content = message["content"] as? String, content.utf8.count <= 16 * 1024,
+          let directiveJSON = try JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any],
+          Set(directiveJSON.keys) == ["objective", "constraints", "completion_criteria"],
+          let objective = directiveJSON["objective"] as? String,
+          let constraints = directiveJSON["constraints"] as? String,
+          let completionCriteria = directiveJSON["completion_criteria"] as? [String] else {
+        throw ComputerUseFaraAction.Failure.invalidResponse
+    }
+    let directive = ComputerUseFaraModel.WorkerDirective(objective: objective,
+        constraints: constraints, completionCriteria: completionCriteria)
+    try directive.validate()
+    let workerGoal = (["Objective: \(directive.objective)",
+        directive.constraints.isEmpty ? nil : "Constraints: \(directive.constraints)",
+        "Completion criteria: \(directive.completionCriteria.joined(separator: "; "))",
+        "The host will identify and supply the requested local file when the native file chooser opens. Do not browse local folders."]
+        .compactMap { $0 }).joined(separator: "\n")
+    await runtime.shutdown()
+    return workerGoal
 }
 
 @MainActor

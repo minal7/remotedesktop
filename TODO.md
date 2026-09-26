@@ -2,17 +2,18 @@
 
 **Model architecture direction — September 23:** The initial working system may use separate planner, browser and native-app models, selected by demonstrated capability. Keep macOS MCP/native tools first and at most one local inference worker active at a time. Model-role separation must not require simultaneous residency or turn planner failures into permission for visual control. Once complete workflows are reliable, evaluate consolidating the roles into one model through training or distillation; weight fusion is an experiment, not an assumed compatible operation. Preserve the same task, handoff and evaluation contracts through consolidation. The 12 GB whole-Mac target remains the acceptance constraint.
 
-**Current checkpoint — September 25:** Native picker input repairs are compiled and pass focused tests, including the previously failing real Safari keyboard-target check. Real Drive is signed in. The full upload test still fails before file selection; no remote upload or readback is accepted.
+**Current checkpoint — September 25:** Native picker input repairs are compiled and pass focused tests, including the previously failing real Safari keyboard-target check. Real Drive is signed in. Test-only native delegation now reaches the actual chooser. Live04 exposed a synchronous Downloads-permission wait; discovery now runs off MainActor and all 16 focused regressions pass. No remote upload or readback is accepted.
 
 | Repair | Implemented | Compiled | Tested | Accepted |
 | --- | --- | --- | --- | --- |
 | Default-browser route and retained task window | Yes | Mac | Focused checks and real Safari navigation/login handoff pass | Navigation slice |
 | Native text and picker execution | Yes | Mac | 23 lifecycle/input checks and 3 keyboard geometry checks pass; exact file selected in earlier picker live11, whose final page-read assertion failed | Components only |
+| Keep folder discovery responsive during permission waits | Yes | Mac | 16 focused metadata, worker, cancellation and choice checks pass after the real hang | Components only; permission-granted E2E pending |
 | File interpretation, candidate choice and choice UI | Yes | Mac and iOS app | Native model lists/selects the newest presentation; 4 current capability/choice checks pass; phone interaction pending | Components only |
-| Default-account Drive upload and fresh readback | Connected | Mac | Real Drive live01–live03 fail before the chooser/catalog; zero admitted uploads | No |
+| Default-account Drive upload and fresh readback | Connected | Mac | Live04 reaches the real chooser with test-only native delegation, then times out waiting for Downloads permission; zero uploads | No |
 | Email attachment to verified own account | Pending | Pending | Not run | No |
 
-Next: fix the browser worker's task handling. Live03 records the correct Drive screenshot, but Fara chooses unrelated navigation despite the file-picker capability instructions. Verify one exact disposable upload and independent download/readback after that failure is fixed. Keep work on this single workflow. No further architecture or model expansion until it works.
+Next: rerun with Downloads access granted and the compiled discovery repair. The browser-role handoff has passed frozen local-model checks and reached the real chooser, but stays test-only until the complete upload and independent readback pass. Keep work on this single workflow; no new models.
 
 [Checkpoint evidence](docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json) preserves failed and passing runs. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md) defines the full outcome. The installed host is unchanged; general production readiness and the 12 GB whole-Mac target remain unaccepted.
 
