@@ -2594,20 +2594,31 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 return .init(response: "key", action: .key(["a"]))
             case 2:
                 rejectedFeedback = try XCTUnwrap(input.actionError)
+                XCTAssertTrue(rejectedFeedback?.contains("No mouse or keyboard input was sent") == true)
+                XCTAssertTrue(rejectedFeedback?.localizedCaseInsensitiveContains("waiting will not complete the rejected action") == true)
                 XCTAssertEqual(input.history.count, 1)
                 XCTAssertNil(input.history.first?.actionError)
                 return .init(response: "wait", action: .wait(0))
             case 3:
-                XCTAssertNil(input.actionError)
+                XCTAssertEqual(input.actionError, rejectedFeedback,
+                    "A passive wait must not clear an unresolved rejected-action result")
                 XCTAssertEqual(input.history.count, 2)
                 XCTAssertEqual(input.history[1].actionError, rejectedFeedback,
                     "The observation after rejection must retain that result when it becomes history")
+                return .init(response: "remember", action: .remember("The rejected input was not sent"))
+            case 4:
+                XCTAssertEqual(input.actionError, rejectedFeedback,
+                    "A passive remember step must not clear an unresolved rejected-action result")
+                return .init(response: "fresh key", action: .key(["a"]))
+            case 5:
+                XCTAssertNil(input.actionError, "A successfully dispatched input resolves the prior rejection")
+                XCTAssertEqual(input.history.last?.action, .key(["a"]))
                 return .init(response: "done", action: .reportCompletion("Done"))
             default: throw ComputerUseDesktopExecutor.Failure.stepLimit
             }
         })
         let result = try await executor.execute(taskID: "feedback", prompt: "Use the current field", trustedUserPrompt: "Use the current field", tools: tools, progress: { _ in })
-        XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(calls, 3); XCTAssertEqual(effects, 0)
+        XCTAssertEqual(result, .completed("Done")); XCTAssertEqual(calls, 5); XCTAssertEqual(effects, 1)
     }
 
     func testDesktopImagePreservesOrientationAndFullOffsetDisplayCoordinates() throws {

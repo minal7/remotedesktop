@@ -246,11 +246,12 @@
       "Ignore background windows’ sheets when inspecting the focused task window; retry transient startup AX loss without repeating Cmd-N.",
       "Clip keyboard screenshot checkpoints to visible focused-control geometry: the real picker outline was 3,857 points tall, placing its original center offscreen.",
       "Advertise host file selection before the first browser proposal; the missing capability caused a real Drive run to attempt local folder navigation.",
-      "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope."
+      "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope.",
+      "Rejected desktop-action feedback and rejection count now survive passive wait/remember. Successful dispatched input clears them. Explicit feedback says no mouse/keyboard input was sent; waiting cannot complete a rejected action. Existing pixel, task/window, approval and dispatch gates unchanged."
     ],
-    "latestFocusedRun": "default-browser-file-discovery-green01",
-    "latestLiveRun": "default-browser-drive-upload-live06",
-    "latestLiveFailure": "The macOS Downloads permission dialog was visible over Safari Start Page. Fara proposed Allow, then Don’t Allow; both were rejected by existing target/focus checks. A subsequent keyboard proposal ended in userInterventionRequired because the intended window was unavailable. Zero native file planner calls and zero upload effects. Permission must be resolved by the user before another live run.",
+    "latestFocusedRun": "default-browser-rejected-input-green02",
+    "latestLiveRun": "default-browser-drive-upload-live08",
+    "latestLiveFailure": "After the user reported Downloads permission allowed, live08 navigated to signed-in real Drive but Fara misgrounded New at the Drive logo, then selected Get more storage as an imagined alternate upload menu. The latter navigated to Google One. Fara proposed Alt+Left and execution returned the retained-window handoff. Zero native file planner calls and zero upload effects.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
@@ -941,6 +942,71 @@
         "sourceUnchanged": true,
         "sourceCount": 37,
         "runnerSHA256": "e22ba3b0fba808cd67bff7a8a695da05fccfaa2421f7a7298eb24da3af77ebcb"
+      },
+      {
+        "run": "default-browser-drive-upload-live07",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "d9f4815be02732dadde7aea41c5a1b9e9a4baaaa681e453612fa5ba59447dd7f"
+      },
+      {
+        "run": "default-browser-rejected-input-red01",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "4027fe08212fe60778bcbefa2bdef263f5ebc748d3c3f0c4bd2a652d91908e5e"
+      },
+      {
+        "run": "default-browser-rejected-input-green01",
+        "result": "Failed",
+        "passed": 4,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 2,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "fb6677ddd815ff49e00936eacdd6e2f5d4b9b3c5393801e4c5126b542eec4274"
+      },
+      {
+        "run": "default-browser-rejected-input-green02",
+        "result": "Passed",
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 4,
+        "runtimeWarnings": 0,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "067888e89afd2ede20a1baeb30db6bb39f6190630b1f5c031f9fb44238285689"
+      },
+      {
+        "run": "default-browser-drive-upload-live08",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "7916d6d253c8b50add02dcb7166ee3e702c334692efd5f552fd492c300e6b7f2"
       }
     ],
     "delegationDiagnostic": {
@@ -968,6 +1034,16 @@
       "live06": "Compiled but blocked by the Downloads OS prompt before navigation. This is not proof that the revised delegation or async discovery now succeeds end-to-end.",
       "permissionRestriction": "Computer Use refuses access to UserNotificationCenter for safety reasons. Pending user question remains unanswered; do not bypass or retry live tests until resolved.",
       "cleanup": "Both test-created Safari windows closed, original signed-in Drive window retained. Own local fixtures absent after normal test cleanup. No xcodebuild, swift-frontend, xctest or llama-server process remained after harvest.",
+      "accepted": false
+    },
+    "postPermissionEvidence": {
+      "permission": "User reported Downloads access allowed on September26. Live07/live08 had no blocking permission dialog, but neither reached file discovery, so discovery-after-grant remains unverified.",
+      "live07": "Reached Drive New menu. Fara chose File upload at [64,200], but the current point-context pixel check rejected it. Subsequent screenshot showed menu hover; exact origin of changed pixels is unproven. Fara waited, then pressed Return under focused AXButton New Folder menu; test stopped at approval. Zero native calls and upload effects.",
+      "red": "RED01 compiled and failed the actual wait/remember feedback retention assertions. GREEN01 passed4/5; remaining assertion failed only on uppercase Waiting. Test-only case-insensitive wording correction produced GREEN02 5/5,0runtime warnings,0build errors,4build warnings.",
+      "live08": "E2E still failed: incorrect visual target selection on the correct saved Drive screenshot. Current Fara request uses temperature0. No further model/runtime/pixel changes were made.",
+      "review": "Independent GPT-6 Luna review found no concrete regression in cancellation, passive steps, rejection counting or successful-input clearing.",
+      "cleanup": "Both test-created windows closed through Computer Use; original signed-in Drive window retained. Exact own test fixtures checked absent after normal defers. No inference/build/test worker remains.",
+      "next": "Keep work on the same real upload. Investigate default-browser native control use and the incorrect Fara target selection from the retained real screenshots before another live run; no production promotion or remote success claim.",
       "accepted": false
     }
   }

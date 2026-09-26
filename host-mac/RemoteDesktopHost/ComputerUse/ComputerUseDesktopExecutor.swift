@@ -356,6 +356,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
+            var preservesRejectedActionFeedback = false
             try Task.checkCancellation(); try lease.assertOwnership()
             do {
                 let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
@@ -427,13 +428,18 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         try await verifyCompletionCandidate(answer, observation: observation,
                             tools: tools, assertOwnership: { try lease.assertOwnership() })
                         return try complete(answer, session: session)
-                    case .action(.wait(let seconds)): try await Task.sleep(for: .seconds(seconds))
-                    case .action(.remember): break
+                    case .action(.wait(let seconds)):
+                        preservesRejectedActionFeedback = true
+                        try await Task.sleep(for: .seconds(seconds))
+                    case .action(.remember): preservesRejectedActionFeedback = true
                     default: throw Failure.unsupportedAction
                     }
                 }
                 record(proposal, observation: observation, session: session)
-                session.actionError = nil; session.rejected = 0
+                if !preservesRejectedActionFeedback {
+                    session.actionError = nil
+                    session.rejected = 0
+                }
                 // Retain the dispatched action before yielding to the other
                 // process. Cancellation here must not lose its history or
                 // reuse its journal ID after Resume.
@@ -446,7 +452,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 session.rejected += 1
             } catch Failure.changedScreen {
                 record(proposal, observation: observation, session: session)
-                session.actionError = "The desktop action was not performed: its observed screen, target or focus changed. Inspect the new screenshot before choosing another action."
+                session.actionError = "The desktop action was not performed because its observed screen, target or focus changed. No mouse or keyboard input was sent. Waiting will not complete the rejected action; choose a fresh action from the current screenshot."
                 session.rejected += 1
             } catch Failure.unsupportedAction {
                 record(proposal, observation: observation, session: session)
