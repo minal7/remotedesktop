@@ -1,45 +1,33 @@
 import Foundation
 
-/// Vision performs synchronous native work and can wait internally. Never
-/// occupy MainActor or Swift's cooperative pool with that wait: takeover and
-/// action-gate closure must remain runnable. A serial queue also bounds the
-/// number of simultaneous OCR requests from this host.
-enum ComputerUseObservationWorker {
-    private static let queue = DispatchQueue(
-        label: "com.threadmark.remotedesktop.computer-use.observation",
-        qos: .userInitiated)
-    private static let capacity = Capacity()
+/// Runs blocking native operations away from MainActor and Swift's cooperative
+/// pool. A serial queue and one permit bound work even when a caller times out
+/// while the underlying native operation remains blocked.
+final class ComputerUseBlockingOperationWorker: @unchecked Sendable {
+    enum Failure: Error, Equatable { case busy, timedOut }
 
-    enum Failure: Error, Equatable, LocalizedError {
-        case busy, timedOut
-        case recognitionFailed(domain: String, code: Int)
-        var errorDescription: String? {
-            switch self {
-            case .busy: return "The previous screen analysis is still finishing. No new action was taken."
-            case .timedOut: return "Local screen analysis took too long. No new action was taken."
-            case .recognitionFailed(let domain, let code):
-                return "Local text recognition failed (\(domain), \(code)). No result was inferred from the failed observation."
-            }
-        }
+    private let queue: DispatchQueue
+    private let capacity = Capacity()
+
+    init(label: String, qos: DispatchQoS = .userInitiated) {
+        queue = DispatchQueue(label: label, qos: qos)
     }
 
-    static func perform<Value: Sendable>(
-        timeout: TimeInterval = 10,
+    func perform<Value: Sendable>(
+        timeout: TimeInterval,
         _ operation: @escaping @Sendable () throws -> Value
     ) async throws -> Value {
         try Task.checkCancellation()
         guard capacity.acquire() else { throw Failure.busy }
         let delivery = Delivery<Value>()
-        let deadline = DispatchWorkItem {
-            delivery.finish(.failure(Failure.timedOut))
-        }
+        let deadline = DispatchWorkItem { delivery.finish(.failure(Failure.timedOut)) }
         defer { deadline.cancel() }
         let value: Value = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 delivery.install(continuation)
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(
                     deadline: .now() + max(0.001, timeout), execute: deadline)
-                queue.async {
+                queue.async { [capacity = self.capacity] in
                     guard !delivery.isFinished else {
                         capacity.release()
                         return
@@ -56,9 +44,6 @@ enum ComputerUseObservationWorker {
         return value
     }
 
-    /// Cancelling the caller cannot forcibly stop a blocked native API. Keep
-    /// its single permit until that API returns; retries must not build up an
-    /// unbounded queue of obsolete image requests.
     private final class Capacity: @unchecked Sendable {
         private let lock = NSLock()
         private var occupied = false
@@ -94,5 +79,34 @@ enum ComputerUseObservationWorker {
             }
             waiter?.resume(with: result)
         }
+    }
+}
+
+/// Vision performs synchronous native work and can wait internally. Keep its
+/// API and error semantics separate from other bounded blocking operations.
+enum ComputerUseObservationWorker {
+    private static let worker = ComputerUseBlockingOperationWorker(
+        label: "com.threadmark.remotedesktop.computer-use.observation")
+
+    enum Failure: Error, Equatable, LocalizedError {
+        case busy, timedOut
+        case recognitionFailed(domain: String, code: Int)
+        var errorDescription: String? {
+            switch self {
+            case .busy: return "The previous screen analysis is still finishing. No new action was taken."
+            case .timedOut: return "Local screen analysis took too long. No new action was taken."
+            case .recognitionFailed(let domain, let code):
+                return "Local text recognition failed (\(domain), \(code)). No result was inferred from the failed observation."
+            }
+        }
+    }
+
+    static func perform<Value: Sendable>(
+        timeout: TimeInterval = 10,
+        _ operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+        do { return try await worker.perform(timeout: timeout, operation) }
+        catch ComputerUseBlockingOperationWorker.Failure.busy { throw Failure.busy }
+        catch ComputerUseBlockingOperationWorker.Failure.timedOut { throw Failure.timedOut }
     }
 }

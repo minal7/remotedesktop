@@ -113,6 +113,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var clarificationNonce: UUID?
         var clarificationRetired = false
         var nativeFileOperationReady = false
+        private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         init(session: ComputerUseDefaultBrowserSession,
              localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
@@ -178,11 +179,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             return enriched
         }
 
-        func apply(_ operation: ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) throws
+        func apply(_ operation: ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws
             -> ComputerUseExecutionResult? {
             guard let taskID, let goal, let tools else { throw Failure.noRetainedWindow }
             guard nativeFileOperationReady else { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
             nativeFileOperationReady = false
+            fileOperationRevision &+= 1
+            let revision = fileOperationRevision
+            let operationTaskID = taskID
+            let operationGoal = goal
             try Task.checkCancellation(); try tools.requireActive(); try check(nil, tools)
             switch operation {
             case .listFiles(let query, let cursor):
@@ -194,7 +199,23 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     page = try catalog.nextPage(after: cursor)
                 } else {
-                    page = try catalog.discover(query: query)
+                    let discovery: ComputerUseLocalFileCatalog.Discovery
+                    do {
+                        discovery = try await catalog.discoverOffMainActor(query: query)
+                    } catch ComputerUseBlockingOperationWorker.Failure.busy {
+                        return .userInterventionRequired("File access is waiting. Allow macOS Downloads access if prompted, then Resume.")
+                    } catch ComputerUseBlockingOperationWorker.Failure.timedOut {
+                        return .userInterventionRequired("File access is waiting. Allow macOS Downloads access if prompted, then Resume.")
+                    }
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try check(nil, tools)
+                    guard fileOperationRevision == revision, self.taskID == operationTaskID,
+                          self.goal == operationGoal else {
+                        throw ComputerUseDesktopExecutor.Failure.changedTask
+                    }
+                    catalog = discovery.catalog
+                    page = discovery.page
                     if userSelectedCandidateID == nil { selectedCandidate = nil }
                 }
                 guard page.candidates.count <= 8 else { throw Failure.invalidFileChoice }
@@ -350,7 +371,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch is CancellationError { throw CancellationError() }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck,
-            localFileOperationHandler: { try scope.apply($0) }, finishRun: finishRun)
+            localFileOperationHandler: { try await scope.apply($0) }, finishRun: finishRun)
     }
 
     func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {

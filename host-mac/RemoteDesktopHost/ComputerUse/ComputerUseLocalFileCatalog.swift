@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// Metadata-only inventory for files inside one host-approved directory.
 /// Candidate IDs are local references; they never encode or expose a path.
-struct ComputerUseLocalFileCatalog {
+struct ComputerUseLocalFileCatalog: Sendable {
     enum FileKind: String, Equatable, Sendable { case any, presentation, spreadsheet, document }
     enum SortField: String, Equatable, Sendable { case modifiedAt, createdAt, addedToDirectoryAt }
     enum SortDirection: String, Equatable, Sendable { case ascending, descending }
@@ -56,7 +56,7 @@ struct ComputerUseLocalFileCatalog {
         case staleCandidate
     }
 
-    private struct Metadata: Equatable {
+    private struct Metadata: Equatable, Sendable {
         let byteCount: Int64
         let contentTypeIdentifier: String?
         let modifiedAt: Date?
@@ -64,7 +64,7 @@ struct ComputerUseLocalFileCatalog {
         let addedToDirectoryAt: Date?
     }
 
-    private struct POSIXFileIdentity: Equatable {
+    private struct POSIXFileIdentity: Equatable, Sendable {
         let device: UInt64
         let inode: UInt64
         let byteCount: Int64
@@ -77,12 +77,12 @@ struct ComputerUseLocalFileCatalog {
         let isSymbolicLink: Bool
     }
 
-    private struct FileIdentity: Equatable {
+    private struct FileIdentity: Equatable, Sendable {
         let posix: POSIXFileIdentity
         let metadata: Metadata
     }
 
-    private struct Record {
+    private struct Record: Sendable {
         let candidate: Candidate
         let url: URL
         let identity: FileIdentity
@@ -100,6 +100,14 @@ struct ComputerUseLocalFileCatalog {
     private var hasInventory = false
     private var queryHasTiedSortValues = false
     private var queryHasMissingSortValues = false
+
+    struct Discovery: Sendable {
+        let catalog: ComputerUseLocalFileCatalog
+        let page: Page
+    }
+
+    private static let discoveryWorker = ComputerUseBlockingOperationWorker(
+        label: "com.threadmark.remotedesktop.computer-use.file-discovery")
 
     init(taskID: String, approvedDirectory: URL, pageSize: Int = 64,
          maximumCandidates: Int = 4096, maximumEntriesScanned: Int = 16_384) throws {
@@ -182,6 +190,18 @@ struct ComputerUseLocalFileCatalog {
         candidateRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.candidate.id, $0) })
         hasInventory = true
         return page(startingAt: 0)
+    }
+
+    /// Performs bounded filesystem enumeration on its own serial worker. The
+    /// caller's catalog is copied so a timeout/cancellation cannot publish a
+    /// partial or late mutation back into task scope.
+    func discoverOffMainActor(query: Query, timeout: TimeInterval = 20) async throws -> Discovery {
+        let original = self
+        return try await Self.discoveryWorker.perform(timeout: timeout) {
+            var catalog = original
+            let page = try catalog.discover(query: query)
+            return Discovery(catalog: catalog, page: page)
+        }
     }
 
     mutating func nextPage(after cursor: String) throws -> Page {

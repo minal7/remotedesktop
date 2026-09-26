@@ -4,6 +4,76 @@ import XCTest
 
 @MainActor
 final class ComputerUseObservationWorkerTests: XCTestCase {
+    func testGenericBlockingWorkerKeepsMainActorResponsiveAndDiscardsLateResult() async throws {
+        let worker = ComputerUseBlockingOperationWorker(label: "test.file-discovery.blocked")
+        let release = DispatchSemaphore(value: 0)
+        let started = expectation(description: "blocking operation started")
+        let exited = expectation(description: "blocking operation exited")
+        let operation = Task {
+            try await worker.perform(timeout: 0.1) {
+                XCTAssertFalse(Thread.isMainThread)
+                started.fulfill()
+                release.wait()
+                exited.fulfill()
+                return "late result"
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+
+        var actorHeartbeat = false
+        await Task { @MainActor in actorHeartbeat = true }.value
+        XCTAssertTrue(actorHeartbeat)
+        do {
+            _ = try await operation.value
+            XCTFail("A blocked native call must time out without delivering its eventual value")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBlockingOperationWorker.Failure, .timedOut)
+        }
+        do {
+            _ = try await worker.perform(timeout: 1) { 0 }
+            XCTFail("A timed-out blocked operation must retain the single worker permit")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseBlockingOperationWorker.Failure, .busy)
+        }
+        release.signal()
+        await fulfillment(of: [exited], timeout: 1)
+        for _ in 0 ..< 100 {
+            do {
+                let result = try await worker.perform(timeout: 1) { "fresh result" }
+                XCTAssertEqual(result, "fresh result")
+                return
+            } catch ComputerUseBlockingOperationWorker.Failure.busy {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        XCTFail("The worker did not release capacity after its blocked operation returned")
+    }
+
+    func testGenericBlockingWorkerCancellationReturnsBeforeBlockedCall() async throws {
+        let worker = ComputerUseBlockingOperationWorker(label: "test.file-discovery.cancel")
+        let release = DispatchSemaphore(value: 0)
+        let started = expectation(description: "blocking operation started")
+        let exited = expectation(description: "blocking operation exited")
+        let operation = Task {
+            try await worker.perform(timeout: 5) {
+                started.fulfill()
+                release.wait()
+                exited.fulfill()
+                return 1
+            }
+        }
+        await fulfillment(of: [started], timeout: 1)
+        let start = ContinuousClock.now
+        operation.cancel()
+        do {
+            _ = try await operation.value
+            XCTFail("Cancelled operation must not return its eventual result")
+        } catch is CancellationError { }
+        XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+        release.signal()
+        await fulfillment(of: [exited], timeout: 1)
+    }
+
     func testBlockingObservationLeavesMainActorResponsiveAndTimesOut() async throws {
         let release = DispatchSemaphore(value: 0)
         let started = expectation(description: "native work started")

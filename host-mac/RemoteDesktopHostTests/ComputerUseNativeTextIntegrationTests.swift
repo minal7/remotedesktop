@@ -132,6 +132,33 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         guard case .userInterventionRequired = staleReplay else { XCTFail("A stale candidate must stop the task"); return }
     }
 
+    func testCancellingAsyncLocalFileOperationDoesNotRequestAnotherProposal() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let enteredHandler = expectation(description: "async file handler entered")
+        var proposals = 0
+        let operation = ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation.listFiles(query: .init(), cursor: nil)
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "list files", action: .localFileOperation(operation))
+        }, localFileOperationHandler: { _ in
+            enteredHandler.fulfill()
+            try await Task.sleep(for: .seconds(30))
+            return nil
+        })
+        let run = Task {
+            try await executor.execute(taskID: "async-local-file-cancel", prompt: "List files",
+                trustedUserPrompt: "List files", tools: desktopTestTools(), progress: { _ in })
+        }
+        await fulfillment(of: [enteredHandler], timeout: 2)
+        run.cancel()
+        do {
+            _ = try await run.value
+            XCTFail("Cancellation should stop the executor after its awaited local operation")
+        } catch is CancellationError { }
+        XCTAssertEqual(proposals, 1, "No new proposal may follow a cancelled local file operation")
+    }
+
     func testDefaultBrowserFilePanelRequiresTheResolvedCandidateBeforeOpen() {
         let element = AXUIElementCreateSystemWide()
         let panel = ComputerUseDefaultBrowserSession.FileOpenPanel(parentWindowID: "window",

@@ -42,7 +42,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// A host-owned, non-input operation. Nil means the operation was handled
     /// and the next loop must obtain a fresh observation before proposing again.
     typealias LocalFileOperationHandler = @MainActor @Sendable
-        (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) throws -> ComputerUseExecutionResult?
+        (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws -> ComputerUseExecutionResult?
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -400,7 +400,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         guard let localFileOperationHandler else { throw Failure.unsupportedAction }
                         try Task.checkCancellation(); try lease.assertOwnership()
                         try checkScopedSurface()
-                        let result = try localFileOperationHandler(operation)
+                        let result = try await localFileOperationHandler(operation)
                         try Task.checkCancellation(); try lease.assertOwnership()
                         try checkScopedSurface()
                         // Metadata-only catalog results are carried in the next
