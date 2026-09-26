@@ -235,7 +235,7 @@
   "fileSelectionCheckpoint": {
     "implemented": true,
     "compiled": true,
-    "tested": "16 current focused tests pass: blocking-operation timeout/cancellation/late-result rejection, unchanged OCR worker behavior, metadata inventory/identity, async executor cancellation, native-planner and file-choice integration. Real Drive live04 reached the native chooser with test-only delegation, then timed out at Downloads permission; no upload accepted.",
+    "tested": "Native page-control, schema, geometry, pre-effect recovery and history checks pass in focused batches; post-approved-action continuation passes 5/5. Live12/13/14 upload once and independent downloads match 28,273 bytes/SHA-256. Live15/16 fail before upload. Captured delegation comparison improves one menu choice, while real delegated workflow still fails; read-only native inspection of settled menu leaves pixels unchanged.",
     "accepted": false,
     "architecture": "One runtime worker at a time. Advertise native file-selection support before visual navigation; native planner interprets the original goal when the website opens its chooser; the native adapter enters the exact resolved path. Fara handles browser actions and the final picker action. No site-specific production rules.",
     "executionRepairs": [
@@ -249,9 +249,9 @@
       "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope.",
       "Rejected desktop-action feedback and rejection count now survive passive wait/remember. Successful dispatched input clears them. Explicit feedback says no mouse/keyboard input was sent; waiting cannot complete a rejected action. Existing pixel, task/window, approval and dispatch gates unchanged."
     ],
-    "latestFocusedRun": "default-browser-rejected-input-green02",
-    "latestLiveRun": "default-browser-drive-upload-live08",
-    "latestLiveFailure": "After the user reported Downloads permission allowed, live08 navigated to signed-in real Drive but Fara misgrounded New at the Drive logo, then selected Get more storage as an imagined alternate upload menu. The latter navigated to Google One. Fara proposed Alt+Left and execution returned the retained-window handoff. Zero native file planner calls and zero upload effects.",
+    "latestFocusedRun": "default-browser-control-history-green01",
+    "latestLiveRun": "default-browser-drive-upload-live16",
+    "latestLiveFailure": "File upload click rejected on changed pointer context with no native target frame, then model treats rejected click as focus and proposes Return. Zero uploads.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
@@ -259,40 +259,45 @@
       "Safari is signed into real Google Drive as independently observed on September 25; login is no longer the current blocker.",
       "Drive upload, email-to-self, phone choice interaction, general production readiness and the 12 GB whole-Mac target remain unaccepted. Installed host unchanged.",
       "Live03 adds opt-in screenshots and per-step proposals only. Its observed failure is model instruction-following/planning, not a stale or wrong screenshot. No broader model/configuration changes were made.",
-      "The catalog async boundary is compiled and covered by 16 focused tests (0 failures/runtime warnings, 0 build errors, 39 build warnings). A permission-granted real upload has not run after this repair. Other synchronous file identity rechecks are outside this observed discovery-freeze repair."
+      "Live12 uses test-only initial native goal delegation; do not claim default original-goal or broader production acceptance from that one run. Independent exact-byte remote readback is verified.",
+      "Catalog discovery now runs under granted Downloads access and real transfers prove that path. Actual phone choices, email-to-self, general completion reliability, deployment and the 12 GB whole-Mac target remain unaccepted."
     ],
     "sourceSHA256": {
-      "TODO.md": "f6a9bce3f2e11f0e24d40b79a989e9ea1483ff8bf7dcbfde0e04e5f69782a95e",
-      "docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json": "6d1f8421c62b4f25ea10352f54ff7d1e1e85904abf3c0c8a5e50522b2e4b51c9",
-      "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "6f33c566ac79133a6363e8dc308c862da311aec39f4f4f1abf96fe060f5839a1",
+      "TODO.md": "a2b63071a74867e48d1d95d8d9246864fbf909a7d932b25465578efef417dfc3",
+      "docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json": "3be956ab22115df3344787b19fa11d5e3cbccef8b8c5fe005c9c147a7f2cd47a",
+      "docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md": "7d47cfb6541c71632155403526927840b67587a8a88ce97c95576cb1321721b8",
+      "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "18afca493ccb8d9375e477998f8789b5636e25fb08d3652f70daa066e01b85b5",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "4f52986986fe833aed6b7b198663e944bc9edb73fbff4327471c6ff280832da4",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserPageReader.swift": "260084ab4714d91c3b847be36763ae44fbcc97d45cf1ce71a63acb9c942b6d3e",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserControlPlanner.swift": "c54383be33af796f4c2f64f6f86715649df8b9f0c9d213d9f92f524a4f4cebbb",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "b15bc8954506517e23a56d7fe737e181ae3fa0a9529b790b8224275ec53acddc",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserPageReader.swift": "a101b50f5e6197f4188b22429bc359c065a504c6e891a6a6c9c2d2c40b97e6df",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserSession.swift": "a802d6b6dffebd3a246bafc50c1f8d61ecff01d8ea13614802b4cf814e41e6c5",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "b127095a5839982d3f552b8d61cb0cca2cb28f1a484929538558e435f99033c1",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "4dbdbfb584374fd3b1184e05fe2f6ef30b22d034ae21ef799162b04323bdc972",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraAction.swift": "e6cef5dee10b1997507cfd2b91fc4c2fcb8e8c0669096f57736e22361ab5a53d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "c8b955dc40a6ccdaf0220181b135f44ba207579e588138a75c95e344f7c68c3b",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "fdde3db4a6fd6bc1421b919a553e67eeb839b437d1f92551c9681366c0663688",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "c334c5308c863597763d4fc7a4c546bf2be8df2ef523f42049960aa1a31088a4",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "220a4b448f8eb7b17e20208831217e863b7b44042c0e57990ff3c5407fcfcdb0",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "b816096a350f37cffc03fb5e46ec072cf78f8a0f57150a1505735e7bfa1952c8",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseObservationWorker.swift": "e4be0df960b3a0c7113aaef110aef434045d89421e678583154121c7bed49572",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
-      "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "c9c0f053403eab3cb078481563c32920e2913831f364daf1199633bba8f8ce86",
+      "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "70d50535af08085931a78084fa1783592958b5d2f08d8ff84f5117e01ca126f5",
       "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "3a9dedfd6b0064a1021f60cef6f814ada6ea10ef86d1fc759e40967ac8ef34f3",
       "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasComputerUseExecutor.swift": "18224b26c02abc8096799167bd47e07bb1d658ecac00e6a231161953dd0cf145",
-      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
+      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d0189162d9fca73ec52a06d1c56f1e506c01f7de7c89ebb77e112d728914acb8",
+      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "31e38b23ef5084baa030afc0b0cbdd3f97f42f655a2c09a2bdf1971d36ff8cc5",
       "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "f61d3f0afffcfbec1df99acedc9b7ab766b198581ffc5b101dcdd60b2a79fb41",
       "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
       "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserPageReaderTests.swift": "9d622bafbc7da4e24f0843a9e45c3e3cf13381f2d1f63b79600aab84660784a0",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "22f5d195e232351a59eb5b3985c0450efc209e8d993a761f23857934de86d6b4",
-      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "3a6d23ab6475e772dc4f4ccd0148375a5917116b89adc56888a75e7781f7f121",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserControlPlannerTests.swift": "694be4cf8c4b8f72e010dce5d7213b39467d1f21c458787240e27d2a7baa3048",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserPageReaderTests.swift": "22ca701027ec47a5aae0c3295ea75b89245c03f4eafd5c8d08283a10a2d65186",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "c1443c1e5edb1246f6ec93afea9720168745ca9924f42fcb75da1654e6be2723",
+      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "c9ad272712ebc4f3d768661f8526a21b3a59d7b419f2745e052131a35c587873",
       "host-mac/RemoteDesktopHostTests/ComputerUseLocalFileCatalogTests.swift": "7c7f811302d32b63bef7795459a32b2c1b8a82e50a87ac91a72c20f9881f658f",
       "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "ee9c12856ba04b570d9c9e72dad8d4d64aa38f0814a851cee6d5490c2924b18d",
-      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "2d5b964da312c81005a61e196159db5ed1bcc6607e5ca14f2578c36f10560ca2",
+      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "ef7a9ae401c9d03cf23afaf4e3c68c22e541c27ca16be45cb6b5255b51931f8b",
       "host-mac/RemoteDesktopHostTests/ComputerUseObservationWorkerTests.swift": "14618de5a2fbe08f33e28181082f1380c590d77b969b3618295b393c62d02aad",
       "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
       "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
@@ -1045,6 +1050,549 @@
       "cleanup": "Both test-created windows closed through Computer Use; original signed-in Drive window retained. Exact own test fixtures checked absent after normal defers. No inference/build/test worker remains.",
       "next": "Keep work on the same real upload. Investigate default-browser native control use and the incorrect Fara target selection from the retained real screenshots before another live run; no production promotion or remote success claim.",
       "accepted": false
-    }
+    },
+    "nativeControlProbe": {
+      "status": "Three exact physical transfers independently byte-verified in live12/13/14. Picker continuation repaired; raw native history removed after RED/GREEN. Live15/16 remain failed whole tasks with zero uploads. Native delegation helps one captured menu decision but remains experimental.",
+      "runs": [
+        {
+          "run": "default-browser-native-control-live01",
+          "result": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 5,
+          "runtimeWarnings": 1,
+          "sourceCount": 37,
+          "sourceUnchanged": true,
+          "finding": "approvalTargetChanged before model request; no attachment or new Safari window observed. Startup failure cause unproven."
+        },
+        {
+          "run": "default-browser-native-control-live02",
+          "result": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 7,
+          "runtimeWarnings": 1,
+          "sourceCount": 37,
+          "sourceUnchanged": true,
+          "finding": "Read-only existing Safari Drive observation succeeded; native model exhausted 512 output tokens before action JSON (finish_reason length)."
+        },
+        {
+          "run": "default-browser-native-control-live03",
+          "result": "Passed",
+          "passed": 1,
+          "failed": 0,
+          "buildErrors": 0,
+          "buildWarnings": 6,
+          "runtimeWarnings": 1,
+          "sourceCount": 37,
+          "sourceUnchanged": true,
+          "finding": "Same read-only real Drive probe with 1024-token bound returned the exact observed enabled New control ID. No control executed; no upload."
+        }
+      ],
+      "model": "Installed nativeTextV2, native-form-planner-v2 alias, one local runtime",
+      "selectedControl": {
+        "label": "New",
+        "role": "AXButton",
+        "enabled": true,
+        "frame": {
+          "x": 16,
+          "y": 156,
+          "width": 101,
+          "height": 56
+        }
+      },
+      "actionExecuted": false,
+      "coordinateReview": "Independent review of live08 screenshot and host normalized-coordinate mapping found no offset/scaling error. The returned points correspond to the wrong controls actually clicked.",
+      "next": "Inspect actual before/after frames at a rejected dispatch and evaluate truthful model recovery on the retained rejected-action case; preserve no-replay and target checks. Do not promote captured-state delegation as production or repeat whole upload unchanged.",
+      "integrationRuns": [
+        {
+          "run": "default-browser-native-controls-red01",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "failed",
+          "buildErrors": 3,
+          "buildWarnings": 0,
+          "runtimeWarnings": 0,
+          "sourceCount": 39,
+          "sourceUnchanged": true,
+          "changed": []
+        },
+        {
+          "run": "default-browser-native-controls-red02",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "failed",
+          "buildErrors": 4,
+          "buildWarnings": 2,
+          "runtimeWarnings": 0,
+          "sourceCount": 39,
+          "sourceUnchanged": true,
+          "changed": []
+        },
+        {
+          "run": "default-browser-native-controls-red03",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "skipped": 0,
+          "buildStatus": "failed",
+          "buildErrors": 2,
+          "buildWarnings": 21,
+          "runtimeWarnings": 0,
+          "sourceCount": 39,
+          "sourceUnchanged": true,
+          "changed": []
+        },
+        {
+          "run": "default-browser-native-controls-red04",
+          "result": "Failed",
+          "passed": 3,
+          "failed": 5,
+          "skipped": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 33,
+          "runtimeWarnings": 0,
+          "sourceCount": 39,
+          "sourceUnchanged": true,
+          "changed": []
+        },
+        {
+          "run": "default-browser-native-controls-green01",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "buildStatus": "failed",
+          "buildErrors": 2,
+          "buildWarnings": 23,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 40,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green02",
+          "result": "Failed",
+          "passed": 16,
+          "failed": 1,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 33,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 40,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green03",
+          "result": "Passed",
+          "passed": 1,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 12,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 40,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green04",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "buildStatus": "failed",
+          "buildErrors": 3,
+          "buildWarnings": 20,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 40,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green05",
+          "result": "Passed",
+          "passed": 7,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 12,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 40,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green06",
+          "result": "unknown",
+          "passed": 0,
+          "failed": 0,
+          "buildStatus": "failed",
+          "buildErrors": 2,
+          "buildWarnings": 12,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-native-controls-green07",
+          "result": "Passed",
+          "passed": 4,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 4,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "native-pre-effect-recovery-green01",
+          "result": "Passed",
+          "passed": 6,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 12,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-picker-resume-green01",
+          "result": "Passed",
+          "passed": 5,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 14,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-control-history-red01",
+          "result": "Failed",
+          "passed": 0,
+          "failed": 2,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 4,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        },
+        {
+          "run": "default-browser-control-history-green01",
+          "result": "Passed",
+          "passed": 5,
+          "failed": 0,
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 6,
+          "runtimeWarnings": 0,
+          "sourceAudit": {
+            "sourceCount": 41,
+            "sourceUnchanged": true,
+            "changed": []
+          }
+        }
+      ],
+      "integrationStatus": "Native-control choice, schema, grounding, history projection, pre-effect recovery and picker continuation compiled/component-tested. Historical raw reasoning removal reproduced in RED and five checks pass in GREEN; final prompt retains explicit untrusted-page boundary. Real task completion pending.",
+      "integratedLiveRuns": [
+        {
+          "run": "default-browser-drive-upload-live09",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 40,
+          "sourceUnchanged": true,
+          "nativeControlCalls": 3,
+          "nativeFileCalls": 0,
+          "uploadEffects": 0,
+          "finding": "Native New selection reaches menu. Third response has askUser outcome with nonnull controlID and is rejected as invalidProposal. No file selection or upload.",
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live10",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 40,
+          "sourceUnchanged": true,
+          "nativeControlCalls": 3,
+          "nativeFileCalls": 0,
+          "uploadEffects": 0,
+          "finding": "Native model selects New, then semantically incorrect Get more storage from still-visible background controls. Navigates to Google One; next response exhausts1024 tokens and is rejected invalidResponse. No file selection/upload.",
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live11",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "nativeControlCalls": 0,
+          "nativeFileCalls": 0,
+          "uploadEffects": 0,
+          "finding": "Before the native page planner runs, typed URL followed by Return proposal stops with approvalTargetChanged. CUA confirms Start Page with URL still focused. Ordered-schema semantic improvement remains unevaluated.",
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live12",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "appResult": "userInterventionRequired: Complete sign-in or macOS permission in the intended browser window, then choose Resume.",
+          "uploadEffects": 1,
+          "finding": "Exact newest presentation selected and uploaded once; app incorrectly hands off for authentication immediately after the approved upload. Full xcresult TestIssues contains two failures; summary exposes only first. Independent Safari download confirms exact remote bytes.",
+          "independentReadback": {
+            "run": "default-browser-drive-upload-live12",
+            "readbackMethod": "Independent Safari UI Drive exact-name search, file menu Download",
+            "driveFileID": "1gYomLoJl7xxmY3L1p-1zAq3qBbFEaZgL",
+            "uniqueName": "Remote Desktop E2E 8755C29D-523E-4BE5-995D-0DAE94C259FA.pptx",
+            "downloadExists": true,
+            "downloadBytes": 28273,
+            "downloadSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "sourceSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "exactBytesMatch": true,
+            "retainedDownloadPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/default-browser-drive-upload-live12-downloaded.pptx",
+            "downloadRemovedFromDownloads": true
+          },
+          "testWindowClosed": true,
+          "completionValidatorAccepted": false,
+          "analysisCorrection": "Earlier inference that result completed and completion validator accepted was incorrect: summary omitted second assertion failure. Full TestIssues and live13 establish post-approved-action auth handoff. No completion acceptance is claimed."
+        },
+        {
+          "run": "default-browser-drive-upload-live13",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 12,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "testOnlyInitialGoalDelegation": false,
+          "nativeFileCalls": 2,
+          "nativeControlCalls": 4,
+          "uploadEffects": 1,
+          "appResult": "userInterventionRequired: Complete sign-in or macOS permission in the intended browser window, then choose Resume.",
+          "completionValidatorAccepted": false,
+          "finding": "Original-goal execution selects exact newest presentation and uploads once, then repeats immediate post-approval authentication handoff. Accepted-evidence assertion correctly remains empty. Independent Safari download exactly matches source bytes.",
+          "independentReadback": {
+            "run": "default-browser-drive-upload-live13",
+            "testOnlyInitialGoalDelegation": false,
+            "readbackMethod": "Independent Safari UI exact-name Drive search and file menu Download",
+            "driveFileID": "1eM7ElsPZA5rmSTZfKG0p3PZmZQRznQeR",
+            "uniqueName": "Remote Desktop E2E 2923421B-7F74-44CE-8058-63DFD4D273E6.pptx",
+            "downloadExists": true,
+            "downloadBytes": 28273,
+            "downloadSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "sourceSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "exactBytesMatch": true,
+            "retainedDownloadPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/default-browser-drive-upload-live13-downloaded.pptx",
+            "downloadRemovedFromDownloads": true
+          },
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live14",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 0,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "testOnlyInitialGoalDelegation": false,
+          "nativeFileCalls": 2,
+          "nativeControlCalls": 5,
+          "uploadEffects": 1,
+          "appResult": "userInterventionRequired: The selected page control changed or is no longer available. Review the page, then choose Resume.",
+          "completionValidatorAccepted": false,
+          "finding": "Picker dismissal repair advances to fresh page planning. Current page reports Starting upload / Uploading 1 item, but native planner repeats old picker reasoning from history and selects unrelated Keyboard shortcuts ID. Control revalidation blocks the click. Independent remote download matches exact source bytes.",
+          "independentReadback": {
+            "run": "default-browser-drive-upload-live14",
+            "testOnlyInitialGoalDelegation": false,
+            "readbackMethod": "Independent Safari UI exact-name Drive search and file menu Download",
+            "driveFileID": "1mWRqtZSe68BrFjm73Gno5DJuAIy8hdgh",
+            "uniqueName": "Remote Desktop E2E 8770680C-6BCA-4585-BFE2-0CA179EF0F1B.pptx",
+            "downloadExists": true,
+            "downloadBytes": 28273,
+            "downloadSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "sourceSHA256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+            "exactBytesMatch": true,
+            "retainedDownloadPath": "/Users/michael/Documents/ChatGPT/remote-desktop-repair/.build/repair-verification/default-browser-drive-upload-live14-downloaded.pptx",
+            "downloadRemovedFromDownloads": true
+          },
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live15",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 6,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "testOnlyInitialGoalDelegation": false,
+          "nativeFileCalls": 0,
+          "nativeControlCalls": 3,
+          "uploadEffects": 0,
+          "appResult": "approvalRequired for unidentified Safari chrome point; test does not authorize unrelated input",
+          "completionValidatorAccepted": false,
+          "finding": "Native planner delegates when menu upload item is absent from AX. Fara screenshot visibly contains File upload, but model copies Safari toolbar show-sidebar bounds from supplementary native_controls and targets its upper-left corner. No file selection or upload; post-upload history repair not exercised.",
+          "testWindowClosed": true
+        },
+        {
+          "run": "default-browser-drive-upload-live16",
+          "testResult": "Failed",
+          "passed": 0,
+          "failed": 1,
+          "buildErrors": 0,
+          "buildWarnings": 13,
+          "runtimeWarnings": 1,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "testOnlyInitialGoalDelegation": true,
+          "delegationRetainsOriginalGoal": true,
+          "nativeFileCalls": 0,
+          "nativeControlCalls": 4,
+          "uploadEffects": 0,
+          "appResult": "approvalRequired for Return on New Folder menu; no upload",
+          "completionValidatorAccepted": false,
+          "finding": "Additive native advice preserves original goal. Fara chooses File upload69,200 but pointer context at119,223 changes and no input executes. Following Fara response incorrectly describes rejected click as focus, asks Enter; test stops. Real workflow still fails and delegation stays test-only.",
+          "testWindowClosed": true
+        }
+      ],
+      "capturedScreenDiagnostics": [
+        {
+          "run": "default-browser-menu-controls-probe01",
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 12,
+          "testResult": "Failed",
+          "testFailure": "Test-only raw JSON substring assertion did not account for escaped nested content. Both model completions and paired requests are retained.",
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "modelCalls": 2,
+          "runtimeWarnings": 0,
+          "effects": 0,
+          "pairedInputs": "Same captured real menu screenshot, goal, empty history and inference settings; native_controls present versus null. Not exact live15 history replay.",
+          "withControlsAction": {
+            "kind": "left_click",
+            "x": 65,
+            "y": 232
+          },
+          "withoutControlsAction": {
+            "kind": "left_click",
+            "x": 65,
+            "y": 232
+          },
+          "semanticVerdict": "Both choose Folder upload, incorrect for the requested individual presentation. Dropping native_controls is not supported by this experiment; production unchanged.",
+          "imageSHA256": "4000b8e96a965d9c6ae08dfab726725cc331ed841d8a4f2367808ac98b9d8216",
+          "next": "Use existing model-generated browser responsibility diagnostic for a bounded next comparison; do not repeat whole upload unchanged."
+        },
+        {
+          "run": "default-browser-menu-delegation-probe01",
+          "buildStatus": "succeeded",
+          "buildErrors": 0,
+          "buildWarnings": 13,
+          "testResult": "Passed",
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "nativeModelCalls": 1,
+          "faraCalls": 2,
+          "runtimeWarnings": 0,
+          "effects": 0,
+          "pairedInputs": "Same real menu screenshot, native controls, host file-selection capability, empty history and Fara settings. Candidate preserves original full goal with bounded model-generated browser responsibility appended.",
+          "baselineAction": {
+            "kind": "left_click",
+            "x": 65,
+            "y": 232,
+            "target": "Folder upload"
+          },
+          "delegatedAction": {
+            "kind": "left_click",
+            "x": 65,
+            "y": 202,
+            "target": "File upload"
+          },
+          "semanticVerdict": "Baseline wrong for individual presentation; generated browser responsibility makes correct single-file menu choice on this captured state. Limited diagnostic; no production promotion or task acceptance.",
+          "next": "Actual E2E with same additive original-goal-preserving delegation before production integration."
+        }
+      ],
+      "readOnlyDiagnostics": [
+        {
+          "run": "default-browser-pointer-read-probe01",
+          "testResult": "Passed",
+          "passed": 1,
+          "failed": 0,
+          "buildErrors": 0,
+          "buildWarnings": 13,
+          "runtimeWarnings": 0,
+          "sourceCount": 41,
+          "sourceUnchanged": true,
+          "effects": 0,
+          "inference": false,
+          "point": "119,223",
+          "immediatePointContextMatches": true,
+          "twoSecondPointContextMatches": true,
+          "immediateWindowPixelsMatch": true,
+          "twoSecondWindowPixelsMatch": true,
+          "nativeTargetFrame": null,
+          "nativeLabel": "New Folder menu",
+          "finding": "On the retained settled menu, system/application AX hit tests return New Folder menu button whose reported frame excludes the requested File upload point; geometry is correctly unavailable. Native reads and 2-second delay do not change pointer context or window pixels. This does not identify the cause of live16 rejection and does not justify weakening pixel guards."
+        }
+      ]
+    },
+    "latestDiagnosticRun": "default-browser-pointer-read-probe01"
   }
 }

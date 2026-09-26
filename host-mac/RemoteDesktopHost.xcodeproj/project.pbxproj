@@ -15,6 +15,7 @@
 		A8A8D2FB53D070204240D08E /* ComputerUseDefaultBrowserTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */; };
 		F296E2885E64E607C4F14112 /* ComputerUseDefaultBrowserSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0264CA02DA51C3CB2A146CF4 /* ComputerUseDefaultBrowserSession.swift */; };
 		F910421DB7C79F90D8A003C9 /* ComputerUseDefaultBrowserPageReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = C785D43D9A709B24B8D52249 /* ComputerUseDefaultBrowserPageReader.swift */; };
+		ABCDEF1234567890ABCDEF03 /* ComputerUseDefaultBrowserControlPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF1234567890ABCDEF04 /* ComputerUseDefaultBrowserControlPlanner.swift */; };
 		C5A14A0E843F7C4112B83FA3 /* ComputerUseDefaultBrowserExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC06008E800E6BD0346CA892 /* ComputerUseDefaultBrowserExecutor.swift */; };
 		BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */; };
 		B1842DC9E43046DDA321CE01 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */; };
@@ -160,6 +161,7 @@
 		0102E78A605EE49D219A30A7 /* ComputerUseDefaultBrowserTargetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */; };
 		E3C8908FB7E6E6D097F23E9A /* ComputerUseDefaultBrowserSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 60767109DF46851F8C086A6D /* ComputerUseDefaultBrowserSessionTests.swift */; };
 		4F59A70F6BF7A31E19CBC452 /* ComputerUseDefaultBrowserPageReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7CE2D48E9BE1D78E39BCB3 /* ComputerUseDefaultBrowserPageReaderTests.swift */; };
+		ABCDEF1234567890ABCDEF01 /* ComputerUseDefaultBrowserControlPlannerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDEF1234567890ABCDEF02 /* ComputerUseDefaultBrowserControlPlannerTests.swift */; };
 		10A427211D15CCDB79125524 /* ComputerUseDefaultBrowserExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F5EBF3EEFEEA39CDC5C0FB07 /* ComputerUseDefaultBrowserExecutorTests.swift */; };
 		2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */; };
 		2F34B7B243FAEA2CFCA96DCA /* ComputerUseTextTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3027DBC19074EFB6AB175D55 /* ComputerUseTextTask.swift */; };
@@ -325,6 +327,7 @@
 		893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserTarget.swift; sourceTree = "<group>"; };
 		0264CA02DA51C3CB2A146CF4 /* ComputerUseDefaultBrowserSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserSession.swift; sourceTree = "<group>"; };
 		C785D43D9A709B24B8D52249 /* ComputerUseDefaultBrowserPageReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserPageReader.swift; sourceTree = "<group>"; };
+		ABCDEF1234567890ABCDEF04 /* ComputerUseDefaultBrowserControlPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserControlPlanner.swift; sourceTree = "<group>"; };
 		FC06008E800E6BD0346CA892 /* ComputerUseDefaultBrowserExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserExecutor.swift; sourceTree = "<group>"; };
 		D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDesktopExecutor.swift; sourceTree = "<group>"; };
 		B1842DC9E43046DDA321CE02 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
@@ -426,6 +429,7 @@
 		9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserTargetTests.swift; sourceTree = "<group>"; };
 		60767109DF46851F8C086A6D /* ComputerUseDefaultBrowserSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserSessionTests.swift; sourceTree = "<group>"; };
 		8F7CE2D48E9BE1D78E39BCB3 /* ComputerUseDefaultBrowserPageReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserPageReaderTests.swift; sourceTree = "<group>"; };
+		ABCDEF1234567890ABCDEF02 /* ComputerUseDefaultBrowserControlPlannerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserControlPlannerTests.swift; sourceTree = "<group>"; };
 		F5EBF3EEFEEA39CDC5C0FB07 /* ComputerUseDefaultBrowserExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserExecutorTests.swift; sourceTree = "<group>"; };
 		49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPFirstComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogo.swift; sourceTree = "<group>"; };
@@ -786,6 +790,7 @@
 				9E1FB783E515ABEF99E0C6B8 /* ComputerUseDefaultBrowserTargetTests.swift */,
 				60767109DF46851F8C086A6D /* ComputerUseDefaultBrowserSessionTests.swift */,
 				8F7CE2D48E9BE1D78E39BCB3 /* ComputerUseDefaultBrowserPageReaderTests.swift */,
+				ABCDEF1234567890ABCDEF02 /* ComputerUseDefaultBrowserControlPlannerTests.swift */,
 				F5EBF3EEFEEA39CDC5C0FB07 /* ComputerUseDefaultBrowserExecutorTests.swift */,
 				49CF19459819E5602DB03150 /* MCPFirstComputerUseExecutorTests.swift */,
 				C8A7FBD347C34995D3AEC37F /* MCPFoundationTests.swift */,
@@ -821,6 +826,7 @@
 				893C74D2876D3A5F62802088 /* ComputerUseDefaultBrowserTarget.swift */,
 				0264CA02DA51C3CB2A146CF4 /* ComputerUseDefaultBrowserSession.swift */,
 				C785D43D9A709B24B8D52249 /* ComputerUseDefaultBrowserPageReader.swift */,
+				ABCDEF1234567890ABCDEF04 /* ComputerUseDefaultBrowserControlPlanner.swift */,
 				FC06008E800E6BD0346CA892 /* ComputerUseDefaultBrowserExecutor.swift */,
 				D58306FBC17046FE9BCE2A0B /* ComputerUseDesktopExecutor.swift */,
 				99ED4432B2B249D56CD6DEAC /* ComputerUseBrowserSearchPlanner.swift */,
@@ -1245,6 +1251,7 @@
 				0102E78A605EE49D219A30A7 /* ComputerUseDefaultBrowserTargetTests.swift in Sources */,
 				E3C8908FB7E6E6D097F23E9A /* ComputerUseDefaultBrowserSessionTests.swift in Sources */,
 				4F59A70F6BF7A31E19CBC452 /* ComputerUseDefaultBrowserPageReaderTests.swift in Sources */,
+				ABCDEF1234567890ABCDEF01 /* ComputerUseDefaultBrowserControlPlannerTests.swift in Sources */,
 				10A427211D15CCDB79125524 /* ComputerUseDefaultBrowserExecutorTests.swift in Sources */,
 				2E117598F13A014329CD22FE /* MCPFirstComputerUseExecutorTests.swift in Sources */,
 				37F053BBB872177DD6DC7615 /* MCPFoundationTests.swift in Sources */,
@@ -1288,6 +1295,7 @@
 				A8A8D2FB53D070204240D08E /* ComputerUseDefaultBrowserTarget.swift in Sources */,
 				F296E2885E64E607C4F14112 /* ComputerUseDefaultBrowserSession.swift in Sources */,
 				F910421DB7C79F90D8A003C9 /* ComputerUseDefaultBrowserPageReader.swift in Sources */,
+				ABCDEF1234567890ABCDEF03 /* ComputerUseDefaultBrowserControlPlanner.swift in Sources */,
 				C5A14A0E843F7C4112B83FA3 /* ComputerUseDefaultBrowserExecutor.swift in Sources */,
 				BA1366C0DE074EBC8F324479 /* ComputerUseDesktopExecutor.swift in Sources */,
 				118C3A0AD32CF1720A773392 /* ComputerUseBrowserSearchPlanner.swift in Sources */,

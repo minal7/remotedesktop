@@ -4573,6 +4573,16 @@ final class HostComputerUseManager: ObservableObject {
         let nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner = { input in
             try await browserPlanner.proposeNativeFileSelection(input: input)
         }
+        let nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?
+        if let nativeTextInstaller {
+            nativeControlInputs = {
+                guard let receipt = await nativeTextInstaller.currentInstallation() else { return nil }
+                try Task.checkCancellation()
+                let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                return try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+                    receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+            }
+        } else { nativeControlInputs = nil }
         self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
             try await MCPFirstComputerUseExecutor.load(
                 binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
@@ -4581,7 +4591,8 @@ final class HostComputerUseManager: ObservableObject {
                 clientPool: MCPClientPool(), browserStepPlanner: browserPlanner, browserExecutorFactory: {
                     let receipt = await modelInstaller.currentInstallation()
                     try Task.checkCancellation()
-                    return try modelLoader.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner)
+                    return try modelLoader.prepareDefaultBrowser(receipt: receipt,
+                        nativeFilePlanner: nativeFilePlanner, nativeControlInputs: nativeControlInputs)
                 })
         }
         self.taskLedger = taskLedger

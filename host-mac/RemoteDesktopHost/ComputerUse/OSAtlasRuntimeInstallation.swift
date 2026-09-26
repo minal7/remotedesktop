@@ -392,6 +392,9 @@ protocol ComputerUseVisualExecutorLoading: AnyObject {
     func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting
     func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
         nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
+        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting
 
     func load(
         receipt: ComputerUseInstallationReceipt,
@@ -407,6 +410,12 @@ protocol ComputerUseVisualExecutorLoading: AnyObject {
 }
 
 extension ComputerUseVisualExecutorLoading {
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
+        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
+        try prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner)
+    }
+
     func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
         nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting {
         try prepareDefaultBrowser(receipt: receipt)
@@ -481,6 +490,10 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         var value: ComputerUseFaraRuntimeInputs?
     }
 
+    @MainActor private final class NativeControlInputsCache {
+        var value: ComputerUseNativeTextRuntimeInputs?
+    }
+
     func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
         let inputs = BrowserInputs()
         return try makeFaraExecutor(resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) })
@@ -499,6 +512,15 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             nativeFilePlanner: nativeFilePlanner)
     }
 
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
+        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
+        let inputs = BrowserInputs()
+        return try makeDefaultBrowserExecutor(
+            resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) },
+            nativeFilePlanner: nativeFilePlanner, nativeControlInputs: nativeControlInputs)
+    }
+
     private func resolveFaraInputs(receipt: ComputerUseInstallationReceipt?, cached: BrowserInputs) throws -> ComputerUseFaraRuntimeInputs {
         try Task.checkCancellation()
         if let value = cached.value { return value }
@@ -515,15 +537,33 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
 
     private func makeDefaultBrowserExecutor(
         resolveInputs: @escaping @MainActor @Sendable () throws -> ComputerUseFaraRuntimeInputs,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner? = nil
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner? = nil,
+        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs? = nil
     ) throws -> ComputerUseDefaultBrowserExecutor {
         let runtime = self.runtime
         let propose: ComputerUseDesktopExecutor.Propose = { input in
             let endpoint = try await runtime.activateFara(resolveInputs())
             return .init(try await runtime.proposeFara(endpoint: endpoint, input: input))
         }
+        let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
+        if let nativeControlInputs {
+            let cachedInputs = NativeControlInputsCache()
+            nativeControlPlanner = { input, page in
+                let inputs: ComputerUseNativeTextRuntimeInputs
+                if let cached = cachedInputs.value { inputs = cached }
+                else if let resolved = try await nativeControlInputs() {
+                    cachedInputs.value = resolved
+                    inputs = resolved
+                } else {
+                    return .visualFallback("The native page planner is not installed.")
+                }
+                let endpoint = try await runtime.activateNativeText(inputs)
+                return try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page)
+            }
+        } else { nativeControlPlanner = nil }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
-            propose: propose, nativeFilePlanner: nativeFilePlanner, finishRun: { await runtime.shutdown() })
+            propose: propose, nativeFilePlanner: nativeFilePlanner, nativeControlPlanner: nativeControlPlanner,
+            finishRun: { await runtime.shutdown() })
     }
 
     private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {

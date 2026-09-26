@@ -88,11 +88,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     ComputerUseTextClarificationContinuing {
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
     typealias NativeFilePlanner = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseMCPBrowserStepPlanner.Plan?
+    typealias NativeControlPlanner = @MainActor @Sendable (ComputerUseFaraModel.Input,
+        ComputerUseDefaultBrowserPageReader.Observation) async throws -> ComputerUseDefaultBrowserControlPlan
+    typealias NativeControlInputs = @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs?
     typealias LocalFileCatalogFactory = ComputerUseDefaultBrowserFileCatalogFactory
     enum Failure: Error { case taskAlreadyBound, noRetainedWindow, invalidFileChoice, selectedFileStale, selectedFileChangeNeedsConfirmation }
 
     @MainActor private final class Scope {
         let session: ComputerUseDefaultBrowserSession
+        let pageReader: ComputerUseDefaultBrowserPageReader
         var window: ComputerUseDefaultBrowserSession.Window?
         var taskID: String?
         var goal: String?
@@ -115,9 +119,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var nativeFileOperationReady = false
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
-        init(session: ComputerUseDefaultBrowserSession,
+        init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
              localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
-            self.session = session; self.localFileCatalogFactory = localFileCatalogFactory
+            self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
         }
         func prepare(_ id: String, _ goal: String, _ tools: ComputerUseHostTools) async throws {
             self.tools = tools
@@ -313,6 +317,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     init(journalDirectory: URL, session suppliedSession: ComputerUseDefaultBrowserSession? = nil,
          propose: @escaping ComputerUseDesktopExecutor.Propose,
          nativeFilePlanner: NativeFilePlanner? = nil,
+         nativeControlPlanner: NativeControlPlanner? = nil,
+         pageReader: ComputerUseDefaultBrowserPageReader? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {},
          completionCheck: CompletionCheck? = nil,
          localFileCatalogFactory: @escaping LocalFileCatalogFactory = { taskID in
@@ -323,7 +329,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         let session: ComputerUseDefaultBrowserSession
         if let suppliedSession { session = suppliedSession }
         else { session = try ComputerUseDefaultBrowserSession(journalDirectory: journalDirectory) }
-        let scope = Scope(session: session,
+        let scope = Scope(session: session, pageReader: pageReader ?? ComputerUseDefaultBrowserPageReader(),
             localFileCatalogFactory: localFileCatalogFactory)
         self.scope = scope
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
@@ -363,7 +369,60 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                let native = ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel, selectedURL: selectedURL) {
                 return native
             }
-            return try await propose(enriched)
+            // Once a picker exists, the page's old AX controls are not an action surface.
+            // A selected candidate with no host navigation proposal must return to the
+            // visual planner for the explicitly guarded final Open action.
+            if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
+            guard let nativeControlPlanner, let tools = scope.tools,
+                  let window = scope.session.currentWindow else { return try await propose(enriched) }
+            try scope.check(nil, tools)
+            guard let page = try scope.pageReader.read(window: window.accessibilityElement,
+                application: window.application, mayAct: { (try? tools.requireActive()) != nil }) else {
+                try scope.check(nil, tools)
+                return try await propose(enriched)
+            }
+            try scope.check(nil, tools)
+            let plan: ComputerUseDefaultBrowserControlPlan
+            do { plan = try await nativeControlPlanner(enriched, page) }
+            catch is CancellationError { throw CancellationError() }
+            catch let error as ComputerUseDefaultBrowserControlPlanError where error == .invalidProposal {
+                // A malformed semantic response proposes no action. Let the existing screenshot
+                // planner handle this same observed state after confirming the task scope remains valid.
+                try scope.check(nil, tools)
+                return try await propose(enriched)
+            }
+            catch {
+                return .init(response: "", decision: .handoff("The current page controls could not be verified. Review the browser window, then choose Resume."),
+                    includeInModelHistory: false)
+            }
+            switch plan {
+            case .askUser(let question):
+                let message = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1_024))
+                return .init(response: "", decision: .handoff(message.isEmpty
+                    ? "The page needs your input before continuing." : message), includeInModelHistory: false)
+            case .visualFallback(let reason):
+                _ = reason // The visual model receives the unchanged goal, screenshot and prior feedback.
+                return try await propose(enriched)
+            case .pressControl(let controlID, _):
+                guard let bounds = scope.session.currentActionBounds,
+                      let center = try scope.pageReader.validatedControlCenter(observation: page, controlID: controlID,
+                        window: window.accessibilityElement, windowBounds: bounds,
+                        mayAct: { (try? tools.requireActive()) != nil }),
+                      let display = enriched.desktopDisplayBounds,
+                      display.width.isFinite, display.height.isFinite, display.width > 0, display.height > 0 else {
+                    return .init(response: "", decision: .handoff("The selected page control changed or is no longer available. Review the page, then choose Resume."),
+                        includeInModelHistory: false)
+                }
+                try scope.check(nil, tools)
+                let x = (center.x - display.minX) / display.width * 1_000
+                let y = (center.y - display.minY) / display.height * 1_000
+                guard x.isFinite, y.isFinite, (0...1_000).contains(x), (0...1_000).contains(y) else {
+                    return .init(response: "", decision: .handoff("The selected page control is outside the captured display. Review the page, then choose Resume."),
+                        includeInModelHistory: false)
+                }
+                let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: x, y: y))
+                return .init(response: try Self.nativeControlHistoryResponse(action), action: action)
+            }
         },
             surfaceScopeCheck: { action in
                 guard let tools = scope.tools else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
@@ -372,6 +431,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck,
             localFileOperationHandler: { try await scope.apply($0) }, finishRun: finishRun)
+    }
+
+    private static func nativeControlHistoryResponse(_ action: ComputerUseFaraAction) throws -> String {
+        guard case .pointer(.leftClick, let point) = action else { throw ComputerUseFaraAction.Failure.invalidResponse }
+        let data = try JSONSerialization.data(withJSONObject: [
+            "name": "computer_use",
+            "arguments": ["action": "left_click", "coordinate": [point.x, point.y]],
+        ], options: [.sortedKeys, .withoutEscapingSlashes])
+        let json = String(decoding: data, as: UTF8.self)
+        return "Host native-control proposal: click the validated center of the selected observed control; verify the next screenshot.\n<tool_call>\n\(json)\n</tool_call>"
     }
 
     func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
@@ -428,7 +497,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         do {
             scope.tools = tools
-            try scope.check(action, tools)
+            // The action has already been approved and dispatched. Let the desktop
+            // executor's bounded post-action surface wait observe sheet dismissal
+            // before validating this retained browser scope again.
             return try await desktop.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: progress)
         } catch is CancellationError { throw CancellationError() }
         catch ComputerUseDefaultBrowserSession.Failure.authenticationHandoff { return .userInterventionRequired("Complete sign-in or macOS permission in the intended browser window, then choose Resume.") }

@@ -1840,6 +1840,37 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
+    func proposeDefaultBrowserControl(endpoint: OSAtlasLlamaEndpoint,
+        input: ComputerUseFaraModel.Input,
+        page: ComputerUseDefaultBrowserPageReader.Observation,
+        inspectExchange: (@Sendable (Data, Data) -> Void)? = nil
+    ) async throws -> ComputerUseDefaultBrowserControlPlan {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
+                bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalDefaultBrowserControlPlanner(connection: connection, transport: server.transport,
+                inspectExchange: inspectExchange)
+            let plan = try await withTaskCancellationHandler {
+                try await planner.propose(input: input, page: page)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return plan
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
     func proposeBrowserSearch(endpoint: OSAtlasLlamaEndpoint,
                               interpretation: ComputerUseBrowserGoalProposal) async throws -> ComputerUseBrowserSearchQuery {
         try Task.checkCancellation()

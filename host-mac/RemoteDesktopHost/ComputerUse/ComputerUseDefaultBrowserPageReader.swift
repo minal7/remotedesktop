@@ -6,7 +6,7 @@ import Foundation
 /// exact AX references but confer no authority to mutate them.
 @MainActor
 final class ComputerUseDefaultBrowserPageReader {
-    struct Control: Equatable {
+    struct Control: Equatable, Sendable {
         let id: String
         let role: String
         let label: String
@@ -14,7 +14,7 @@ final class ComputerUseDefaultBrowserPageReader {
         let enabled: Bool?
     }
 
-    struct Observation: Equatable {
+    struct Observation: Equatable, Sendable {
         let id: String
         let application: ComputerUseApplicationIdentity
         let url: String
@@ -52,7 +52,9 @@ final class ComputerUseDefaultBrowserPageReader {
         let application: ComputerUseApplicationIdentity
         let window: AXUIElement
         let webArea: AXUIElement
+        let url: String
         let controls: [String: AXUIElement]
+        let controlMetadata: [String: Control]
     }
 
     private let access: Access
@@ -207,12 +209,17 @@ final class ComputerUseDefaultBrowserPageReader {
         let finalURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea)
         guard finalURL == url, !expired else { return nil }
         let observationID = UUID().uuidString
+        let observation = Observation(id: observationID, application: expectedApplication, url: url,
+            renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
-                                           webArea: webArea, controls: controlRefs)
-        if retained.count > 32 { retained.removeValue(forKey: retained.keys.first!) }
+            webArea: webArea, url: url, controls: controlRefs,
+            controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))
+        if retained.count > 32,
+           let evictedID = retained.keys.first(where: { $0 != observationID }) {
+            retained.removeValue(forKey: evictedID)
+        }
         try check()
-        return Observation(id: observationID, application: expectedApplication, url: url,
-                           renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated)
+        return observation
     }
 
     /// Resolve only a reference retained by this exact observation. This API
@@ -223,6 +230,57 @@ final class ComputerUseDefaultBrowserPageReader {
         guard let snapshot = retained[observationID], snapshot.application == application,
               CFEqual(snapshot.window, window) else { return nil }
         return snapshot.controls[controlID]
+    }
+
+    /// Returns a host-derived click center only when the retained control is
+    /// still the same enabled, bounded control on the freshly observed page.
+    func validatedControlCenter(observation: Observation, controlID: String,
+                                window: AXUIElement, windowBounds: CGRect,
+                                mayAct: () -> Bool) throws -> CGPoint? {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+        guard let original = retained[observation.id],
+              original.application == observation.application,
+              CFEqual(original.window, window),
+              original.url == observation.url,
+              let originalElement = original.controls[controlID],
+              let originalControl = original.controlMetadata[controlID],
+              let suppliedControl = observation.controls.first(where: { $0.id == controlID }),
+              suppliedControl == originalControl,
+              Self.permittedCenterMetadata(originalControl, within: windowBounds) != nil else { return nil }
+
+        guard let fresh = try read(window: window, application: original.application, mayAct: mayAct) else { return nil }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+        guard fresh.application == original.application, fresh.url == original.url,
+              let current = retained[fresh.id], current.application == original.application,
+              CFEqual(current.window, window), CFEqual(current.webArea, original.webArea),
+              current.url == original.url,
+              let freshControl = fresh.controls.first(where: { id in
+                  guard let element = current.controls[id.id] else { return false }
+                  return CFEqual(element, originalElement)
+              }),
+              Self.sameControlMetadata(originalControl, freshControl),
+              let center = Self.permittedCenterMetadata(freshControl, within: windowBounds) else { return nil }
+        return center
+    }
+
+    private static func sameControlMetadata(_ lhs: Control, _ rhs: Control) -> Bool {
+        lhs.role == rhs.role && lhs.label == rhs.label && lhs.frame == rhs.frame && lhs.enabled == rhs.enabled
+    }
+
+    private static func permittedCenterMetadata(_ control: Control, within bounds: CGRect) -> CGPoint? {
+        let permittedRoles: Set<String> = ["AXButton", "AXLink", "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
+        guard permittedRoles.contains(control.role),
+              !control.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              control.enabled == true,
+              let frame = control.frame, !frame.isEmpty,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height,
+               frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              bounds.width > 0, bounds.height > 0, frame.width > 0, frame.height > 0,
+              bounds.contains(frame) else { return nil }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        return center.x.isFinite && center.y.isFinite ? center : nil
     }
 
 }

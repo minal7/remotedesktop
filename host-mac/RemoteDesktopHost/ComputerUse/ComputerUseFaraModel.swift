@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Verified model data and the signed bundled executable, resolved by setup.
 /// The runtime never downloads models or executes code from a model package.
@@ -133,6 +134,8 @@ enum ComputerUseFaraModel {
         /// Host-resolved path for the selected candidate, disclosed only to a
         /// desktop task so it can choose that file in a native open panel.
         var selectedLocalFilePath: String? = nil
+        /// Host-only geometry used to map validated native controls to the same display as this screenshot.
+        var desktopDisplayBounds: CGRect? = nil
 
         func validatedBrowserGoal() throws -> ComputerUseUnresolvedTextGoal {
             guard surface == .browser else { throw OSAtlasLlamaRuntimeError.invalidResponse }
@@ -185,7 +188,7 @@ enum ComputerUseFaraModel {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
             } else if editors.contains(where: { $0 != nil }) || states.contains(where: { $0 != nil }) || nativeControls != nil
-                || selectedLocalFilePath != nil {
+                || selectedLocalFilePath != nil || desktopDisplayBounds != nil {
                 throw OSAtlasLlamaRuntimeError.invalidResponse
             }
             if let browserWorkerDirective { try browserWorkerDirective.validate() }

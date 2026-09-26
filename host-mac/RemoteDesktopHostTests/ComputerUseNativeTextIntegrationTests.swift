@@ -2041,12 +2041,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     }
 
     private func desktopTestTools(focus: @escaping () -> String = { "field" },
+        approvalTarget: ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         textEditor: ComputerUseTextEditor? = nil,
         injector: InputInjector = InputInjector(), mayAct: @escaping () -> Bool = { true },
         window: @escaping () -> CGRect = { CGRect(x: 0, y: 0, width: 640, height: 400) },
         perform: ((ComputerUsePredictedAction) throws -> Void)? = nil) -> ComputerUseHostTools {
         ComputerUseHostTools(injector: injector, mayAct: mayAct,
-            approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
+            approvalTargetProvider: approvalTarget ?? { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
             actionPerformer: perform, textEditor: textEditor,
             screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
                 displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: window()) },
@@ -2578,6 +2579,63 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(resumed, .completed("Done")); XCTAssertEqual(effects, 1); XCTAssertEqual(proposals, 2)
         do { _ = try await executor.execute(taskID: "after", prompt: "New goal", trustedUserPrompt: "New goal", tools: tools, progress: { _ in }); XCTFail("Task identity accepted a changed goal") }
         catch { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, .changedTask) }
+    }
+
+    func testApprovalTargetChangedBeforeDispatchBecomesRejectedActionFeedback() async throws {
+        for failureStage in ["preparation", "dispatch"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var approvalQueries = 0, identity = "observed-target", calls = 0, effects = 0
+            let tools = desktopTestTools(approvalTarget: { _ in
+                approvalQueries += 1
+                if failureStage == "preparation", approvalQueries == 1 {
+                    throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                }
+                return .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: identity)
+            }, perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                calls += 1
+                if calls == 1 { return .init(response: "tab", action: .key(["Tab"])) }
+                XCTAssertEqual(input.history.count, 1)
+                XCTAssertEqual(input.history.first?.action, .key(["Tab"]))
+                XCTAssertTrue(input.actionError?.contains("No mouse or keyboard input was sent") == true)
+                return .init(response: "handoff", decision: .handoff("Review the current field."))
+            })
+            let result = try await executor.execute(taskID: "approval-target-\(failureStage)", prompt: "Continue",
+                trustedUserPrompt: "Continue", tools: tools, progress: { message in
+                    if failureStage == "dispatch", message == "Using the desktop…" { identity = "changed-target" }
+                })
+            XCTAssertEqual(result, .userInterventionRequired("Review the current field."))
+            XCTAssertEqual(calls, 2)
+            XCTAssertEqual(effects, 0)
+            XCTAssertEqual(executor.lastRevalidationDiagnostic["blockedAt"],
+                failureStage == "preparation" ? "approval-fingerprint-preparation" : "approval-fingerprint-dispatch")
+        }
+    }
+
+    func testApprovalTargetChangedAfterDispatchRemainsUncertainAndCannotReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var calls = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in
+            effects += 1
+            throw ComputerUseHostTools.ToolError.approvalTargetChanged
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            calls += 1
+            return .init(response: "tab", action: .key(["Tab"]))
+        })
+        do {
+            _ = try await executor.execute(taskID: "approval-target-after-effect", prompt: "Continue",
+                trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+            XCTFail("A target change after dispatch must remain uncertain")
+        } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
+        }
+        let resumed = try await executor.execute(taskID: "approval-target-after-effect", prompt: "Continue",
+            trustedUserPrompt: "Continue", tools: tools, progress: { _ in })
+        guard case .unableToComplete = resumed else { return XCTFail("An uncertain target change must not be replayed") }
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(calls, 1)
     }
 
     func testNativeDesktopHistoryRetainsRejectedActionFeedbackWithItsObservation() async throws {

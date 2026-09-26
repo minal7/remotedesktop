@@ -353,7 +353,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try checkScopedSurface()
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
                 surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
-                focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls)
+                focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls,
+                desktopDisplayBounds: observation.image.displayBounds)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             var preservesRejectedActionFeedback = false
@@ -383,7 +384,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     }
                     guard try !tools.actionIsObstructedByTransientSystemOverlay(action) else { throw Failure.changedScreen }
                     try checkScopedSurface(action)
-                    let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+                    let fingerprint: ComputerUseApprovalFingerprint
+                    do { fingerprint = try tools.prepareNativeActionFingerprint(for: action) }
+                    catch ComputerUseHostTools.ToolError.approvalTargetChanged {
+                        lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-preparation"
+                        throw Failure.changedScreen
+                    }
                     if let reason = tools.approvalReason(for: action) {
                         try checkScopedSurface(action)
                         let pending = Approval(taskID: taskID, proposal: proposal, action: action,
@@ -495,6 +501,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             var verified = attempted; verified.statuses = [.verified]
             try store.save(verified, replacing: attempted)
         } catch {
+            if !approved, !began, case ComputerUseHostTools.ToolError.approvalTargetChanged = error {
+                lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-dispatch"
+                throw Failure.changedScreen
+            }
             if began {
                 var uncertain = attempted; uncertain.statuses = [.uncertain]
                 try? store.save(uncertain, replacing: attempted)

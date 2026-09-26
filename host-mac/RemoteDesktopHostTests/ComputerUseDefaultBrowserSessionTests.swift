@@ -22,6 +22,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var taskID = "task-1"
         var fileOpenPanel: ComputerUseDefaultBrowserSession.FileOpenPanel?
         var hasUnrecognizedSheets = false
+        var additionalAction: ((ComputerUsePredictedAction) throws -> Void)?
 
         func snapshot(application: ComputerUseApplicationIdentity) -> ComputerUseDefaultBrowserSession.WindowSnapshot {
             .init(application: application, windows: windows, focusedWindowID: focusedID,
@@ -142,6 +143,58 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testApprovedActionWaitsForPickerDismissalOrHandsOffWithoutReplay() async throws {
+        for persistentSheet in [false, true] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let session = try fixture.session()
+            let goal = "Continue after confirming the selected file"
+            let transitionSettled = persistentSheet ? nil : expectation(description: "Transient sheet dismissal")
+            var effects = 0, proposals = 0
+            fixture.desktop.additionalAction = { action in
+                guard case .key(let usage, let modifiers) = action, usage == 0x28, modifiers == 0 else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                effects += 1
+                fixture.desktop.hasUnrecognizedSheets = true
+                if !persistentSheet {
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(25))
+                        fixture.desktop.hasUnrecognizedSheets = false
+                        transitionSettled?.fulfill()
+                    }
+                }
+            }
+            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+                propose: { input in
+                    proposals += 1
+                    if proposals == 1 { return .init(response: "confirm", action: .key(["Return"])) }
+                    XCTAssertEqual(input.history.count, 1)
+                    XCTAssertEqual(input.history.first?.action, .key(["Return"]))
+                    return .init(response: "handoff", decision: .handoff("Review the completed browser step."))
+                })
+            let pending = try await executor.execute(taskID: "approved-picker-dismissal-\(persistentSheet)", prompt: goal,
+                trustedUserPrompt: goal, tools: fixture.tools, progress: { _ in })
+            guard case .approvalRequired(_, let action, let continuation) = pending else {
+                return XCTFail("Return in the browser should use the existing approval flow")
+            }
+            let fingerprint = try fixture.tools.prepareNativeActionFingerprint(for: action)
+            try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+                tools: fixture.tools, willBeginEffect: {})
+            let result = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
+                tools: fixture.tools, progress: { _ in })
+            if persistentSheet {
+                XCTAssertEqual(result, .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume."))
+                XCTAssertEqual(proposals, 1, "An unresolved native sheet must stop before another proposal")
+            } else {
+                await fulfillment(of: [try XCTUnwrap(transitionSettled)], timeout: 2)
+                XCTAssertEqual(result, .userInterventionRequired("Review the completed browser step."))
+                XCTAssertEqual(proposals, 2, "After dismissal, Resume observes the settled page without replaying the approved action")
+            }
+            XCTAssertEqual(effects, 1, "The approved action is performed once")
+        }
+    }
+
     func testNativeSheetsCauseHandoffBeforeKeyboardInput() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -204,6 +257,161 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertThrowsError(try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools))
     }
 
+    func testNativeControlPlannerCanHandoffBeforeFaraProposal() async throws {
+        for scenario in ["ask-user", "stale-control"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let taskID = "native-control-handoff-\(scenario)"
+            let goal = "Upload the selected presentation and verify the page confirmation"
+            let session = try fixture.session()
+            let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+            graph.makePage()
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            var nativeCalls = 0, visualCalls = 0
+            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+                propose: { _ in
+                    visualCalls += 1
+                    return .init(response: "fallback", decision: .handoff("Fara fallback"))
+                }, nativeControlPlanner: { input, page in
+                    nativeCalls += 1
+                    XCTAssertEqual(input.goal, goal)
+                    XCTAssertEqual(page.url, "https://drive.google.com/drive/my-drive")
+                    XCTAssertEqual(page.controls.map(\.label), ["New"])
+                    return scenario == "ask-user" ? .askUser("Choose the destination account.")
+                        : .pressControl(id: "stale-control-id", explanation: "No longer in the observed page.")
+                }, pageReader: reader)
+
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: fixture.tools, progress: { _ in })
+            if scenario == "ask-user" {
+                XCTAssertEqual(result, .userInterventionRequired("Choose the destination account."))
+            } else {
+                guard case .userInterventionRequired = result else { return XCTFail("A stale control must hand off") }
+            }
+            XCTAssertEqual(nativeCalls, 1)
+            XCTAssertEqual(visualCalls, 0, "Ask-user and stale-control outcomes must not fall through to Fara")
+            XCTAssertEqual(fixture.desktop.keyCount, 1, "The only input is the session's original Cmd-N")
+        }
+    }
+
+    func testNativeControlInvalidProposalFallsBackWithUnchangedScreenshotInput() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-control-invalid-proposal-fallback"
+        let goal = "Open the upload menu, then continue from the screenshot"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+        var nativeCalls = 0, visualCalls = 0
+        var nativeInput: ComputerUseFaraModel.Input?
+        var visualInput: ComputerUseFaraModel.Input?
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInput = input
+                return .init(response: "handoff", decision: .handoff("Review the current page."))
+            }, nativeControlPlanner: { input, _ in
+                nativeCalls += 1
+                nativeInput = input
+                throw ComputerUseDefaultBrowserControlPlanError.invalidProposal
+            }, pageReader: reader)
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the current page."))
+        XCTAssertEqual(nativeCalls, 1)
+        XCTAssertEqual(visualCalls, 1)
+        let observedNativeInput = try XCTUnwrap(nativeInput)
+        let observedVisualInput = try XCTUnwrap(visualInput)
+        XCTAssertEqual(observedVisualInput.goal, observedNativeInput.goal)
+        XCTAssertEqual(observedVisualInput.screenshotPNG, observedNativeInput.screenshotPNG)
+        XCTAssertEqual(observedVisualInput.history, observedNativeInput.history)
+        XCTAssertEqual(observedVisualInput.actionError, observedNativeInput.actionError)
+        XCTAssertEqual(observedVisualInput.desktopDisplayBounds, observedNativeInput.desktopDisplayBounds)
+        XCTAssertEqual(observedVisualInput.goal, goal)
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Fallback planning must not dispatch a native action")
+    }
+
+    func testNativeControlPlannerClicksValidatedCenterUsingNonzeroDisplayOrigin() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-control-click-center"
+        let goal = "Open the upload menu, then continue from the screenshot"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let display = CGRect(x: -640, y: 10, width: 640, height: 480)
+        guard let windowIndex = fixture.desktop.windows.firstIndex(where: { $0.id == retained.id }) else {
+            return XCTFail("Expected the retained window in the fixture")
+        }
+        let old = fixture.desktop.windows[windowIndex]
+        let changedIdentity = ComputerUseFrontmostWindowCaptureIdentity(
+            applicationProcessIdentifier: old.identity.applicationProcessIdentifier,
+            accessibilityWindowHash: old.identity.accessibilityWindowHash, bounds: display)
+        fixture.desktop.windows[windowIndex] = .init(id: old.id, application: old.application,
+            accessibilityElement: old.accessibilityElement, identity: changedIdentity)
+        try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement,
+            controlFrame: CGRect(x: -600, y: 50, width: 80, height: 36))
+        graph.makePage()
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+        var clicks: [(Int, Int)] = [], visualCalls = 0
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "fixture browser window", applicationID: retained.application.bundleIdentifier,
+                accessibilityIdentity: "fixture-window") },
+            actionPerformer: { action in
+                guard case .click(let x, let y, 1, 1) = action else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
+                clicks.append((x, y))
+            }, screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: display), displayBounds: display, frontmostWindowBounds: display)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "fixture-window" },
+            frontmostApplicationIdentityProvider: { retained.application }, frontmostApplicationProvider: { retained.application.bundleIdentifier })
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+        var decodedAction: ComputerUseFaraAction?
+        var controlCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.desktopDisplayBounds, display)
+                XCTAssertEqual(input.history.count, 1)
+                decodedAction = try ComputerUseFaraAction.decodeNativeMessage(input.history[0].response)
+                _ = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                return .init(response: "handoff", decision: .handoff("Review the page."))
+            }, nativeControlPlanner: { input, page in
+                XCTAssertEqual(input.desktopDisplayBounds, display)
+                controlCalls += 1
+                if controlCalls == 1 {
+                    return .pressControl(id: try XCTUnwrap(page.controls.first?.id), explanation: "Open the menu")
+                }
+                return .visualFallback("Use the fresh screenshot after the click.")
+            }, pageReader: reader)
+
+        var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        guard case .approvalRequired(_, let action, let continuation) = result else {
+            return XCTFail("A validated native click must use the existing visual-action approval flow")
+        }
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+            tools: tools, willBeginEffect: {})
+        result = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the page."))
+        XCTAssertEqual(clicks.count, 1)
+        XCTAssertEqual(clicks.first?.0, -560)
+        XCTAssertEqual(clicks.first?.1, 68)
+        XCTAssertEqual(decodedAction, .pointer(.leftClick, .init(x: 125, y: 120.83333333333333)))
+        XCTAssertEqual(controlCalls, 2)
+        XCTAssertEqual(visualCalls, 1)
+    }
+
     func testOptInDefaultBrowserFaraSelectsDisposableTranslateFileAndStopsBeforeUpload() async throws {
         try await runDefaultBrowserFileProbe(uploadToDrive: false)
     }
@@ -212,12 +420,150 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: true)
     }
 
+    func testOptInCapturedBrowserMenuNativeControlsComparison() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_CAPTURED_BROWSER_MENU_COMPARISON"] == "1" else {
+            throw XCTSkip("Opt-in: serial Fara comparison over one captured browser screenshot; no desktop actions")
+        }
+        let screenshotURL = URL(fileURLWithPath: try XCTUnwrap(environment["CAPTURED_BROWSER_MENU_SCREENSHOT_PATH"]))
+        let proposalURL = URL(fileURLWithPath: try XCTUnwrap(environment["CAPTURED_BROWSER_MENU_PROPOSAL_PATH"]))
+        let screenshot = try Data(contentsOf: screenshotURL)
+        let proposalText = try String(contentsOf: proposalURL, encoding: .utf8)
+        let controlsLine = try XCTUnwrap(proposalText.split(whereSeparator: \.isNewline)
+            .last(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("{\"native_controls\"") }))
+        let wrapper = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(controlsLine.utf8)) as? [String: Any])
+        let controlObject = try XCTUnwrap(wrapper["native_controls"] as? [String: Any])
+        let controlRows = try XCTUnwrap(controlObject["items"] as? [[String: Any]])
+        let displayBounds = CGRect(x: 0, y: 0, width: 1_000, height: 1_000)
+        let controls = try controlRows.map { row -> ComputerUseNativeControls.Item in
+            let description = try XCTUnwrap(row["description"] as? String)
+            let bounds = try XCTUnwrap(row["bounds_1000"] as? [NSNumber])
+            guard bounds.count == 4 else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
+            let frame = CGRect(x: bounds[0].doubleValue, y: bounds[1].doubleValue,
+                width: bounds[2].doubleValue, height: bounds[3].doubleValue)
+            return try XCTUnwrap(ComputerUseNativeControls.Item(description: description, frame: frame,
+                enabled: row["enabled"] as? Bool, displayBounds: displayBounds))
+        }
+        let controlWindow: ComputerUseNativeControls.Window? = (controlObject["window"] as? [String: Any]).map { window in
+            .init(role: window["role"] as? String, subrole: window["subrole"] as? String,
+                title: window["title"] as? String, modal: window["modal"] as? Bool)
+        }
+        let nativeControls = try XCTUnwrap(ComputerUseNativeControls(items: controls,
+            truncated: controlObject["truncated"] as? Bool ?? true, window: controlWindow))
+        let goal = "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
+        let withControls = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: screenshot,
+            surface: .desktop, history: [], nativeControls: nativeControls)
+        var withoutControls = withControls
+        withoutControls.nativeControls = nil
+        XCTAssertEqual(withControls.goal, withoutControls.goal)
+        XCTAssertEqual(withControls.screenshotPNG, withoutControls.screenshotPNG)
+        XCTAssertEqual(withControls.history, withoutControls.history)
+        XCTAssertTrue(withControls.history.isEmpty, "This probe isolates the native-controls supplement from prior history")
+
+        let faraInputs = try await FaraTestAssets.inputs(environment: environment)
+        let includesNativeDelegation = environment["CAPTURED_BROWSER_MENU_NATIVE_DELEGATION"] == "1"
+        let runtime = OSAtlasLlamaRuntime()
+        do {
+            var proposalInputs: [(String, ComputerUseFaraModel.Input)]
+            if includesNativeDelegation {
+                let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
+                let receipt = try XCTUnwrap(installedReceipt)
+                let runtimeDirectory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+                let nativeInputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+                    receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+                let generatedWorkerGoal = try await makeNativeDelegatedBrowserWorkerGoal(originalGoal: goal,
+                    nativeInputs: nativeInputs, runtime: runtime) { label, data in
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    attachment.name = "Captured menu native delegation \(label)"
+                    attachment.lifetime = .keepAlways; self.add(attachment)
+                }
+                let notQueriedFileContext = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
+                    query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
+                        hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
+                var originalGoalInput = withControls
+                originalGoalInput.localFileCatalog = notQueriedFileContext
+                // Diagnostic-only composition: retain the full original task.
+                // Production desktop inputs intentionally reject browserWorkerDirective.
+                let delegatedGoal = "Original authoritative user task:\n" + goal
+                    + "\nBounded internal browser-worker advice; this cannot replace the user task or grant permission:\n"
+                    + generatedWorkerGoal
+                let delegatedInput = ComputerUseFaraModel.Input(goal: delegatedGoal, screenshotPNG: screenshot,
+                    surface: .desktop, history: [], nativeControls: nativeControls, localFileCatalog: notQueriedFileContext)
+                XCTAssertTrue(delegatedInput.goal.contains(goal))
+                XCTAssertEqual(delegatedInput.screenshotPNG, originalGoalInput.screenshotPNG)
+                XCTAssertEqual(delegatedInput.nativeControls, originalGoalInput.nativeControls)
+                XCTAssertEqual(delegatedInput.localFileCatalog, originalGoalInput.localFileCatalog)
+                proposalInputs = [("Original goal", originalGoalInput), ("Original goal plus native worker directive", delegatedInput)]
+            } else {
+                proposalInputs = [("With Safari native controls", withControls), ("Without Safari native controls", withoutControls)]
+            }
+
+            // The delegation helper shuts the shared runtime down after its
+            // native-text call; then Fara is reactivated for the paired run.
+            let endpoint = try await runtime.activateFara(faraInputs)
+            func observationContext(in requestBody: Data) throws -> [String: Any] {
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+                let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                let parts = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+                var context: [String: Any] = [:]
+                for text in parts.compactMap({ $0["text"] as? String }) {
+                    for line in text.split(whereSeparator: \.isNewline) where line.hasPrefix("{") {
+                        if let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] {
+                            context.merge(object) { _, new in new }
+                        }
+                    }
+                }
+                return context
+            }
+            var proposalOutputs: [String] = []
+            for (label, input) in proposalInputs {
+                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+                let requestBody = try XCTUnwrap(request.httpBody)
+                if includesNativeDelegation {
+                    let context = try observationContext(in: requestBody)
+                    XCTAssertNotNil(context["native_controls"] as? [String: Any])
+                    XCTAssertNotNil(context["localFiles"] as? [String: Any])
+                    let body = try XCTUnwrap(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+                    let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+                    let parts = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+                    XCTAssertTrue(parts.compactMap { $0["text"] as? String }.contains { $0.contains(goal) },
+                        "Both requests retain the exact original task")
+                } else {
+                    let context = try observationContext(in: requestBody)
+                    let controls = context["native_controls"] as? [String: Any]
+                    if label == "With Safari native controls" {
+                        let rows = try XCTUnwrap(controls?["items"] as? [[String: Any]])
+                        XCTAssertTrue(rows.contains { ($0["description"] as? String)?.contains("show sidebar") == true })
+                    } else {
+                        XCTAssertTrue(context["native_controls"] is NSNull)
+                    }
+                }
+                let requestAttachment = XCTAttachment(data: requestBody, uniformTypeIdentifier: "public.json")
+                requestAttachment.name = "Captured menu Fara request: \(label)"
+                requestAttachment.lifetime = .keepAlways; add(requestAttachment)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                proposalOutputs.append("\(label): \(proposal.action)\n\(proposal.response)")
+            }
+            let screenshotAttachment = XCTAttachment(data: screenshot, uniformTypeIdentifier: "public.png")
+            screenshotAttachment.name = "Captured Drive upload-menu screenshot (shared by both proposals)"
+            screenshotAttachment.lifetime = .keepAlways; add(screenshotAttachment)
+            let proposalsAttachment = XCTAttachment(string: proposalOutputs.joined(separator: "\n\n"))
+            proposalsAttachment.name = "Paired captured browser-menu Fara proposals (no actions dispatched)"
+            proposalsAttachment.lifetime = .keepAlways; add(proposalsAttachment)
+            await runtime.shutdown()
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+    }
+
     private func runDefaultBrowserFileProbe(uploadToDrive: Bool) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1" else {
             throw XCTSkip("Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
         let usesNativeDelegation = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
+        let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
         let began = ContinuousClock.now
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
@@ -229,9 +575,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             .appendingPathComponent("DefaultBrowserPickerResponse-" + UUID().uuidString + ".json")
         let nativeResponseURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("DefaultBrowserPickerNativeResponse-" + UUID().uuidString + ".json")
+        let nativeControlRequestURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserPickerNativeControlRequest-" + UUID().uuidString + ".json")
+        let nativeControlResponseURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserPickerNativeControlResponse-" + UUID().uuidString + ".json")
         defer {
             try? FileManager.default.removeItem(at: responseURL)
             try? FileManager.default.removeItem(at: nativeResponseURL)
+            try? FileManager.default.removeItem(at: nativeControlRequestURL)
+            try? FileManager.default.removeItem(at: nativeControlResponseURL)
         }
         let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { _, response in
             try? response.prefix(65_536).write(to: responseURL, options: .atomic)
@@ -279,19 +631,56 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             : "In the default browser, open https://translate.google.com/?sl=auto&tl=es&op=docs, choose \(name) from Downloads in the native file picker, then stop before pressing Upload. Do not submit the file."
         var proposals: [String] = []
         var actionErrors: [String] = []
-        var nativeCalls = 0
+        var nativeCalls = 0, nativeControlCalls = 0
+        var nativeControlTraces: [String] = []
         var selectedBeforeUpload = false
         var observedRequestedPage = false
         var uploadEffects = 0
+        var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int, pickerDismissed: Bool)?
         var pickerOpeningEffects = 0
         var delegatedWorkerGoal: String?
         func remoteUploadConfirmed() throws -> Bool {
+            acceptedUploadEvidence = nil
             guard uploadToDrive, uploadEffects == 1, session.currentFileOpenPanel == nil,
                   let window = session.currentWindow,
                   let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
                     application: window.application, mayAct: { true }),
-                  URL(string: page.url)?.host == "drive.google.com" else { return false }
-            return page.renderedAXText.contains(name) && page.renderedAXText.lowercased().contains("upload complete")
+                  URL(string: page.url)?.host == "drive.google.com",
+                  page.renderedAXText.contains(name),
+                  page.renderedAXText.lowercased().contains("upload complete") else { return false }
+            acceptedUploadEvidence = (page.url, page.renderedAXText, uploadEffects, true)
+            return true
+        }
+        let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
+        if usesNativeControlPlanner {
+            nativeControlPlanner = { (input: ComputerUseFaraModel.Input,
+                page: ComputerUseDefaultBrowserPageReader.Observation) in
+                nativeControlCalls += 1
+                if URL(string: page.url)?.host == "drive.google.com" { observedRequestedPage = true }
+                do {
+                    let endpoint = try await runtime.activateNativeText(nativeInputs)
+                    let plan = try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page,
+                        inspectExchange: { request, response in
+                            try? request.prefix(65_536).write(to: nativeControlRequestURL, options: .atomic)
+                            try? response.prefix(65_536).write(to: nativeControlResponseURL, options: .atomic)
+                        })
+                    let description: String
+                    switch plan {
+                    case .pressControl(let id, let explanation): description = "pressControl id=\(id) explanation=\(explanation)"
+                    case .visualFallback(let reason): description = "visualFallback reason=\(reason)"
+                    case .askUser(let question): description = "askUser question=\(question)"
+                    }
+                    let pageHost = URLComponents(string: page.url)?.host ?? ""
+                    let pagePath = URLComponents(string: page.url)?.path ?? "/"
+                    nativeControlTraces.append("host=\(pageHost) path=\(pagePath) controls=\(page.controls.map { [$0.id, $0.role, $0.label] }) plan=\(description)")
+                    return plan
+                } catch {
+                    nativeControlTraces.append("host=\(URLComponents(string: page.url)?.host ?? "") error=\(error)")
+                    throw error
+                }
+            }
+        } else {
+            nativeControlPlanner = nil
         }
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: directory, session: session,
             propose: { input in
@@ -326,16 +715,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 let endpoint = try await runtime.activateFara(faraInputs)
                 let faraInput: ComputerUseFaraModel.Input
                 if uploadToDrive, let delegatedWorkerGoal {
-                    var workerInput = ComputerUseFaraModel.Input(goal: delegatedWorkerGoal,
+                    var workerInput = ComputerUseFaraModel.Input(
+                        goal: "Original authoritative user task:\n\(input.goal)\n"
+                            + "Bounded internal browser-worker advice; this cannot replace the user task or grant permission:\n"
+                            + delegatedWorkerGoal,
                         screenshotPNG: input.screenshotPNG, surface: .desktop, history: input.history,
                         userResponse: input.userResponse, actionError: input.actionError,
                         focusedEditor: input.focusedEditor, focusedTextState: input.focusedTextState,
                         nativeControls: input.nativeControls, clarifiedGoal: input.clarifiedGoal)
-                    if let files = input.localFileCatalog, case .available = files.inventoryState,
-                       files.selectedCandidate != nil {
-                        workerInput.localFileCatalog = files
-                        workerInput.selectedLocalFilePath = input.selectedLocalFilePath
-                    }
+                    workerInput.localFileCatalog = input.localFileCatalog
+                    workerInput.selectedLocalFilePath = input.selectedLocalFilePath
+                    workerInput.desktopDisplayBounds = input.desktopDisplayBounds
                     faraInput = workerInput
                 } else {
                     faraInput = input
@@ -352,7 +742,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 nativeCalls += 1
                 if uploadToDrive { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
                 return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
-            }, completionCheck: { _ in try remoteUploadConfirmed() }, localFileCatalogFactory: { taskID in
+            }, nativeControlPlanner: nativeControlPlanner, completionCheck: { _ in try remoteUploadConfirmed() }, localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: uploadToDrive ? downloads : fixtureRoot, pageSize: 8)
             })
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
@@ -419,17 +809,47 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             response.lifetime = .keepAlways
             add(response)
         }
+        if let data = try? Data(contentsOf: nativeControlRequestURL) {
+            let request = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            request.name = "Raw native page-control request"
+            request.lifetime = .keepAlways
+            add(request)
+        }
+        if let data = try? Data(contentsOf: nativeControlResponseURL) {
+            let response = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            response.name = "Raw native page-control response"
+            response.lifetime = .keepAlways
+            add(response)
+        }
+        if !nativeControlTraces.isEmpty {
+            let trace = XCTAttachment(string: nativeControlTraces.joined(separator: "\n"))
+            trace.name = "Native page-control decisions"
+            trace.lifetime = .keepAlways
+            add(trace)
+        }
         if let data = try? Data(contentsOf: responseURL) {
             let response = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
             response.name = "Raw Fara response at native picker handoff"
             response.lifetime = .keepAlways
             add(response)
         }
-        XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(String(describing: executor.lastSessionFailureForDiagnostics)); nativeCalls=\(nativeCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(executor.lastActionDiagnosticForTests)")
+        XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(String(describing: executor.lastSessionFailureForDiagnostics)); nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(executor.lastActionDiagnosticForTests)")
         guard let result else { XCTFail("No result; error=\(String(describing: failure))"); return }
         if uploadToDrive {
             XCTAssertEqual(uploadEffects, 1)
-            XCTAssertTrue(try remoteUploadConfirmed(), "Require the unique fixture name and fresh upload-complete evidence on real Drive")
+            guard let evidence = acceptedUploadEvidence else {
+                XCTFail("Completion validator did not retain fresh exact-file evidence. nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); uploadEffects=\(uploadEffects); result=\(result)")
+                return
+            }
+            let evidenceAttachment = XCTAttachment(string: "URL: \(evidence.url)\nPicker dismissed at validation: \(evidence.pickerDismissed)\nUpload effects: \(evidence.uploadEffects)\n\(evidence.renderedAXText)")
+            evidenceAttachment.name = "Fresh Drive upload completion evidence"
+            evidenceAttachment.lifetime = .keepAlways
+            add(evidenceAttachment)
+            XCTAssertEqual(evidence.uploadEffects, 1)
+            XCTAssertTrue(evidence.pickerDismissed)
+            XCTAssertEqual(URL(string: evidence.url)?.host, "drive.google.com")
+            XCTAssertTrue(evidence.renderedAXText.contains(name))
+            XCTAssertTrue(evidence.renderedAXText.lowercased().contains("upload complete"))
             if case .completed = result { } else { XCTFail("Expected completed real upload; got \(result), error=\(String(describing: failure))") }
         } else if case .userInterventionRequired = result { } else { XCTFail("Expected handoff before picker Upload; got \(result), error=\(String(describing: failure))") }
         XCTAssertNotNil(executor.retainedWindowForDiagnostics)
@@ -441,35 +861,46 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     func testOptInCurrentDefaultBrowserNativePointerGeometry() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_POINTER_DIAGNOSTIC"] == "1" else {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_DEFAULT_BROWSER_POINTER_DIAGNOSTIC"] == "1" else {
             throw XCTSkip("Read-only hit test on the prepared real browser page")
         }
+        func coordinate(_ key: String, default fallback: Int) throws -> Int {
+            guard let raw = environment[key] else { return fallback }
+            guard let value = Int(raw), (-10_000...10_000).contains(value) else {
+                throw XCTSkip("Invalid optional pointer diagnostic coordinate: \(key)")
+            }
+            return value
+        }
+        let hasCoordinateOverride = environment["DEFAULT_BROWSER_POINTER_X"] != nil
+            || environment["DEFAULT_BROWSER_POINTER_Y"] != nil
+        let x = try coordinate("DEFAULT_BROWSER_POINTER_X", default: 1152)
+        let y = try coordinate("DEFAULT_BROWSER_POINTER_Y", default: 401)
+        let expectedLabel = environment["DEFAULT_BROWSER_POINTER_EXPECTED_LABEL"]
+            ?? (hasCoordinateOverride ? nil : "Browse your files")
         let handler = try XCTUnwrap(ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler())
         let app = try XCTUnwrap(NSWorkspace.shared.frontmostApplication)
         XCTAssertEqual(app.bundleIdentifier, handler.bundleIdentifier)
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
-        let action = ComputerUsePredictedAction.click(x: 1152, y: 401, button: 1, count: 1)
-        let frame = try tools.nativePointerTargetFrame(for: action)
-        var facts: [String: String] = ["nativeTargetFrame": String(describing: frame)]
+        let action = ComputerUsePredictedAction.click(x: x, y: y, button: 1, count: 1)
         let initialScreen = try tools.currentScreen()
         let firstImage = try ComputerUseDesktopImage(observation: initialScreen)
         let windowBounds = try XCTUnwrap(initialScreen.frontmostWindowBounds)
+        var facts: [String: String] = [
+            "point": "\(x),\(y)", "expectedLabel": expectedLabel ?? "<not asserted>",
+            "captureOrder": "before pointer/control AX reads",
+        ]
+        let frame = try tools.nativePointerTargetFrame(for: action)
+        facts["nativeTargetFrame"] = String(describing: frame)
         _ = try tools.nativeControlObservation(displayBounds: initialScreen.displayBounds, windowBounds: windowBounds)
-        facts["targetAfterCaptureAndControls"] = String(describing: try tools.nativePointerTargetFrame(for: action))
-        try await Task.sleep(for: .seconds(2))
-        let secondImage = try ComputerUseDesktopImage(observation: tools.currentScreen())
-        facts["windowPixelsMatch"] = String(try firstImage.matchesPixels(of: secondImage, in: windowBounds, wholePixelsOnly: true))
-        _ = try firstImage.matchesInsertionPointPixels(of: secondImage, window: windowBounds, field: windowBounds) { changed, _, _ in
-            facts["changedDisplayBounds"] = String(describing: changed)
-        }
-        for (name, image) in [("Before native capture wait", firstImage), ("After native capture wait", secondImage)] {
-            let screenshot = XCTAttachment(data: image.png, uniformTypeIdentifier: "public.png")
-            screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
-        }
+        facts["targetAfterControlCapture"] = String(describing: try tools.nativePointerTargetFrame(for: action))
+        let label = tools.actionablePointerTargetLabel(at: CGPoint(x: x, y: y), providerAction: action)
+        facts["targetLabel"] = String(describing: label)
+
         for (name, root) in [("system", AXUIElementCreateSystemWide()),
                              ("application", AXUIElementCreateApplication(app.processIdentifier))] {
             var hit: AXUIElement?
-            facts[name + "Result"] = String(AXUIElementCopyElementAtPosition(root, 1152, 401, &hit).rawValue)
+            facts[name + "Result"] = String(AXUIElementCopyElementAtPosition(root, Float(x), Float(y), &hit).rawValue)
             for depth in 0..<4 {
                 guard let element = hit else { break }
                 for attribute in [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute] {
@@ -484,11 +915,38 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 hit = (parent as! AXUIElement)
             }
         }
+        let immediateScreen = try tools.currentScreen()
+        let immediateImage = try ComputerUseDesktopImage(observation: immediateScreen)
+        func comparePoint(_ other: ComputerUseDesktopImage, prefix: String) throws {
+            var changedBounds: [String] = []
+            let matches = try firstImage.matchesPointerPixels(of: other, window: windowBounds,
+                target: CGRect(x: x, y: y, width: 1, height: 1)) { changed, pixels, _ in
+                    changedBounds = [String(describing: changed), String(describing: pixels)]
+                }
+            facts[prefix + "PointContextMatches"] = String(matches)
+            facts[prefix + "ChangedDisplayAndPixelBounds"] = changedBounds.joined(separator: " | ")
+        }
+        try comparePoint(immediateImage, prefix: "immediateAfterReads")
+        facts["immediateWindowPixelsMatch"] = String(try firstImage.matchesPixels(of: immediateImage,
+            in: windowBounds, wholePixelsOnly: true))
+
+        try await Task.sleep(for: .seconds(2))
+        let delayedImage = try ComputerUseDesktopImage(observation: tools.currentScreen())
+        try comparePoint(delayedImage, prefix: "afterTwoSeconds")
+        facts["delayedWindowPixelsMatch"] = String(try firstImage.matchesPixels(of: delayedImage,
+            in: windowBounds, wholePixelsOnly: true))
+        for (name, image) in [("Before native reads", firstImage), ("Immediately after native reads", immediateImage),
+                              ("Two seconds after native reads", delayedImage)] {
+            let screenshot = XCTAttachment(data: image.png, uniformTypeIdentifier: "public.png")
+            screenshot.name = name; screenshot.lifetime = .keepAlways; add(screenshot)
+        }
         let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys]),
             uniformTypeIdentifier: "public.json")
-        attachment.name = "Native browser point geometry"; attachment.lifetime = .keepAlways; add(attachment)
-        XCTAssertEqual(tools.actionablePointerTargetLabel(at: CGPoint(x: 1152, y: 401), providerAction: action), "Browse your files")
-        XCTAssertNil(tools.approvalReason(for: action), "A directly hit neutral button must retain its native label even if AX geometry is displaced")
+        attachment.name = "Native browser point geometry and read timing"; attachment.lifetime = .keepAlways; add(attachment)
+        if let expectedLabel { XCTAssertEqual(label, expectedLabel) }
+        if !hasCoordinateOverride {
+            XCTAssertNil(tools.approvalReason(for: action), "The default directly hit neutral button must retain native neutral-action policy")
+        }
     }
 
     func testOptInCaptureRecognizesCurrentDefaultBrowserFilePicker() async throws {
@@ -808,7 +1266,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     accessibilityIdentity: "window:\(desktop.focusedID ?? "none")") },
                 actionPerformer: { action in
                     guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == (1 << 3) else {
-                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        guard let additionalAction = desktop.additionalAction else {
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                        try additionalAction(action)
+                        return
                     }
                     desktop.keyCount += 1
                     for index in 0..<desktop.createCount {
@@ -829,6 +1291,48 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
                 planningAccessibilityIdentityProvider: { "fixture-window" },
                 frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { app.bundleIdentifier })
+        }
+    }
+
+    private final class ExecutorPageAXGraph {
+        private let application: ComputerUseApplicationIdentity
+        private let window: AXUIElement
+        private var refs: [String: AXUIElement] = [:]
+        private var attrs: [String: [String: CFTypeRef]] = [:]
+
+        init(application: ComputerUseApplicationIdentity, window: AXUIElement,
+             controlFrame: CGRect = CGRect(x: 20, y: 30, width: 80, height: 36)) {
+            self.application = application
+            self.window = window
+            self.controlFrame = controlFrame
+            refs["root"] = AXUIElementCreateApplication(application.processIdentifier + 200)
+            refs["window"] = window
+            refs["web"] = AXUIElementCreateApplication(application.processIdentifier + 202)
+            refs["button"] = AXUIElementCreateApplication(application.processIdentifier + 204)
+        }
+        private let controlFrame: CGRect
+        private func element(_ key: String) -> AXUIElement { refs[key]! }
+        func makePage() {
+            attrs["root", default: [:]][kAXFocusedWindowAttribute as String] = window
+            attrs["window", default: [:]][kAXRoleAttribute as String] = "AXWindow" as NSString
+            attrs["window", default: [:]][kAXChildrenAttribute as String] = [element("web")] as CFArray
+            attrs["web", default: [:]][kAXRoleAttribute as String] = "AXWebArea" as NSString
+            attrs["web", default: [:]]["AXURL"] = "https://drive.google.com/drive/my-drive" as NSString
+            attrs["web", default: [:]][kAXChildrenAttribute as String] = [element("button")] as CFArray
+            attrs["button", default: [:]][kAXRoleAttribute as String] = "AXButton" as NSString
+            attrs["button", default: [:]][kAXTitleAttribute as String] = "New" as NSString
+            attrs["button", default: [:]][kAXEnabledAttribute as String] = NSNumber(value: true)
+            var origin = controlFrame.origin, size = controlFrame.size
+            attrs["button", default: [:]][kAXPositionAttribute as String] = AXValueCreate(.cgPoint, &origin)!
+            attrs["button", default: [:]][kAXSizeAttribute as String] = AXValueCreate(.cgSize, &size)!
+        }
+        var access: ComputerUseDefaultBrowserPageReader.Access {
+            .init(frontmost: { [self] in
+                (application, element("root"))
+            }, read: { [self] name, ref in
+                guard let key = refs.first(where: { CFEqual($0.value, ref) })?.key else { return nil }
+                return attrs[key]?[name]
+            }, timeout: { _, _ in })
         }
     }
 }
