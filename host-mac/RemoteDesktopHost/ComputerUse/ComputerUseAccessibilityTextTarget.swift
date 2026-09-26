@@ -214,7 +214,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     deinit { lifecycle?.cancel() }
 
     func snapshot() -> ComputerUseTextSnapshot? {
-        guard let app = applicationForObservation() else { return nil }
+        guard let app = applicationForObservation(allowFreshScope: true) else { return nil }
         let root = app.root
         setTimeout(root, 0.15)
         guard let element = elementAttribute(kAXFocusedUIElementAttribute, on: root),
@@ -225,7 +225,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     /// Bounded discovery in the current window. Labels are untrusted planning
     /// data; opaque IDs retain the actual AX references needed for execution.
     func fields() -> [ComputerUseTextField] {
-        guard let app = applicationForObservation() else { return [] }
+        guard let app = applicationForObservation(allowFreshScope: true) else { return [] }
         let revision = lifecycleRevision
         let root = app.root
         setTimeout(root, 0.15)
@@ -491,9 +491,14 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         return access.write(attribute, value, binding.element)
     }
 
-    private func applicationForObservation() -> Application? {
+    private func applicationForObservation(allowFreshScope: Bool = false) -> Application? {
         let app = access.frontmost()
-        if app?.identity.utf8.elementsEqual(observedApplication?.utf8 ?? "".utf8) != true {
+        synchronizeLifecycle()
+        // Overflow retires every retained reference. A new observation may
+        // start a new monitor and bind freshly queried controls; a lookup or
+        // mutation using an old target ID must never recover that authority.
+        if app?.identity.utf8.elementsEqual(observedApplication?.utf8 ?? "".utf8) != true
+            || (allowFreshScope && lifecycleUnavailable) {
             lifecycle?.cancel(); lifecycle = nil
             bindings.removeAll(); destroyedElements.removeAll()
             lifecycleUnavailable = false; lifecycleRevision = UUID()

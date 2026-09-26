@@ -111,6 +111,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(calls, 0)
         let clarification = try XCTUnwrap(executor.clarification(taskID: taskID))
         let choice = try XCTUnwrap(clarification.choices?.first)
+        // The user has also selected that row in the native chooser.
+        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
+            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
+            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil,
+            selectedFileURLs: [downloads.appendingPathComponent(choice.label)],
+            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
+            primaryActionEnabled: true)
         let result = try await executor.continueClarification(taskID: taskID + "-choice", originatingTaskID: taskID,
             goal: clarification.goal, selectedChoice: choice, progress: { _ in })
         XCTAssertTrue(sawOriginalGoal)
@@ -190,10 +197,17 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
             primaryActionEnabled: false)
         var visualCalls = 0, nativeCalls = 0
+        let preparedPicker = state.fileOpenPanel
+        state.fileOpenPanel = nil
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: root.appendingPathComponent("executor"),
-            session: session, propose: { _ in
-                visualCalls += 1; XCTFail("Fara must not choose among local files before host selection");
-                return .init(response: "", decision: .unsupported)
+            session: session, propose: { input in
+                visualCalls += 1
+                XCTAssertNil(state.fileOpenPanel, "Native planner takes over once the picker opens")
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.localFileCatalog?.inventoryState, .notQueried,
+                    "Advertise host file selection before the browser model chooses its next step")
+                XCTAssertNil(input.selectedLocalFilePath)
+                return .init(response: "", decision: .handoff("Open the website's file chooser."))
             }, nativeFilePlanner: { input in
                 nativeCalls += 1
                 XCTAssertEqual(input.goal, goal)
@@ -207,12 +221,50 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             }, localFileCatalogFactory: { id in
                 try ComputerUseLocalFileCatalog(taskID: id, approvedDirectory: downloads)
             })
+        _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(nativeCalls, 0)
+        state.fileOpenPanel = preparedPicker
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: tools, progress: { _ in })
         guard case .clarificationRequired = result else { return XCTFail("Expected host-owned file choices") }
         XCTAssertEqual(nativeCalls, 2)
-        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(visualCalls, 1)
         XCTAssertEqual(state.inputCount, 1, "File catalog and clarification require no native input")
+    }
+
+    func testNativeFilePickerUsesResolvedPathAndStopsBeforeUpload() {
+        let element = AXUIElementCreateSystemWide()
+        let candidate = URL(fileURLWithPath: "/tmp/Chosen résumé.pdf")
+        func panel(navigating: Bool = true, selected: [URL] = []) -> ComputerUseDefaultBrowserSession.FileOpenPanel {
+            .init(parentWindowID: "window", parentWindowElement: element, accessibilityElement: element,
+                bounds: CGRect(x: 0, y: 0, width: 800, height: 600), isFocused: true,
+                goToFolderBounds: navigating ? CGRect(x: 100, y: 100, width: 400, height: 200) : nil,
+                pathTextFieldElement: navigating ? element : nil, selectedFileURLs: selected,
+                primaryActionElement: element, primaryActionBounds: CGRect(x: 700, y: 560, width: 80, height: 30),
+                primaryActionEnabled: true)
+        }
+        func next(_ panel: ComputerUseDefaultBrowserSession.FileOpenPanel) -> ComputerUseDesktopProposal? {
+            ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel, selectedURL: candidate)
+        }
+        XCTAssertEqual(next(panel(navigating: false))?.action, .key(["Command", "Shift", "g"]))
+        var current = panel()
+        current.pathFieldIsFocused = true
+        current.pathFieldValue = "/tmp/old.pdf"
+        current.pathFieldSelection = NSRange(location: 0, length: 0)
+        XCTAssertEqual(next(current)?.action, .key(["Command", "a"]))
+        current.pathFieldSelection = NSRange(location: 0, length: current.pathFieldValue!.utf16.count)
+        XCTAssertEqual(next(current)?.action, .typeText(candidate.path))
+        current.pathFieldValue = candidate.path
+        current.pathFieldSelection = NSRange(location: candidate.path.utf16.count, length: 0)
+        XCTAssertEqual(next(current)?.action, .key(["Return"]))
+        current.pathFieldIsFocused = false
+        guard case .handoff? = next(current)?.decision else { return XCTFail("Wrong path-field focus must yield") }
+        XCTAssertFalse(ComputerUseDefaultBrowserActionScope.permitsFilePanel(.key(usage: 0x28, modifiers: 0),
+            within: current.actionBounds, panel: current, selectedURL: candidate))
+        XCTAssertNil(next(panel(navigating: false, selected: [candidate])), "The native path adapter never presses Upload")
+        XCTAssertEqual(next(panel(navigating: false, selected: [URL(fileURLWithPath: "/tmp/other.pdf")]))?.action,
+            .key(["Command", "Shift", "g"]))
     }
 
     private typealias DocumentRequirement = ComputerUseMCPDocumentProposal.Requirement
@@ -1726,7 +1778,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             effects += 1
             scopeValid = false
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(25))
+                try? await Task.sleep(for: .milliseconds(300))
                 scopeValid = true
             }
         })
@@ -1802,26 +1854,32 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
             launchGeneration: 1, codeIdentity: code)!
 
-        for scenario in ["outside", "inside"] {
+        for (mode, scenario) in [("click", "outside"), ("click", "elsewhere in window"), ("click", "target"),
+                                 ("key", "elsewhere in window"), ("key", "focus")] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: directory) }
             var changed = false, proposals = 0, effects = 0
+            var focus = "original-control"
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
                 approvalTargetProvider: { _ in .init(context: "AXButton", applicationID: "fixture", accessibilityIdentity: "visual-target", frame: nil) }, actionPerformer: { _ in effects += 1 },
                 screenProvider: {
                     let base = CIImage(color: .black).cropped(to: display)
                     let changedRect = scenario == "outside"
                         ? CGRect(x: 5, y: 1030, width: 20, height: 20)
-                        : CGRect(x: 500, y: 200, width: 20, height: 20)
+                        : (scenario == "target" ? CGRect(x: 1144, y: 641, width: 20, height: 20)
+                            : CGRect(x: 500, y: 200, width: 20, height: 20))
                     let image = changed ? CIImage(color: .blue).cropped(to: changedRect).composited(over: base) : base
                     return .init(image: image, displayBounds: display, frontmostWindowBounds: window)
                 }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXButton Browse" },
                 authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+                planningAccessibilityIdentityProvider: { focus },
                 frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
             let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
                 proposals += 1
                 changed = true
                 if proposals == 1 {
+                    if scenario == "focus" { focus = "another-control" }
+                    if mode == "key" { return .init(response: "tab", action: .key(["Tab"])) }
                     return .init(response: "click", action: .pointer(.leftClick, .init(x: 2000.0 / 3.0, y: 401000.0 / 1050.0)))
                 }
                 return .init(response: "handoff", decision: .handoff("Review the page."))
@@ -1829,12 +1887,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
             let result = try await executor.execute(taskID: "nil-ax-\(scenario)", prompt: "Click in the owned window.",
                 trustedUserPrompt: "Click in the owned window.", tools: tools, progress: { _ in })
-            if scenario == "outside" {
+            if scenario != "target" && scenario != "focus" {
                 XCTAssertEqual(result, .userInterventionRequired("Review the page."))
-                XCTAssertEqual(effects, 1, "A display change outside the owned window must not block its visual click")
+                XCTAssertEqual(effects, 1, "A change outside the click context must not block its visual click")
                 XCTAssertEqual(proposals, 2)
             } else {
-                XCTAssertEqual(effects, 0, "A changed pixel inside the owned window must still invalidate the click")
+                XCTAssertEqual(effects, 0, "Changed target pixels or keyboard focus must invalidate the action")
                 XCTAssertEqual(proposals, 2)
             }
         }
@@ -2257,6 +2315,20 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertLessThanOrEqual(bounded.utf8.count, 1_024)
         XCTAssertTrue(bounded.hasSuffix("👩🏽‍💻")); XCTAssertTrue(context.hasPrefix(bounded))
         permitted = false; XCTAssertThrowsError(try tools.nativeFocusedEditorDescription())
+    }
+
+    func testKeyboardCheckpointUsesVisiblePartOfScrollableFocus() {
+        let display = CGRect(x: 0, y: 0, width: 1728, height: 1117)
+        let window = CGRect(x: 400, y: 200, width: 950, height: 650)
+        let outline = CGRect(x: 598, y: 426, width: 707, height: 3857)
+        let point = ComputerUseHostTools.nativeKeyboardCheckpoint(focusedFrame: outline,
+            windowBounds: window, displayBounds: display)
+        XCTAssertEqual(point, CGPoint(x: 951.5, y: 638))
+        XCTAssertTrue(display.contains(point)); XCTAssertTrue(window.contains(point))
+        for frame in [nil, CGRect.zero, CGRect(x: 0, y: 2000, width: 50, height: 50)] as [CGRect?] {
+            XCTAssertEqual(ComputerUseHostTools.nativeKeyboardCheckpoint(focusedFrame: frame,
+                windowBounds: window, displayBounds: display), CGPoint(x: 875, y: 525))
+        }
     }
 
     func testApprovalPixelsIgnoreOnlyBackgroundOutsideAStableOwningWindow() throws {

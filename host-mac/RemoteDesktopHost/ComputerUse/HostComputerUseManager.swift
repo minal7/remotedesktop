@@ -882,7 +882,7 @@ struct ComputerUsePlanningStateFingerprint: Equatable {
             && expectedApplicationIdentity == candidateApplicationIdentity
     }
 
-    private func matchesStableSignedFocusedAuthority(
+    func matchesStableSignedFocusedAuthority(
         _ candidate: ComputerUsePlanningStateFingerprint
     ) -> Bool {
         guard let expectedApplicationIdentity = frontmostApplicationIdentity,
@@ -2166,6 +2166,17 @@ final class ComputerUseHostTools {
             return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context,
                 verifiedSearchSubmission: nativeTarget.isSearchSubmission, verifiedLinkNavigation: nativeTarget.navigation != nil)
         }
+        if case .key(let usage, let modifiers) = action, usage == 0x28, modifiers == 0,
+           usesLiveFrontmostApplicationIdentity, screenProvider == nil, accessibilityContextProvider == nil,
+           mayAct(), let app = frontmostApplicationSnapshot().identity, app.codeIdentity != nil,
+           let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(app),
+           !snapshot.hasUnrecognizedSheets, let panel = snapshot.fileOpenPanel,
+           panel.isNavigatingPath, panel.pathFieldIsFocused {
+            // Return in the native Go To field navigates the local picker.
+            // It neither activates the outer Open/Upload button nor submits a
+            // website form; the retained-window scope is checked separately.
+            return nil
+        }
         return ComputerUseActionSafetyPolicy.approvalReason(
             for: action,
             accessibilityContext: accessibilityContext(for: action))
@@ -2199,9 +2210,11 @@ final class ComputerUseHostTools {
 
         for _ in 0 ..< 8 {
             let snapshot = accessibilitySnapshot(for: current)
+            // AX hit testing identifies the element at the physical point.
+            // Browser AX frames can be offset from that point; use the hit
+            // for its label, and validate usable geometry separately.
             if snapshot.isActionable,
-               (!requiringLabel || snapshot.attestationLabel != nil),
-               snapshot.frame?.contains(point) == true {
+               (!requiringLabel || snapshot.attestationLabel != nil) {
                 return snapshot
             }
             guard let parent = parentElement(of: current) else { break }
@@ -2531,7 +2544,11 @@ final class ComputerUseHostTools {
         // Geometry is useful even when an editor or icon has no semantic
         // label. Label attestation keeps its stricter, separate requirement;
         // the executor still validates target authority and current pixels.
-        return actionableElementSnapshot(at: CGPoint(x: x, y: y), requiringLabel: false)?.frame
+        let point = CGPoint(x: x, y: y)
+        guard let frame = actionableElementSnapshot(at: point, requiringLabel: false)?.frame,
+              !frame.isEmpty, [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              frame.contains(point) else { return nil }
+        return frame
     }
 
     func nativeFocusedTextFrame() throws -> CGRect? {
@@ -2678,9 +2695,9 @@ final class ComputerUseHostTools {
         case .key:
             let focused = focusedElementSnapshot()
             snapshots = focused.map { [$0] } ?? []
-            checkpoints = focused?.center.map { [$0] }
-                ?? [CGPoint(x: CGDisplayBounds(CGMainDisplayID()).midX,
-                            y: CGDisplayBounds(CGMainDisplayID()).midY)]
+            checkpoints = [Self.nativeKeyboardCheckpoint(focusedFrame: focused?.frame,
+                windowBounds: liveFrontmostWindowSnapshot()?.bounds,
+                displayBounds: CGDisplayBounds(CGMainDisplayID()))]
 
         case .typeText:
             guard let focused = focusedElementSnapshot() else {
@@ -2711,6 +2728,21 @@ final class ComputerUseHostTools {
                 : snapshots.map(\.identity).joined(separator: " -> "),
             applicationID: applicationID,
             visualCheckpoints: checkpoints)
+    }
+
+    static func nativeKeyboardCheckpoint(focusedFrame: CGRect?, windowBounds: CGRect?, displayBounds: CGRect) -> CGPoint {
+        func visible(_ frame: CGRect?, in bounds: CGRect) -> CGRect? {
+            guard let frame, !frame.isEmpty,
+                  [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite) else { return nil }
+            let intersection = frame.intersection(bounds)
+            return intersection.isEmpty || intersection.isNull ? nil : intersection
+        }
+        let window = visible(windowBounds, in: displayBounds) ?? displayBounds
+        // AX outlines can describe all scrollable rows, with their center far
+        // offscreen. Bind keyboard pixels to the visible part of that control.
+        // This point is only observed; keyboard input still targets AX focus.
+        let target = visible(focusedFrame, in: window) ?? window
+        return CGPoint(x: target.midX, y: target.midY)
     }
 
     private func accessibilityContext(for action: ComputerUsePredictedAction) -> String {

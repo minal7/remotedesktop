@@ -882,7 +882,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         }
     }
 
-    func testNativeLifecycleScopeReplacementCancelsOldCallbacksAndOverflowStopsObservation() throws {
+    func testNativeLifecycleOverflowRetiresOldReferencesAndFreshObservationRecovers() throws {
         let graph = AXTextGraph()
         var monitors: [AXFixtureLifecycleMonitor] = []
         graph.lifecycleFactory = { _ in let next = AXFixtureLifecycleMonitor(); monitors.append(next); return next }
@@ -899,11 +899,20 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             monitors[1].notify(kAXUIElementDestroyedNotification as String, element: graph.element("other-label"))
         }
         let calls = graph.calls.count
-        XCTAssertNil(target?.snapshot(targetID: second.targetID)); XCTAssertNil(target?.snapshot())
-        XCTAssertTrue(target?.fields().isEmpty == true)
+        XCTAssertNil(target?.snapshot(targetID: second.targetID))
         XCTAssertEqual(graph.calls.count, calls, "Lost event coverage must stop all AX queries in this scope")
+        let fresh = try XCTUnwrap(target?.snapshot(), "A new observation must be able to establish fresh AX authority")
+        XCTAssertNotEqual(fresh.targetID, second.targetID)
+        XCTAssertEqual(monitors.count, 3)
+        XCTAssertEqual(monitors[1].cancellations, 1)
+        XCTAssertNil(target?.snapshot(targetID: second.targetID), "An old reference must never revive")
+        monitors[1].notify(kAXUIElementDestroyedNotification as String, element: graph.element("destination"))
+        XCTAssertEqual(target?.snapshot(targetID: fresh.targetID), fresh)
+        XCTAssertThrowsError(try target?.focus(expected: second))
+        XCTAssertTrue(graph.writes.isEmpty)
         target = nil
         XCTAssertEqual(monitors[1].cancellations, 1)
+        XCTAssertEqual(monitors[2].cancellations, 1)
     }
 
     func testNativeLifecycleCallbackRegistryOwnsExactRegistrationAndBoundsItsInbox() throws {

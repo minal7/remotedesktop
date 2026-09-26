@@ -118,6 +118,26 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         catch { throw Failure.scopedSurfaceChanged }
     }
 
+    private func waitForPostActionSurface(_ observation: Observation, tools: ComputerUseHostTools) async throws {
+        try await Task.sleep(for: .milliseconds(100))
+        guard surfaceScopeCheck != nil else { return }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        while true {
+            try Task.checkCancellation(); try tools.requireActive()
+            let app = tools.frontmostApplicationSnapshot()
+            guard app.identity == observation.fingerprint.frontmostApplicationIdentity,
+                  app.policyName == observation.fingerprint.frontmostApplication else { throw Failure.scopedSurfaceChanged }
+            do { try checkScopedSurface(); return }
+            catch Failure.scopedSurfaceChanged {
+                guard ContinuousClock.now < deadline else { throw Failure.scopedSurfaceChanged }
+                // A native sheet can briefly leave AX focus unavailable. Wait
+                // for the existing scope to validate; never replay the input
+                // or ask the model to act on the transitional surface.
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+    }
+
     private func verifyCompletionCandidate(_ answer: String, observation: Observation,
                                            tools: ComputerUseHostTools,
                                            assertOwnership: () throws -> Void) async throws {
@@ -185,6 +205,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         case .typeText?, .key?:
             if let action, try tools.focusedTypingTargetIsEditable(providerAction: action) {
                 matches = expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint)
+            } else if case .key? = action, surfaceScopeCheck != nil {
+                // Keyboard navigation belongs to the same signed window and
+                // focused control, independent of unrelated pixel animation.
+                matches = expected.fingerprint.matchesStableSignedFocusedAuthority(fresh.fingerprint)
             } else { matches = expected.fingerprint == fresh.fingerprint }
         case .click(let x, let y, _, _)?:
             let target = try action.flatMap { try tools.nativePointerTargetFrame(for: $0) }
@@ -211,11 +235,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                       let window = expected.fingerprint.frontmostWindowBounds,
                       window.contains(CGPoint(x: x, y: y)),
                       expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint) {
-                // Visual fallback still works when AX has no element for the
-                // point. Pixels outside the retained window are not its target.
-                matches = try expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
+                // Without trustworthy AX geometry, recheck the physical point
+                // and its surrounding context in the retained window.
+                let pointContext = CGRect(x: x, y: y, width: 1, height: 1)
+                matches = try expected.image.matchesPointerPixels(of: fresh.image, window: window, target: pointContext)
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
-                    "pointerPoint": "\(x),\(y)", "pointerWindowPixelsMatch": "false"] }
+                    "pointerPoint": "\(x),\(y)", "pointerContextPixelsMatch": "false"] }
             } else {
                 // A point outside the focused window was grounded in the full
                 // desktop. Changes elsewhere cannot inherit window-only proof.
@@ -351,7 +376,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     try checkScopedSurface()
                 }
                 if let action {
-                    if case .typeText = action, try !tools.focusedTypingTargetIsEditable(providerAction: action) { throw Failure.changedScreen }
+                    if case .typeText = action, try !tools.focusedTypingTargetIsEditable(providerAction: action) {
+                        lastRevalidationDiagnostic = ["blockedAt": "typing-target-unavailable"]
+                        throw Failure.changedScreen
+                    }
                     guard try !tools.actionIsObstructedByTransientSystemOverlay(action) else { throw Failure.changedScreen }
                     try checkScopedSurface(action)
                     let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
@@ -410,7 +438,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 // process. Cancellation here must not lose its history or
                 // reuse its journal ID after Resume.
                 if action != nil {
-                    try await Task.sleep(for: .milliseconds(100))
+                    try await waitForPostActionSurface(observation, tools: tools)
                 }
             } catch Failure.completionUnverified {
                 record(proposal, observation: observation, session: session)
@@ -513,6 +541,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         // Match the ordinary verified-input path: the next proposal observes
         // success, and only subsequent consecutive rejections count.
         session.actionError = nil; session.rejected = 0
+        try await waitForPostActionSurface(pending.observation, tools: tools)
         return try await execute(taskID: session.taskID, prompt: session.goal, trustedUserPrompt: session.goal, tools: tools, progress: progress)
     }
 

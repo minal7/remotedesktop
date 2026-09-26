@@ -2,21 +2,19 @@
 
 **Model architecture direction — September 23:** The initial working system may use separate planner, browser and native-app models, selected by demonstrated capability. Keep macOS MCP/native tools first and at most one local inference worker active at a time. Model-role separation must not require simultaneous residency or turn planner failures into permission for visual control. Once complete workflows are reliable, evaluate consolidating the roles into one model through training or distillation; weight fusion is an experiment, not an assumed compatible operation. Preserve the same task, handoff and evaluation contracts through consolidation. The 12 GB whole-Mac target remains the acceptance constraint.
 
-**Current checkpoint — September 24:** The development build now passes the real default-browser navigation/login-handoff test. Local Fara opens Google Drive in Safari and yields while the account chooser is still visible, before account selection or passkey authentication. The full file-upload workflow remains unaccepted. The installed host has not been replaced.
+**Current checkpoint — September 25:** Native picker input repairs are compiled and pass focused tests, including the previously failing real Safari keyboard-target check. Real Drive is signed in. The full upload test still fails before file selection; no remote upload or readback is accepted.
 
 | Repair | Implemented | Compiled | Tested | Accepted |
 | --- | --- | --- | --- | --- |
-| Default-browser route and retained task window | Yes | Mac | Focused routing/session checks and real Safari navigation pass; startup transient AX reads do not repeat Cmd-N | Navigation slice |
-| Fara action loop and login handoff | Yes | Mac | Real Drive run live12 passes; independent AX oracle confirms account chooser. One current screenshot avoids the observed 4 GiB worker stop | Login-handoff slice |
-| Completion and native account-chooser boundaries | Yes | Mac | Focused RED then GREEN; real account-chooser detector passes. Completion mismatch yields control instead of generating more actions | Tested for these cases |
-| File metadata, candidate choice and choice UI | Yes | Mac and iOS app | Earlier component checks pass; actual phone-button interaction untested | Components only |
-| Selected file to real default-browser native dialog | Connected | Mac |14 focused/read-only checks pass; actual native planner selects newest presentation. Full real picker run still rejects the click before catalog use | No |
-| Default-account Drive upload and fresh readback | Pending | Pending | No real upload; login remains pending | No |
+| Default-browser route and retained task window | Yes | Mac | Focused checks and real Safari navigation/login handoff pass | Navigation slice |
+| Native text and picker execution | Yes | Mac | 23 lifecycle/input checks and 3 keyboard geometry checks pass; exact file selected in earlier picker live11, whose final page-read assertion failed | Components only |
+| File interpretation, candidate choice and choice UI | Yes | Mac and iOS app | Native model lists/selects the newest presentation; 4 current capability/choice checks pass; phone interaction pending | Components only |
+| Default-account Drive upload and fresh readback | Connected | Mac | Real Drive live01/live02 fail before the chooser/catalog; zero admitted uploads | No |
 | Email attachment to verified own account | Pending | Pending | Not run | No |
 
-[Checkpoint evidence](docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json) records the failures as well as passing tests. In failed live11, an account was selected and an unexpected passkey prompt appeared; the prompt was canceled and the failed test window closed without completing login. The subsequent auth-boundary fix and real live12 pass are separate evidence. These checks do not establish general production readiness or the 12 GB whole-Mac performance target.
+Next: inspect the model's menu observations and rejected clicks on real Drive, fix the observed interaction failure, then verify one exact disposable upload and independent download/readback. Keep work on this single workflow. No further architecture or model expansion until it works.
 
-Next: fix the observed in-flight browser capture/click rejection, then finish exact native file selection. The native catalog/choice connection is implemented and compiled, with14 focused checks and a real two-call native model selection pass. The latest real Safari run still rejects actions before opening the chooser; do not count this as a working upload. After that passes, verify one disposable exact upload and fresh readback on signed-in Google Drive. Keep changes driven by this workflow; avoid additional architecture until it works. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md).
+[Checkpoint evidence](docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json) preserves failed and passing runs. [File-transfer acceptance](docs/audits/2026-09-04-mac-computer-use/file-transfer-acceptance-sept24.md) defines the full outcome. The installed host is unchanged; general production readiness and the 12 GB whole-Mac target remain unaccepted.
 
 **Earlier checkpoints and repair notes follow; the table above owns current acceptance.**
 

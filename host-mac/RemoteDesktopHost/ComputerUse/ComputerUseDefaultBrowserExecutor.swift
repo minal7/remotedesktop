@@ -6,6 +6,34 @@ typealias ComputerUseDefaultBrowserFileCatalogFactory = @MainActor (String) thro
 /// Keyboard admission for a retained browser window. No shortcut here can
 /// create, close, or switch a browser tab/window or application.
 enum ComputerUseDefaultBrowserActionScope {
+    /// The model has already resolved the user's file. Navigate the native
+    /// picker from its current AX state without guessing a visible file row.
+    static func nativeSelectionProposal(panel: ComputerUseDefaultBrowserSession.FileOpenPanel,
+                                        selectedURL: URL) -> ComputerUseDesktopProposal? {
+        func action(_ action: ComputerUseFaraAction) -> ComputerUseDesktopProposal {
+            .init(response: "", action: action, includeInModelHistory: false)
+        }
+        func handoff(_ message: String) -> ComputerUseDesktopProposal {
+            .init(response: "", decision: .handoff(message), includeInModelHistory: false)
+        }
+        if panel.selectedFileURLs.count == 1,
+           panel.selectedFileURLs[0].standardizedFileURL.resolvingSymlinksInPath()
+            == selectedURL.standardizedFileURL.resolvingSymlinksInPath(), !panel.isNavigatingPath {
+            return panel.primaryActionEnabled == true ? nil
+                : handoff("The chosen file is selected, but this dialog cannot open it. Check the accepted file types.")
+        }
+        guard panel.isNavigatingPath else { return action(.key(["Command", "Shift", "g"])) }
+        guard panel.pathFieldIsFocused, let value = panel.pathFieldValue,
+              let selection = panel.pathFieldSelection, selectedURL.path.utf8.count <= 32_768 else {
+            return handoff("The file path field is not ready. Focus it, then choose Resume.")
+        }
+        if value == selectedURL.path { return action(.key(["Return"])) }
+        if value.isEmpty || selection == NSRange(location: 0, length: value.utf16.count) {
+            return action(.typeText(selectedURL.path))
+        }
+        return action(.key(["Command", "a"]))
+    }
+
     static func permits(_ action: ComputerUsePredictedAction?, within bounds: CGRect) -> Bool {
         guard let action else { return true }
         switch action {
@@ -40,14 +68,14 @@ enum ComputerUseDefaultBrowserActionScope {
         case .scroll(let x, let y, _, _): return bounds.contains(CGPoint(x: x, y: y))
         case .key(let usage, let modifiers):
             if modifiers == 9, usage == 0x0A { return panel.goToFolderBounds == nil } // Cmd-Shift-G
-            if modifiers == 8, usage == 0x04 { return panel.goToFolderBounds != nil } // Cmd-A replaces Go To path
+            if modifiers == 8, usage == 0x04 { return panel.isNavigatingPath && panel.pathFieldIsFocused } // Cmd-A replaces Go To path
             guard modifiers == 0 else { return false }
             if usage == 0x28 { // Return/Enter opens a selected file, except in Go To Folder.
-                return panel.goToFolderBounds != nil || selectedExactlyOneEnabledFile()
+                return panel.isNavigatingPath ? panel.pathFieldIsFocused : selectedExactlyOneEnabledFile()
             }
             return [0x29, 0x2B, 0x4F, 0x50, 0x51, 0x52].contains(usage) // Escape, Tab, arrows
         case .typeText:
-            return panel.goToFolderBounds != nil
+            return panel.isNavigatingPath && panel.pathFieldIsFocused
         case .requestApproval(_, let nested):
             return permitsFilePanel(nested, within: bounds, panel: panel, selectedURL: selectedURL)
         case .drag, .wait, .done: return false
@@ -129,7 +157,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
 
         func modelInput(_ input: ComputerUseFaraModel.Input,
-            includeUnselectedCatalog: Bool = false) throws -> ComputerUseFaraModel.Input {
+            includeUnselectedCatalog: Bool = false, advertiseFilePicker: Bool = false) throws -> ComputerUseFaraModel.Input {
             guard let tools else { throw Failure.noRetainedWindow }
             try check(nil, tools)
             if selectedCandidate != nil { _ = try selectedFileURL() }
@@ -144,7 +172,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 enriched.localFileCatalog = .init(query: fileContext.query, page: selectedPage,
                     selectedCandidate: selectedCandidate, inventoryState: fileContext.inventoryState)
             } else {
-                enriched.localFileCatalog = nil
+                enriched.localFileCatalog = advertiseFilePicker ? Self.notQueriedFileContext : nil
             }
             enriched.selectedLocalFilePath = session.currentFileOpenPanel == nil ? nil : try selectedFileURL()?.path
             return enriched
@@ -308,7 +336,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     decision: .handoff("The native file chooser did not return a supported file choice."),
                     includeInModelHistory: false)
             }
-            return try await propose(scope.modelInput(input))
+            let enriched = try scope.modelInput(input, advertiseFilePicker: nativeFilePlanner != nil)
+            if let panel = scope.session.currentFileOpenPanel,
+               let selectedURL = try scope.selectedFileURL(),
+               let native = ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel, selectedURL: selectedURL) {
+                return native
+            }
+            return try await propose(enriched)
         },
             surfaceScopeCheck: { action in
                 guard let tools = scope.tools else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }

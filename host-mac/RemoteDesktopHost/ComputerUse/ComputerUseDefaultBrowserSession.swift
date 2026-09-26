@@ -47,6 +47,9 @@ final class ComputerUseDefaultBrowserSession {
         let primaryActionElement: AXUIElement?
         let primaryActionBounds: CGRect?
         let primaryActionEnabled: Bool?
+        var pathFieldIsFocused = false
+        var pathFieldValue: String?
+        var pathFieldSelection: NSRange?
 
         var actionBounds: CGRect { goToFolderBounds ?? bounds }
         var isNavigatingPath: Bool { goToFolderBounds != nil }
@@ -285,11 +288,9 @@ final class ComputerUseDefaultBrowserSession {
                 case "handler-current": return try resolveHandler() == state.handler
                 case "new-window":
                     guard let app = state.app, let before = state.before, let target = state.target else { return false }
-                    let current = try captureWindows(app)
-                    return current.application == app && !current.hasSheets
-                        && current.focusedWindowID == target.id
-                        && current.windows.contains(where: { Self.sameWindow($0, target) })
-                        && Self.isExactlyOneNewWindow(before: before, after: current, target: target)
+                    let current = try await Self.waitForNewFocusedWindow(
+                        before: before, app: app, tools: tools, captureWindows: captureWindows)
+                    return Self.sameWindow(current, target)
                 default: return false
                 }
             }, perform: { [weak state] step, _ in
@@ -656,6 +657,10 @@ final class ComputerUseDefaultBrowserSession {
             let window = Window(id: id, application: application,
                 accessibilityElement: element, identity: windowIdentity)
             windows.append(window)
+            // A background window's chooser or sign-in sheet does not own
+            // input in this window. Keep all window identities for startup
+            // comparison, but inspect sheets only under current native focus.
+            guard focusedWithin(focusedElement, element) else { continue }
             let axSheets = array(element, "AXSheets" as CFString)
             if !axSheets.isEmpty { hasSheets = true }
             for sheet in axSheets where string(sheet, kAXRoleAttribute as CFString) != "AXSheet" {
@@ -703,6 +708,9 @@ final class ComputerUseDefaultBrowserSession {
             }
             var goToBounds: CGRect?
             var pathField: AXUIElement?
+            var pathFocused = false
+            var pathValue: String?
+            var pathSelection: NSRange?
             if let nested = nestedSheets.first {
                 guard let nestedNodes = descendants(nested) else { throw Failure.authenticationHandoff }
                 let fields = nestedNodes.filter { string($0, "AXIdentifier" as CFString) == "PathTextField" }
@@ -714,6 +722,19 @@ final class ComputerUseDefaultBrowserSession {
                       let nestedBounds = bounds(nested) else { throw Failure.authenticationHandoff }
                 goToBounds = nestedBounds
                 pathField = fields[0]
+                if let focusedUI = read(root, kAXFocusedUIElementAttribute as CFString),
+                   CFGetTypeID(focusedUI) == AXUIElementGetTypeID() {
+                    pathFocused = focusedWithin(focusedUI as! AXUIElement, fields[0])
+                }
+                if let text = string(fields[0], kAXValueAttribute as CFString), text.utf8.count <= 32_768 {
+                    pathValue = text
+                    var range = CFRange()
+                    if value(fields[0], kAXSelectedTextRangeAttribute as CFString, .cfRange, &range),
+                       range.location >= 0, range.length >= 0,
+                       range.location <= text.utf16.count, range.length <= text.utf16.count - range.location {
+                        pathSelection = NSRange(location: range.location, length: range.length)
+                    }
+                }
             }
             var enabled: Bool?
             if let raw = read(primaryButtons[0], kAXEnabledAttribute as CFString), CFGetTypeID(raw) == CFBooleanGetTypeID() {
@@ -725,7 +746,8 @@ final class ComputerUseDefaultBrowserSession {
                 goToFolderBounds: goToBounds, pathTextFieldElement: pathField,
                 selectedFileURLs: selectedURLs(in: listViews[0]),
                 primaryActionElement: primaryButtons[0], primaryActionBounds: bounds(primaryButtons[0]),
-                primaryActionEnabled: enabled)
+                primaryActionEnabled: enabled, pathFieldIsFocused: pathFocused,
+                pathFieldValue: pathValue, pathFieldSelection: pathSelection)
         } else if hasSheets {
             hasUnrecognizedSheets = true
         }
