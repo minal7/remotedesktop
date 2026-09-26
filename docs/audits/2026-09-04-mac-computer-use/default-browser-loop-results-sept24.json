@@ -243,14 +243,14 @@
       "Retain dispatched effects before a bounded native-sheet settling check; never replay input while waiting.",
       "Recover fresh text observations after AX event overflow while permanently retiring old target references.",
       "Navigate the native picker from current path-field focus/value/selection and the exact resolved file, stopping before its outer primary action.",
-      "Ignore background windows\u2019 sheets when inspecting the focused task window; retry transient startup AX loss without repeating Cmd-N.",
+      "Ignore background windows’ sheets when inspecting the focused task window; retry transient startup AX loss without repeating Cmd-N.",
       "Clip keyboard screenshot checkpoints to visible focused-control geometry: the real picker outline was 3,857 points tall, placing its original center offscreen.",
       "Advertise host file selection before the first browser proposal; the missing capability caused a real Drive run to attempt local folder navigation.",
       "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope."
     ],
     "latestFocusedRun": "default-browser-file-discovery-green01",
-    "latestLiveRun": "default-browser-drive-upload-live04",
-    "latestLiveFailure": "Test-only native-generated browser directive reaches actual Drive New -> File upload -> native picker; native planner requests presentation files sorted by modifiedAt descending. Host MainActor then blocks in Catalog.discover -> NSURLDirectoryEnumerator.nextObject -> open while macOS requests Downloads permission. XCTest times out at its 5-minute allowance; no upload or completed readback.",
+    "latestLiveRun": "default-browser-drive-upload-live06",
+    "latestLiveFailure": "The macOS Downloads permission dialog was visible over Safari Start Page. Fara proposed Allow, then Don’t Allow; both were rejected by existing target/focus checks. A subsequent keyboard proposal ended in userInterventionRequired because the intended window was unavailable. Zero native file planner calls and zero upload effects. Permission must be resolved by the user before another live run.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
       "Picker live12 returned an invalid native model response. Live13 selected the candidate but failed on offscreen keyboard geometry; the real capture RED reproduces that error and GREEN passes after clipping.",
@@ -915,6 +915,32 @@
         "buildWarnings": 39,
         "sourceUnchanged": true,
         "runnerSHA256": "7531a3fea88a105d90436f49b1de98b7fb917392bcac442c2d5fa8f683508ddf"
+      },
+      {
+        "run": "default-browser-drive-upload-live05",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 0,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "4d05c5206bc16792a2eee2826cde7159ea25e6c39d71603255feacbe68e23817"
+      },
+      {
+        "run": "default-browser-drive-upload-live06",
+        "result": "Failed",
+        "passed": 0,
+        "failed": 1,
+        "skipped": 0,
+        "buildErrors": 0,
+        "buildWarnings": 10,
+        "runtimeWarnings": 1,
+        "sourceUnchanged": true,
+        "sourceCount": 37,
+        "runnerSHA256": "e22ba3b0fba808cd67bff7a8a695da05fccfaa2421f7a7298eb24da3af77ebcb"
       }
     ],
     "delegationDiagnostic": {
@@ -935,6 +961,14 @@
       "sampleSHA256": "89876f9ac0f5a22dcfad3727251a5cf6c351cad421d509fec64e0b2bfd2dfba8",
       "computerUseRestriction": "UserNotificationCenter app access refused by Computer Use for safety reasons; user asked to allow the Downloads request. No permission bypass attempted.",
       "cleanup": "Timed-out test host exited; exact orphan inference worker PID2302 terminated. Own fixture triple, empty fixture directory, test journal/response temporaries and expired runtime credential artifact cleaned. Non-secret diagnostics retained; test Safari window closed, user Drive window preserved."
+    },
+    "delegationRetryEvidence": {
+      "live05": "Same native directive as live04; first Fara action unnecessarily asked the user which file instead of reaching the chooser. Zero native file planner calls and zero upload effects.",
+      "change": "Only test helper instructions changed: positive browser/host division of responsibility, no file already selected at delegation, browser reaches chooser before host identifies/selects from original request and metadata, then resumes and verifies. Genuine ambiguity handoff remains. No production routing, model settings, original task, approval guards or final oracle changed.",
+      "live06": "Compiled but blocked by the Downloads OS prompt before navigation. This is not proof that the revised delegation or async discovery now succeeds end-to-end.",
+      "permissionRestriction": "Computer Use refuses access to UserNotificationCenter for safety reasons. Pending user question remains unanswered; do not bypass or retry live tests until resolved.",
+      "cleanup": "Both test-created Safari windows closed, original signed-in Drive window retained. Own local fixtures absent after normal test cleanup. No xcodebuild, swift-frontend, xctest or llama-server process remained after harvest.",
+      "accepted": false
     }
   }
 }

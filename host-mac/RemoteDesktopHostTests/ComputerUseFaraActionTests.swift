@@ -8080,7 +8080,7 @@ func makeNativeDelegatedBrowserWorkerGoal(
         "required": ["objective", "constraints", "completion_criteria"]
     ]
     let system = """
-    Create a bounded internal visual-worker directive for the complete browser-side responsibility in the original user task. The original goal is authoritative: preserve its destination, account choice, required confirmation conditions, and requested outcome and verification. The host handles local-file identification and selection when the native file chooser opens; do not direct the visual worker to inspect Downloads, Finder, or other local folders. Do not invent facts or weaken requested conditions. Return only objective, constraints, and completion_criteria in the required JSON schema. Do not include site-specific instructions or examples.
+    Create a bounded internal visual-worker directive for the complete browser-side responsibility in the original user task. The original goal is authoritative: preserve its destination, account choice, required confirmation conditions, and requested outcome and verification. Divide responsibility positively: the browser worker reaches the point where the local file can be supplied, then yields to the host; the host identifies and selects the local file using the original request and available local-file metadata; the browser worker resumes afterward to finish the browser-side task and verify its outcome. At delegation time, no local file has been selected yet. Do not ask the user to identify or provide a file the host can identify from the request and metadata; ask only if the available evidence leaves a genuine ambiguity. Do not direct the visual worker to inspect Downloads, Finder, or other local folders. Do not invent facts or weaken requested conditions. Return only objective, constraints, and completion_criteria in the required JSON schema. Do not include site-specific instructions or examples.
     """
     let userData = try JSONSerialization.data(withJSONObject: ["original_goal": originalGoal],
         options: [.sortedKeys, .withoutEscapingSlashes])
@@ -8130,7 +8130,7 @@ func makeNativeDelegatedBrowserWorkerGoal(
     let workerGoal = (["Objective: \(directive.objective)",
         directive.constraints.isEmpty ? nil : "Constraints: \(directive.constraints)",
         "Completion criteria: \(directive.completionCriteria.joined(separator: "; "))",
-        "The host will identify and supply the requested local file when the native file chooser opens. Do not browse local folders."]
+        "At delegation time, no local file has been selected. The browser worker should reach and open the native file chooser, then yield to the host to identify and select the requested file from the original request and available local-file metadata. Do not ask the user to identify a file the host can determine. After host selection, resume the browser-side task and verify the requested outcome. Do not browse local folders."]
         .compactMap { $0 }).joined(separator: "\n")
     await runtime.shutdown()
     return workerGoal
