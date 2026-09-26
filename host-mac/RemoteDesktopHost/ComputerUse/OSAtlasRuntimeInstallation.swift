@@ -445,6 +445,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let resolver: OSAtlasRuntimeInputResolver
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
+    private let nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)?
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
     private let localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
@@ -455,6 +456,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         resolver: OSAtlasRuntimeInputResolver = OSAtlasRuntimeInputResolver(),
         bundle: Bundle = .main,
         runtime: OSAtlasLlamaRuntime = .shared,
+        nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
         faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
@@ -467,6 +469,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.resolver = resolver
         self.bundle = bundle
         self.runtime = runtime
+        self.nativeControlInspectExchange = nativeControlInspectExchange
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
         self.localFileCatalogFactory = localFileCatalogFactory
@@ -541,6 +544,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs? = nil
     ) throws -> ComputerUseDefaultBrowserExecutor {
         let runtime = self.runtime
+        let nativeControlInspectExchange = self.nativeControlInspectExchange
         let propose: ComputerUseDesktopExecutor.Propose = { input in
             let endpoint = try await runtime.activateFara(resolveInputs())
             return .init(try await runtime.proposeFara(endpoint: endpoint, input: input))
@@ -558,7 +562,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                     return .visualFallback("The native page planner is not installed.")
                 }
                 let endpoint = try await runtime.activateNativeText(inputs)
-                return try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page)
+                return try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page,
+                    inspectExchange: nativeControlInspectExchange)
             }
         } else { nativeControlPlanner = nil }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,

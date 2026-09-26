@@ -4,6 +4,32 @@ import CoreImage
 import CoreGraphics
 @testable import RemoteDesktopHost
 
+private final class NativeControlExchangeCapture: @unchecked Sendable {
+    struct Entry { let timestamp: String; let id: String; let requestURL: URL; let responseURL: URL }
+    private let lock = NSLock()
+    private let directory: URL
+    private var entries: [Entry] = []
+    init(directory: URL) { self.directory = directory }
+    func record(_ request: Data, _ response: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard entries.count < 20 else { return }
+        let id = UUID().uuidString
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let stem = "native-control-\(entries.count)-\(id)"
+        let requestURL = directory.appendingPathComponent(stem + "-request.json")
+        let responseURL = directory.appendingPathComponent(stem + "-response.json")
+        do {
+            try Data(request.prefix(128 * 1_024)).write(to: requestURL, options: .atomic)
+            try Data(response.prefix(128 * 1_024)).write(to: responseURL, options: .atomic)
+            entries.append(.init(timestamp: timestamp, id: id, requestURL: requestURL, responseURL: responseURL))
+        } catch {
+            try? FileManager.default.removeItem(at: requestURL)
+            try? FileManager.default.removeItem(at: responseURL)
+        }
+    }
+    func captured() -> [Entry] { lock.lock(); defer { lock.unlock() }; return entries }
+}
+
 @MainActor
 final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     private final class FakeDesktop {
@@ -707,19 +733,23 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             try? FileManager.default.removeItem(at: nativeControlRequestURL)
             try? FileManager.default.removeItem(at: nativeControlResponseURL)
         }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserFilePicker-" + UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let nativeControlExchanges = NativeControlExchangeCapture(directory: directory)
         let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { request, response in
             if request.count <= 16 * 1_024 * 1_024 {
                 try? request.write(to: responseURL.appendingPathExtension("request"), options: .atomic)
             }
             try? response.prefix(65_536).write(to: responseURL, options: .atomic)
         })
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DefaultBrowserFilePicker-" + UUID().uuidString, isDirectory: true)
         let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
         let fixtureRoot = downloads.appendingPathComponent(".remote-desktop-picker-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: fixtureRoot); try? FileManager.default.removeItem(at: directory) }
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
         let name = uploadToDrive ? "Remote Desktop E2E \(UUID().uuidString).pptx" : "Disposable Translate Picker Probe.pdf"
         let expectedURL = (uploadToDrive ? downloads : fixtureRoot).appendingPathComponent(name)
         let olderURL = downloads.appendingPathComponent("Older " + name)
@@ -789,24 +819,49 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 application: window.application, mayAct: { true }) { return page.url }
             guard productionComposition else { return nil }
             let snapshot = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(window.application)
-            guard let freshWindow = snapshot.windows.first(where: { $0.id == window.id }) else { return nil }
+            guard let freshWindow = snapshot.windows.first(where: { $0.id == window.id }),
+                  CFEqual(window.accessibilityElement, freshWindow.accessibilityElement) else { return nil }
             if let panel = snapshot.fileOpenPanel {
-                guard panel.parentWindowID == window.id, CFEqual(panel.parentWindowElement, freshWindow.accessibilityElement) else { return nil }
+                guard panel.parentWindowID == window.id, CFEqual(panel.parentWindowElement, freshWindow.accessibilityElement),
+                      snapshot.focusedWindowID == window.id || panel.isFocused else { return nil }
+            } else {
+                guard snapshot.focusedWindowID == window.id else { return nil }
             }
-            let pageElement = snapshot.fileOpenPanel?.parentWindowElement ?? freshWindow.accessibilityElement
-            for attribute in ["AXURL", kAXDocumentAttribute as String] {
-                AXUIElementSetMessagingTimeout(pageElement, 0.15)
+            func attribute(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+                AXUIElementSetMessagingTimeout(element, 0.1)
                 var value: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(pageElement, attribute as CFString, &value) == .success else {
-                    continue
-                }
-                let urlText = (value as? URL)?.absoluteString ?? value as? String
-                if let urlText, let url = URLComponents(string: urlText), url.scheme == "https", url.host != nil {
-                    return urlText
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+                return value
+            }
+            var pending = [freshWindow.accessibilityElement]
+            var visited: [AXUIElement] = []
+            var webAreas: [AXUIElement] = []
+            var incomplete = false
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+            while !pending.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = pending.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = attribute(kAXRoleAttribute as String, element) as? String ?? ""
+                if role == "AXWebArea" { webAreas.append(element); continue }
+                if role == "AXSheet" || role == "AXDialog" { continue }
+                if let children = attribute(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, 256 - visited.count - pending.count)
+                    if children.count > room { incomplete = true }
+                    pending.append(contentsOf: children.prefix(room))
                 }
             }
-            return try ComputerUseDefaultBrowserPageReader().read(window: freshWindow.accessibilityElement,
-                application: freshWindow.application, mayAct: { true })?.url
+            guard pending.isEmpty, !incomplete, !Task.isCancelled, ContinuousClock.now < deadline,
+                  webAreas.count == 1 else { return nil }
+            let webArea = webAreas[0]
+            let urls = ["AXURL", kAXDocumentAttribute as String].compactMap { name -> String? in
+                guard let value = attribute(name, webArea) else { return nil }
+                let text = (value as? URL)?.absoluteString ?? value as? String
+                guard let text, let components = URLComponents(string: text), components.scheme == "https", components.host != nil else { return nil }
+                return text
+            }
+            let uniqueURLs = Set(urls)
+            return uniqueURLs.count == 1 ? uniqueURLs.first : nil
         }
         func remoteUploadConfirmed() throws -> Bool {
             acceptedUploadEvidence = nil
@@ -958,7 +1013,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 modelVariant: .fara15_4B,
                 modelDirectory: faraInputs.modelURL.deletingLastPathComponent().path,
                 installedAt: Date())
-            let loader = OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: directory)
+            let loader = OSAtlasVisualExecutorLoader(runtime: runtime,
+                nativeControlInspectExchange: { request, response in nativeControlExchanges.record(request, response) },
+                faraJournalDirectory: directory)
             let nativeInstaller = ComputerUseInstaller.nativeText()
             let nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs = {
                 guard let current = await nativeInstaller.currentInstallation() else { return nil }
@@ -1212,6 +1269,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             request.name = "Final production-composition Fara request (body only)"
             request.lifetime = .keepAlways
             add(request)
+        }
+        for exchange in nativeControlExchanges.captured() {
+            for (label, url) in [("request", exchange.requestURL), ("response", exchange.responseURL)] {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "Native control \(label) \(exchange.timestamp) \(exchange.id)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
         }
         if productionComposition {
             let summary = XCTAttachment(string: "Task: \(goal)\nResult: \(String(describing: result))\nError: \(String(describing: failure))\nBrowser factory calls: \(productionBrowserFactoryCalls)\nHelper catalog: \(helperCatalogNames)\nNative file calls: \(nativeCalls)\nNative control calls: \(nativeControlCalls)\nNative catalog: \(nativeCatalogTrace)\nObserved page URL: \(String(describing: observedPageURL))\nExact selected file observed: \(selectedBeforeUpload)\nAdmitted upload effects: \(uploadEffects)\nProgress: \(routeProgress)\nFresh completion evidence: \(String(describing: acceptedUploadEvidence?.url))")
