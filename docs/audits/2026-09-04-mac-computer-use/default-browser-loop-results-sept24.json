@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable. Live10 completed the exact-file upload, fresh completion and independent byte/hash readback, but formal XCTest failed only a stale picker-opening-count assertion. Live11 ran after that test-only assertion fix with production code unchanged and paused after three rejected proposals when Fara invented a Downloads tile and targeted a point outside the browser window.",
+    "status": "Not accepted as reliable. Live10 completed the exact-file upload, fresh completion and independent byte/hash readback, but formal XCTest failed only a stale picker-opening-count assertion. Live11 failed on an out-of-window target. Live12/13 failed before file selection or upload; unchanged production code and stable 45-source audits. The chronology component change passed focused tests but did not resolve the workflow.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3264,6 +3264,14 @@
         "greenEvidence": ".build/repair-verification/focused-pointer-context-green01-summary.json",
         "sourceCount": 42,
         "sourcesUnchangedDuringRun": true
+      },
+      {
+        "name": "native-planner-feedback-action-chronology",
+        "change": "History keys feedback explicitly before the related action and applies matching truncation; message contents, current action_error, and outcome assumptions are unchanged.",
+        "red": "browser-feedback-chronology-red01: 0/1; 16 expected assertions; 0 build errors, 4 warnings; 42 source hashes stable.",
+        "green": "browser-feedback-chronology-green01: 9/9 planner tests; 0 build errors, 8 warnings; 42 source hashes stable; no issues/runtime warnings.",
+        "redEvidence": ".build/repair-verification/browser-feedback-chronology-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/browser-feedback-chronology-green01-summary.json"
       }
     ],
     "runs": [
@@ -3321,18 +3329,38 @@
         "run": "client-manager-drive-upload-live11",
         "outcome": "0/1 formal failure after three rejected proposals; no native file calls, approvals or upload. Fara proposed a Downloads quick-access tile at normalized [894,28] -> pixel (1544,31), outside browser window (top y=33); controller refused.",
         "evidence": ".build/repair-verification/client-manager-drive-upload-live11-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live12",
+        "outcome": "0/1; 0 build errors/warnings, 45 source hashes unchanged, one known main-thread warning. Paused on ambiguousWindows after rejected type/Return/field-click; no approvals, file calls or upload. Harness counters for native controls are unused and do not establish absence of native proposals.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live12-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live13",
+        "outcome": "Unchanged repeat, 0/1 at test timeout after 310.716 s; 0 build errors/warnings, 45 source hashes unchanged, one known main-thread warning. Reached /drive/projects; actual native trace had 12 exchanges and repeatedly proposed the expanded New Folder menu. A Create proposal was rejected before input and Fara canceled the dialog; no folder creation is demonstrated. The final Fara request screenshot showed New collapsed with no File upload item visible; Fara imagined a Drive File>Upload menu and proposed a click on the macOS menu bar. No file selection, approval or upload. Outcome counter nativeControlCalls=0 is unused. Post-run CUA later showed File upload in the expanded menu; that is a separate observation, not the screenshot Fara received.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live13-summary.json"
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
-    "qualifications": "Live10 success does not override live11 reliability failure. Do not infer broad production readiness or alter approval/input guards. Existing production-composition live11 and separate direct-executor live28 acceptances remain separately scoped.",
+    "qualifications": "Live10 success does not override later reliability failures. Live12/13 show no upload. Keep prior production-composition live11 and direct-executor live28 acceptances separately scoped. Do not alter approval/input guards or infer menu-role remediation from post-run AX evidence.",
     "lastBuild": {
       "errors": 0,
-      "warnings": 16,
+      "warnings": 0,
       "runtimeWarnings": [
         "Existing main-thread responsiveness warning"
       ],
       "sourceCount": 45,
-      "sourcesUnchangedDuringRun": true
+      "sourcesUnchangedDuringRun": true,
+      "latestRun": "client-manager-drive-upload-live13"
+    },
+    "nativeControlsABDiagnostic": {
+      "evidence": ".build/repair-verification/fara-native-controls-ab01/summary.json",
+      "scope": "Two serial proposals from one saved real Drive Projects screenshot; no actions executed",
+      "result": "Removing native_controls alone changes the wrong action but does not resolve the model failure. No production input filtering is justified by this comparison.",
+      "baseline": "Reproduced the exact live13 File > Upload hallucination at [103,11].",
+      "withoutNativeControls": "Invented a Downloads sidebar item and proposed [58,243], the Projects navigation area.",
+      "memory": "Both serial workers stayed below the unchanged 4 GiB stop cap (peak sampled 4,211,294,208 bytes), exited, and removed credentials; not whole-Mac 12 GB qualification.",
+      "next": "Compare a trained alternative on these retained failure states before another real upload test."
     }
   }
 }

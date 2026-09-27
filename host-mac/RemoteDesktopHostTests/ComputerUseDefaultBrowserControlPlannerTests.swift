@@ -71,6 +71,48 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertFalse(contextText.contains("70.0"), "The planner chooses IDs; coordinates stay host-side")
     }
 
+    func testRecentHistoryLabelsFeedbackBeforeItsActionWithoutShifting() throws {
+        let rejectedBeforeKey = "The previous pointer was rejected. No input was sent."
+        let currentError = "The current action was rejected. No input was sent."
+        var input = makeInput()
+        input.history = [
+            .init(screenshotPNG: Data([2]), response: "Pointer proposal", actionError: nil,
+                action: .pointer(.leftClick, .init(x: 10, y: 20))),
+            .init(screenshotPNG: Data([3]), response: "Key proposal", actionError: rejectedBeforeKey,
+                action: .key(["Command", "l"])),
+            .init(screenshotPNG: Data([4]), response: "Wait proposal", actionError: rejectedBeforeKey,
+                action: .wait(1)),
+            .init(screenshotPNG: Data([5]), response: "Remember proposal", actionError: rejectedBeforeKey,
+                action: .remember("Keep looking at the current page")),
+        ]
+        input.actionError = currentError
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Use the screenshot."}"#)))
+
+        let request = try planner.makeRequest(input: input, page: page(controls: []))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let contextText = try XCTUnwrap(messages.last?["content"] as? String)
+        let context = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contextText.utf8)) as? [String: Any])
+        let history = try XCTUnwrap(context["recent_history"] as? [[String: Any]])
+
+        XCTAssertEqual(history.count, 4)
+        XCTAssertEqual(history.map { $0["action_kind"] as? String }, ["pointer:left_click", "key", "wait", "remember"])
+        XCTAssertTrue(history[0]["feedback_before_action"] is NSNull)
+        XCTAssertEqual(history[1]["feedback_before_action"] as? String, rejectedBeforeKey)
+        XCTAssertEqual(history[2]["feedback_before_action"] as? String, rejectedBeforeKey,
+            "Wait can preserve prior feedback; do not shift it onto a different action")
+        XCTAssertEqual(history[3]["feedback_before_action"] as? String, rejectedBeforeKey,
+            "Remember can preserve prior feedback; do not shift it onto a different action")
+        for step in history {
+            XCTAssertNotNil(step["feedback_before_action_truncated"])
+            XCTAssertNil(step["action_error"], "Historical feedback must not be mislabeled as the outcome of its action")
+            XCTAssertNil(step["action_error_truncated"], "Historical truncation metadata must use the before-action field name too")
+        }
+        XCTAssertEqual(context["action_error"] as? String, currentError,
+            "The latest post-action rejection remains in the unchanged current top-level field")
+    }
+
     func testVisualFallbackAndAskUserRequireNullControlID() async throws {
         let page = try page(controls: [.init(id: "new-control", role: "AXButton", label: "New", frame: nil, enabled: true)])
         for (json, expected) in [
