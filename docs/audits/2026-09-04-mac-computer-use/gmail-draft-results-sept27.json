@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded test approvals now cover the observed Gmail Attach files click, exact selected-file picker confirmation, and one freshly verified recipient-autocomplete Return; the exact recipient, subject, body and attachment oracle remains required. The autocomplete exception is test-only; production Return policy is unchanged, and Send is never allowed. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run real Gmail live21 with bounded off-main OCR. Keep optional editor quiet-timeout behavior changes deferred; require the full recipient/body/subject/attachment/task-completion oracle before accepting Gmail.",
+  "next": "Run real Gmail live22 after the general adjacent-caret fix. Full recipient/body/subject/attachment/task-completion oracle is still required. Keep the alternate Drive-picker harness gap explicit.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1440,5 +1440,33 @@
     "completion": "native-desktop-ocr-completion01: 3 passed, 0 skips/issues/runtime warnings; 0 build errors / 4 warnings; 55 stable entries after the final completion ownership guard.",
     "coverage": "Desktop composition off-main OCR, bounded timeout with no proposal/effect, cancellation and scope loss while OCR awaits; existing single-flight/cancellation, approval single-use, effect/no-replay and completion checks.",
     "acceptance": "Implemented, compiled and component-tested; real Gmail retry pending. Does not qualify broad workflow reliability or the 12 GB whole-Mac target."
+  },
+  "live21": {
+    "run": "client-manager-gmail-draft-live21",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "The freshly verified recipient-autocomplete Return was approved once and had one admitted effect; the subject was entered. Two body clicks were rejected by the caret/pixel guard. Fara then proposed Gmail’s “Insert files using Google Drive” route and proposed clicking its Upload tab; the test harness did not approve that action. This alternative attachment route is not inherently invalid, but this run did not authorize or exercise it. No file was selected, native file picker opened, attachment uploaded, task completed or message sent.",
+    "revalidation": "The two rejected body clicks had focus/editable authority true but screen and pointer-target pixel matches false; their text frame remained the same. This is evidence for reviewing caret adjacency, not a reason to loosen the production approval policy.",
+    "partialState": "CUA observed the own-recipient label, exact subject 7986A4B5-019A-4880-8C2D-51B1C5982F7C, placeholder body and no attachment. It discarded the draft and verified zero Compose panes.",
+    "diagnostics": "No synchronous OCR hang was observed in live21. A single run does not establish OCR-hang recurrence or its absence over repeated runs.",
+    "cleanup": "CUA discarded the draft and verified zero Compose panes, closed only the owned Safari window, restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923, and confirmed the disposable fixture was automatically removed. No owned workers remain.",
+    "acceptance": "Recipient and subject entry only. No selected file, attachment, successful task terminal or send; Gmail draft workflow remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live21-attachments/manifest.json",
+      "summary": ".build/repair-verification/client-manager-gmail-draft-live21-summary.json",
+      "lifecycle": "client-manager-gmail-draft-live21-attachments/B6472A83-0CAD-4CDC-91FA-C62FACBF12F9.json",
+      "route": "client-manager-gmail-draft-live21-attachments/4A4E12FC-F426-4065-AF0E-83429F8ABC51.txt",
+      "outcome": "client-manager-gmail-draft-live21-attachments/98C51834-6680-4922-8333-C45DB87AB550.txt",
+      "faraRequest": "client-manager-gmail-draft-live21-attachments/FCBF6C8C-4FB1-446A-B653-81CBA11D4017.json",
+      "faraResponse": "client-manager-gmail-draft-live21-attachments/8A47BE98-047B-45DA-8023-6E962ADD9962.json",
+      "failure": "client-manager-gmail-draft-live21-attachments/81A6398C-3B15-4341-AF1B-0A7F4AFEA18B.txt"
+    }
+  },
+  "nativePointerCaretContextRepair": {
+    "evidence": "Both live20 and live21 rejection pairs have exactly 63 changed in-window RGB pixels in a 3-by-21 strip inside the unchanged focused field; all other owned-window pixels match. The field is outside the AX click target but entirely inside its existing 40-point padded context.",
+    "change": "Allow the existing full-window narrow-caret comparison when the complete unchanged focused field fits within the already-checked pointer context. The full-window matcher and caller checks for unchanged editable authority remain unchanged; no task/site-specific logic. Correct diagnostic now reports whether unchanged-field proof was supplied.",
+    "red": "native-pointer-adjacent-caret-red01: 0 passed / 2 intended failures; 0 build errors / 9 warnings; 55 stable entries.",
+    "green": "native-pointer-adjacent-caret-green01: 5 passed, 0 skips/issues/runtime warnings; 0 build errors / 4 warnings; 55 stable entries.",
+    "coverage": "Adjacent and partly overlapping target/field geometry; no-proof, field outside padded context, forged field, changed text or horizontal paint, second in-window change, and existing pointer/final-caret regressions.",
+    "acceptance": "Implemented, compiled and component-tested. Full Gmail retry pending; alternate Drive-picker approval path remains outside the current test harness."
   }
 }

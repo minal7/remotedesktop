@@ -349,7 +349,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
                     "pointerPoint": "\(x),\(y)", "pointerAuthorityMatches": String(authorityMatches),
                     "pointerTargetPixelsMatch": String(pixelsMatch),
-                    "pointerHasUnchangedEditorProof": String(unchangedField.map { target.contains($0) } ?? false)]
+                    "pointerHasUnchangedEditorProof": String(unchangedField != nil)]
                     lastRevalidationDiagnostic.merge(difference) { _, value in value }
                 }
             } else if surfaceScopeCheck != nil,

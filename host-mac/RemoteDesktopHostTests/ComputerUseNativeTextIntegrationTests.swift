@@ -3627,8 +3627,54 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             unchangedFocusedField: field), "Caret paint outside the actual focused field must still reject")
 
         let nonContainingTarget = CGRect(x: 102, y: 96, width: 308, height: 38)
+        XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: nonContainingTarget,
+            unchangedFocusedField: field), "The unchanged editor is inside the 40-point target context even though the AX control frame excludes its edge")
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: nonContainingTarget),
+            "Without unchanged focused-editor proof, caret paint still rejects")
+        XCTAssertFalse(try before.matchesPointerPixels(of: image(changing: CGRect(x: 150, y: 106, width: 8, height: 18)),
+            window: window, target: nonContainingTarget, unchangedFocusedField: field),
+            "Wide text changes inside the editor remain significant")
+        XCTAssertFalse(try before.matchesPointerPixels(of: image(changing: CGRect(x: 130, y: 106, width: 20, height: 1)),
+            window: window, target: nonContainingTarget, unchangedFocusedField: field),
+            "Horizontal paint remains significant")
+        let forgedField = CGRect(x: 120, y: 140, width: 200, height: 20)
+        XCTAssertTrue(nonContainingTarget.insetBy(dx: -40, dy: -40).intersection(window).contains(forgedField))
         XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: nonContainingTarget,
-            unchangedFocusedField: field), "A pointer target that does not contain the focused field cannot borrow its caret exception")
+            unchangedFocusedField: forgedField), "The proven editor frame must contain the caret pixels")
+    }
+
+    func testFocusedEditorCaretIsToleratedBesideAdjacentAXTargetOnlyWithinLocalContext() throws {
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 50, y: 40, width: 580, height: 320)
+        let field = CGRect(x: 506, y: 100, width: 20, height: 30)
+        let target = CGRect(x: 546, y: 96, width: 80, height: 38)
+        func image(changing rect: CGRect? = nil, also extra: CGRect? = nil) throws -> ComputerUseDesktopImage {
+            var result = CIImage(color: .white).cropped(to: display)
+            for changed in [rect, extra].compactMap({ $0 }) {
+                let local = CGRect(x: changed.minX, y: display.maxY - changed.maxY,
+                    width: changed.width, height: changed.height)
+                result = CIImage(color: .blue).cropped(to: local).composited(over: result)
+            }
+            return try .init(observation: .init(image: result, displayBounds: display))
+        }
+        let before = try image()
+        let caret = try image(changing: CGRect(x: 510, y: 106, width: 1, height: 18))
+        XCTAssertFalse(target.contains(field), "The browser control can be adjacent to its focused editor")
+        XCTAssertTrue(target.insetBy(dx: -40, dy: -40).intersection(window).contains(field),
+            "The focused editor must remain inside the bounded local comparison context")
+        XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: target,
+            unchangedFocusedField: field))
+        let crossesContext = CGRect(x: 505, y: 100, width: 21, height: 30)
+        XCTAssertTrue(crossesContext.contains(CGPoint(x: 510, y: 110)))
+        XCTAssertFalse(target.insetBy(dx: -40, dy: -40).intersection(window).contains(crossesContext))
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: target,
+            unchangedFocusedField: crossesContext), "The focused field itself must fit within the local context")
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: target),
+            "An adjacent caret is not exempt without fresh focused-editor proof")
+        let secondChange = try image(changing: CGRect(x: 510, y: 106, width: 1, height: 18),
+            also: CGRect(x: 530, y: 110, width: 1, height: 1))
+        XCTAssertFalse(try before.matchesPointerPixels(of: secondChange, window: window, target: target,
+            unchangedFocusedField: field), "A second in-window change cannot ride along with the caret exception")
     }
 
     func testFinalDispatchCaretEvidenceMatchesOnlyWhenItsPixelsAndSnapshotPermitIt() throws {

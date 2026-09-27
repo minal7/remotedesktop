@@ -293,9 +293,10 @@ struct ComputerUseDesktopImage: Sendable {
         // must not import another application's pixels or partial edge cells.
         let context = target.insetBy(dx: -40, dy: -40).intersection(window)
         if try matchesPixels(of: other, in: context, wholePixelsOnly: true) { return true }
-        // Focused-editor proof broadens only the caret exception; it does not
-        // narrow the normal pointer's already-approved local context.
-        guard let unchangedFocusedField, target.contains(unchangedFocusedField) else { return false }
+        // Focused-editor proof may cover an adjacent field when its complete
+        // bounds are already inside this pointer's padded local context. The
+        // full-window matcher still permits only the proven caret footprint.
+        guard let unchangedFocusedField, context.contains(unchangedFocusedField) else { return false }
         return try matchesInsertionPointPixels(of: other, window: window, field: unchangedFocusedField,
             onDifference: onInsertionPointDifference)
     }
