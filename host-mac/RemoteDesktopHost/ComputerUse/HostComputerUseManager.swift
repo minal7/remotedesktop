@@ -2208,8 +2208,51 @@ final class ComputerUseHostTools {
             &element) == .success,
               var current = element else { return nil }
 
+        var hitPathLabel: String?
         for _ in 0 ..< 8 {
             let snapshot = accessibilitySnapshot(for: current)
+            let currentLabel = snapshot.attestationLabel.flatMap { value -> String? in
+                guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return String(value.prefix(256))
+            }
+            if hitPathLabel == nil {
+                hitPathLabel = currentLabel
+            }
+            let role = Self.stringAttribute(kAXRoleAttribute as CFString, from: current) ?? ""
+            var selectedValue: CFTypeRef?
+            var selectableCell = false
+            if role == "AXCell" {
+                selectedValue = Self.attributeValue(kAXSelectedAttribute as CFString, from: current)
+                let selectedCapability = Self.selectedAttributeSettableResult(for: current)
+                selectableCell = Self.isSelectableAXCell(
+                    role: role,
+                    selectedValue: selectedValue,
+                    selectedSettableResult: selectedCapability.result,
+                    selectedIsSettable: selectedCapability.isSettable,
+                    enabled: boolAttribute(kAXEnabledAttribute as CFString, from: current))
+            }
+            if selectableCell {
+                let label = currentLabel ?? hitPathLabel
+                if !requiringLabel || label != nil {
+                    let boundLabel = label
+                    let summary = [snapshot.summary, boundLabel]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " • ")
+                    return AccessibilitySnapshot(
+                        summary: summary,
+                        attestationLabel: boundLabel,
+                        identity: snapshot.identity
+                            + "|AXSelected=\(Self.booleanDescription(selectedValue))"
+                            + "|hitPathLabel=\(boundLabel ?? "")",
+                        center: snapshot.center,
+                        frame: snapshot.frame,
+                        isEnabled: true,
+                        isActionable: true)
+                }
+            }
             // AX hit testing identifies the element at the physical point.
             // Browser AX frames can be offset from that point; use the hit
             // for its label, and validate usable geometry separately.
@@ -2221,6 +2264,49 @@ final class ComputerUseHostTools {
             current = parent
         }
         return nil
+    }
+
+    static func isSelectableAXCell(
+        role: String,
+        selectedValue: CFTypeRef?,
+        selectedSettableResult: AXError,
+        selectedIsSettable: Bool,
+        enabled: Bool?
+    ) -> Bool {
+        guard role == "AXCell",
+              let selectedValue,
+              CFGetTypeID(selectedValue) == CFBooleanGetTypeID(),
+              selectedSettableResult == .success,
+              selectedIsSettable,
+              enabled != false else { return false }
+        return true
+    }
+
+    private static func attributeValue(
+        _ attribute: CFString,
+        from element: AXUIElement
+    ) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        return value
+    }
+
+    private static func selectedAttributeSettableResult(
+        for element: AXUIElement
+    ) -> (result: AXError, isSettable: Bool) {
+        var isSettable = DarwinBoolean(false)
+        let result = AXUIElementIsAttributeSettable(
+            element, kAXSelectedAttribute as CFString, &isSettable)
+        return (result, isSettable.boolValue)
+    }
+
+    private static func booleanDescription(_ value: CFTypeRef?) -> String {
+        guard let value, CFGetTypeID(value) == CFBooleanGetTypeID() else {
+            return "unavailable"
+        }
+        return CFBooleanGetValue(unsafeBitCast(value, to: CFBoolean.self)) ? "true" : "false"
     }
 
     /// Returns true only when the system focus is a writable, non-secure text

@@ -1839,6 +1839,37 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertLessThan(ContinuousClock.now - began, .seconds(timeLimit + 5))
     }
 
+    func testSelectableAXCellRequiresWritableBooleanSelectionAndNonDisabledState() {
+        let selectedFalse: CFTypeRef = kCFBooleanFalse
+        let selectedTrue: CFTypeRef = kCFBooleanTrue
+        let labelValueInsteadOfBoolean: CFTypeRef = "false" as CFString
+
+        XCTAssertTrue(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: selectedFalse,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: nil))
+        XCTAssertTrue(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: selectedTrue,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: true))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: selectedFalse,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: false))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: selectedFalse,
+            selectedSettableResult: .success, selectedIsSettable: false, enabled: nil))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: selectedFalse,
+            selectedSettableResult: .failure, selectedIsSettable: true, enabled: nil))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: nil,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: nil))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXCell", selectedValue: labelValueInsteadOfBoolean,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: nil))
+        XCTAssertFalse(ComputerUseHostTools.isSelectableAXCell(
+            role: "AXGroup", selectedValue: selectedFalse,
+            selectedSettableResult: .success, selectedIsSettable: true, enabled: nil))
+    }
+
     func testOptInCurrentDefaultBrowserNativePointerGeometry() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_DEFAULT_BROWSER_POINTER_DIAGNOSTIC"] == "1" else {
@@ -1882,12 +1913,24 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             facts[name + "Result"] = String(AXUIElementCopyElementAtPosition(root, Float(x), Float(y), &hit).rawValue)
             for depth in 0..<4 {
                 guard let element = hit else { break }
-                for attribute in [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute] {
+                for attribute in [kAXRoleAttribute, kAXPositionAttribute, kAXSizeAttribute,
+                                  kAXTitleAttribute, kAXDescriptionAttribute,
+                                  kAXSelectedAttribute] {
                     var value: CFTypeRef?
                     if AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success {
-                        facts["\(name).\(depth).\(attribute)"] = String(describing: value)
+                        let bounded = String(String(describing: value).prefix(200))
+                        facts["\(name).\(depth).\(attribute)"] = bounded
                     }
                 }
+                var actionNames: CFArray?
+                if AXUIElementCopyActionNames(element, &actionNames) == .success {
+                    facts["\(name).\(depth).actions"] = String(describing: actionNames)
+                }
+                var selectedIsSettable = DarwinBoolean(false)
+                let selectedSettableResult = AXUIElementIsAttributeSettable(
+                    element, kAXSelectedAttribute as CFString, &selectedIsSettable)
+                facts["\(name).\(depth).selectedIsSettable"] =
+                    "\(selectedIsSettable.boolValue) (AXError \(selectedSettableResult.rawValue))"
                 var parent: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
                       let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
