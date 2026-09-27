@@ -2841,7 +2841,7 @@ final class ComputerUseHostTools {
             access: .live, mayAct: mayAct)
     }
 
-    func nativeFocusedEditorObservation() throws -> (description: String, textState: ComputerUseNativeTextState?)? {
+    func nativeFocusedEditorObservation() throws -> (description: String, textState: ComputerUseNativeTextState?, stabilityToken: String?)? {
         guard mayAct() else { throw ToolError.paused }
         let description: String
         let observed: ComputerUseTextSnapshot?
@@ -2874,7 +2874,8 @@ final class ComputerUseHostTools {
             guard result.utf8.count + next.utf8.count <= 1_024 else { break }
             result += next
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : (result, state)
+        return result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? nil : (result, state, observed?.preconditionDigest)
     }
 
     func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,

@@ -1869,6 +1869,172 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(executor.diagnosticHistory.first?.response, "click")
     }
 
+    func testScopedDesktopWaitsForDelayedFocusedEditorRetirementBeforeReplanning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current = ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
+            isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var effects = 0, proposals = 0
+        var effectStarted: Date?
+        var retirement: Task<Void, Never>?
+        defer { retirement?.cancel() }
+        let tools = desktopTestTools(focus: { current.preconditionDigest }, textEditor: editor, perform: { _ in
+            effects += 1
+            effectStarted = Date()
+            current = ComputerUseTextSnapshot(targetID: "B", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            retirement = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(700)) } catch { return }
+                current = ComputerUseTextSnapshot(targetID: "C", value: "", selection: NSRange(location: 0, length: 0),
+                    isEditable: true, isSecure: false)
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 {
+                XCTAssertEqual(current.targetID, "A")
+                return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+            }
+            XCTAssertEqual(current.targetID, "C", "The delayed title-change retirement must settle before replanning")
+            XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(effectStarted ?? Date()), 1.8,
+                "The next proposal must wait for the new focused target to remain stable")
+            XCTAssertEqual(input.history.count, 1)
+            XCTAssertEqual(input.history.first?.response, "open-compose")
+            return .init(response: "ready", decision: .handoff("The recipient field is ready for review."))
+        }, surfaceScopeCheck: { _ in })
+
+        let result = try await executor.execute(taskID: "delayed-editor-retirement", prompt: "Open a compose editor.",
+            trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The recipient field is ready for review."))
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(proposals, 2)
+    }
+
+    func testScopedDesktopCancellationDuringEditorQuietWaitPreventsNextProposal() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current = ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
+            isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var run: Task<ComputerUseExecutionResult, Error>?
+        var cancellation: Task<Void, Never>?
+        defer { cancellation?.cancel(); run?.cancel() }
+        var effects = 0, proposals = 0
+        let tools = desktopTestTools(focus: { current.preconditionDigest }, textEditor: editor, perform: { _ in
+            effects += 1
+            current = ComputerUseTextSnapshot(targetID: "B", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            cancellation = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                run?.cancel()
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals == 1 { return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500))) }
+            return .init(response: "late", decision: .handoff("Review the editor."))
+        }, surfaceScopeCheck: { _ in })
+        run = Task { try await executor.execute(taskID: "editor-wait-cancel", prompt: "Open a compose editor.",
+            trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in }) }
+        do { _ = try await run?.value; XCTFail("Cancellation during the quiet wait must stop replanning") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+    }
+
+    func testScopedDesktopEditorChurnStopsAndResumeDoesNotReplayClick() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current = ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
+            isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var churn: Task<Void, Never>?
+        defer { churn?.cancel() }
+        var effects = 0, proposals = 0
+        let tools = desktopTestTools(focus: { current.preconditionDigest }, textEditor: editor, perform: { _ in
+            effects += 1
+            current = ComputerUseTextSnapshot(targetID: "B", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            churn = Task { @MainActor in
+                var index = 0
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    index += 1
+                    current = ComputerUseTextSnapshot(targetID: "churn-\(index)", value: "", selection: NSRange(location: 0, length: 0),
+                        isEditable: true, isSecure: false)
+                }
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 { return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500))) }
+            XCTAssertEqual(input.history.count, 1)
+            return .init(response: "ready", decision: .handoff("Review the editor."))
+        }, surfaceScopeCheck: { _ in })
+        do {
+            _ = try await executor.execute(taskID: "editor-churn", prompt: "Open a compose editor.",
+                trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
+            XCTFail("A continuously changing focused target must stop safely")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
+        catch { XCTFail("Unexpected error: \(error)") }
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+
+        churn?.cancel()
+        churn = nil
+        current = ComputerUseTextSnapshot(targetID: "stable-after-stop", value: "", selection: NSRange(location: 0, length: 0),
+            isEditable: true, isSecure: false)
+        let resumed = try await executor.execute(taskID: "editor-churn", prompt: "Resume editor observation.",
+            trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
+        XCTAssertEqual(resumed, .userInterventionRequired("Review the editor."))
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(effects, 1, "Resume observes the stable editor without replaying the earlier click")
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+    }
+
+    func testScopedDesktopEditorScopeLossDuringQuietWaitPreventsNextProposal() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current = ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
+            isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var scopeValid = true
+        var transition: Task<Void, Never>?
+        defer { transition?.cancel() }
+        var effects = 0, proposals = 0
+        let tools = desktopTestTools(focus: { current.preconditionDigest }, textEditor: editor, perform: { _ in
+            effects += 1
+            current = ComputerUseTextSnapshot(targetID: "B", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            transition = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+                scopeValid = false
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals == 1 { return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500))) }
+            return .init(response: "late", decision: .handoff("Review the editor."))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        })
+        do {
+            _ = try await executor.execute(taskID: "editor-scope-loss", prompt: "Open a compose editor.",
+                trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
+            XCTFail("Scope loss during the quiet wait must stop replanning")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+    }
+
     func testScopedCompletionUsesOwnedWindowPixelsAndHandoffDoesNotNeedPixelEquality() async throws {
         for scenario in ["outside completion", "inside completion", "outside handoff"] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

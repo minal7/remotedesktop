@@ -66,6 +66,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let focusedTextFrame: CGRect?
         let focusedEditor: String?
         let focusedTextState: ComputerUseNativeTextState?
+        let focusedTextStabilityToken: String?
         let nativeControls: ComputerUseNativeControls?
     }
     private final class Approval {
@@ -147,21 +148,60 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private func waitForPostActionSurface(_ observation: Observation, tools: ComputerUseHostTools) async throws {
         try await Task.sleep(for: .milliseconds(100))
         guard surfaceScopeCheck != nil else { return }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
-        while true {
+        let scopeDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+        func checkActiveApplication() throws {
             try Task.checkCancellation(); try tools.requireActive()
             let app = tools.frontmostApplicationSnapshot()
             guard app.identity == observation.fingerprint.frontmostApplicationIdentity,
                   app.policyName == observation.fingerprint.frontmostApplication else { throw Failure.scopedSurfaceChanged }
-            do { try checkScopedSurface(); return }
+        }
+        func currentScopeIsValid() throws -> Bool {
+            try checkActiveApplication()
+            do { try checkScopedSurface() }
+            catch Failure.scopedSurfaceChanged { return false }
+            try checkActiveApplication()
+            return true
+        }
+        while true {
+            try checkActiveApplication()
+            do { try checkScopedSurface() }
             catch Failure.scopedSurfaceChanged {
-                guard ContinuousClock.now < deadline else { throw Failure.scopedSurfaceChanged }
+                guard ContinuousClock.now < scopeDeadline else { throw Failure.scopedSurfaceChanged }
                 // A native sheet can briefly leave AX focus unavailable. Wait
                 // for the existing scope to validate; never replay the input
                 // or ask the model to act on the transitional surface.
                 try await Task.sleep(for: .milliseconds(100))
+                continue
+            }
+            try checkActiveApplication()
+            break
+        }
+
+        let currentToken = try tools.nativeFocusedEditorObservation()?.stabilityToken
+        guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+        guard currentToken != observation.focusedTextStabilityToken else { return }
+
+        // Newly focused native fields can emit delayed AX title/ancestry events;
+        // settle their exact observed identity before asking the model to plan.
+        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var lastToken = currentToken
+        var quietSince = ContinuousClock.now
+        while ContinuousClock.now < settleDeadline {
+            try await Task.sleep(for: .milliseconds(250))
+            guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+            let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
+            guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+            if token != lastToken {
+                lastToken = token
+                quietSince = ContinuousClock.now
+            } else if ContinuousClock.now - quietSince >= .seconds(1.25) {
+                guard ContinuousClock.now < settleDeadline else { break }
+                return
             }
         }
+        // The input already returned and was recorded. Do not route a settle
+        // timeout through changedScreen, whose feedback says no input was sent.
+        throw Failure.scopedSurfaceChanged
     }
 
     private static func displayKeyboardChord(_ keys: [String]) -> String {
@@ -235,6 +275,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
             focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState,
+            focusedTextStabilityToken: editor?.stabilityToken,
             nativeControls: controls)
     }
 
