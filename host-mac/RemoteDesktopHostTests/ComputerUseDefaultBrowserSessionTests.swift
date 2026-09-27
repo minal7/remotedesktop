@@ -635,7 +635,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 visualInput = input
                 XCTAssertEqual(input.goal, goal)
                 XCTAssertEqual(input.browserWorkerDirective, directive,
-                    "The structured directive should accompany the fresh screenshot exactly once")
+                    "The structured directive accompanies each visual turn until the delegated task ends")
                 return .init(response: "handoff", decision: .handoff("Review the current screenshot."))
             }, nativeControlPlanner: { input, _ in
                 nativeCalls += 1
@@ -662,6 +662,155 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertNil(observedNativeInput.browserWorkerDirective)
         XCTAssertEqual(observedVisualInput.browserWorkerDirective, directive)
         XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the original session Cmd+N may have sent input")
+    }
+
+    func testExplicitNativeVisualDelegationPersistsAcrossVisualActionsUntilCompletion() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-visual-delegation-persists"
+        let goal = "Upload the selected presentation and verify completion"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        fixture.desktop.additionalAction = { action in
+            guard action == .key(usage: 0x29, modifiers: 0) else {
+                throw ComputerUseDefaultBrowserSession.Failure.interrupted
+            }
+            fixture.desktop.keyCount += 1
+            fixture.desktop.screenColor = CIColor.white
+        }
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Use the visible upload menu",
+            constraints: "Keep the original task and selected file", completionCriteria: ["Verify the upload result"])
+        var nativeCalls = 0, visualCalls = 0
+        var visualInputs: [ComputerUseFaraModel.Input] = []
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInputs.append(input)
+                XCTAssertEqual(input.goal, goal, "The original user task remains authoritative")
+                XCTAssertEqual(input.browserWorkerDirective, directive,
+                    "An explicit native delegation remains active through the visual specialist's loop")
+                if visualCalls == 1 {
+                    return .init(response: "Dismiss the open menu.", action: .key(["Escape"]))
+                }
+                return .init(response: "The page confirms completion.", decision: .completionStatus(success: true))
+            }, nativeControlPlanner: { _, _ in
+                nativeCalls += 1
+                return .visualFallback("The screenshot is needed for the next step.", directive: directive)
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access),
+            completionCheck: { _ in true })
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        XCTAssertEqual(result, .completed("The model reported completion."))
+        XCTAssertEqual(nativeCalls, 1, "Native planning delegates once; it does not restart after each visual action")
+        XCTAssertEqual(visualCalls, 2, "The visual specialist continues until it reports verified completion")
+        XCTAssertEqual(visualInputs.count, 2)
+        XCTAssertNotEqual(visualInputs[0].screenshotPNG, visualInputs[1].screenshotPNG,
+            "The second specialist turn must use a fresh post-action screenshot")
+        XCTAssertEqual(visualInputs[1].history.count, 1, "The dispatched visual action remains in ordinary history")
+        XCTAssertEqual(visualInputs[1].history[0].action, .key(["Escape"]))
+        XCTAssertEqual(fixture.desktop.keyCount, 2, "Only initial Cmd-N and the fixture's Escape action are sent")
+    }
+
+    func testExplicitNativeVisualDelegationSurvivesApprovalContinuation() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-visual-delegation-approval-resume"
+        let goal = "Continue the requested task in the current browser page"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        let display = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "fixture browser window",
+                applicationID: retained.application.bundleIdentifier, accessibilityIdentity: "fixture-window") },
+            actionPerformer: { action in
+                guard case .click = action else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
+                fixture.desktop.keyCount += 1
+                fixture.desktop.screenColor = CIColor.white
+            }, screenProvider: {
+                .init(image: CIImage(color: fixture.desktop.screenColor).cropped(to: display),
+                    displayBounds: display, frontmostWindowBounds: display)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "fixture-window" },
+            frontmostApplicationIdentityProvider: { retained.application },
+            frontmostApplicationProvider: { retained.application.bundleIdentifier })
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Continue from the visible screenshot",
+            constraints: "Keep the original task authoritative", completionCriteria: ["Verify the requested result"])
+        var nativeCalls = 0, visualCalls = 0
+        var visualInputs: [ComputerUseFaraModel.Input] = []
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInputs.append(input)
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.browserWorkerDirective, directive,
+                    "The explicit delegation must survive the approval pause and continuation")
+                if visualCalls == 1 {
+                    return .init(response: "Inspect the selected page item.",
+                        action: .pointer(.leftClick, .init(x: 500, y: 500)))
+                }
+                return .init(response: "The requested result is verified.", decision: .completionStatus(success: true))
+            }, nativeControlPlanner: { _, _ in
+                nativeCalls += 1
+                return .visualFallback("Use the visual specialist for the next task step.", directive: directive)
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access),
+            completionCheck: { _ in true })
+
+        var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        guard case .approvalRequired(_, let action, let continuation) = result else {
+            return XCTFail("The unidentified visual click should pause at the existing approval boundary; got \(result)")
+        }
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint,
+            tools: tools, willBeginEffect: {})
+        result = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
+            tools: tools, progress: { _ in })
+
+        XCTAssertEqual(result, .completed("The model reported completion."))
+        XCTAssertEqual(nativeCalls, 1, "Approval continuation stays within the active visual delegation")
+        XCTAssertEqual(visualCalls, 2)
+        XCTAssertEqual(visualInputs[1].history.count, 1, "The approved click remains in ordinary history")
+        XCTAssertNotEqual(visualInputs[0].screenshotPNG, visualInputs[1].screenshotPNG,
+            "Continuation receives a fresh screenshot after the approved action")
+    }
+
+    func testImplicitNativeVisualFallbackReturnsToNativePlanningAfterOneVisualTurn() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-implicit-visual-fallback-one-turn"
+        let goal = "Continue the requested task in the current browser page"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        var nativeCalls = 0, visualCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertNil(input.browserWorkerDirective, "An implicit fallback has no delegated task directive")
+                return .init(response: "Remember the current state.", action: .remember("Current screenshot observed"))
+            }, nativeControlPlanner: { _, _ in
+                nativeCalls += 1
+                if nativeCalls == 1 {
+                    return .visualFallback("The current screen needs one visual inspection.", directive: nil)
+                }
+                return .askUser("Review the current page before continuing.")
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        XCTAssertEqual(result, .userInterventionRequired("Review the current page before continuing."))
+        XCTAssertEqual(nativeCalls, 2, "An implicit visual fallback returns to native planning after one visual turn")
+        XCTAssertEqual(visualCalls, 1)
     }
 
     func testNativeControlFailureDiagnosticsRetainOnlyErrorDomainAndCode() async throws {

@@ -462,10 +462,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             // visual planner for the explicitly guarded final Open action.
             if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
             if scope.visualFallbackPending {
-                scope.visualFallbackPending = false
+                let directive = scope.pendingVisualDirective
+                // An explicit directive gives the visual specialist a bounded
+                // assignment: keep the advice through its action loop. An implicit fallback
+                // (nil directive) is only a one-observation visual turn.
+                if directive == nil { scope.visualFallbackPending = false }
                 var visualInput = enriched
-                visualInput.browserWorkerDirective = scope.pendingVisualDirective
-                scope.pendingVisualDirective = nil
+                visualInput.browserWorkerDirective = directive
                 return try await propose(visualInput)
             }
             guard let nativeControlPlanner, let tools = scope.tools,
@@ -559,8 +562,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
             onSuccessfulDispatch: { scope.successfulDispatch($0) }, finishRun: {
-                scope.visualFallbackPending = false
-                scope.pendingVisualDirective = nil
+                // Desktop finishRun also runs when it returns an approval
+                // continuation. Keep explicit task advice for that bounded
+                // continuation; prepare, picker priority, and cancellation
+                // clear it at their task/surface lifecycle boundaries.
+                if scope.pendingVisualDirective == nil { scope.visualFallbackPending = false }
                 await finishRun()
             })
     }
@@ -648,6 +654,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     }
 
     func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) {
+        scope.visualFallbackPending = false
+        scope.pendingVisualDirective = nil
         desktop.cancelVisualApprovalContinuation(continuation)
     }
 
