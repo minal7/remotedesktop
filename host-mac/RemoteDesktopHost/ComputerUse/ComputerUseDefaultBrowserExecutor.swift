@@ -519,15 +519,25 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             case .pressControl(let controlID, _):
                 scope.visualFallbackPending = false
                 scope.pendingVisualDirective = nil
-                guard let selectedControl = page.controls.first(where: { $0.id == controlID }),
-                      let bounds = scope.session.currentActionBounds,
-                      let center = try scope.pageReader.validatedControlCenter(observation: page, controlID: controlID,
-                        window: window.accessibilityElement, windowBounds: bounds,
-                        mayAct: { (try? tools.requireActive()) != nil }),
+                guard let bounds = scope.session.currentActionBounds,
                       let display = enriched.desktopDisplayBounds,
                       display.width.isFinite, display.height.isFinite, display.width > 0, display.height > 0 else {
                     return .init(response: "", decision: .handoff("The selected page control changed or is no longer available. Review the page, then choose Resume."),
                         includeInModelHistory: false)
+                }
+                guard let selectedControl = page.controls.first(where: { $0.id == controlID }) else {
+                    try scope.check(nil, tools)
+                    scope.visualFallbackPending = true
+                    scope.pendingVisualDirective = nil
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                }
+                guard let center = try scope.pageReader.validatedControlCenter(observation: page, controlID: controlID,
+                    window: window.accessibilityElement, windowBounds: bounds,
+                    mayAct: { (try? tools.requireActive()) != nil }) else {
+                    try scope.check(nil, tools)
+                    scope.visualFallbackPending = true
+                    scope.pendingVisualDirective = nil
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
                 }
                 try scope.check(nil, tools)
                 let x = (center.x - display.minX) / display.width * 1_000

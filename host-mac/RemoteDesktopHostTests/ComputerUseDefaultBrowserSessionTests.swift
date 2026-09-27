@@ -345,13 +345,60 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 tools: fixture.tools, progress: { _ in })
             if scenario == "ask-user" {
                 XCTAssertEqual(result, .userInterventionRequired("Choose the destination account."))
+                XCTAssertEqual(visualCalls, 0, "A deliberate request for user input remains a direct handoff")
             } else {
-                guard case .userInterventionRequired = result else { return XCTFail("A stale control must hand off") }
+                XCTAssertEqual(result, .userInterventionRequired("Fara fallback"),
+                    "A stale control should fall back to the current screenshot")
+                XCTAssertEqual(visualCalls, 1)
             }
             XCTAssertEqual(nativeCalls, 1)
-            XCTAssertEqual(visualCalls, 0, "Ask-user and stale-control outcomes must not fall through to Fara")
             XCTAssertEqual(fixture.desktop.keyCount, 1, "The only input is the session's original Cmd-N")
         }
+    }
+
+    func testNativeControlChangedDuringPlanningRefreshesBeforeVisualFallback() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-control-changed-during-planning"
+        let goal = "Continue the requested task in the current browser page"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        var nativeInput: ComputerUseFaraModel.Input?
+        var visualInput: ComputerUseFaraModel.Input?
+        var nativeCalls = 0, visualCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInput = input
+                let freshScreen = try fixture.tools.currentScreen()
+                XCTAssertEqual(input.screenshotPNG, try ComputerUseDesktopImage(observation: freshScreen).png,
+                    "A stale native target must route from a post-planning screenshot")
+                return .init(response: "handoff", decision: .handoff("Review the refreshed browser page."))
+            }, nativeControlPlanner: { input, page in
+                nativeCalls += 1
+                nativeInput = input
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(page.url, "https://drive.google.com/drive/my-drive")
+                let observedID = try XCTUnwrap(page.controls.first?.id)
+                fixture.desktop.screenColor = CIColor.white
+                graph.changePageURL("https://drive.google.com/drive/home")
+                return .pressControl(id: observedID, explanation: "Open the current page control")
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the refreshed browser page."))
+        XCTAssertEqual(nativeCalls, 1)
+        XCTAssertEqual(visualCalls, 1)
+        let oldInput = try XCTUnwrap(nativeInput)
+        let freshInput = try XCTUnwrap(visualInput)
+        XCTAssertEqual(freshInput.goal, goal, "Keep the original user task authoritative")
+        XCTAssertNotEqual(freshInput.screenshotPNG, oldInput.screenshotPNG)
+        XCTAssertTrue(freshInput.history.isEmpty, "A rejected pre-effect control is not a dispatched action")
+        XCTAssertNil(freshInput.actionError, "Do not invent an input-rejection error for a native plan that never dispatched")
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the session's original Cmd-N may be sent")
     }
 
     func testMissingNativePageRefreshesBeforeVisualFallback() async throws {
@@ -2367,6 +2414,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var origin = controlFrame.origin, size = controlFrame.size
             attrs["button", default: [:]][kAXPositionAttribute as String] = AXValueCreate(.cgPoint, &origin)!
             attrs["button", default: [:]][kAXSizeAttribute as String] = AXValueCreate(.cgSize, &size)!
+        }
+        func changePageURL(_ url: String) {
+            attrs["web", default: [:]]["AXURL"] = url as NSString
         }
         var access: ComputerUseDefaultBrowserPageReader.Access {
             .init(frontmost: { [self] in

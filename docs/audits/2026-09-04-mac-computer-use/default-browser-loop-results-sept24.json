@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable. Live21 recovered from a rejected address-bar type, reached Drive, opened the File upload chooser, and chose the exact newest Downloads candidate, but the picker never confirmed it. Typing in the chooser Go To sheet failed with preconditionChanged; no exact picker selection or upload followed; the client ended unableToComplete. The saved lastActionDiagnostic is from the earlier address-bar rejection and does not establish the chooser failure cause. Earlier scoped upload/readback evidence remains separately qualified; full client-route reliability is open.",
+    "status": "Not accepted as reliable end-to-end. Live22 and live24 each produced one upload effect and independent 28,273-byte SHA-256 readback matching the fixture. Live24 client paused for user confirmation before completion verification; terminal nil. The app selected an older suggested file on Drive’s Home page while verifying the new upload. Live23 stale-control proposal rejection remains unexplained. The stale-control refresh is component-tested, but live24 does not establish that branch was exercised.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3305,6 +3305,32 @@
         "redEvidence": ".build/repair-verification/native-page-unavailable-refresh-red01-summary.json",
         "greenEvidence": ".build/repair-verification/native-page-unavailable-refresh-green01-summary.json",
         "qualification": "Component behavior only; no Drive completion inference."
+      },
+      {
+        "name": "native-unsent-text-recovery",
+        "change": "Only a typeText attempt with exact preconditionChanged and proof that no text was sent is retired through the existing store before reobservation and replanning. Failure persistence remains terminal; approved and uncertain attempts are not replayed.",
+        "red": "native-unsent-text-recovery-red01 reproduced preconditionChanged: 1 new test failed and 1 uncertain-regression test passed; 0 build errors, 4 warnings, 42 source hashes stable, no runtime warnings.",
+        "green": "native-unsent-text-recovery-green01: 14 focused checks passed, 0 failures/skips/runtime warnings; 0 build errors, 2 warnings, 45 source hashes stable.",
+        "redEvidence": ".build/repair-verification/native-unsent-text-recovery-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/native-unsent-text-recovery-green01-summary.json",
+        "qualification": "Component behavior only; bounded live22 validation pending."
+      },
+      {
+        "name": "selectable-ax-file-row-label-and-pointer-context",
+        "red": "default-browser-file-row-label-red01: expected label-evidence failure; 1 failed test, 0 build errors/warnings, 45 source hashes stable.",
+        "green": "default-browser-file-row-label-green01: 3/3 passed, 0 build errors, 45 compiler warnings, 47 source hashes stable, no runtime warnings.",
+        "readOnlyProbe": ".build/repair-verification/default-browser-file-row-label-green01-attachments/BCEDACBF-C5C1-40F9-BBCA-A11AFEABEF40.json",
+        "finding": "Exact Drive filename was found on the AXCell target. Target frame and point-context pixels were stable immediately after control capture and after two seconds. Separate diagnostic probe; no acceptance of a row action or live22 approval gate.",
+        "qualification": "Component/observation evidence only."
+      },
+      {
+        "name": "stale-native-control-pre-effect-refresh",
+        "change": "After a stale native-control pre-effect rejection, refresh the observation and replan using the existing visual handoff; approval/input guards remain unchanged.",
+        "red": "native-control-stale-refresh-red01: 1 expected failure; 0 build errors, 16 warnings, 49 source hashes stable.",
+        "green": "native-control-stale-refresh-green01: 26 passed, 1 skipped, 0 failures; 0 build errors, 18 warnings, 49 source hashes stable, no runtime warnings.",
+        "redEvidence": ".build/repair-verification/native-control-stale-refresh-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/native-control-stale-refresh-green01-summary.json",
+        "qualification": "Component behavior only; live24 uploaded the correct file but paused during verification; branch exercise unproven."
       }
     ],
     "runs": [
@@ -3416,6 +3442,30 @@
         "evidence": ".build/repair-verification/client-manager-drive-upload-live21-summary.json",
         "attachments": ".build/repair-verification/client-manager-drive-upload-live21-attachments/manifest.json",
         "diagnosis": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live22",
+        "outcome": "The exact newest candidate was selected and one upload effect was admitted. Independent Safari verification found the exact fixture in Drive and downloaded 28,273 bytes matching source SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. Client terminal was nil; the test stopped at a separate unidentified-item approval during Fara’s additional verification attempt, so app completion was not observed. Build: 0 errors/warnings; 51 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live22-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-drive-upload-live22-attachments/68B15AE4-2B0A-471B-9275-DFF680DB6272.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-drive-upload-live22-attachments/56BB805C-A5CF-4C2D-977A-1A00582A5B93.txt",
+        "readback": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
+        "diagnosis": "Scoped upload/readback succeeded; the client workflow did not complete."
+      },
+      {
+        "run": "client-manager-drive-upload-live23",
+        "outcome": "Failed after reaching Drive. The captured request showed New disabled and the native planner chose observed Google Account control C52918BF-95F7-4B21-B450-44EA5EDDAF9C; host validation rejected before click dispatch, immediate predicate unknown. A later CUA snapshot showed /drive/home with New enabled. No file calls, approval, upload or client terminal. The selectable-cell label repair was not exercised. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live23-summary.json",
+        "attachments": ".build/repair-verification/client-manager-drive-upload-live23-attachments/manifest.json",
+        "diagnosis": ".build/repair-verification/client-manager-drive-upload-live23-checkpoint-draft.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live24",
+        "outcome": "One upload effect was admitted for the expected fixture. Independent Safari readback found the exact expected filename in My Drive and downloaded 28,273 bytes matching source SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. The client paused with “Previous upload verification failed; need user confirmation to check file status”; terminal nil and no fresh completion evidence. The app selected an older suggested file on Drive’s Home page during verification. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning. No evidence establishes the stale-control refresh branch was exercised.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live24-summary.json",
+        "attachments": ".build/repair-verification/client-manager-drive-upload-live24-attachments/manifest.json",
+        "readback": ".build/repair-verification/client-manager-drive-upload-live24-independent-readback.json",
+        "readbackQualification": "Independent upload/readback only; client completion not observed."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3504,6 +3554,25 @@
     "live21Diagnosis": {
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
+    },
+    "next": "Investigate live24’s post-upload verification decisions and premature request for user input; keep approval gates unchanged.",
+    "live22Readback": {
+      "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
+      "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "appCompleted": false,
+      "qualification": "Independent real-Drive upload/readback is verified; client task stopped before completion at a separate unidentified-item approval."
+    },
+    "live24Readback": {
+      "evidence": ".build/repair-verification/client-manager-drive-upload-live24-independent-readback.json",
+      "fileName": "Remote Desktop E2E E5FFADC0-29BF-469B-AF82-FAD04F9468C1.pptx",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "appCompleted": false,
+      "observedSelectionDiscrepancy": "Post-upload CUA showed an older suggested file selected on Drive’s Home page while the upload widget named the correct new fixture. Native picker exact-file selection passed."
     }
   }
 }
