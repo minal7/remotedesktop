@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Live26 remains a separate complete scoped task pass. After clarification-approval identity fix commit 5c2c0d7, live07 delivered exactly two tied choices, accepted the exact filename answer, admitted one upload, and passed independent 28,273-byte SHA-256 readback. The client then paused during completion screenshot revalidation; no taskCompleted terminal was produced. Thus ambiguity choice and transfer are verified in this run, while full task completion is not.",
+    "status": "Live26 remains one complete scoped ClientModel/HostManager task pass. Live07 verified exact two-way clarification, exact filename answer, one upload, and independent 28,273-byte SHA-256 readback; client paused before taskCompleted. Live08 regressed: with hasTiedSortValues=true, the native planner selected the first Alternate candidate instead of asking, and the bounded harness refused the resulting mismatched Upload approval; no upload. Ambiguous-transfer reliability remains unaccepted.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3376,6 +3376,22 @@
         "qualification": "Component verified; live07 passed answer-task identity, exact-file transfer and byte readback, but paused before taskCompleted.",
         "green": "GREEN01: compile-only failure from ambiguous Host/ClientCore test type; 0 tests ran. GREEN02: 6 passed, 0 failures/skips/runtime warnings; 0 build errors, 24 warnings, 50 source hashes stable.",
         "greenEvidence": ".build/repair-verification/clarification-approval-identity-green02-summary.json"
+      },
+      {
+        "name": "completion-fresh-observation-reobserve",
+        "change": "Production DesktopExecutor now uses its existing bounded completionUnverified/reobserve loop when the completion frame is stale instead of immediately handing off.",
+        "red": "completion-fresh-observation-red01: 2 failed tests, 5 expected assertions; 0 build errors, 5 warnings, 50 source hashes stable.",
+        "green": "completion-fresh-observation-green01: 10 passed, 0 failures/skips/runtime warnings; 0 build errors, 25 warnings, 50 source hashes stable.",
+        "redEvidence": ".build/repair-verification/completion-fresh-observation-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/completion-fresh-observation-green01-summary.json",
+        "qualification": "Production component behavior is tested, but live08 failed during file selection before completion; no live branch proof."
+      },
+      {
+        "name": "completion-fresh-observation-test-oracle",
+        "change": "Separate test-only same-row Drive evidence fallback after toast fade; requires the exact filename and “Uploaded” in the same AXRow. The production validator remains nil.",
+        "green": "Included in completion-fresh-observation-green01: 10 passed, 0 failures/skips/runtime warnings; 0 build errors, 25 warnings, 50 source hashes stable.",
+        "greenEvidence": ".build/repair-verification/completion-fresh-observation-green01-summary.json",
+        "qualification": "Test-oracle behavior only; live08 failed during file selection before completion."
       }
     ],
     "runs": [
@@ -3581,6 +3597,16 @@
         "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live07-attachments/AF3ED532-A12A-4415-87C3-5CAD5BB38199.txt",
         "readback": ".build/repair-verification/client-manager-ambiguous-drive-live07-independent-readback.json",
         "qualification": "Clarification, upload and independent byte readback succeeded; full task completion did not."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live08",
+        "outcome": "Native file planner saw hasTiedSortValues=true but selected the first Alternate candidate instead of asking. An Upload approval was presented but not accepted because it did not match the expected fixture. No clarification, upload effect or task completion; client terminal nil. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live08-summary.json",
+        "attachments": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/manifest.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/2F26EBBA-4D3D-4411-BB3E-78C0A85C6FB0.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/1C952384-06CD-4700-860D-7AD8B1C2D3F9.txt",
+        "nativeSelectionResponse": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/7F044312-F109-430A-921B-ADFC6090E41C.json",
+        "cleanup": "Canceled chooser and closed only owned Safari window AAE18F46-AD09-4D18-B11B-64D09803870B; original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 preserved."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3670,7 +3696,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Reobserve completion after the upload toast fades; do not repeat file selection or approval changes.",
+    "next": "Add a typed metadata tie guard at selectFile, preserving general LLM interpretation and explicit-name choices; keep approval gates unchanged.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
