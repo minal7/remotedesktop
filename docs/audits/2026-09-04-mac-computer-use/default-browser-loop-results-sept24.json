@@ -3455,7 +3455,7 @@
       "nonthinkingCandidate": ".build/repair-verification/native-nonthinking-candidate01/result/result.json",
       "nonthinkingResult": "Changing only enable_thinking=false still chose the wrong menu container and Create in the wrong dialog. Faster (4.47/2.53 seconds), but incorrect; no production settings changed.",
       "limits": "Four serial proposal-only completions across two experiments, one worker per experiment, unchanged 4 GiB cap, workers exited and temporary credentials removed. No effects or model promotion.",
-      "next": "Investigate the live20 native focused-editor authority mismatch before another Drive workflow. Do not relax focus/pixel/approval guards or apply the prior-target history draft. The expanded-menu component is tested, but live20 never reached a menu.",
+      "next": "Read-only focus and delayed real executor typing probes passed without explaining live20. Make one bounded client Drive retry to exercise the new menu handoff; preserve guards and defer history draft.",
       "handoffComponent": {
         "red": ".build/repair-verification/expanded-menu-handoff-red01-summary.json",
         "green": ".build/repair-verification/expanded-menu-handoff-green01-summary.json",
@@ -3474,7 +3474,17 @@
       "result": "40 samples over 15.29 seconds retained the production text-target ID, empty value, selection, editable and secure states. Three unrelated AXUIElementDestroyed notifications at sample 16 did not retire the field binding. No test issues or runtime warnings.",
       "limits": "Read-only target sampling on an already-open fresh task-owned Safari Start Page. No model, screenshot or input. Does not reproduce the full executor capture/revalidation sequence or explain the live20 rejection. No guard changed.",
       "cleanup": "Closed owned Safari window E0B7F642-4430-4C02-8B7E-06054D16374F; original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 preserved.",
-      "next": "Exercise one delayed URL-typing proposal through the real default-browser executor with inference disabled; verify exact readback and stop before Return."
+      "next": "Delayed executor typing probe passed without reproducing the live20 rejection; see delayedExecutorTypingDiagnostic."
+    },
+    "delayedExecutorTypingDiagnostic": {
+      "run": "default-browser-url-typing-live01",
+      "summary": ".build/repair-verification/default-browser-url-typing-live01-summary.json",
+      "observation": ".build/repair-verification/default-browser-url-typing-live01-attachments/4F2ADDED-5BDE-49C5-A640-6FEAC679A416.json",
+      "result": "Passed: real default-browser executor created its own Safari window, waited 12 seconds, dispatched one proposed URL type, then read the exact full URL with no action error and stopped before Return. Two proposal callbacks; no inference, submission or upload.",
+      "build": "Zero errors, 16 warnings, existing main-thread runtime warning; 46 source hashes unchanged during run.",
+      "limits": "Scripted literal proposal validates this execution slice, not model recovery or client/HostManager reliability. The live20 rejection was not reproduced or explained. Guards unchanged.",
+      "independentUIReadback": "CUA observed Start Page with the exact URL in the focused smart address field after the test; no navigation. Closed own window 3AA10D09-62B7-4F5E-AB1C-A8CE3C061C60 and preserved original 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+      "next": "One bounded full client Drive retry to exercise the new menu handoff, with unchanged acceptance assertions."
     }
   }
 }

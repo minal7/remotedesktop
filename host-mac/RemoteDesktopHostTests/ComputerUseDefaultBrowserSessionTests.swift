@@ -741,6 +741,92 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: false)
     }
 
+    func testOptInDefaultBrowserTypesURLWithoutNavigation() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_URL_TYPING_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_URL_TYPING_PROBE=1 to type a URL into the owned default-browser window without submitting it.")
+        }
+        let taskID = UUID().uuidString
+        let url = "https://drive.google.com/"
+        let goal = "Type \(url) into the empty Safari address field, then stop without pressing Return or navigating."
+        let journal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserURLTyping-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journal) }
+
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        var proposalCount = 0
+        var initialFieldVerified = false
+        var typedTextReadBack = false
+        var actionErrorAfterTyping: String?
+        var diagnostic: [String: String] = [:]
+        var windowID: String?
+        var outcome = "not started"
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: journal, propose: { input in
+            proposalCount += 1
+            let editor = input.focusedEditor ?? ""
+            let state = input.focusedTextState
+            if proposalCount == 1 {
+                initialFieldVerified = editor.contains("WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD")
+                    && state?.valuePrefix.isEmpty == true
+                    && state?.valueUTF8Bytes == 0
+                    && state?.valueUTF16Units == 0
+                    && state?.truncated == false
+                guard initialFieldVerified else {
+                    return .init(response: "", decision: .handoff("The empty Safari address field was not verified; no text was entered."),
+                        includeInModelHistory: false)
+                }
+                try await Task.sleep(for: .seconds(12))
+                return .init(response: "Proposed one URL text entry; do not submit it.", action: .typeText(url))
+            }
+            typedTextReadBack = editor.contains("WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD")
+                && state?.valuePrefix == url
+                && state?.valueUTF8Bytes == url.utf8.count
+                && state?.valueUTF16Units == url.utf16.count
+                && state?.truncated == false
+            actionErrorAfterTyping = input.actionError
+            return .init(response: "Typing diagnostic finished.",
+                decision: .handoff("Typing diagnostic finished. Stop without pressing Return."),
+                includeInModelHistory: false)
+        })
+
+        func attach(_ error: String? = nil) {
+            diagnostic = executor.lastActionDiagnosticForTests
+            windowID = executor.retainedWindowForDiagnostics?.id
+            let payload: [String: Any] = [
+                "taskID": taskID, "outcome": outcome, "error": error.map { $0 as Any } ?? NSNull(),
+                "proposalCount": proposalCount, "initialAddressFieldVerified": initialFieldVerified,
+                "typedURLReadBackExactly": typedTextReadBack,
+                "actionErrorAfterTyping": actionErrorAfterTyping.map { $0 as Any } ?? NSNull(),
+                "windowID": windowID.map { $0 as Any } ?? NSNull(), "lastActionDiagnostic": diagnostic,
+                "navigationSubmitted": false,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                attachment.name = "default-browser-url-typing-readback.json"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+        }
+        do {
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+            outcome = String(describing: result)
+            attach()
+            XCTAssertTrue(initialFieldVerified, "The first proposal must be based on the verified empty Safari address field")
+            XCTAssertEqual(proposalCount, 2, "One delayed type proposal and one fresh readback/handoff proposal are expected")
+            XCTAssertTrue(typedTextReadBack, "The fresh focused address field must contain the exact URL")
+            XCTAssertNil(actionErrorAfterTyping, "Typing must not be reported as rejected")
+            if case .userInterventionRequired = result { } else {
+                XCTFail("Expected the explicit stop handoff after URL readback; got \(result)")
+            }
+        } catch {
+            outcome = "threw"
+            attach(String(describing: error))
+            throw error
+        }
+    }
+
     func testOptInDefaultBrowserUploadsLatestPresentationToRealDrive() async throws {
         try await runDefaultBrowserFileProbe(uploadToDrive: true)
     }
