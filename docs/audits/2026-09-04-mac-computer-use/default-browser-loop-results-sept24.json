@@ -5,54 +5,80 @@
     "implemented": true,
     "compiled": true,
     "tested": true,
-    "accepted": "One blank-start, app-completed real-Drive upload/completion/readback slice from live28 using the direct executor, original goal, no native advice or scripted startup, bounded test approvals and a custom completion check. Production MCPFirst/HostManager and paired iOS routes, email, ambiguity handling, and 12 GB whole-machine qualification remain unaccepted."
+    "accepted": "One blank-start production-composition real-Drive upload/completion/readback slice (live11) using the actual Apple planner, mac-control MCP helper and browser loader; exact newest candidate among three, one admitted upload, fresh host completion evidence, Fara termination, and independent exact-byte readback. Bounded test approvals covered chooser opening and exact-file confirmation; no custom completion checker. The separate live28 direct-executor slice also passes. Broad HostManager/iOS UI workflows, email, ambiguity and 12 GB whole-machine qualification remain unaccepted."
   },
   "defaultBrowser": "com.apple.Safari",
   "model": "Fara1.5-4B Q4_K_M",
   "runtimeLimitBytes": 4294967296,
   "concurrency": "One model worker; serial builds; no parallel inference",
   "latest": {
-    "run": "default-browser-fara-drive-live12",
+    "run": "production-drive-upload-live11",
     "testIDs": [
-      "ComputerUseFaraActionTests/testOptInDefaultBrowserFaraStopsAtGoogleSignIn"
+      "ComputerUseDefaultBrowserSessionTests/testOptInProductionCompositionDefaultBrowserUploadsLatestPresentationToRealDrive"
     ],
     "sourceSHA256": {
-      "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "6f33c566ac79133a6363e8dc308c862da311aec39f4f4f1abf96fe060f5839a1",
+      "TODO.md": "54301a8ab15cc37608d1779a00a49550990651e404efb9f8726095da83eea43f",
+      "docs/audits/2026-09-04-mac-computer-use/default-browser-loop-results-sept24.json": "0fa5da36add1f2a61a4dbfcc773e2d3ccf4e0774b77c4d79510f743981187c6f",
+      "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj": "18afca493ccb8d9375e477998f8789b5636e25fb08d3652f70daa066e01b85b5",
+      "host-mac/RemoteDesktopHost/ComputerUse/AppleFoundationMCPPlanner.swift": "fb28131563f7217e15a0c97f4897fb407bea0007df8cc31416ed8d5cb58f43f2",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserDOM.swift": "a7727bb5a488dc1e1823e3eedfe3df6e8dbf742a7510a38425d0a2cded18dfb7",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseBrowserNavigationTask.swift": "93f0378fe5176a97fa83cb623d069123dc6853ae40bb285a98589a11eacf6a7d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseCapabilityExecutor.swift": "3511a93f4fc28b95e4952ba33d675d768367817317126a533777b3ed56b63bb0",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "08b6b7697443b85773ffaf54cb25546fd8db640dbd048c74cf85d72f76884b11",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserPageReader.swift": "260084ab4714d91c3b847be36763ae44fbcc97d45cf1ce71a63acb9c942b6d3e",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserSession.swift": "4acb2821f1cd4c515909ce194f2734fa61ab63f3e3a96c34cab48148ead597ae",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "18b6ff50d9dc0359a000977bc569a8f50cff263404d71fd2ea3c9aa58f56cf00",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraAction.swift": "9aae901e57e5015cbac3a7222c1964895c1a4a01de925afca89d688b7d75f13a",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserControlPlanner.swift": "3f175363f806b720b4bd17b04778b7cd1a3d4c88a61fdd5f1ca19a905ee628b6",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserExecutor.swift": "a6cadc0e68e9385e5e155e4e32c3527cbc4e70b4557720370b27616aa294ec51",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserPageReader.swift": "b74191e92d78bd622df54d4baaf09db7b856564e7ac7e1fe4f2a2c866f259832",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDefaultBrowserSession.swift": "a802d6b6dffebd3a246bafc50c1f8d61ecff01d8ea13614802b4cf814e41e6c5",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift": "5f9a012f551a48eeeef9b1765fca1b0210a3f131ecdda03aa21141b095025aa3",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraAction.swift": "e6cef5dee10b1997507cfd2b91fc4c2fcb8e8c0669096f57736e22361ab5a53d",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraBrowserExecutor.swift": "c8b955dc40a6ccdaf0220181b135f44ba207579e588138a75c95e344f7c68c3b",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "ae8bd2d1654035acd1dd664cb22d6206f73d2db79a657f85e1094ceacb18a5bf",
-      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "f65dce5bcb5f3ff57d30b7b82babaeca35558485a03259ca2a9c87ddac8ef4a2",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift": "0cad438370509fdb9b5c5ab44dc4d38b6fb4b52131221428de18e9eb4ba4f4c2",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseLocalFileCatalog.swift": "220a4b448f8eb7b17e20208831217e863b7b44042c0e57990ff3c5407fcfcdb0",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseMCPBrowserStepPlanner.swift": "761fcc57aa55c85d4936c1033c391865bd77d16b50be49b37aaad9ddca51d04b",
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseObservationWorker.swift": "e4be0df960b3a0c7113aaef110aef434045d89421e678583154121c7bed49572",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseOwnedBrowser.swift": "196f514da18f777c35107be6860226afdd038ab43b4feb6b381f278f0706493a",
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseTextClarificationStore.swift": "7a7c5057b5d23008baafbf8490e5cacc9ccfce127d13b0a1b6854d45817b2e2f",
-      "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "296d6063b8572a6a0d7290c9110816b07433ea3cc0c7bbd02d8dc5fc9ad03e2c",
+      "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift": "70d50535af08085931a78084fa1783592958b5d2f08d8ff84f5117e01ca126f5",
       "host-mac/RemoteDesktopHost/ComputerUse/MCPFirstComputerUseExecutor.swift": "3a9dedfd6b0064a1021f60cef6f814ada6ea10ef86d1fc759e40967ac8ef34f3",
       "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasComputerUseExecutor.swift": "18224b26c02abc8096799167bd47e07bb1d658ecac00e6a231161953dd0cf145",
-      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d469db3997a1d1217d98fa257cb3f61a53ae050e83645e88cf76ea3c2c1c9159",
-      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "e47e0dd889aa12c3357a3513bf207b967029e0e6f958d2a3f0d164b1884ee885",
+      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasLlamaRuntime.swift": "d0189162d9fca73ec52a06d1c56f1e506c01f7de7c89ebb77e112d728914acb8",
+      "host-mac/RemoteDesktopHost/ComputerUse/OSAtlasRuntimeInstallation.swift": "33ee9cb1fe49264a20c529edf1800abf7835d4ed3de6a94623d581d38b16f16c",
       "host-mac/RemoteDesktopHostTests/ComputerUseBrowserDOMTests.swift": "f61d3f0afffcfbec1df99acedc9b7ab766b198581ffc5b101dcdd60b2a79fb41",
       "host-mac/RemoteDesktopHostTests/ComputerUseCapabilityExecutorTests.swift": "d0648878382ad22062635f154aaa61de1495952c3f9f9dc5c00705fba0e0a215",
       "host-mac/RemoteDesktopHostTests/ComputerUseClarificationCompositionTests.swift": "78a10bf3432aa4344934f9c04515170b2d98cb0e95c3780cb5d3b15865947a89",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserExecutorTests.swift": "da6267651e62a0947a38504708bbac336ebcafd48a251e918cf3e90e5efde628",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserPageReaderTests.swift": "9d622bafbc7da4e24f0843a9e45c3e3cf13381f2d1f63b79600aab84660784a0",
-      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "9c9b1ccbbfc0fc77d1f09944f6ccb483d54df906e4d99702f20a45f0ecbcda67",
-      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "86408a1522ffc41243eb909677a864fa8307e77209a1b46c74eba6a284aea099",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserControlPlannerTests.swift": "e7fe3f79f908fdeaea15a9666c5ce4d69d9db5d07739de605cae96e4ead10257",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserPageReaderTests.swift": "af996e4fbe5a27c42aefa8a826f47c5ac5116e30aa8617bea833352c5a57d817",
+      "host-mac/RemoteDesktopHostTests/ComputerUseDefaultBrowserSessionTests.swift": "d3394f4ddb771f149ad96d31e4d32608fc4cf86848f7b83b1c5575084c174149",
+      "host-mac/RemoteDesktopHostTests/ComputerUseFaraActionTests.swift": "6769aecad72a09f8ca5ec11d5324fecc0ce0b5c1ff891c9b6aecbfbdaf7036d0",
+      "host-mac/RemoteDesktopHostTests/ComputerUseLocalFileCatalogTests.swift": "7c7f811302d32b63bef7795459a32b2c1b8a82e50a87ac91a72c20f9881f658f",
       "host-mac/RemoteDesktopHostTests/ComputerUseMobileInitiationTests.swift": "ee9c12856ba04b570d9c9e72dad8d4d64aa38f0814a851cee6d5490c2924b18d",
-      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "91f8c974bfb877776d04db9d7ac7f619ca652b6f005b59d653ae27300b04d559",
+      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift": "215024b12a41dea154efbaffd60c47e9eaa05a478b5d837cc8322211f6f3136a",
+      "host-mac/RemoteDesktopHostTests/ComputerUseObservationWorkerTests.swift": "14618de5a2fbe08f33e28181082f1380c590d77b969b3618295b393c62d02aad",
       "host-mac/RemoteDesktopHostTests/ComputerUseTextClarificationTests.swift": "5d95230357a7ae1fc8800a7fddea2fe193049956de86e1f25f99c1ad77656bb5",
-      "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "5f2e548e89b6007bbc1b241cff8f649450bef6d7d08f2be32c9c942ee7ebd98d",
+      "host-mac/RemoteDesktopHostTests/MCPFirstComputerUseExecutorTests.swift": "2f2bc0e8c2e37cca555e6bdfc6dc7e14160d9d9ffd1c45aae7582aa9d5ed8f5b",
       "host-mac/RemoteDesktopHostTests/OSAtlasComputerUseExecutorTests.swift": "68da6305073a186890e37f9c239bb73bf2039e65b0ddc010b248abedad7ea0a7",
       "host-mac/RemoteDesktopHostTests/OSAtlasRuntimeInstallationTests.swift": "e2daa00a013dc2a16e2161495163eeadffab7bd1a24fe0db8889f8e9e3bdeb28",
       "protocol/Swift/ComputerUseProtocol.swift": "e11f1c6f4aff5c9167fbab461bf0e90ad5d68710f07427b4a150c58dffa02ce9"
     },
     "buildConfigSHA256": "66891e6654e4a62394769ff87fbe9ef808b41c886ff44a521fb8ac0d56dc4294",
-    "sourceUnchangedThroughHarvest": true
+    "sourceUnchangedThroughHarvest": true,
+    "sourceCount": 41,
+    "result": "Passed",
+    "passed": 1,
+    "failed": 0,
+    "skipped": 0,
+    "buildErrors": 0,
+    "buildWarnings": 0,
+    "runtimeWarnings": [
+      {
+        "issueType": "Runtime Warning",
+        "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+      }
+    ],
+    "commandPath": ".build/repair-verification/production-drive-upload-live11-command.json",
+    "summaryPath": ".build/repair-verification/production-drive-upload-live11-summary.json",
+    "buildPath": ".build/repair-verification/production-drive-upload-live11-build.json",
+    "sourceAuditPath": ".build/repair-verification/production-drive-upload-live11-source-audit.json",
+    "independentReadbackPath": ".build/repair-verification/production-drive-upload-live11-independent-readback.json"
   },
   "runs": [
     {
@@ -813,14 +839,89 @@
       "requestSHA256": "03ca0f3fff45afa2d9405d1152d082584ae614b8c5d631a0ff9e026d4acaf2d4",
       "note": "No model promotion or product conclusion from this two-profile diagnostic.",
       "reportPath": ".build/repair-verification/holo-drive-live09-current01/report.json"
+    },
+    {
+      "run": "native-control-history-target-red01",
+      "testResult": "Failed",
+      "passed": 2,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "note": "Expected RED: native click history omitted observed target label/ID/role metadata."
+    },
+    {
+      "run": "native-control-history-target-green01",
+      "testResult": "Passed",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 23,
+      "runtimeWarnings": 0,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "review": "Independent review found no issues. Focused component result does not prove causation for the live upload."
+    },
+    {
+      "run": "production-drive-upload-live11",
+      "testResult": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": 1,
+      "sourceCount": 41,
+      "sourceUnchanged": true,
+      "route": "Actual Apple planner + mac-control MCP helper + browser loader; blank-start Safari; original goal.",
+      "candidateSelection": "Exact latest presentation selected among three candidates.",
+      "nativeFileCalls": 2,
+      "nativeControlExchanges": 4,
+      "harnessNativeControlCounter": 0,
+      "harnessCounterQualification": "Harness counter bypasses actual production-route exchanges; do not use it as a production native-control count.",
+      "uploadEffects": 1,
+      "freshHostEvidence": "Exact filename and 1 upload complete; picker absent. Fara terminated and app returned completed.",
+      "boundedTestApproval": "Chooser opening and exact disposable-file confirmation, each at most once",
+      "customCompletionChecker": false,
+      "independentReadbackPath": ".build/repair-verification/production-drive-upload-live11-independent-readback.json",
+      "retainedReadbackPath": ".build/repair-verification/production-drive-upload-live11-readback.pptx",
+      "fileName": "Remote Desktop E2E 18796FA5-C7C6-42D0-9923-A7E5256CCC0C.pptx",
+      "remoteID": "1Uq5S8JonM_F0R5RwCyI571tLNtv5KQnr",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "broadProductionReadinessAccepted": false,
+      "summaryPath": ".build/repair-verification/production-drive-upload-live11-summary.json",
+      "sourceAuditPath": ".build/repair-verification/production-drive-upload-live11-source-audit.json",
+      "attachmentsPath": ".build/repair-verification/production-drive-upload-live11-attachments/manifest.json"
+    },
+    {
+      "run": "fara-drive-live10-two-images-cap4",
+      "testResult": "No-effects replay; unqualified",
+      "outcome": "stop after proposing Return despite the rejected type and empty field.",
+      "promptTokens": 6514,
+      "completionTokens": 68,
+      "totalSeconds": 14.5247,
+      "peakSampledProcessMemoryBytes": 4270718976,
+      "memoryStopLimitBytes": 4294967296,
+      "note": "Does not establish the reason for live10 URLSession -1005. Memory cap unchanged."
+    },
+    {
+      "run": "fara-drive-live09-labelled01",
+      "testResult": "No-effects replay; unqualified",
+      "outcome": "Proposed click File upload at [62,202] for the observed labelled target.",
+      "note": "One captured request only; proposal is not an effect or causal proof."
     }
   ],
   "limitations": [
     "The installed Applications host was not replaced; testing used the isolated CaptureProbe product.",
     "Existing main-thread runtime warning remains.",
     "12 GB whole-Mac performance acceptance not established.",
-    "Native planner/catalog and native file-dialog dispatch are not connected to the default-browser route.",
-    "No production-route upload has been accepted; live28 is one scoped direct-executor upload/completion/readback pass."
+    "A single exact-file production-composition upload passed; broader app-initiated/paired iOS workflows remain unqualified.",
+    "Only one scoped production-composition upload is accepted (live11), plus the separate direct-executor live28 slice; broad HostManager/iOS UI workflows are unqualified."
   ],
   "faraTypeCoordinateReference": "https://github.com/microsoft/fara/blob/main/src/fara/agents/fara/fara15_agent.py#L710-L752",
   "fileSelectionCheckpoint": {
@@ -840,8 +941,8 @@
       "Move blocking catalog discovery off MainActor onto a separate bounded native worker, preserving the existing OCR API. Await a copied catalog and recheck cancellation, active tools, task/goal and revision before publishing. Timeout/busy returns an honest file-access handoff; late results cannot mutate scope.",
       "Rejected desktop-action feedback and rejection count now survive passive wait/remember. Successful dispatched input clears them. Explicit feedback says no mouse/keyboard input was sent; waiting cannot complete a rejected action. Existing pixel, task/window, approval and dispatch gates unchanged."
     ],
-    "latestFocusedRun": "default-browser-picker-ready-green01",
-    "latestLiveRun": "default-browser-drive-upload-live28",
+    "latestFocusedRun": "native-control-history-target-green01",
+    "latestLiveRun": "production-drive-upload-live11",
     "latestLiveFailure": "No failure in live28: one blank-start direct-executor real-Drive run passed exact-file selection, one-upload completion, fresh host evidence and independent byte-matched readback. This accepts only that scoped slice; production MCPFirst/HostManager, paired iOS composer, email, ambiguity handling and 12 GB whole-machine qualification remain open.",
     "qualifications": [
       "Exact native file selection occurred in picker live11, but its final test page read behind the modal failed; this is not upload acceptance.",
@@ -3070,13 +3171,18 @@
       "hostEffects": 0
     },
     "latestLiveOutcome": {
-      "run": "default-browser-drive-upload-live28",
+      "run": "production-drive-upload-live11",
       "result": "Passed",
-      "acceptedScope": "Blank-start direct-executor real-Drive exact-file upload, app completion and independent readback",
+      "acceptedScope": "Blank-start production-composition exact-file upload, app completion and independent readback",
       "overallWorkflowAccepted": false,
-      "productionHostRouteAccepted": false
+      "productionCompositionSliceAccepted": true,
+      "productionManagerAndIOSUIAccepted": false,
+      "boundedTestApprovalScope": "Chooser opening and exact disposable-file confirmation, each at most once",
+      "customCompletionChecker": false,
+      "sourceCount": 41,
+      "sourceUnchanged": true
     },
-    "acceptedScope": "One blank-start direct-executor real-Drive upload/completion/readback slice (live28)",
+    "acceptedScope": "One blank-start production-composition real-Drive upload/completion/readback slice (live11), plus separate direct-executor slice (live28)",
     "acceptedScopeQualified": true,
     "latestProductionRouterRun": "production-drive-routing-live02",
     "productionRouterScope": {
@@ -3090,17 +3196,24 @@
       "sourceCount": 43,
       "sourceUnchanged": true
     },
-    "latestProductionUploadRun": "production-drive-upload-live07",
+    "latestProductionUploadRun": "production-drive-upload-live11",
     "latestProductionUploadOutcome": {
-      "result": "Not accepted; no upload in production-upload live01–07",
-      "uploadEffects": 0,
-      "readback": false,
-      "live05": "setup failure before UI; test-only permission fix",
-      "live06": "exact fixture selected, but URL behind picker unavailable to harness; two New-control proposals then visual fallback",
-      "live07": "bounded URL observer unexercised; 300-second timeout after fallback/action loops ended on Computers page",
-      "promptTrial": "live04 conditional chooser prompt rejected",
-      "codeChange": "native-exchange callback observational only in live05–07; no prompt/role/guard repair accepted",
-      "next": "Assess AXExpanded state projection for native controls before another prompt/model change; live replay candidate is rejected."
+      "result": "Live11 passed one scoped blank-start production-composition upload/completion/readback; production-upload live01–10 had no upload.",
+      "run": "production-drive-upload-live11",
+      "uploadEffects": 1,
+      "exactFileSelected": true,
+      "candidateCount": 3,
+      "freshHostPageEvidence": true,
+      "pickerDismissed": true,
+      "appCompleted": true,
+      "independentReadback": true,
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "boundedApproval": "Chooser opening and exact disposable-file confirmation, each at most once",
+      "customCompletionChecker": false,
+      "broadProductionReadinessAccepted": false,
+      "live10": "URLSession -1005; cause unknown, with no file/native calls or upload.",
+      "next": "Broad HostManager/iOS UI and other task variants remain unqualified; do not infer 12 GB acceptance."
     },
     "latestNativeNextActionReplay": "native-next-action-replay02",
     "latestNativeNextActionFinding": "Initial Drive replay: original visual fallback, candidate New control. Expanded-menu replay: original visual fallback, candidate incorrectly New Folder; reject and do not apply candidate guidance. These off-source replays had no browser/MCP effects.",
@@ -3115,8 +3228,18 @@
       "sourceCount": 42,
       "sourceUnchanged": true,
       "modalParentWebAreaURLObserver": "compiled, not live-exercised because live07 never reached picker"
+    },
+    "revertedDesktopImageTrial": {
+      "candidate": "Desktop requests include latest three screenshots, matching the reference image window",
+      "state": "Archived patch and test; restored before live11. No workflow benefit accepted.",
+      "red": "fara-desktop-image-context-red02: 2 pass, 1 expected failure; 0 build errors, 10 warnings; distinct PNG fixtures. Earlier RED01 had identical-image fixtures and was superseded.",
+      "green": "fara-desktop-image-context-green01: 3/3 pass; 0 build errors, 2 warnings; 41 unchanged source hashes.",
+      "live": "production-drive-upload-live10: 0/1; 0 build errors/warnings; one known main-thread warning; 41 unchanged sources; no upload; URLSession -1005 on a two-image request, cause unknown.",
+      "liveAttachments": ".build/repair-verification/production-drive-upload-live10-attachments/manifest.json",
+      "patch": ".build/repair-verification/fara-desktop-three-images-candidate.patch",
+      "diagnostic": "Same-cap replay fara-drive-live10-two-images-cap4 returned a proposal below 4 GiB; it does not establish a memory-limit cause."
     }
   },
-  "latestScopeNote": "Live28 is the only accepted direct-executor real-Drive upload/completion/readback slice. Production-router live02 passes route selection only; production-upload live01–09 have no upload. Live09 had the history-actions candidate active, but failed with malformed tool-call JSON and it was reverted afterward; no workflow benefit is established. A no-effects current-context comparison on the same goal/screenshot/focus/control state yielded Fara’s valid File upload proposal; Holo was stopped above its 4 GiB cap and lacks Fara’s local-file metadata. Neither profile is promoted. Next compare visual action selection on captured failed states.",
-  "latestEvidenceRun": "production-drive-upload-live09"
+  "latestScopeNote": "Live11 is the first accepted blank-start production-composition real-Drive upload/completion/readback slice: actual Apple planner + mac-control MCP helper + browser loader; newest of three exact candidates; one admitted upload; fresh completion page text and app.completed; independent 28,273-byte SHA-256 readback. Bounded test approvals cover chooser opening and exact-file confirmation; no custom completion checker. Live28 is a separate direct-executor pass. Native target label/ID/role history GREEN passes 3/3 after expected RED failure and was present for live11, but causation is not proven. Broad HostManager/iOS UI, email, ambiguity, and 12 GB qualification remain open.",
+  "latestEvidenceRun": "production-drive-upload-live11"
 }
