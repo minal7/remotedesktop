@@ -177,6 +177,8 @@ final class ComputerUseDefaultBrowserPageReader {
         let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
             "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
         var focusedControlIsInPage: Bool?
+        var focusedNodeIsInPage = false
+        var focusedPathControls: [AXUIElement] = []
         if let focusedUIElement {
             let focusedRole = try string(kAXRoleAttribute as String, focusedUIElement) ?? ""
             var node = focusedUIElement
@@ -188,11 +190,13 @@ final class ComputerUseDefaultBrowserPageReader {
                 seen.append(node)
                 if try isPruned(node) { return nil }
                 if CFEqual(node, webArea) {
+                    focusedNodeIsInPage = true
                     focusedControlIsInPage = controlRoles.contains(focusedRole)
                     reachedBoundary = true
                     break
                 }
                 let role = try string(kAXRoleAttribute as String, node) ?? ""
+                if controlRoles.contains(role) { focusedPathControls.append(node) }
                 if role == "AXWebArea" { return nil }
                 if CFEqual(node, focused) { reachedBoundary = true; break }
                 guard let parent = try element(kAXParentAttribute as String, node) else { return nil }
@@ -280,6 +284,12 @@ final class ComputerUseDefaultBrowserPageReader {
         if let focusedUIElement {
             guard let finalFocus = try element(kAXFocusedUIElementAttribute as String, afterRoot),
                   CFEqual(finalFocus, focusedUIElement) else { return nil }
+            if focusedNodeIsInPage {
+                guard contentVisited.contains(where: { CFEqual($0, focusedUIElement) }),
+                      focusedPathControls.allSatisfy({ pathControl in
+                          controlRefs.values.contains(where: { CFEqual($0, pathControl) })
+                      }) else { return nil }
+            }
             if focusedControlIsInPage == true,
                !controlRefs.values.contains(where: { CFEqual($0, focusedUIElement) }) { return nil }
         } else if try element(kAXFocusedUIElementAttribute as String, afterRoot) != nil {

@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run one bounded live Gmail retry after the scoped lifecycle GREEN; treat it as a check of the active path, not proof that the RED02 event caused live11. Keep the 12 GB whole-Mac target unqualified.",
+  "next": "Run real Gmail live13 on the focused-page coverage repair; retain native-first routing and unchanged models/prompts. Do not equate component passes with Gmail acceptance.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1142,5 +1142,79 @@
     "scope": "Snapshot-scoped capture retains lifecycle events drained during the focused snapshot, including outer focus/window lookup and nested AX reads, up to 256. Only events affecting the app root, window, focused element, its ancestors or label source, plus scope/coverage changes, nil-source events or overflow invalidate this snapshot. Existing lifecycle retirement/tombstones and whole-fields revision check remain in place.",
     "independentReview": "Read-only review found no actionable blocker: destroyed event references are compared locally without AX queries; unrelated events may advance the global revision but do not invalidate the focused snapshot unless they affect its observed references.",
     "limits": "Component tests only. The finding does not establish that this event caused live11’s typing rejection; one bounded real Gmail retry is pending."
+  },
+  "live12": {
+    "run": "client-manager-gmail-draft-live12",
+    "result": "0 passed / 1 failed / 0 skipped; 0 build errors / 0 warnings; 54 stable source hashes; 3 test issues including one known main-thread responsiveness warning.",
+    "outcome": "Client paused with “The intended browser window changed or is unavailable.” Four captured native-control request/response exchanges proposed Compose. Fara’s final proposal clicked the paperclip at [778,896], but no picker/file handoff, attachment, upload, accepted approval, or successful client terminal followed. The production harness nativeControlCalls counter reported 0 and is not a count of these captured production exchanges.",
+    "draftState": "Post-run CUA found multiple drafts, including recipient-only drafts and a separate draft with the exact requested subject but empty To and body. Do not infer that the intended draft had a successfully populated recipient. CUA discarded the test drafts, verified no Compose panes remained, closed only owned Safari window 5290BFAF-E936-46D3-9131-17EF6354EE67, and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+    "revalidation": "Four captured pairs show pre-effect rejection: URL type with screen match but focus/edit authority mismatch; two To-area clicks with focus and target-pixel mismatch; and a key action with the same mismatch. The captured request sequence then includes repeated native Compose proposals and later subject-field navigation. These facts do not establish the cause of the invalidations.",
+    "plannerContextFinding": "Code review confirms the native planner request on the truncated-AX path omits the already captured focusedEditor/focusedTextState context. This is a concrete omission to address; live12 alone does not establish it as the sole cause of repeated Compose or the final window pause.",
+    "acceptance": "No file handoff, attachment, upload or successful terminal. Gmail model-driven draft/attachment E2E remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live12-attachments/manifest.json",
+      "route": "client-manager-gmail-draft-live12-attachments/274C25AB-70D1-4525-BE84-31EA08C8ED1C.txt",
+      "outcome": "client-manager-gmail-draft-live12-attachments/E0560F7D-3920-4EE4-A8F8-8BE5345DB8CC.txt",
+      "finalFaraRequest": "client-manager-gmail-draft-live12-attachments/256D991E-78E8-4E24-900D-61BA93EBBA3C.json",
+      "finalFaraResponse": "client-manager-gmail-draft-live12-attachments/9BF298FC-BA38-4775-AD9C-58BA8BF83DB0.json",
+      "revalidationPairs": [
+        "client-manager-gmail-draft-live12-attachments/4DA4C85E-A113-4259-B67A-9947F70A4D5F.json",
+        "client-manager-gmail-draft-live12-attachments/1A11226E-7245-40C2-B488-19B1B95D47CA.json",
+        "client-manager-gmail-draft-live12-attachments/2FECBF66-B735-4B98-9886-19B1B95D47CA.json",
+        "client-manager-gmail-draft-live12-attachments/0A2431E2-E9D6-44E5-AE95-8FEB354F37A4.json"
+      ],
+      "nativeControlRequests": [
+        "client-manager-gmail-draft-live12-attachments/8894553B-2444-4373-8003-D333E6ECA22A.json",
+        "client-manager-gmail-draft-live12-attachments/3C48B64C-E402-446E-9B29-E51B8AEB5D4A.json",
+        "client-manager-gmail-draft-live12-attachments/C0B8E581-6017-4079-B235-E6739DE1C3A8.json",
+        "client-manager-gmail-draft-live12-attachments/1228BBF3-7C8A-4C08-B957-B7B2C8DC35BF.json"
+      ],
+      "nativeControlResponses": [
+        "client-manager-gmail-draft-live12-attachments/0F03182C-E356-4BDC-B97E-CC9EF9B60A5D.json",
+        "client-manager-gmail-draft-live12-attachments/3CD42E0B-2671-4518-BDB9-71A141632332.json",
+        "client-manager-gmail-draft-live12-attachments/3C0CB0DF-DFF7-4844-8D15-158E79DF358B.json",
+        "client-manager-gmail-draft-live12-attachments/097BA13B-165D-4362-88D0-05A6DCCCF1D0.json"
+      ]
+    }
+  },
+  "nativeFocusedContextProbe01": {
+    "run": "native-focused-context-probe01",
+    "result": "Preparation failed before worker or credential creation: multiline captured observation could not be parsed as one JSON object. No model call or UI effects.",
+    "artifacts": ".build/repair-verification/native-focused-context-probe01/report.json"
+  },
+  "nativeFocusedContextProbe02": {
+    "run": "native-focused-context-probe02",
+    "scope": "Offline, effect-free counterfactual native-planner replay. Added focused_editor/focused_text from an adjacent captured Fara observation; it was not the same contemporaneous observation. No system/prompt change.",
+    "result": "Empty content; finish_reason=length at 1,024 completion tokens (2,707 prompt), 20.821 s generation. Worker exited and temporary credential was removed.",
+    "resource": "Sampled process RSS peak 3,067,297,792 bytes over 43 samples; excludes unsampled peaks and whole-app/Metal usage. Not a 12 GB whole-Mac qualification.",
+    "artifacts": ".build/repair-verification/native-focused-context-probe02/{report,response}.json"
+  },
+  "nativeFocusedContextContractProbe01": {
+    "run": "native-focused-context-contract-probe01",
+    "scope": "Same adjacent-focus counterfactual, adding current-focus/partial-observation contract. Not a contemporaneous native input; no production prompt change.",
+    "result": "Empty content; finish_reason=length at 1,024 completion tokens (2,805 prompt), 21.010 s generation. Worker exited and temporary credential was removed.",
+    "resource": "Sampled process RSS peak 3,068,297,216 bytes over 43 samples; not whole-Mac qualification.",
+    "artifacts": ".build/repair-verification/native-focused-context-contract-probe01/{report,response}.json"
+  },
+  "nativeFocusedContextDirectProbe01": {
+    "run": "native-focused-context-direct-probe01",
+    "scope": "Same counterfactual focus and partial-observation contract, with thinking disabled for this effect-free step only. No production mode change.",
+    "result": "Returned a syntactically valid pressControl for Compose in 4.888 s (2,807 prompt / 58 completion tokens). This does not establish that Compose was appropriate, executed, or improved the workflow.",
+    "resource": "Sampled process RSS peak 3,119,562,752 bytes over 11 samples; worker exited and temporary credential was removed. Not a 12 GB whole-Mac qualification.",
+    "artifacts": ".build/repair-verification/native-focused-context-direct-probe01/{report,response}.json"
+  },
+  "nativeFocusedContextSerializationRed01": {
+    "run": "native-control-focused-context-red01",
+    "result": "0 passed / 3 failed / 0 skipped / 0 runtime warnings; 0 build errors / 8 warnings; 25 source hashes stable. The failures are from the unadopted focused-context serialization test patch, which is archived and its source restored.",
+    "status": "No production context-serialization patch, prompt change, model change or mode change was adopted. The next test is a PageReader focus-coverage case; live12 causality remains unproven.",
+    "artifact": ".build/repair-verification/native-control-focused-context-red01-unadopted-tests.patch"
+  },
+  "focusedPageCoverageRepair": {
+    "change": "Require a focused in-page node and every control-role ancestor on its existing bounded ancestry to be represented in the retained page observation. Omission returns nil into existing fresh screenshot fallback. No extra AX IPC, traversal cap, model, prompt or site-specific rule.",
+    "red": "native-page-focused-coverage-red01: 0 passed / 2 failed / 0 skipped, 3 intended assertions; build 0 errors / 10 warnings; 24 stable sources; no runtime warnings.",
+    "green": "native-page-focused-coverage-green01: 21 passed / 0 failed / 0 skipped; build 0 errors / 2 warnings; 55 stable sources; no issues or runtime warnings.",
+    "review": "Independent Luna review found no blocker; preserves browser chrome, nil focus, secure/hidden nodes, nested documents, and existing control authority.",
+    "acceptance": "Component-tested only; real Gmail live13 prepared, not executed at this checkpoint. Does not establish live12 cause.",
+    "open": "An unrelated control omitted after the 32-control cap may still leave truncated=false; separate reporting bug, not fixed here."
   }
 }

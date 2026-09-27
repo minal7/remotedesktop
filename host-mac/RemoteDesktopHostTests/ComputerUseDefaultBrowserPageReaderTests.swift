@@ -732,6 +732,72 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         } catch ComputerUseHostTools.ToolError.paused { }
     }
 
+    func testOmittedFocusedNoncontrolPageNodeInvalidatesBoundedObservation() throws {
+        for role in ["AXStaticText", "AXGroup"] {
+            let graph = PageAXGraph(); graph.makePage()
+            let focusedName = "late-focused-node"
+            let focused = graph.element(focusedName)
+            graph.set(focusedName, kAXParentAttribute, graph.element("web"))
+            graph.set(focusedName, kAXRoleAttribute, role as NSString)
+            if role == "AXStaticText" { graph.set(focusedName, kAXValueAttribute, "Recipient" as NSString) }
+            graph.set(focusedName, kAXChildrenAttribute, [] as CFArray)
+            var children: [AXUIElement] = [graph.element("text"), graph.element("button"), graph.element("secure"), graph.element("iframe")]
+            for index in 0..<260 {
+                let name = "noncontrol-filler-\(index)"
+                let filler = graph.element(name)
+                graph.set(name, kAXParentAttribute, graph.element("web"))
+                graph.set(name, kAXRoleAttribute, "AXGroup" as NSString)
+                graph.set(name, kAXChildrenAttribute, [] as CFArray)
+                children.append(filler)
+            }
+            children.append(focused)
+            graph.set("web", kAXChildrenAttribute, children as CFArray)
+            graph.set("root", kAXFocusedUIElementAttribute as CFString, focused)
+
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .read(window: graph.window, application: graph.identity, mayAct: { true }),
+                "An in-page \(role) focus omitted by the 256-node traversal cannot be paired with the generic page context")
+        }
+    }
+
+    func testFocusedStaticChildRequiresItsEditableAncestorInControlCatalogue() throws {
+        for fillerCount in [0, 31] {
+            let graph = PageAXGraph(); graph.makePage()
+            let editor = graph.element("focused-editor")
+            let child = graph.element("focused-editor-child")
+            graph.set("focused-editor", kAXParentAttribute, graph.element("web"))
+            graph.set("focused-editor", kAXRoleAttribute, "AXTextArea" as NSString)
+            graph.set("focused-editor", kAXTitleAttribute, "Message Body" as NSString)
+            graph.set("focused-editor", kAXEnabledAttribute, kCFBooleanTrue)
+            graph.set("focused-editor", kAXChildrenAttribute, [child] as CFArray)
+            graph.set("focused-editor-child", kAXParentAttribute, editor)
+            graph.set("focused-editor-child", kAXRoleAttribute, "AXStaticText" as NSString)
+            graph.set("focused-editor-child", kAXValueAttribute, "Write a message" as NSString)
+            graph.set("root", kAXFocusedUIElementAttribute as CFString, child)
+            var children: [AXUIElement] = [graph.element("text"), graph.element("button"), graph.element("secure"), graph.element("iframe")]
+            for index in 0..<fillerCount {
+                let name = "control-filler-\(index)"
+                let filler = graph.element(name)
+                graph.set(name, kAXParentAttribute, graph.element("web"))
+                graph.set(name, kAXRoleAttribute, "AXButton" as NSString)
+                graph.set(name, kAXTitleAttribute, "Filler \(index)" as NSString)
+                children.append(filler)
+            }
+            children.append(editor)
+            graph.set("web", kAXChildrenAttribute, children as CFArray)
+
+            let observation = try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .read(window: graph.window, application: graph.identity, mayAct: { true })
+            if fillerCount == 0 {
+                let page = try XCTUnwrap(observation)
+                XCTAssertTrue(page.controls.contains { $0.role == "AXTextArea" && $0.label == "Message Body" })
+            } else {
+                XCTAssertNil(observation,
+                    "A visited focused leaf cannot stand in for its editable ancestor omitted by the 32-control cap")
+            }
+        }
+    }
+
     func testRetainedControlCannotCrossWindowOrApplication() throws {
         let graph = PageAXGraph(); graph.makePage()
         let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
