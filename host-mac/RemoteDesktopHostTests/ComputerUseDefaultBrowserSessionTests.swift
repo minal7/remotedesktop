@@ -73,6 +73,142 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.windows.first?.identity, fixture.original.identity)
     }
 
+    func testInitialWindowCreationRetriesOneConfirmedPreEffectFingerprintChange() async throws {
+        for scenario in ["comparison-mismatch", "fingerprint-preparation"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var targetReads = 0
+            var dispatchedKeys: [ComputerUsePredictedAction] = []
+            let tools = retryTestTools(fixture,
+                target: { _ in
+                    targetReads += 1
+                    if scenario == "fingerprint-preparation", targetReads == 1 {
+                        throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                    }
+                    return .init(context: "Browser focused window", applicationID: fixture.app.bundleIdentifier,
+                        accessibilityIdentity: scenario == "comparison-mismatch" && targetReads == 2
+                            ? "transient-target" : "stable-target")
+                },
+                perform: { action in
+                    dispatchedKeys.append(action)
+                    guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == (1 << 3) else {
+                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                    }
+                    fixture.desktop.keyCount += 1
+                    let created = fixture.window("new", pid: fixture.app.processIdentifier, hash: 2)
+                    fixture.desktop.windows.append(created)
+                    fixture.desktop.focusedID = created.id
+                })
+            let session = try fixture.session()
+
+            let window = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+
+            XCTAssertEqual(window.id, "new")
+            XCTAssertEqual(fixture.desktop.launchCount, 1, "Retry only the rejected key dispatch, never relaunch the handler")
+            XCTAssertEqual(dispatchedKeys.count, 1, "The stale fingerprint must not dispatch; retry dispatches once")
+            XCTAssertEqual(fixture.desktop.keyCount, 1)
+            XCTAssertEqual(targetReads, scenario == "comparison-mismatch" ? 4 : 3,
+                "One fresh fingerprint is prepared after the initial pre-effect rejection")
+            XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "new"])
+        }
+    }
+
+    func testInitialWindowCreationDoesNotRetryOtherErrorsOrAfterEffectBegins() async throws {
+        for scenario in ["lost-activity", "other-pre-effect-error", "second-stale-target", "window-changed", "after-effect-error"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var targetReads = 0
+            var active = true
+            var dispatchedKeys: [ComputerUsePredictedAction] = []
+            let tools = retryTestTools(fixture,
+                mayAct: { active },
+                target: { _ in
+                    targetReads += 1
+                    if scenario == "lost-activity", targetReads == 2 { active = false }
+                    if scenario == "other-pre-effect-error", targetReads == 2 {
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    if scenario == "window-changed", targetReads == 2 {
+                        fixture.desktop.windows.append(fixture.window("unexpected", pid: fixture.app.processIdentifier, hash: 3))
+                        fixture.desktop.focusedID = "unexpected"
+                    }
+                    let shouldChange = (scenario == "second-stale-target" && targetReads.isMultiple(of: 2))
+                        || ((scenario == "lost-activity" || scenario == "window-changed") && targetReads == 2)
+                    return .init(context: "Browser focused window", applicationID: fixture.app.bundleIdentifier,
+                        accessibilityIdentity: shouldChange ? "changed-\(targetReads)" : "stable-target")
+                },
+                perform: { action in
+                    dispatchedKeys.append(action)
+                    if scenario == "after-effect-error" {
+                        throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                    }
+                })
+            let session = try fixture.session()
+            do {
+                _ = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+                XCTFail("Expected create-window to stop for \(scenario)")
+            } catch ComputerUseHostTools.ToolError.paused where scenario == "lost-activity" {
+                XCTAssertEqual(dispatchedKeys.count, 0)
+            } catch ComputerUseHostTools.ToolError.approvalTargetChanged where scenario == "second-stale-target" || scenario == "after-effect-error" {
+                XCTAssertEqual(dispatchedKeys.count, scenario == "after-effect-error" ? 1 : 0)
+            } catch ComputerUseDefaultBrowserSession.Failure.targetLost where scenario == "other-pre-effect-error" {
+                XCTAssertEqual(dispatchedKeys.count, 0)
+            } catch {
+                if scenario == "window-changed" {
+                    XCTAssertEqual(dispatchedKeys.count, 0, "A changed window inventory must block retry input")
+                } else {
+                    XCTFail("Unexpected create-window error for \(scenario): \(error)")
+                }
+            }
+            XCTAssertEqual(fixture.desktop.launchCount, 1, "No retry scenario may relaunch the default browser")
+            XCTAssertEqual(dispatchedKeys.count, scenario == "after-effect-error" ? 1 : 0,
+                "Do not retry \(scenario) or replay an action whose effect began")
+            XCTAssertEqual(targetReads, scenario == "second-stale-target" ? 4 : 2,
+                "Retry is limited to one pre-effect approvalTargetChanged")
+            XCTAssertEqual(fixture.desktop.keyCount, 0)
+            if scenario == "window-changed" { XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "unexpected"]) }
+            if scenario == "second-stale-target" || scenario == "after-effect-error" {
+                let previousReads = targetReads
+                do {
+                    _ = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+                    XCTFail("A failed create-window attempt must not be replayed")
+                } catch { }
+                XCTAssertEqual(targetReads, previousReads, "The durable attempt must not dispatch again on resume")
+                XCTAssertEqual(dispatchedKeys.count, scenario == "after-effect-error" ? 1 : 0)
+            }
+        }
+    }
+
+    func testInitialWindowCreationCancellationDoesNotRetryFingerprintMismatch() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var targetReads = 0
+        var dispatchedKeys: [ComputerUsePredictedAction] = []
+        let session = try fixture.session()
+        var ensureTask: Task<ComputerUseDefaultBrowserSession.Window, Error>!
+        let tools = retryTestTools(fixture,
+            target: { _ in
+                targetReads += 1
+                if targetReads == 2 { ensureTask.cancel() }
+                return .init(context: "Browser focused window", applicationID: fixture.app.bundleIdentifier,
+                    accessibilityIdentity: targetReads == 2 ? "changed-target" : "stable-target")
+            },
+            perform: { dispatchedKeys.append($0) })
+        ensureTask = Task { @MainActor in
+            try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+        }
+
+        do {
+            _ = try await ensureTask.value
+            XCTFail("Cancellation must stop before retrying the window shortcut")
+        } catch is CancellationError {
+            XCTAssertEqual(targetReads, 2)
+            XCTAssertTrue(dispatchedKeys.isEmpty)
+            XCTAssertEqual(fixture.desktop.keyCount, 0)
+            XCTAssertEqual(fixture.desktop.launchCount, 1)
+        }
+    }
+
     func testWindowCreationWaitsForTransientAXLossOrAmbiguityWithoutRepeatingInput() async throws {
         for failure in [ComputerUseDefaultBrowserSession.Failure.targetLost, .ambiguousWindows] {
             let fixture = try Fixture()
@@ -2677,6 +2813,23 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 planningAccessibilityIdentityProvider: { "fixture-window" },
                 frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { app.bundleIdentifier })
         }
+    }
+
+    private func retryTestTools(
+        _ fixture: Fixture,
+        mayAct: @escaping () -> Bool = { true },
+        target: @escaping (ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot,
+        perform: @escaping (ComputerUsePredictedAction) throws -> Void
+    ) -> ComputerUseHostTools {
+        ComputerUseHostTools(injector: InputInjector(), mayAct: mayAct,
+            approvalTargetProvider: target, actionPerformer: perform,
+            screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            frontmostApplicationIdentityProvider: { fixture.app },
+            frontmostApplicationProvider: { fixture.app.bundleIdentifier })
     }
 
     private final class ExecutorPageAXGraph {

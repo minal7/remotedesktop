@@ -310,20 +310,40 @@ final class ComputerUseDefaultBrowserSession {
                     app: app, tools: tools, captureWindows: captureWindows)
                 state.before = before
                 let action = ComputerUsePredictedAction.key(usage: 0x11, modifiers: 1 << 3)
-                try Task.checkCancellation()
-                try tools.requireActive()
-                let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
-                guard try Self.sameSnapshot(before, captureWindows(app)) else {
-                    throw Failure.interrupted
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try await tools.performNativeAction(action, fingerprint: fingerprint) { [weak state, captureWindows] in
+                var effectBegan = false
+                for attempt in 0..<2 {
                     try Task.checkCancellation()
                     try tools.requireActive()
-                    guard let state, let app = state.app, let before = state.before,
-                          try Self.sameSnapshot(before, captureWindows(app)) else {
-                        throw Failure.interrupted
+                    guard try resolveHandler() == state.handler,
+                          try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                    do {
+                        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+                        guard try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        try await tools.performNativeAction(action, fingerprint: fingerprint) { [weak state, captureWindows] in
+                            try Task.checkCancellation()
+                            try tools.requireActive()
+                            guard let state, let app = state.app, let originalBefore = state.before,
+                                  try Self.sameSnapshot(originalBefore, captureWindows(app)) else {
+                                throw Failure.interrupted
+                            }
+                            effectBegan = true
+                        }
+                        break
+                    } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        guard !effectBegan, attempt == 0 else {
+                            throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                        }
+                        guard try resolveHandler() == state.handler,
+                              try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                        await Task.yield()
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        guard try resolveHandler() == state.handler,
+                              try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
                     }
                 }
                 state.target = try await Self.waitForNewFocusedWindow(
