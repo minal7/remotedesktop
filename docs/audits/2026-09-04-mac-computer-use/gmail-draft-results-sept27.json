@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run the bounded live15 manager-path check. Treat it as a check of current behavior, not proof that the ancestor-only event caused live14. Preserve scope, destruction, root/window/document/label, used-label and lifecycle-coverage guards. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Read-only review the live15 title-change sequence, then use a tiny timing experiment only if needed to distinguish notification timing. Do not repeat a blind full Gmail run. Keep identity and lifecycle guards strict; Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1274,6 +1274,26 @@
     "green": "28 passed / 0 failed / 0 skipped; no test issues/runtime warnings; 0 build errors / 31 warnings; 55 source hashes stable.",
     "behavior": "Intermediate ancestor-only AXValueChanged events that do not supply label/document identity no longer retire the unchanged focused-field snapshot. Existing hard-boundary behavior remains covered.",
     "coverage": "Includes a positive web-content case, target value/selection mutation checks, and a negative used-label case; two hard-boundary negative cases already passed RED01.",
-    "acceptance": "Component implemented, compiled and tested only. Live15 is prepared but not executed; live14 causality remains unproven and Gmail workflow is not accepted."
+    "acceptance": "Component implemented, compiled and tested only. Live15 did not exercise ancestor-only AXValueChanged filtering: its recipient binding retired after AXTitleChanged matched the field and an ancestor. Live behavior and causality remain unresolved; Gmail workflow is not accepted."
+  },
+  "live15": {
+    "run": "client-manager-gmail-draft-live15",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "One native Compose proposal. Fara’s final Subject-intended click at [1048,473] hit an unidentified item, requested approval, and received none from the bounded harness. No file handoff, picker, attachment, upload or terminal.",
+    "lifecycle": "Diagnostic F814B001-DA4A-46B3-93B4-94C92598FDC0.json retained 7 events with 0 drops. Recipient binding created at 91.298 s, retired at 105.881 s after AXTitleChanged matched the field and an ancestor, then recreated at 105.897 s. Pair 2 reported screenMatches/focusMatches/editableAuthorityMatches=false with the same To-field frame (1106,458,495,36). This is a title-change event, not the ancestor-only AXValueChanged case covered by the GREEN component.",
+    "cleanup": "CUA verified To, subject and body empty with no attachment, discarded the draft, confirmed zero Compose panes, closed only owned Safari window 2741C287-ABA4-4369-B65A-AD7CC75339A6 and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+    "acceptance": "No file picker or upload; Gmail model-driven workflow remains unaccepted. Live15 did not establish whether the tested lifecycle change affects the real path.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live15-attachments/manifest.json",
+      "diagnostic": "client-manager-gmail-draft-live15-attachments/F814B001-DA4A-46B3-93B4-94C92598FDC0.json",
+      "route": "client-manager-gmail-draft-live15-attachments/36EDF4A2-798E-4188-ABFC-FF4EDB4A4918.txt",
+      "outcome": "client-manager-gmail-draft-live15-attachments/89DBA670-CA54-4621-A727-A22484D30B0F.txt",
+      "faraRequest": "client-manager-gmail-draft-live15-attachments/D71BCD43-FD47-49F5-A710-054788F356A5.json",
+      "faraResponse": "client-manager-gmail-draft-live15-attachments/C839A96A-E1E2-4032-8266-B669805AB3E5.json",
+      "revalidationPairs": [
+        "client-manager-gmail-draft-live15-attachments/7993BB7D-2478-4941-B1CD-1EAF5D239BD3.json",
+        "client-manager-gmail-draft-live15-attachments/06DD0FA5-C685-4C8B-93BC-4CF0073AE5B8.json"
+      ]
+    }
   }
 }
