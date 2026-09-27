@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Read-only review the live15 title-change sequence, then use a tiny timing experiment only if needed to distinguish notification timing. Do not repeat a blind full Gmail run. Keep identity and lifecycle guards strict; Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Run the prepared bounded live16 check to measure post-input settling. It is not yet run and cannot establish that the component caused or resolves live15. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1295,5 +1295,15 @@
         "client-manager-gmail-draft-live15-attachments/06DD0FA5-C685-4C8B-93BC-4CF0073AE5B8.json"
       ]
     }
+  },
+  "nativeDelayedEditorSettle": {
+    "redRun": "native-delayed-editor-red01",
+    "red": "0 passed / 1 failed / 0 skipped; 2 expected assertion failures; 0 build errors / 9 warnings; 54 source hashes stable; no runtime warnings.",
+    "greenRun": "native-delayed-editor-green01",
+    "green": "11 passed / 0 failed / 0 skipped; no issues/runtime warnings; 0 build errors / 11 warnings; 54 source hashes stable.",
+    "behavior": "Removed the unchanged-token early return and unused observation property. Existing 250 ms polling now waits for 1.25 seconds of quiet (3-second cap) after every scoped input, including initially nil editor state. Fixture covers initial nil and A→B at 300 ms→C at 700 ms; existing cancellation, scope, churn and no-replay checks pass.",
+    "tradeoff": "The quiet period now applies after every scoped input and may add latency. No title guard, model or prompt changed.",
+    "acceptance": "Component implemented/compiled/tested only. Live16 is prepared but not run; live15 causality remains unresolved.",
+    "artifacts": ".build/repair-verification/native-delayed-editor-red01-{summary,build,source-audit}.json and .build/repair-verification/native-delayed-editor-green01-{summary,build,source-audit}.json"
   }
 }
