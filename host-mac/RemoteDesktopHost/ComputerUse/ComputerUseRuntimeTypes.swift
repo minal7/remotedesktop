@@ -289,13 +289,15 @@ struct ComputerUseDesktopImage: Sendable {
     func matchesPointerPixels(of other: Self, window: CGRect, target: CGRect, unchangedFocusedField: CGRect? = nil,
         onInsertionPointDifference: ((CGRect, CGRect, CGRect) -> Void)? = nil) throws -> Bool {
         guard !target.isEmpty, window.contains(target) else { return false }
-        if unchangedFocusedField == target {
-            return try matchesInsertionPointPixels(of: other, window: window, field: target,
-                onDifference: onInsertionPointDifference)
-        }
         // Surrounding context belongs to this window. Padding an edge control
         // must not import another application's pixels or partial edge cells.
-        return try matchesPixels(of: other, in: target.insetBy(dx: -40, dy: -40).intersection(window), wholePixelsOnly: true)
+        let context = target.insetBy(dx: -40, dy: -40).intersection(window)
+        if try matchesPixels(of: other, in: context, wholePixelsOnly: true) { return true }
+        // Focused-editor proof broadens only the caret exception; it does not
+        // narrow the normal pointer's already-approved local context.
+        guard unchangedFocusedField == target else { return false }
+        return try matchesInsertionPointPixels(of: other, window: window, field: target,
+            onDifference: onInsertionPointDifference)
     }
 
     /// This is only valid with separately verified, unchanged editable text,

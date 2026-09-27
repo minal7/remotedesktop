@@ -3241,5 +3241,98 @@
     }
   },
   "latestScopeNote": "Live11 is the first accepted blank-start production-composition real-Drive upload/completion/readback slice: actual Apple planner + mac-control MCP helper + browser loader; newest of three exact candidates; one admitted upload; fresh completion page text and app.completed; independent 28,273-byte SHA-256 readback. Bounded test approvals cover chooser opening and exact-file confirmation; no custom completion checker. Live28 is a separate direct-executor pass. Native target label/ID/role history GREEN passes 3/3 after expected RED failure and was present for live11, but causation is not proven. Broad HostManager/iOS UI, email, ambiguity, and 12 GB qualification remain open.",
-  "latestEvidenceRun": "production-drive-upload-live11"
+  "latestEvidenceRun": "production-drive-upload-live11",
+  "clientManagerEntryCheckpoint": {
+    "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
+    "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
+    "status": "Not accepted as reliable. Live10 completed the exact-file upload, fresh completion and independent byte/hash readback, but formal XCTest failed only a stale picker-opening-count assertion. Live11 ran after that test-only assertion fix with production code unchanged and paused after three rejected proposals when Fara invented a Downloads tile and targeted a point outside the browser window.",
+    "focusedFixes": [
+      {
+        "name": "browser-shortcut-feedback",
+        "red": "client-manager shortcut feedback RED: 0/1, 3 expected assertions; 0 build errors.",
+        "green": "4/4 pass; disallowed browser key chords receive no-input feedback and replan; no allowlist/retry changes.",
+        "redEvidence": ".build/repair-verification/browser-shortcut-feedback-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/browser-shortcut-feedback-green01-summary.json",
+        "sourceCount": 41,
+        "sourcesUnchangedDuringRun": true
+      },
+      {
+        "name": "focused-pointer-context",
+        "red": "1 expected failure; 0 build errors.",
+        "green": "5/5 pass; existing exact target/context pixel comparison is checked before the strict full-window caret fallback.",
+        "redEvidence": ".build/repair-verification/focused-pointer-context-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/focused-pointer-context-green01-summary.json",
+        "sourceCount": 42,
+        "sourcesUnchangedDuringRun": true
+      }
+    ],
+    "runs": [
+      {
+        "run": "client-manager-drive-upload-live01",
+        "outcome": "Build failed; no workflow result.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live01-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live02",
+        "outcome": "Build failed; no workflow result.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live02-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live03",
+        "outcome": "Build failed; no workflow result.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live03-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live04",
+        "outcome": "Compiled; actual workflow failed before file selection/upload; no exact-file/native file calls or upload.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live04-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live05",
+        "outcome": "Build/diagnostic compile failure; no workflow result.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live05-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live06",
+        "outcome": "Compiled; client and host paused when a disallowed Control+l shortcut was misclassified as a changed browser window. No file calls, approvals or upload; the error classification was later repaired.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live06-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live07",
+        "outcome": "Exact newest candidate selected and upload approval requested; test harness incorrectly required a prior picker-opening approval, so no upload.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live07-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live08",
+        "outcome": "Actual model failure: unrelated unidentified click was not approved; no file calls or upload.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live08-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live09",
+        "outcome": "Paused after three rejects before Drive; no file calls, approval or upload. Pointer-context controller regression later repaired.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live09-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live10",
+        "outcome": "Completed exact-file upload and fresh completion; independent 28,273-byte SHA-256 readback matched. Formal test failed only stale picker-opening count assertion.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live10-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live11",
+        "outcome": "0/1 formal failure after three rejected proposals; no native file calls, approvals or upload. Fara proposed a Downloads quick-access tile at normalized [894,28] -> pixel (1544,31), outside browser window (top y=33); controller refused.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live11-summary.json"
+      }
+    ],
+    "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
+    "qualifications": "Live10 success does not override live11 reliability failure. Do not infer broad production readiness or alter approval/input guards. Existing production-composition live11 and separate direct-executor live28 acceptances remain separately scoped.",
+    "lastBuild": {
+      "errors": 0,
+      "warnings": 16,
+      "runtimeWarnings": [
+        "Existing main-thread responsiveness warning"
+      ],
+      "sourceCount": 45,
+      "sourcesUnchangedDuringRun": true
+    }
+  }
 }

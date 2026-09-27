@@ -3,6 +3,7 @@ import AppKit
 import CoreImage
 import CoreGraphics
 @testable import RemoteDesktopHost
+@testable import RemoteDesktopClientCore
 
 private final class NativeControlExchangeCapture: @unchecked Sendable {
     struct Entry { let timestamp: String; let id: String; let requestURL: URL; let responseURL: URL }
@@ -393,6 +394,86 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.keyCount, 1, "Fallback planning must not dispatch a native action")
     }
 
+    func testRejectedBrowserShortcutReturnsUnsupportedFeedbackBeforeAllowedShortcut() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "rejected-browser-shortcut-feedback"
+        let goal = "Focus the browser address bar"
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        var proposals = 0
+        var proposalErrors: [String?] = []
+        var dispatched: [ComputerUsePredictedAction] = []
+        fixture.desktop.additionalAction = { action in dispatched.append(action) }
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                proposals += 1
+                proposalErrors.append(input.actionError)
+                switch proposals {
+                case 1: return .init(response: "Try the browser shortcut.", action: .key(["Control", "l"]))
+                case 2:
+                    XCTAssertTrue(input.actionError?.contains("No input was sent") == true,
+                        "The next model proposal should receive clear feedback for the rejected, nondispatched chord")
+                    return .init(response: "Use the permitted browser shortcut.", action: .key(["Command", "l"]))
+                default:
+                    return .init(response: "Address bar focused.", decision: .completionStatus(success: true))
+                }
+            })
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        XCTAssertEqual(result, .completed("The model reported completion."))
+        XCTAssertEqual(proposals, 3)
+        XCTAssertNil(proposalErrors.first ?? nil)
+        XCTAssertEqual(dispatched, [.key(usage: 0x0F, modifiers: 8)],
+            "Only the permitted Command-L should reach the native dispatcher")
+    }
+
+    func testLostBrowserWindowAndOutOfWindowPointerRemainScopedHandoffs() async throws {
+        for scenario in ["lost-window", "out-of-window-pointer"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let taskID = "scope-negative-\(scenario)"
+            let goal = "Continue in the retained browser window"
+            let session = try fixture.session()
+            let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            if scenario == "lost-window" {
+                fixture.desktop.windows.removeAll { $0.id == retained.id }
+                fixture.desktop.focusedID = "existing"
+            } else if let index = fixture.desktop.windows.firstIndex(where: { $0.id == retained.id }) {
+                let resizedIdentity = ComputerUseFrontmostWindowCaptureIdentity(
+                    applicationProcessIdentifier: retained.identity.applicationProcessIdentifier,
+                    accessibilityWindowHash: retained.identity.accessibilityWindowHash,
+                    bounds: CGRect(x: 1, y: 2, width: 200, height: 200))
+                fixture.desktop.windows[index] = .init(id: retained.id, application: retained.application,
+                    accessibilityElement: retained.accessibilityElement, identity: resizedIdentity)
+            }
+            var proposals = 0
+            var dispatched: [ComputerUsePredictedAction] = []
+            fixture.desktop.additionalAction = { action in dispatched.append(action) }
+            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+                propose: { _ in
+                    proposals += 1
+                    return .init(response: "Try the far edge of the screen.",
+                        action: .pointer(.leftClick, .init(x: 1_000, y: 1_000)))
+                })
+
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: fixture.tools, progress: { _ in })
+
+            guard case .userInterventionRequired = result else {
+                return XCTFail("\(scenario) must remain a scoped handoff")
+            }
+            XCTAssertTrue(dispatched.isEmpty, "\(scenario) must not dispatch native input")
+            if scenario == "lost-window" {
+                XCTAssertEqual(proposals, 0, "A missing retained window must stop before proposing")
+            } else {
+                XCTAssertEqual(proposals, 1, "The out-of-bounds pointer is rejected after one proposal")
+            }
+        }
+    }
+
     func testNativeVisualFallbackRefreshesObservationBeforeFaraWithoutSyntheticAction() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -579,6 +660,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true)
     }
 
+    func testOptInClientManagerDefaultBrowserUploadsLatestPresentationToRealDrive() async throws {
+        try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true, clientEntry: true)
+    }
+
     func testOptInCapturedBrowserMenuNativeControlsComparison() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_CAPTURED_BROWSER_MENU_COMPARISON"] == "1" else {
@@ -716,15 +801,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
-    private func runDefaultBrowserFileProbe(uploadToDrive: Bool, productionComposition: Bool = false) async throws {
+    private func runDefaultBrowserFileProbe(uploadToDrive: Bool, productionComposition: Bool = false,
+                                            clientEntry: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         let enabled = productionComposition
-            ? environment["RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
+            ? environment[clientEntry ? "RUN_CLIENT_MANAGER_PRODUCTION_DRIVE_UPLOAD_PROBE" : "RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
             : environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1"
         guard enabled else {
             throw XCTSkip("Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
         guard !productionComposition || uploadToDrive else { throw XCTSkip("Production composition probe covers Drive upload only") }
+        guard !clientEntry || productionComposition else { throw XCTSkip("Client-manager route requires production composition") }
         let usesNativeDelegation = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
         let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
         let startsOnDrivePage = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
@@ -1084,6 +1171,57 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         } else {
             taskExecutor = directExecutor
         }
+        var clientManager: HostComputerUseManager?
+        var clientModel: ClientModel?
+        var clientBridge: SerializedClarificationClientChannel?
+        var clientPendingStore: CompositionPendingStore?
+        var clientExecutorObserver: DriveClientExecutorObserver?
+        var managerTaskID: String?
+        var managerHostID: String?
+        var managerClientID: String?
+        var managerSessionID: String?
+        var managerPairingCode: String?
+        var managerTerminal: ClientUpdate?
+        var managerTerminalMessages: [ClientUpdate] = []
+        var managerApprovalStage: String?
+        var clientFailureDiagnostic: String?
+        var managerActivityAtFailure: String?
+        var clientFailureReason: String?
+        var receivedApprovalDiagnostics: [String] = []
+        var lastClientExecutorResult: String?
+        var seenManagerApprovals = Set<String>()
+        if clientEntry {
+            guard let productionMCPExecutor else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
+            let hostID = UUID().uuidString, clientID = UUID().uuidString
+            let sessionID = UUID().uuidString, pairingCode = "842193"
+            managerHostID = hostID; managerClientID = clientID
+            managerSessionID = sessionID; managerPairingCode = pairingCode
+            let mailbox = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+            let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID,
+                clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
+            let pending = CompositionPendingStore()
+            let observer = DriveClientExecutorObserver(productionMCPExecutor)
+            observer.willBeginVisualEffect = { action in
+                switch managerApprovalStage {
+                case "picker": pickerOpeningEffects += 1
+                case "upload": uploadEffects += 1
+                default: XCTFail("Unexpected visual input outside the two bounded approval gates: \(action)")
+                }
+                managerApprovalStage = nil
+            }
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: observer,
+                taskLedger: .init(fileURL: directory.appendingPathComponent("client-manager-ledger.json")),
+                channelFactory: { _ in mailbox })
+            let client = ClientModel(hostName: "Remote Desktop Host", pairingCode: pairingCode,
+                hostID: hostID, sessionID: sessionID, pendingStore: pending, channel: bridge,
+                promptRefreshInterval: .seconds(600))
+            manager.start(pairingCode: pairingCode, additionalChannels: [mailbox], includeDefaultChannel: false)
+            manager.authorizePeer(senderID: clientID)
+            client.start()
+            clientManager = manager; clientModel = client; clientBridge = bridge
+            clientPendingStore = pending; clientExecutorObserver = observer
+        }
+        defer { clientModel?.stop(); clientManager?.stop() }
         func performApproved(_ continuation: ComputerUseVisualApprovalContinuation,
             action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
             willBeginEffect: @escaping () -> Void) async throws {
@@ -1105,7 +1243,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 action: action, tools: tools, progress: { _ in })
         }
         var startPageSetupEvidence: String?
-        let operation = Task { @MainActor in
+        let operation = Task<ComputerUseExecutionResult, Error> { @MainActor in
             if startsOnDrivePage {
                 let ownedWindow = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
                 var setupActions: [String] = []
@@ -1169,6 +1307,100 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         attachment.lifetime = .keepAlways; self.add(attachment)
                     }
             }
+            if clientEntry {
+                guard let client = clientModel, let bridge = clientBridge,
+                      let pendingStore = clientPendingStore, let observer = clientExecutorObserver else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                guard client.sendPrompt(goal) else {
+                    clientFailureReason = "client sendPrompt returned false"
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                if let hostID = managerHostID, let pairingCode = managerPairingCode {
+                    managerTaskID = pendingStore.load(hostID: hostID, pairingCode: pairingCode)?.messageID
+                }
+                let deadline = ContinuousClock.now.advanced(by: .seconds(300))
+                while ContinuousClock.now < deadline {
+                    try Task.checkCancellation()
+                    if case .error(let detail) = client.state {
+                        clientFailureReason = "client entered error state"
+                        let messages = client.messages.map { "\($0.author): \($0.text)" }.joined(separator: "\n")
+                        clientFailureDiagnostic = "Client error: \(detail)\nStatus: \(client.statusText)\n"
+                            + "Progress: \(client.taskProgressHistory)\nMessages:\n\(messages)"
+                        throw NSError(domain: "ClientManagerDriveProbe", code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Client entered error state: \(detail)"])
+                    }
+                    if case .paused = client.state {
+                        clientFailureReason = "client paused; probe will not auto-resume"
+                        throw NSError(domain: "ClientManagerDriveProbe", code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: "Client paused: \(client.statusText)"])
+                    }
+                    for approval in await bridge.approvals() where !seenManagerApprovals.contains(approval.requestID) {
+                        guard case .approvalRequired(let current) = client.state,
+                              current.requestID == approval.requestID else { continue }
+                        let pending = try XCTUnwrap(pendingStore.load(hostID: try XCTUnwrap(managerHostID),
+                            pairingCode: try XCTUnwrap(managerPairingCode)))
+                        guard approval.taskID == pending.messageID,
+                              case .approvalRequired(let message, let action, _) = observer.lastResult else {
+                            clientFailureReason = "approval task ID did not match pending prompt or executor result was not approvalRequired"
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                        let panel = try currentFilePanel()
+                        if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
+                           message.localizedCaseInsensitiveContains("file upload"),
+                           case .click(let x, let y, 1, 1) = action, let window = retainedBrowserWindow(),
+                           window.identity.bounds.contains(CGPoint(x: x, y: y)),
+                           let pageURL = try freshlyObservedBrowserURL(), URL(string: pageURL)?.host == "drive.google.com" {
+                            managerApprovalStage = "picker"
+                            observedRequestedPage = true; observedPageURL = pageURL
+                        } else if let panel, panel.primaryActionEnabled == true, !panel.isNavigatingPath,
+                                  panel.selectedFileURLs.map(\.standardizedFileURL) == [expectedURL.standardizedFileURL],
+                                  message.localizedCaseInsensitiveContains("upload"),
+                                  let pageURL = try freshlyObservedBrowserURL(),
+                                  URL(string: pageURL)?.host == "drive.google.com" {
+                            let primaryAction: Bool
+                            switch action {
+                            case .key(usage: 0x28, modifiers: 0): primaryAction = true
+                            case .click(let x, let y, 1, 1):
+                                primaryAction = panel.primaryActionBounds?.contains(CGPoint(x: x, y: y)) == true
+                            default: primaryAction = false
+                            }
+                            guard primaryAction, uploadEffects == 0 else {
+                                clientFailureReason = "upload approval gate rejected action: primaryAction=\(primaryAction), uploadEffects=\(uploadEffects), priorPickerApprovalObserved=\(observedRequestedPage)"
+                                throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                            }
+                            selectedBeforeUpload = true
+                            managerApprovalStage = "upload"
+                            observedRequestedPage = true; observedPageURL = pageURL
+                        } else {
+                            clientFailureReason = "approval was unrelated to the exact Drive picker-open or selected-file primary action"
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                        seenManagerApprovals.insert(approval.requestID)
+                        client.respondToApproval(current, approved: true)
+                    }
+                    if !client.hasActivePrompt {
+                        let sentPrompts = await bridge.prompts()
+                        if let sent = sentPrompts.last,
+                           let terminal = await bridge.terminals(taskID: sent.id).last {
+                            managerTaskID = sent.id
+                            managerTerminalMessages = await bridge.terminals(taskID: sent.id)
+                            managerTerminal = terminal
+                            switch terminal.outcome {
+                            case .taskCompleted: return .completed(terminal.text)
+                            case .userInterventionRequired: return .userInterventionRequired(terminal.text)
+                            default: return .unableToComplete(terminal.text)
+                            }
+                        }
+                    }
+                    if case .answer = client.composerMode {
+                        clientFailureReason = "client entered answer mode without an accepted clarification"
+                        throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                    }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                throw ComputerUseDesktopExecutor.Failure.stepLimit
+            }
             var result = try await taskExecutor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: tools, progress: { routeProgress.append($0) })
             while uploadToDrive, case .approvalRequired(let message, let action, let continuation) = result {
@@ -1224,6 +1456,29 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var failure: Error?
         do { result = try await operation.value } catch { failure = error }
         deadline.cancel()
+        if clientEntry {
+            if let client = clientModel {
+                if clientFailureDiagnostic == nil {
+                    clientFailureDiagnostic = "State: \(client.state)\nStatus: \(client.statusText)\n"
+                        + "Progress: \(client.taskProgressHistory)\nMessages: "
+                        + client.messages.map { "\($0.author): \($0.text)" }.joined(separator: "\n")
+                }
+            }
+            managerActivityAtFailure = String(describing: clientManager?.activity)
+            lastClientExecutorResult = String(describing: clientExecutorObserver?.lastResult)
+            if let bridge = clientBridge {
+                receivedApprovalDiagnostics = await bridge.approvals().map {
+                    "requestID=\($0.requestID) taskID=\($0.taskID) message=\($0.message)"
+                }
+                if managerTerminalMessages.isEmpty, let taskID = managerTaskID {
+                    managerTerminalMessages = await bridge.terminals(taskID: taskID)
+                    managerTerminal = managerTerminalMessages.last
+                }
+            }
+        }
+        clientModel?.stop()
+        clientManager?.stop()
+        await clientManager?.shutdown()
         if productionComposition, result != nil {
             do {
                 _ = try remoteUploadConfirmed()
@@ -1305,9 +1560,41 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             summary.lifetime = .keepAlways
             add(summary)
         }
+        if clientEntry {
+            let summary = XCTAttachment(string: "Transport: in-process LocalHostComputerUseChannel JSON bridge (no CloudKit/TLS enrollment)\n"
+                + "Task ID: \(String(describing: managerTaskID))\nClient terminal: \(String(describing: managerTerminal?.outcome))\n"
+                + "Wire terminal messages: \(managerTerminalMessages.map { "\($0.outcome): \($0.text)" })\n"
+                + "Failure state captured before shutdown: \(clientFailureDiagnostic ?? "none")\n"
+                + "Failure reason: \(clientFailureReason ?? String(describing: failure))\n"
+                + "Last executor result: \(lastClientExecutorResult ?? "not captured")\n"
+                + "Host activity at failure: \(managerActivityAtFailure ?? "not captured")\n"
+                + "Received approval envelopes: \(receivedApprovalDiagnostics)\nAccepted approval count: \(seenManagerApprovals.count)\nPicker effect callbacks: \(pickerOpeningEffects)\n"
+                + "Upload effect callbacks: \(uploadEffects)\nTask ledger: \(directory.appendingPathComponent("client-manager-ledger.json").path)")
+            summary.name = "Client and HostComputerUseManager envelope route"
+            summary.lifetime = .keepAlways
+            add(summary)
+        }
         let activeBrowserExecutor = productionBrowserExecutor ?? directExecutor
         XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(activeBrowserExecutor.lastSessionFailureForDiagnostics); nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(activeBrowserExecutor.lastActionDiagnosticForTests)")
         guard let result else { XCTFail("No result; error=\(String(describing: failure))"); return }
+        if clientEntry {
+            let bridge = try XCTUnwrap(clientBridge)
+            let sentPrompts = await bridge.prompts()
+            let sent = try XCTUnwrap(sentPrompts.last)
+            XCTAssertEqual(sent.id, managerTaskID)
+            XCTAssertEqual(sent.senderID, managerClientID)
+            XCTAssertEqual(sent.sessionID, managerSessionID)
+            let terminals = await bridge.terminals(taskID: sent.id)
+            let terminal = try XCTUnwrap(terminals.last)
+            XCTAssertEqual(terminal, managerTerminal)
+            XCTAssertEqual(terminal.outcome, .taskCompleted)
+            let ledger = ComputerUseTaskLedger(fileURL: directory.appendingPathComponent("client-manager-ledger.json"))
+            XCTAssertEqual(try ledger.claim(taskID: sent.id, senderID: sent.senderID,
+                sessionID: sent.sessionID, promptBody: sent.body), .completed(terminal.text))
+            XCTAssertTrue((0...1).contains(pickerOpeningEffects))
+            XCTAssertEqual(seenManagerApprovals.count, pickerOpeningEffects + uploadEffects,
+                "Each accepted client approval must correspond to exactly one admitted native effect")
+        }
         if uploadToDrive {
             XCTAssertEqual(uploadEffects, 1)
             guard let evidence = acceptedUploadEvidence else {
@@ -1812,6 +2099,82 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }, timeout: { _, _ in })
         }
     }
+}
+
+// Transparent test adapter: preserve every dynamic capability the manager
+// probes while exposing the exact action held for approval and its pre-effect
+// callback. It does not modify proposals, approvals, or dispatch.
+@MainActor
+private final class DriveClientExecutorObserver: ComputerUseTaskAwareExecuting,
+    MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
+    let base: MCPFirstComputerUseExecutor
+    var lastResult: ComputerUseExecutionResult?
+    var willBeginVisualEffect: ((ComputerUsePredictedAction) -> Void)?
+    init(_ base: MCPFirstComputerUseExecutor) { self.base = base }
+    var isReady: Bool { base.isReady }
+    var runtimeName: String { base.runtimeName }
+    var requiresMacControlHelper: Bool { base.requiresMacControlHelper }
+    var hasAdditionalSetup: Bool { base.hasAdditionalSetup }
+    var supportsNativeTextTasks: Bool { base.supportsNativeTextTasks }
+    var readyDetail: String { base.readyDetail }
+
+    func execute(prompt: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.execute(prompt: prompt, tools: tools, progress: progress); lastResult = result; return result
+    }
+    func execute(taskID: String, prompt: String, trustedUserPrompt: String, tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.execute(taskID: taskID, prompt: prompt, trustedUserPrompt: trustedUserPrompt, tools: tools, progress: progress)
+        lastResult = result; return result
+    }
+    func execute(taskID: String, modelPrompt: String, currentUserPrompt: String,
+                 conversation: [RemoteDesktopHost.ComputerUseConversationTurn], tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.execute(taskID: taskID, modelPrompt: modelPrompt, currentUserPrompt: currentUserPrompt,
+            conversation: conversation, tools: tools, progress: progress); lastResult = result; return result
+    }
+    func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
+                               progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
+        try await base.continueAfterApproval(prepared, tools: tools, progress: progress)
+    }
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {
+        try base.approvedActionPlan(taskID: taskID, promptBody: promptBody)
+    }
+    func continueApprovedActionPlan(taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.continueApprovedActionPlan(taskID: taskID, confirmedActions: confirmedActions,
+            tools: tools, progress: progress); lastResult = result; return result
+    }
+    func cancelMCPWork() { base.cancelMCPWork() }
+    func pauseMCPWork() { base.pauseMCPWork() }
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        try await base.performApprovedVisualAction(continuation, action: action, fingerprint: fingerprint, tools: tools,
+            willBeginEffect: { willBeginEffect(); self.willBeginVisualEffect?(action) })
+    }
+    func continueAfterApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: progress)
+        lastResult = result; return result
+    }
+    func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) {
+        base.cancelVisualApprovalContinuation(continuation)
+    }
+    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        try base.clarification(taskID: taskID)
+    }
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
+        lastResult = result; return result
+    }
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+        selectedChoice: RemoteDesktopHost.ComputerUseClarificationChoice?, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        let result = try await base.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+            goal: goal, selectedChoice: selectedChoice, progress: progress); lastResult = result; return result
+    }
+    func invalidateClarification(taskID: String?) { base.invalidateClarification(taskID: taskID) }
 }
 
 import XCTest

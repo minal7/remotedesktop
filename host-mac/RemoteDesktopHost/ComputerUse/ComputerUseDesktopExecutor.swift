@@ -128,6 +128,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard let surfaceScopeCheck else { return }
         do { try surfaceScopeCheck(action) }
         catch is CancellationError { throw CancellationError() }
+        catch Failure.unsupportedAction { throw Failure.unsupportedAction }
         catch { throw Failure.scopedSurfaceChanged }
     }
 

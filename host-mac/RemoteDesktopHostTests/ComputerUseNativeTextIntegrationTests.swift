@@ -2952,6 +2952,31 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testFocusedEditorPointerUsesSameLocalContextAsOrdinaryPointer() throws {
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 100, height: 30)
+        func image(changing rect: CGRect? = nil) throws -> ComputerUseDesktopImage {
+            let base = CIImage(color: .white).cropped(to: display)
+            let result: CIImage
+            if let rect {
+                let local = CGRect(x: rect.minX, y: display.maxY - rect.maxY, width: rect.width, height: rect.height)
+                result = CIImage(color: .blue).cropped(to: local).composited(over: base)
+            } else { result = base }
+            return try .init(observation: .init(image: result, displayBounds: display))
+        }
+        let before = try image()
+        let unrelatedWindowChange = try image(changing: CGRect(x: 350, y: 200, width: 1, height: 1))
+        XCTAssertTrue(try before.matchesPointerPixels(of: unrelatedWindowChange, window: window, target: field),
+            "Ordinary pointers ignore pixels outside their target context")
+        XCTAssertTrue(try before.matchesPointerPixels(of: unrelatedWindowChange, window: window, target: field,
+            unchangedFocusedField: field),
+            "An unchanged focused-editor proof should preserve the same local target policy")
+        let changedTargetContext = try image(changing: CGRect(x: 110, y: 110, width: 1, height: 1))
+        XCTAssertFalse(try before.matchesPointerPixels(of: changedTargetContext, window: window, target: field,
+            unchangedFocusedField: field), "Changes inside the target context must still reject the pointer")
+    }
+
     func testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds() throws {
         let bounds = CGRect(x: -400, y: 100, width: 1728, height: 1117)
         for window in [CGRect(x: -180, y: 625, width: 640, height: 332),

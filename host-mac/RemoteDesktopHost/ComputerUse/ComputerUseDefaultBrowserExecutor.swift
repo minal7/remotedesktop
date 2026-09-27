@@ -192,6 +192,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     action: action, candidateID: selectedCandidate.id, panel: panel, candidateURL: selectedURL) {
                     pendingPickerConfirmation = (candidateID, action)
                 }
+            } else if let action, case .key = action,
+                      !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
+                throw ComputerUseDesktopExecutor.Failure.unsupportedAction
             } else if !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
@@ -502,6 +505,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 guard let tools = scope.tools else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
                 do { try scope.check(action, tools) }
                 catch is CancellationError { throw CancellationError() }
+                catch ComputerUseDesktopExecutor.Failure.unsupportedAction { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },

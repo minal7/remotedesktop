@@ -5,10 +5,10 @@ import XCTest
 @testable import RemoteDesktopHost
 @testable import RemoteDesktopClientCore
 
-private typealias ClientModel = RemoteDesktopClientCore.ComputerUseSessionModel
-private typealias ClientEnvelope = RemoteDesktopClientCore.ComputerUseEnvelope
-private typealias HostEnvelope = RemoteDesktopHost.ComputerUseEnvelope
-private typealias ClientUpdate = RemoteDesktopClientCore.ComputerUseTaskUpdate
+typealias ClientModel = RemoteDesktopClientCore.ComputerUseSessionModel
+typealias ClientEnvelope = RemoteDesktopClientCore.ComputerUseEnvelope
+typealias HostEnvelope = RemoteDesktopHost.ComputerUseEnvelope
+typealias ClientUpdate = RemoteDesktopClientCore.ComputerUseTaskUpdate
 private typealias FormOracle = ComputerUseOwnedBrowserModelAcceptanceTests
 
 @MainActor
@@ -1500,11 +1500,12 @@ private enum CompositionFailure: Error { case incomplete(String) }
 /// production wire types and exchange JSON bytes; no cross-module cast can hide
 /// a serialization mismatch. LocalHostComputerUseChannel performs real routing
 /// and mailbox validation, but this fixture makes no claim about TLS enrollment.
-private actor SerializedClarificationClientChannel: RemoteDesktopClientCore.ComputerUseSessionChannel {
+actor SerializedClarificationClientChannel: RemoteDesktopClientCore.ComputerUseSessionChannel {
     let mailbox: LocalHostComputerUseChannel
     let hostID: String, clientID: String, sessionID: String, pairingCode: String
     private var sentPrompts: [ClientEnvelope] = []
     private var receivedTerminals: [String: [ClientUpdate]] = [:]
+    private var receivedApprovals: [RemoteDesktopHost.ComputerUseApprovalRequest] = []
     private var seen = Set<String>()
     init(mailbox: LocalHostComputerUseChannel, hostID: String, clientID: String, sessionID: String, pairingCode: String) {
         self.mailbox = mailbox; self.hostID = hostID; self.clientID = clientID
@@ -1524,9 +1525,14 @@ private actor SerializedClarificationClientChannel: RemoteDesktopClientCore.Comp
     func poll() async throws -> [ClientEnvelope] {
         let outgoing = try await mailbox.pollForClient(authenticatedSenderID: clientID, sessionID: sessionID)
         let decoded = try JSONDecoder().decode([ClientEnvelope].self, from: JSONEncoder().encode(outgoing))
-        for envelope in decoded where envelope.kind == .assistant && seen.insert(envelope.id).inserted {
-            let update = try ClientUpdate.decodeBody(envelope.body)
-            if update.outcome != nil { receivedTerminals[update.taskID, default: []].append(update) }
+        for envelope in decoded where seen.insert(envelope.id).inserted {
+            if envelope.kind == .assistant {
+                let update = try ClientUpdate.decodeBody(envelope.body)
+                if update.outcome != nil { receivedTerminals[update.taskID, default: []].append(update) }
+            } else if envelope.kind == .approvalRequest,
+                      let approval = try? RemoteDesktopHost.ComputerUseApprovalRequest.decodeBody(envelope.body) {
+                receivedApprovals.append(approval)
+            }
         }
         return decoded
     }
@@ -1535,6 +1541,7 @@ private actor SerializedClarificationClientChannel: RemoteDesktopClientCore.Comp
     }
     func prompts() -> [ClientEnvelope] { sentPrompts }
     func terminals(taskID: String) -> [ClientUpdate] { receivedTerminals[taskID] ?? [] }
+    func approvals() -> [RemoteDesktopHost.ComputerUseApprovalRequest] { receivedApprovals }
 }
 
 private struct NoCompositionHelperInstaller: MacControlMCPProvisioning {
@@ -1544,7 +1551,7 @@ private struct NoCompositionHelperInstaller: MacControlMCPProvisioning {
     }
 }
 
-private final class CompositionPendingStore: RemoteDesktopClientCore.ComputerUsePendingPromptStoring, @unchecked Sendable {
+final class CompositionPendingStore: RemoteDesktopClientCore.ComputerUsePendingPromptStoring, @unchecked Sendable {
     private let lock = NSLock()
     private var value: RemoteDesktopClientCore.ComputerUsePendingPrompt?
     func load(hostID: String, pairingCode: String) -> RemoteDesktopClientCore.ComputerUsePendingPrompt? {
