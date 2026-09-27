@@ -725,7 +725,8 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
                 "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
                 "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
-                "--image-max-tokens", "1536", "--mtmd-batch-max-tokens", "1536", "--jinja",
+                "--image-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot),
+                "--mtmd-batch-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot), "--jinja",
             ]
         }
         if let authenticationFile {
@@ -1085,6 +1086,7 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
     case inactiveSession
     case invalidResponse
     case invalidVisionInput
+    case inputContextTooLarge
     case insufficientPhysicalMemory
     case insufficientAvailableMemory
     case resourceInspectionFailed
@@ -1105,6 +1107,8 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
             return "The local AI model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .invalidVisionInput:
             return "The screenshot exceeded the safe local-model image limit, so no further action was performed. Any earlier completed steps remain on the Mac."
+        case .inputContextTooLarge:
+            return "The current task and screenshot exceed the local model's context limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
             return "AI Computer Use requires a Mac with at least 12 GB of memory."
         case .insufficientAvailableMemory:
@@ -1578,9 +1582,32 @@ actor OSAtlasLlamaRuntime {
         }
         do {
             try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
-            let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-            let data = try await withTaskCancellationHandler {
-                try await server.transport.complete(request: request)
+            let (request, data) = try await withTaskCancellationHandler {
+                var preparedInput = input
+                while true {
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    // Validate the caller's complete history before any local copy is trimmed.
+                    let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: preparedInput)
+                    let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    let screenshotCount = preparedInput.surface == .desktop
+                        ? 1 : min(preparedInput.history.count, 2) + 1
+                    let reservedTokens = screenshotCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
+                        + ComputerUseFaraModel.maximumCompletionTokens
+                        + ComputerUseFaraModel.contextSafetyReserveTokens
+                    let remainingBudget = server.resourceProfile.contextSize - reservedTokens
+                    if exactTokens <= remainingBudget {
+                        try Task.checkCancellation()
+                        guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                        let data = try await server.transport.complete(request: request)
+                        return (request, data)
+                    }
+                    guard !preparedInput.history.isEmpty else { throw OSAtlasLlamaRuntimeError.inputContextTooLarge }
+                    preparedInput.history.removeFirst()
+                }
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }

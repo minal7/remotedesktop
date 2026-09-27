@@ -18,6 +18,9 @@ struct ComputerUseFaraRuntimeInputs: Equatable, Sendable {
 }
 
 enum ComputerUseFaraModel {
+    static let maximumCompletionTokens = 1_024
+    static let contextImageTokensPerScreenshot = 1_536
+    static let contextSafetyReserveTokens = 64
     /// Page data read from a validated native observation, not a new instruction
     /// or proof that the model's interpretation is correct.
     struct PageReading: Equatable, Sendable, Codable {
@@ -409,7 +412,7 @@ enum ComputerUseFaraModel {
         request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": ComputerUseFaraRuntimeInputs.modelAlias, "messages": messages,
-            "temperature": 0, "max_tokens": 1024, "stream": false, "reasoning_format": "none",
+            "temperature": 0, "max_tokens": maximumCompletionTokens, "stream": false, "reasoning_format": "none",
         ], options: [.sortedKeys, .withoutEscapingSlashes])
         guard request.httpBody!.count <= 9 * 1_024 * 1_024 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
         return request

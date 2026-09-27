@@ -10783,6 +10783,163 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         } catch { await runtime.shutdown(); throw error }
     }
 
+    func testFaraContextBudgetTrimsOldestDesktopHistoryAndPreservesCurrentFileState() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
+            inputTokenCounts: [7_000, 6_000, 5_000])
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
+        let first = "Oldest history narrative", second = "Newer history narrative"
+        let goal = "Continue the requested browser task without losing the selected file."
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "candidate-exact-1",
+            displayName: "Selected Presentation.pptx", contentTypeIdentifier: "org.openxmlformats.presentationml.presentation",
+            fileExtension: "pptx", byteCount: 1_024, modifiedAt: Date(timeIntervalSince1970: 10),
+            createdAt: nil, addedToDirectoryAt: nil)
+        let catalog = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(fileKind: .presentation),
+            page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false), selectedCandidate: candidate)
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Continue the upload task",
+            constraints: "Preserve the user's destination and selected file.", completionCriteria: ["Verify the current result"])
+        var input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: png, surface: .desktop,
+            history: [.init(screenshotPNG: png, response: faraWaitAction(first)),
+                      .init(screenshotPNG: png, response: faraWaitAction(second))],
+            actionError: "Previous action rejected; no input was sent.")
+        input.browserWorkerDirective = directive; input.localFileCatalog = catalog
+        input.selectedLocalFilePath = "/Users/fixture/Downloads/Selected Presentation.pptx"
+        input.nativeOpenPanelSelection = .init(candidateSelected: true, primaryActionEnabled: true)
+        input.hostDispatchedLocalFileConfirmationCandidateID = candidate.id
+        let originalInput = input
+        _ = try await runtime.proposeFara(endpoint: endpoint, input: input)
+        XCTAssertEqual(input, originalInput, "Request budgeting must not mutate caller history")
+        let counts = transport.recordedTokenCountRequests()
+        XCTAssertEqual(counts.count, 3, "Recount after each oldest-history eviction")
+        XCTAssertEqual(try counts.map(faraAssistantHistoryCount), [2, 1, 0])
+        let completions = transport.recordedCompletionRequests()
+        XCTAssertEqual(completions.count, 1)
+        let final = try XCTUnwrap(completions.first)
+        XCTAssertEqual(try faraImageCount(final), 1, "Desktop history reserves only the current screenshot")
+        let body = try faraBodyString(try XCTUnwrap(final.httpBody))
+        XCTAssertFalse(body.contains(first)); XCTAssertFalse(body.contains(second))
+        for required in [goal, "Previous action rejected; no input was sent.", candidate.displayName,
+                         candidate.id, "/Users/fixture/Downloads/Selected Presentation.pptx",
+                         "Continue the upload task", "Verify the current result"] {
+            XCTAssertTrue(body.contains(required), "Trimmed request lost current context: \(required)")
+        }
+        XCTAssertEqual(input.history.count, 2)
+        await runtime.shutdown()
+    }
+
+    func testFaraContextBudgetRejectsOversizedCurrentObservationWithoutCompletion() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()], inputTokenCounts: [6_000])
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateFara(faraInputs)
+        let input = ComputerUseFaraModel.Input(goal: "Keep the current task and observation.", screenshotPNG: try faraTestPNG(),
+            surface: .desktop, actionError: "Current rejection feedback must remain.")
+        do { _ = try await runtime.proposeFara(endpoint: endpoint, input: input); XCTFail("Mandatory current context cannot be evicted") }
+        catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inputContextTooLarge) }
+        XCTAssertEqual(transport.recordedTokenCountRequests().count, 1)
+        XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
+        await runtime.shutdown()
+    }
+
+    func testFaraContextBudgetKeepsShortBoundaryInputAndHistory() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()], inputTokenCounts: [5_568])
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
+        let prior = "Recent history remains when the complete request fits."
+        let input = ComputerUseFaraModel.Input(goal: "Continue this task.", screenshotPNG: png, surface: .desktop,
+            history: [.init(screenshotPNG: png, response: faraWaitAction(prior))], actionError: "Current feedback")
+        _ = try await runtime.proposeFara(endpoint: endpoint, input: input)
+        XCTAssertEqual(transport.recordedTokenCountRequests().count, 1)
+        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        let completion = try XCTUnwrap(transport.recordedCompletionRequests().first)
+        XCTAssertEqual(try faraAssistantHistoryCount(completion), 1)
+        let bodyData = try XCTUnwrap(completion.httpBody)
+        XCTAssertTrue(try faraBodyString(bodyData).contains(prior))
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: bodyData) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let currentContent = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
+        let image = try XCTUnwrap(currentContent.first { $0["type"] as? String == "image_url" })
+        let imageURL = try XCTUnwrap((image["image_url"] as? [String: Any])?["url"] as? String)
+        XCTAssertEqual(imageURL, "data:image/png;base64,\(png.base64EncodedString())",
+            "Current screenshot must survive request-history budgeting byte for byte")
+        await runtime.shutdown()
+    }
+
+    func testFaraContextBudgetReservesRecentBrowserScreenshotWindowAndClarifications() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
+            inputTokenCounts: [4_000, 4_000, 4_000])
+        let runtime = textRuntime(launcher, transports: transport)
+        let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
+        let originalGoal = "Continue the browser task after a clarification."
+        let clarified = try ComputerUseUnresolvedTextGoal(userRequest: originalGoal)
+            .answering("Which presentation?", with: "Selected Presentation.pptx")
+        let input = ComputerUseFaraModel.Input(goal: originalGoal, screenshotPNG: png, surface: .browser,
+            history: [.init(screenshotPNG: png, response: faraWaitAction("Oldest")),
+                      .init(screenshotPNG: png, response: faraWaitAction("Middle")),
+                      .init(screenshotPNG: png, response: faraWaitAction("Newest"))],
+            currentURL: URL(string: "https://example.com/"), actionError: "Keep current rejection feedback",
+            clarifiedGoal: clarified)
+        _ = try await runtime.proposeFara(endpoint: endpoint, input: input)
+        let counts = transport.recordedTokenCountRequests()
+        XCTAssertEqual(counts.count, 3, "Three image reserves overflow; two recent images fit")
+        XCTAssertEqual(try counts.map(faraImageCount), [3, 3, 2])
+        let completion = try XCTUnwrap(transport.recordedCompletionRequests().first)
+        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+        XCTAssertEqual(try faraAssistantHistoryCount(completion), 1)
+        XCTAssertEqual(try faraImageCount(completion), 2)
+        let body = try faraBodyString(try XCTUnwrap(completion.httpBody))
+        for required in [originalGoal, "Selected Presentation.pptx", "Which presentation?", "https://example.com/",
+                         "Keep current rejection feedback"] {
+            XCTAssertTrue(body.contains(required), "Trimmed browser request lost mandatory context: \(required)")
+        }
+        XCTAssertEqual(input.history.count, 3)
+        await runtime.shutdown()
+    }
+
+    private func faraTestPNG() throws -> Data {
+        try XCTUnwrap(NSBitmapImageRep(data: makeTestJPEG(width: 4, height: 4))?.representation(using: .png, properties: [:]))
+    }
+
+    private func faraWaitAction(_ narrative: String) -> String {
+        "\(narrative)\n<tool_call>{\"name\":\"computer_use\",\"arguments\":{\"action\":\"wait\",\"time\":0}}</tool_call>"
+    }
+
+    private func faraWaitResponse() throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
+                "content": faraWaitAction("Wait for the current state.")]]]])
+    }
+
+    private func faraBodyString(_ request: Data) throws -> String {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        return messages.compactMap { message -> String? in
+            if let text = message["content"] as? String { return text }
+            guard let content = message["content"] as? [[String: Any]] else { return nil }
+            return content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }.joined(separator: "\n")
+    }
+
+    private func faraImageCount(_ request: URLRequest) throws -> Int {
+        guard let data = request.httpBody else { XCTFail("Expected request body"); return 0 }
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        return messages.reduce(0) { count, message in
+            count + ((message["content"] as? [[String: Any]])?.filter { $0["type"] as? String == "image_url" }.count ?? 0)
+        }
+    }
+
+    private func faraAssistantHistoryCount(_ request: URLRequest) throws -> Int {
+        guard let data = request.httpBody else { XCTFail("Expected request body"); return 0 }
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try XCTUnwrap(object["messages"] as? [[String: Any]])
+        return messages.filter { $0["role"] as? String == "assistant" }.count
+    }
+
     private var nativeTextInputs: ComputerUseNativeTextRuntimeInputs {
         ComputerUseNativeTextRuntimeInputs(
             modelURL: URL(fileURLWithPath: "/models/Qwen3.5-4B-Q4_K_M.gguf"),
