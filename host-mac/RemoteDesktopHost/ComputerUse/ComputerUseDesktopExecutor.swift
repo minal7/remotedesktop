@@ -530,6 +530,27 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-dispatch"
                 throw Failure.changedScreen
             }
+            if !approved, began, case .typeText = action,
+               error as? ComputerUseTextEditError == .preconditionChanged {
+                // The insert editor reports this only before its selected-text
+                // setter or Unicode input. The effect journal was already
+                // attempted at willBeginEffect, so tombstone that exact action
+                // under the same lease before allowing a fresh observation.
+                let retirement = ComputerUseTaskJournal(taskID: attempted.taskID,
+                    promptDigest: attempted.promptDigest, contractDigest: attempted.contractDigest,
+                    stepIDs: attempted.stepIDs, statuses: attempted.statuses,
+                    retirementDigest: ComputerUseTaskContract.digest([
+                        "native-unsent-type-precondition-v1", actionID, attempted.contractDigest,
+                    ]))
+                do {
+                    try store.retireUnsent(retirement, replacing: attempted)
+                } catch {
+                    session.terminal = .unableToComplete(
+                        "I couldn't safely record that text was not entered. Check the field before starting another request.")
+                    throw error
+                }
+                throw Failure.changedScreen
+            }
             if began {
                 var uncertain = attempted; uncertain.statuses = [.uncertain]
                 try? store.save(uncertain, replacing: attempted)

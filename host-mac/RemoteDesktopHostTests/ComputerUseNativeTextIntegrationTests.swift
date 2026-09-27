@@ -2531,6 +2531,63 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(journals.filter { $0.statuses == [.uncertain] }.count, 1)
     }
 
+    func testNativeDesktopUnsentTypePreconditionFailureRetiresAndReplans() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let initial = ComputerUseTextSnapshot(targetID: "address-field", value: "old value",
+            selection: NSRange(location: 9, length: 0), isEditable: true, isSecure: false)
+        let changed = ComputerUseTextSnapshot(targetID: "address-field", value: "fresh value",
+            selection: NSRange(location: 11, length: 0), isEditable: true, isSecure: false)
+        var current = initial, setterPreconditions = 0, postedText = 0, proposals = 0
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in
+            XCTFail("Insert mode must not change the selection before typing")
+            return false
+        }, replaceSelectedText: { _, expected in
+            XCTAssertEqual(current, expected)
+            setterPreconditions += 1
+            current = changed // Simulate the target changing before its AX write.
+            throw ComputerUseTextEditError.preconditionChanged
+        }, postUnicode: { _, _ in
+            postedText += 1
+            XCTFail("A precondition rejection must not post Unicode input")
+        }, mayAct: { true })
+        let tools = desktopTestTools(textEditor: editor)
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            XCTAssertEqual(input.goal, "Type the requested text")
+            if proposals == 1 {
+                XCTAssertEqual(input.focusedTextState?.valuePrefix, "old value")
+                return .init(response: "stale type proposal", action: .typeText("Tokyo"))
+            }
+            XCTAssertEqual(proposals, 2)
+            XCTAssertEqual(input.history.count, 1)
+            XCTAssertEqual(input.history.first?.response, "stale type proposal")
+            XCTAssertEqual(input.history.first?.action, .typeText("Tokyo"))
+            XCTAssertTrue(input.actionError?.contains("No mouse or keyboard input was sent") == true)
+            XCTAssertTrue(input.actionError?.contains("fresh action") == true)
+            XCTAssertEqual(input.focusedTextState?.valuePrefix, "fresh value",
+                "The retry proposal must observe the changed current field")
+            return .init(response: "handoff after fresh observation", decision: .handoff("Review the current field."))
+        })
+
+        let result = try await executor.execute(taskID: "unsent-type", prompt: "Type the requested text",
+            trustedUserPrompt: "Type the requested text", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the current field."))
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(setterPreconditions, 1)
+        XCTAssertEqual(postedText, 0)
+
+        let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "json" }
+            .map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
+        let retired = journals.filter { $0.retirementDigest != nil }
+        XCTAssertEqual(retired.count, 1)
+        XCTAssertEqual(try XCTUnwrap(retired.first).statuses, [.attempted],
+            "Proven-unsent remains attempted and is tombstoned, never mislabeled verified")
+        XCTAssertFalse(journals.contains { $0.statuses.contains(.uncertain) }, "A proven-unsent text attempt is not an uncertain effect")
+        XCTAssertFalse(journals.contains { $0.statuses.contains(.verified) }, "No input returned successfully")
+    }
+
     func testNativeDesktopCancellationRejectsLateProposalAndConcurrentExecution() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
