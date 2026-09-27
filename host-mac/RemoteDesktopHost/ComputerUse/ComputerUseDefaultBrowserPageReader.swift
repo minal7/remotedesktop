@@ -174,6 +174,35 @@ final class ComputerUseDefaultBrowserPageReader {
         // Stop at each AXWebArea, so nested iframe content is not treated as
         // an outer page. Multiple discovered outer areas are ambiguous.
         guard let webArea = try discoverOuterWebArea() else { return nil }
+        let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
+            "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
+        var focusedControlIsInPage: Bool?
+        if let focusedUIElement {
+            let focusedRole = try string(kAXRoleAttribute as String, focusedUIElement) ?? ""
+            var node = focusedUIElement
+            var seen: [AXUIElement] = []
+            var reachedBoundary = false
+            for _ in 0..<16 {
+                try check()
+                guard !expired, !seen.contains(where: { CFEqual($0, node) }) else { return nil }
+                seen.append(node)
+                if try isPruned(node) { return nil }
+                if CFEqual(node, webArea) {
+                    focusedControlIsInPage = controlRoles.contains(focusedRole)
+                    reachedBoundary = true
+                    break
+                }
+                let role = try string(kAXRoleAttribute as String, node) ?? ""
+                if role == "AXWebArea" { return nil }
+                if CFEqual(node, focused) { reachedBoundary = true; break }
+                guard let parent = try element(kAXParentAttribute as String, node) else { return nil }
+                node = parent
+            }
+            guard reachedBoundary else { return nil }
+            // A focused browser-chrome control is outside the page, but the
+            // retained same-window page remains a valid observation.
+            if focusedControlIsInPage == nil { focusedControlIsInPage = false }
+        }
         guard let url = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea),
               let parsed = URL(string: url), parsed.scheme?.lowercased() == "https", parsed.host != nil else { return nil }
 
@@ -182,7 +211,6 @@ final class ComputerUseDefaultBrowserPageReader {
         var contextBytes = 0
         var contentQueue: [(AXUIElement, Bool)] = [(webArea, false)]
         var contentVisited: [AXUIElement] = []
-        let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
         func bounded(_ chunk: String, to bytes: Int) -> String {
             var result = "", used = 0
             for scalar in chunk.unicodeScalars {
@@ -249,6 +277,14 @@ final class ComputerUseDefaultBrowserPageReader {
         guard !expired, let (afterRoot, afterWindow) = try currentScope(),
               CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow),
               let finalArea = try discoverOuterWebArea(), CFEqual(finalArea, webArea) else { return nil }
+        if let focusedUIElement {
+            guard let finalFocus = try element(kAXFocusedUIElementAttribute as String, afterRoot),
+                  CFEqual(finalFocus, focusedUIElement) else { return nil }
+            if focusedControlIsInPage == true,
+               !controlRefs.values.contains(where: { CFEqual($0, focusedUIElement) }) { return nil }
+        } else if try element(kAXFocusedUIElementAttribute as String, afterRoot) != nil {
+            return nil
+        }
         var focusedExpandedMenuHasNoActionableChildren = false
         if let focusedEmptyExpandedMenu, let focusedUIElement,
            CFEqual(focusedEmptyExpandedMenu, focusedUIElement),

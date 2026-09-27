@@ -5,7 +5,7 @@
   "stages": {
     "implemented": true,
     "compiled": true,
-    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in one direct probe and real Gmail run; 2 planner control cases remain failed",
+    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in one direct probe and real Gmail run; 2 planner control cases remain failed; focused-control RED then 23/23 GREEN; live04 reached the screenshot model after Compose but stopped on an unverified click",
     "accepted": "Host delegation component and scoped browser route only. Gmail draft/attachment end-to-end remains failed."
   },
   "checks": [
@@ -246,6 +246,96 @@
       ],
       "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live03-sources",
       "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live03.xcresult"
+    },
+    {
+      "name": "focused-control-observation-red01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 10,
+      "runtimeWarnings": [],
+      "allIssueCount": 7,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserPageReaderTests/testFocusedControlMustBeRepresentedWithinBoundedPageObservation"
+      ],
+      "sourceSnapshot": ".build/repair-verification/focused-control-observation-red01-sources",
+      "resultBundle": ".build/repair-verification/focused-control-observation-red01.xcresult"
+    },
+    {
+      "name": "focused-control-observation-green01",
+      "result": "Passed",
+      "passed": 23,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 26,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserPageReaderTests/testFocusedExpandedMenuRequiresKnownEmptyChildrenAndStableFocus",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterReturnsFreshEnabledControlCenter",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterRequiresHitPathToReachRetainedControlInSameWindow",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterPropagatesPauseAndCancellationDuringHitValidation",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterRejectsExpandedStateChangesButAcceptsStableUnknownState",
+        "ComputerUseDefaultBrowserPageReaderTests/testNativeControlRequestPreservesAXExpandedTrueFalseAndUnknown",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterKeepsNewestSnapshotAfterCacheEviction",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterRejectsChangedOrUnsafeControls",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterPropagatesPauseAndCancellation",
+        "ComputerUseDefaultBrowserPageReaderTests/testReadsMainPageTextAndControlsButExcludesSecureAndIframeContent",
+        "ComputerUseDefaultBrowserPageReaderTests/testRejectsForeignApplicationAndForeignFocusedWindow",
+        "ComputerUseDefaultBrowserPageReaderTests/testRejectsReplacedWebAreaDuringObservation",
+        "ComputerUseDefaultBrowserPageReaderTests/testBoundsRenderedAXTextAndMarksTruncation",
+        "ComputerUseDefaultBrowserPageReaderTests/testFocusedControlMustBeRepresentedWithinBoundedPageObservation",
+        "ComputerUseDefaultBrowserPageReaderTests/testRetainedControlCannotCrossWindowOrApplication",
+        "ComputerUseDefaultBrowserPageReaderTests/testHiddenAncestorCannotSupplyPageOrControlEvidence",
+        "ComputerUseDefaultBrowserPageReaderTests/testPageDiscoveryFailsClosedWhenNodeBudgetDropsUnseenSibling",
+        "ComputerUseDefaultBrowserSessionTests/testMissingNativePageRefreshesBeforeVisualFallback",
+        "ComputerUseDefaultBrowserSessionTests/testExpandedMenuWithoutObservedChildrenUsesFreshVisualHandoff",
+        "ComputerUseDefaultBrowserSessionTests/testNativeControlChangedDuringPlanningRefreshesBeforeVisualFallback",
+        "ComputerUseDefaultBrowserSessionTests/testImplicitNativeVisualFallbackReturnsToNativePlanningAfterOneVisualTurn",
+        "ComputerUseDefaultBrowserSessionTests/testNativeFilePanelTakesPriorityOverPendingVisualFallback",
+        "ComputerUseDefaultBrowserSessionTests/testNativeControlPlannerClicksValidatedCenterUsingNonzeroDisplayOrigin"
+      ],
+      "sourceSnapshot": ".build/repair-verification/focused-control-observation-green01-sources",
+      "resultBundle": ".build/repair-verification/focused-control-observation-green01.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live04",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live04-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live04.xcresult"
     }
   ],
   "live01": {
@@ -286,5 +376,27 @@
     "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live03-attachments",
     "limits": "Capture archive caps at 20 native exchanges; not a claim that only 20 attempts occurred. No screenshot/upload/completion acceptance."
+  },
+  "focusedControlRepair": {
+    "problem": "A bounded native page could omit the active form control and keep proposing unrelated page controls. Gmail live03 repeated Compose.",
+    "change": "Serialize AXComboBox and require a focused page control to be represented. Reject unsafe/unknown focus ancestry and capture-time focus changes. Clearly scoped browser chrome and noncontrol focus remain readable. Use the existing nil-page fresh screenshot fallback; no site rules or increased budgets.",
+    "verification": "RED reproduced 7 assertion failures. GREEN passed all 23 focused methods with no skips or runtime issues. Live04 used Fara after one native Compose proposal; the exact nil-page cause was not separately instrumented.",
+    "harnessChange": "Exact-point Attach files approval and final draft evidence no longer depend on the capped PageReader. Approval still requires observed enabled Attach files, protected-content exclusions, current Gmail URL, exact retained foreground window, and subsequent exact-file picker confirmation. Removed an extra period from the test goal body.",
+    "accepted": "Focused observation/fallback component only; Gmail workflow remains unaccepted."
+  },
+  "live04": {
+    "result": "Stopped at an unidentified click approval; zero accepted approvals, picker confirmations, file selection or upload. Client had no successful terminal before harness shutdown.",
+    "observedProgress": "Gmail opened in a new retained default-Safari window; exactly one native Compose exchange was captured. The next Fara request contained a current screenshot of one blank composer.",
+    "failure": "Fara described clicking New Message in the lower-right but proposed normalized [65,318], mapped by the host to [112,355] in the left sidebar. The host requested approval for an unidentified item and the bounded harness rejected it.",
+    "separateEarlierRejection": "A URL typing proposal was rejected on stale focus/screen; the model later recovered and navigated. That retained revalidation diagnostic is not the final stopping cause.",
+    "independentUI": "After all workers exited, CUA confirmed a blank composer with focused AXComboBox To recipients, no subject/body/attachment. Discarded the empty test draft, closed only the owned Gmail window, and verified original Drive window restored.",
+    "artifacts": {
+      "client": "F25A1531-EC3C-4996-A190-B28935913BF8.txt",
+      "outcome": "D2241AAB-AE46-4756-A489-38ED46ADC371.txt",
+      "faraRequest": "011DC06C-E7B5-4C17-AFE7-7827EEFB71B8.json",
+      "faraResponse": "82909FA1-163C-475C-A627-D10142460757.json",
+      "frame": "last-fara-frame.png"
+    },
+    "next": "Check the pinned model coordinate contract and missing AXComboBox focused-editor evidence before another live run. Do not widen approval or claim a completed draft."
   }
 }

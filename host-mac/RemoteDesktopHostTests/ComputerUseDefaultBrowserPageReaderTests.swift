@@ -287,7 +287,12 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             default: break
             }
             let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
-            let page = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }), scenario)
+            let result = try reader.read(window: graph.window, application: graph.identity, mayAct: { true })
+            if scenario == "focus-changed" {
+                XCTAssertNil(result, "A focus change during capture invalidates the native observation")
+                continue
+            }
+            let page = try XCTUnwrap(result, scenario)
             XCTAssertEqual(page.focusedExpandedMenuHasNoActionableChildren, scenario == "known-empty", scenario)
         }
     }
@@ -611,6 +616,120 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         let result = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
         XCTAssertLessThanOrEqual(result.renderedAXText.utf8.count, 8_192)
         XCTAssertTrue(result.truncated)
+    }
+
+    func testFocusedControlMustBeRepresentedWithinBoundedPageObservation() throws {
+        func addFocusedCombo(_ graph: PageAXGraph, parent: String = "web") {
+            let combo = graph.element("focused-combo")
+            graph.set("focused-combo", kAXParentAttribute, graph.element(parent))
+            graph.set("focused-combo", kAXRoleAttribute, "AXComboBox" as NSString)
+            graph.set("focused-combo", kAXTitleAttribute, "To recipients" as NSString)
+            graph.set("focused-combo", kAXEnabledAttribute, NSNumber(value: true))
+            graph.setFrame("focused-combo", CGRect(x: 20, y: 30, width: 180, height: 32))
+            graph.set("root", kAXFocusedUIElementAttribute as CFString, combo)
+        }
+
+        let represented = PageAXGraph(); represented.makePage()
+        addFocusedCombo(represented)
+        represented.set("web", kAXChildrenAttribute, [represented.element("text"), represented.element("button"),
+            represented.element("secure"), represented.element("iframe"), represented.element("focused-combo")] as CFArray)
+        let representedPage = try XCTUnwrap(ComputerUseDefaultBrowserPageReader(access: represented.access)
+            .read(window: represented.window, application: represented.identity, mayAct: { true }))
+        XCTAssertTrue(representedPage.controls.contains { $0.role == "AXComboBox" && $0.label == "To recipients" })
+
+        let browserChrome = PageAXGraph(); browserChrome.makePage()
+        let addressBar = browserChrome.element("address-bar")
+        browserChrome.set("address-bar", kAXParentAttribute, browserChrome.window)
+        browserChrome.set("address-bar", kAXRoleAttribute, "AXTextField" as NSString)
+        browserChrome.set("address-bar", kAXTitleAttribute, "Address and search" as NSString)
+        browserChrome.set("root", kAXFocusedUIElementAttribute as CFString, addressBar)
+        browserChrome.set("window", kAXChildrenAttribute, [browserChrome.element("web"), addressBar] as CFArray)
+        XCTAssertNotNil(try ComputerUseDefaultBrowserPageReader(access: browserChrome.access)
+            .read(window: browserChrome.window, application: browserChrome.identity, mayAct: { true }),
+            "Clearly scoped browser chrome focus must not invalidate the page observation")
+
+        let staticTextFocus = PageAXGraph(); staticTextFocus.makePage()
+        staticTextFocus.set("text", kAXParentAttribute, staticTextFocus.element("web"))
+        staticTextFocus.set("root", kAXFocusedUIElementAttribute as CFString, staticTextFocus.element("text"))
+        XCTAssertNotNil(try ComputerUseDefaultBrowserPageReader(access: staticTextFocus.access)
+            .read(window: staticTextFocus.window, application: staticTextFocus.identity, mayAct: { true }),
+            "A focused non-control page element does not need a pressable control reference")
+
+        for scenario in ["control-cap", "node-cap", "hidden", "protected", "iframe", "foreign"] {
+            let graph = PageAXGraph(); graph.makePage()
+            switch scenario {
+            case "control-cap", "node-cap":
+                var children: [AXUIElement] = [graph.element("text"), graph.element("button"),
+                    graph.element("secure"), graph.element("iframe")]
+                let count = scenario == "control-cap" ? 40 : 270
+                for index in 0..<count {
+                    let name = "focus-filler-\(index)"
+                    let filler = graph.element(name)
+                    graph.set(name, kAXParentAttribute, graph.element("web"))
+                    graph.set(name, kAXRoleAttribute, (scenario == "control-cap" ? "AXButton" : "AXGroup") as NSString)
+                    graph.set(name, kAXTitleAttribute, "Filler \(index)" as NSString)
+                    graph.set(name, kAXEnabledAttribute, NSNumber(value: true))
+                    graph.set(name, kAXChildrenAttribute, [] as CFArray)
+                    children.append(filler)
+                }
+                addFocusedCombo(graph)
+                children.append(graph.element("focused-combo"))
+                graph.set("web", kAXChildrenAttribute, children as CFArray)
+            case "hidden", "protected":
+                let branch = graph.element("focus-branch")
+                graph.set("focus-branch", kAXParentAttribute, graph.element("web"))
+                graph.set("focus-branch", kAXRoleAttribute, "AXGroup" as NSString)
+                graph.set("focus-branch", kAXChildrenAttribute, [graph.element("focused-combo")] as CFArray)
+                graph.set("focused-combo", kAXParentAttribute, branch)
+                graph.set("web", kAXChildrenAttribute, [graph.element("text"), graph.element("button"),
+                    graph.element("secure"), graph.element("iframe"), branch] as CFArray)
+                graph.set("focus-branch", scenario == "hidden" ? "AXHidden" : "AXProtectedContent", kCFBooleanTrue)
+                addFocusedCombo(graph, parent: "focus-branch")
+            case "iframe":
+                graph.set("iframe", kAXParentAttribute, graph.element("web"))
+                graph.set("iframe", kAXChildrenAttribute, [graph.element("focused-combo")] as CFArray)
+                addFocusedCombo(graph, parent: "iframe")
+            default:
+                let foreign = graph.element("foreign-focused-combo")
+                graph.set("foreign-focused-combo", kAXRoleAttribute, "AXComboBox" as NSString)
+                graph.set("foreign-focused-combo", kAXTitleAttribute, "To recipients" as NSString)
+                graph.set("root", kAXFocusedUIElementAttribute as CFString, foreign)
+            }
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .read(window: graph.window, application: graph.identity, mayAct: { true }), scenario)
+        }
+
+        let appeared = PageAXGraph(); appeared.makePage()
+        let combo = appeared.element("appeared-combo")
+        appeared.set("appeared-combo", kAXParentAttribute, appeared.element("web"))
+        appeared.set("appeared-combo", kAXRoleAttribute, "AXComboBox" as NSString)
+        appeared.set("appeared-combo", kAXTitleAttribute, "To recipients" as NSString)
+        appeared.set("appeared-combo", kAXEnabledAttribute, NSNumber(value: true))
+        var initialFocusRead = false
+        appeared.afterRead = { node, attribute in
+            if node == "root", attribute == (kAXFocusedUIElementAttribute as String), !initialFocusRead {
+                initialFocusRead = true
+                appeared.set("root", kAXFocusedUIElementAttribute as CFString, combo)
+            }
+        }
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: appeared.access)
+            .read(window: appeared.window, application: appeared.identity, mayAct: { true }),
+            "A focus appearing mid-capture must not create evidence retroactively")
+
+        let paused = PageAXGraph(); paused.makePage()
+        let pausedCombo = paused.element("paused-combo")
+        paused.set("paused-combo", kAXParentAttribute, paused.element("web"))
+        paused.set("paused-combo", kAXRoleAttribute, "AXComboBox" as NSString)
+        paused.set("root", kAXFocusedUIElementAttribute as CFString, pausedCombo)
+        var active = true
+        paused.afterRead = { node, attribute in
+            if node == "paused-combo", attribute == (kAXParentAttribute as String) { active = false }
+        }
+        do {
+            _ = try ComputerUseDefaultBrowserPageReader(access: paused.access)
+                .read(window: paused.window, application: paused.identity, mayAct: { active })
+            XCTFail("Pause during focused ancestry observation must stop the read")
+        } catch ComputerUseHostTools.ToolError.paused { }
     }
 
     func testRetainedControlCannotCrossWindowOrApplication() throws {

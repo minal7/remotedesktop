@@ -1859,7 +1859,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let nativeFileSelectionPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativeSteps })
         let taskID = UUID().uuidString
         let goal = gmailDraft
-            ? "Using the default signed-in Gmail account at https://mail.google.com/, create a draft email to my own email address for that account with subject \(gmailSubject) and body \(gmailBody). Attach the spreadsheet named \(name) from Downloads, leave the draft open for review, and do not send it."
+            ? "Using the default signed-in Gmail account at https://mail.google.com/, create a draft email to my own email address for that account with subject \(gmailSubject) and body \(gmailBody) Attach the spreadsheet named \(name) from Downloads, leave the draft open for review, and do not send it."
             : uploadToDrive
             ? "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
             : "In the default browser, open https://translate.google.com/?sl=auto&tl=es&op=docs, choose \(name) from Downloads in the native file picker, then stop before pressing Upload. Do not submit the file."
@@ -1947,55 +1947,86 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                                              window: ComputerUseDefaultBrowserSession.Window) throws -> Bool {
             guard gmailDraft, case .click(let x, let y, 1, 1) = action,
                   window.identity.bounds.contains(CGPoint(x: x, y: y)) else { return false }
-            let reader = ComputerUseDefaultBrowserPageReader()
-            guard let page = try reader.read(window: window.accessibilityElement,
-                application: window.application, mayAct: { true }),
-                  URL(string: page.url)?.host == destinationHost,
-                  let control = page.controls.first(where: {
-                      $0.role == "AXPopUpButton" && $0.label == "Attach files" && $0.enabled == true
-                          && $0.frame?.contains(CGPoint(x: x, y: y)) == true
-                  }) else { return false }
-            guard try reader.validatedControlCenter(observation: page, controlID: control.id,
-                window: window.accessibilityElement, windowBounds: window.identity.bounds,
-                mayAct: { true }) != nil else { return false }
-            func axString(_ attribute: String, _ element: AXUIElement) -> String? {
+            let point = CGPoint(x: x, y: y)
+            func frontmostApplicationMatches() -> Bool {
+                guard let app = NSWorkspace.shared.frontmostApplication, !app.isTerminated,
+                      let identity = ComputerUseApplicationIdentity(runningApplication: app) else { return false }
+                return identity == window.application
+            }
+            guard frontmostApplicationMatches() else { return false }
+            guard let pageURL = try freshlyObservedBrowserURL(),
+                  URL(string: pageURL)?.host == "mail.google.com" else { return false }
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+            func axValue(_ attribute: String, _ element: AXUIElement) -> CFTypeRef? {
+                guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
                 AXUIElementSetMessagingTimeout(element, 0.1)
                 var value: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
-                    return nil
-                }
-                return value as? String
+                guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }
+                guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+                return value
+            }
+            func axString(_ attribute: String, _ element: AXUIElement) -> String? {
+                axValue(attribute, element) as? String
+            }
+            func axFrame(_ element: AXUIElement) -> CGRect? {
+                guard let position = axValue(kAXPositionAttribute as String, element),
+                      let size = axValue(kAXSizeAttribute as String, element),
+                      CFGetTypeID(position) == AXValueGetTypeID(),
+                      CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+                var origin = CGPoint.zero
+                var dimensions = CGSize.zero
+                guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+                      AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+                let frame = CGRect(origin: origin, size: dimensions)
+                guard frame.minX.isFinite, frame.minY.isFinite, frame.width.isFinite,
+                      frame.height.isFinite, frame.width > 0, frame.height > 0 else { return nil }
+                return frame
             }
             var hit: AXUIElement?
             let systemWide = AXUIElementCreateSystemWide()
             AXUIElementSetMessagingTimeout(systemWide, 0.1)
             guard AXUIElementCopyElementAtPosition(systemWide, Float(x), Float(y), &hit) == .success,
                   var current = hit else { return false }
-            let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
             var matchedControl = false
+            var webAreaCount = 0
+            var visited: [AXUIElement] = []
             for _ in 0..<16 {
                 guard ContinuousClock.now < deadline, !Task.isCancelled else { return false }
-                if CFEqual(current, window.accessibilityElement) { return matchedControl }
+                guard !visited.contains(where: { CFEqual($0, current) }) else { return false }
+                visited.append(current)
                 let role = axString(kAXRoleAttribute as String, current)
                 let label = axString(kAXTitleAttribute as String, current)
                     ?? axString(kAXDescriptionAttribute as String, current)
+                let subrole = axString(kAXSubroleAttribute as String, current)
+                guard (axValue("AXHidden", current) as? NSNumber)?.boolValue != true,
+                      (axValue("AXProtectedContent", current) as? NSNumber)?.boolValue != true,
+                      role != "AXSecureTextField", subrole != (kAXSecureTextFieldSubrole as String),
+                      role != "AXSheet", role != "AXDialog" else { return false }
+                if role == "AXWebArea" {
+                    webAreaCount += 1
+                    guard webAreaCount == 1 else { return false }
+                    let urls = ["AXURL", kAXDocumentAttribute as String].compactMap { attribute -> String? in
+                        guard let raw = axValue(attribute, current) else { return nil }
+                        let text = (raw as? URL)?.absoluteString ?? raw as? String
+                        guard let text, URLComponents(string: text)?.scheme == "https" else { return nil }
+                        return text
+                    }
+                    guard Set(urls) == [pageURL] else { return false }
+                }
                 if role == "AXPopUpButton", label == "Attach files" {
-                    var positionValue: CFTypeRef?
-                    var sizeValue: CFTypeRef?
-                    guard AXUIElementCopyAttributeValue(current, kAXPositionAttribute as CFString, &positionValue) == .success,
-                          AXUIElementCopyAttributeValue(current, kAXSizeAttribute as CFString, &sizeValue) == .success,
-                          let positionValue, let sizeValue,
-                          CFGetTypeID(positionValue) == AXValueGetTypeID(),
-                          CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return false }
-                    var origin = CGPoint.zero
-                    var size = CGSize.zero
-                    guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &origin),
-                          AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else { return false }
-                    let hitFrame = CGRect(origin: origin, size: size)
-                    guard control.frame.map({ abs($0.minX - hitFrame.minX) < 1
-                        && abs($0.minY - hitFrame.minY) < 1 && abs($0.width - hitFrame.width) < 1
-                        && abs($0.height - hitFrame.height) < 1 }) == true else { return false }
+                    guard (axValue(kAXEnabledAttribute as String, current) as? NSNumber)?.boolValue == true,
+                          let hitFrame = axFrame(current), hitFrame.contains(point),
+                          window.identity.bounds.contains(hitFrame) else { return false }
                     matchedControl = true
+                }
+                if CFEqual(current, window.accessibilityElement) {
+                    guard matchedControl, webAreaCount == 1,
+                          let retained = retainedBrowserWindow(), retained.id == window.id,
+                          retained.application == window.application,
+                          CFEqual(retained.accessibilityElement, window.accessibilityElement),
+                          frontmostApplicationMatches(),
+                          try freshlyObservedBrowserURL() == pageURL else { return false }
+                    return true
                 }
                 var parent: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
@@ -2073,9 +2104,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             guard gmailDraft, pickerOpeningEffects == 1, uploadEffects == 1,
                   try currentFilePanel() == nil,
                   let window = retainedBrowserWindow(),
-                  let page = try ComputerUseDefaultBrowserPageReader().read(
-                    window: window.accessibilityElement, application: window.application, mayAct: { true }),
-                  URL(string: page.url)?.host == destinationHost else { return false }
+                  let pageURL = try freshlyObservedBrowserURL(),
+                  URL(string: pageURL)?.host == "mail.google.com" else { return false }
 
             func attribute(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
                 AXUIElementSetMessagingTimeout(element, 0.1)
@@ -2188,11 +2218,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             guard hasRecipient, hasSubject, hasBody,
                   let attachmentContainer, hasAttachmentLink, !hasUploadProgress,
                   try currentFilePanel() == nil,
-                  try freshlyObservedBrowserURL() == page.url else { return false }
+                  try freshlyObservedBrowserURL() == pageURL,
+                  let currentWindow = retainedBrowserWindow(), currentWindow.id == window.id,
+                  currentWindow.application == window.application,
+                  CFEqual(currentWindow.accessibilityElement, window.accessibilityElement) else { return false }
             let savedMarker = composer.contains {
                 ($0.title + $0.description + $0.value).localizedCaseInsensitiveContains("Draft saved")
             }
-            acceptedGmailDraftEvidence = (page.url,
+            acceptedGmailDraftEvidence = (pageURL,
                 attachmentContainer.title + attachmentContainer.description + attachmentContainer.value,
                 savedMarker)
             return true
