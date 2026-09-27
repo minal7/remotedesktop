@@ -6,6 +6,142 @@ import AppKit
 
 @MainActor
 final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
+    func testOptInGmailFocusedRecipientEditorMetadataProbe() throws {
+        guard ProcessInfo.processInfo.environment["RUN_GMAIL_FOCUSED_EDITOR_METADATA_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_FOCUSED_EDITOR_METADATA_PROBE=1 with the Gmail recipient control already focused.")
+        }
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let app = workspace.frontmostApplication, app.bundleIdentifier == "com.apple.Safari",
+              app.isFinishedLaunching,
+              let url = URL(string: "https://mail.google.com/"),
+              workspace.urlForApplication(toOpen: url)?.standardizedFileURL.path == app.bundleURL?.standardizedFileURL.path else {
+            throw XCTSkip("The default Safari must already be frontmost; this probe never activates or opens it.")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(root, 0.1)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute, of: root) else {
+            throw XCTSkip("Safari has no readable focused window.")
+        }
+        _ = AXUIElementSetMessagingTimeout(window, 0.1)
+        guard let focused = Self.axElement(kAXFocusedUIElementAttribute, of: root),
+              Self.axString(kAXRoleAttribute as String, of: focused) == (kAXComboBoxRole as String) else {
+            throw XCTSkip("The focused element is not an AXComboBox.")
+        }
+        _ = AXUIElementSetMessagingTimeout(focused, 0.1)
+        let label = [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+                     kAXPlaceholderValueAttribute as String, kAXHelpAttribute as String,
+                     "AXIdentifier"].compactMap { Self.axString($0, of: focused) }
+            .first { $0.localizedCaseInsensitiveContains("To recipients") }
+        guard label != nil else { throw XCTSkip("The focused combo is not labeled To recipients.") }
+
+        func attribute(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+            var raw: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success else { return nil }
+            return raw
+        }
+        func attributeKind(_ raw: CFTypeRef?) -> String {
+            guard let raw else { return "missing" }
+            if CFGetTypeID(raw) == AXValueGetTypeID() { return "AXValue" }
+            if CFGetTypeID(raw) == CFStringGetTypeID() { return "string" }
+            if CFGetTypeID(raw) == CFBooleanGetTypeID() { return "boolean" }
+            if CFGetTypeID(raw) == CFNumberGetTypeID() { return "number" }
+            return "other"
+        }
+        func settable(_ name: String) -> Bool? {
+            var result = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(focused, name as CFString, &result) == .success else { return nil }
+            return result.boolValue
+        }
+        var ancestors: [[String: Any]] = []
+        var current: AXUIElement? = focused
+        var reachedWindow = false
+        var webAreaURL: String?
+        var webAreaFound = false
+        var seen: [AXUIElement] = []
+        for _ in 0 ..< 20 {
+            guard !Task.isCancelled, Date().timeIntervalSince(started) < 1.5 else {
+                throw XCTSkip("The bounded metadata observation expired.")
+            }
+            guard let element = current, !seen.contains(where: { CFEqual($0, element) }) else { break }
+            seen.append(element)
+            _ = AXUIElementSetMessagingTimeout(element, 0.1)
+            let ancestorRole = Self.axString(kAXRoleAttribute as String, of: element) ?? ""
+            let ancestor: [String: Any] = ["role": ancestorRole]
+            if ancestorRole == "AXWebArea" {
+                webAreaFound = true
+                let rawDocument = attribute(kAXDocumentAttribute as String, element)
+                    ?? attribute("AXURL", element)
+                let document = (rawDocument as? String) ?? (rawDocument as? URL)?.absoluteString
+                if let document, let parsed = URL(string: document), parsed.scheme == "https",
+                   parsed.host == "mail.google.com" { webAreaURL = parsed.absoluteString }
+            }
+            guard ancestorRole != "AXSecureTextField",
+                  Self.axString(kAXSubroleAttribute as String, of: element) != (kAXSecureTextFieldSubrole as String),
+                  Self.axBool("AXProtectedContent", of: element) != true,
+                  Self.axBool("AXHidden", of: element) != true else {
+                throw XCTSkip("The focused ancestry is hidden or protected; no value is read.")
+            }
+            ancestors.append(ancestor)
+            if CFEqual(element, window) { reachedWindow = true; break }
+            current = Self.axElement(kAXParentAttribute as String, of: element)
+        }
+        guard webAreaFound, webAreaURL != nil, reachedWindow,
+              workspace.frontmostApplication?.processIdentifier == app.processIdentifier,
+              let currentWindow = Self.axElement(kAXFocusedWindowAttribute, of: root), CFEqual(currentWindow, window),
+              let currentFocus = Self.axElement(kAXFocusedUIElementAttribute, of: root), CFEqual(currentFocus, focused) else {
+            throw XCTSkip("The focused combo was not within the retained mail.google.com web area/window, or scope changed.")
+        }
+        let role = Self.axString(kAXRoleAttribute as String, of: focused) ?? ""
+        let subrole = Self.axString(kAXSubroleAttribute as String, of: focused)
+        let enabled = Self.axBool(kAXEnabledAttribute as String, of: focused)
+        let editable = Self.axBool("AXEditable", of: focused)
+        let rawValue = attribute(kAXValueAttribute as String, focused)
+        let valueType = attributeKind(rawValue)
+        let valueByteLength = (rawValue as? String)?.utf8.count
+        let rawSelection = attribute(kAXSelectedTextRangeAttribute as String, focused)
+        let selectionType = attributeKind(rawSelection)
+        var selectionLocation: Int?
+        var selectionLength: Int?
+        if let rawSelection, CFGetTypeID(rawSelection) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rawSelection as! AXValue, .cfRange, &range) {
+                selectionLocation = range.location
+                selectionLength = range.length
+            }
+        }
+        let protected = Self.axBool("AXProtectedContent", of: focused)
+        let hidden = Self.axBool("AXHidden", of: focused)
+        let snapshotAvailable = ComputerUseAccessibilityTextTarget().snapshot() != nil
+        guard workspace.frontmostApplication?.processIdentifier == app.processIdentifier,
+              let finalWindow = Self.axElement(kAXFocusedWindowAttribute, of: root), CFEqual(finalWindow, window),
+              let finalFocus = Self.axElement(kAXFocusedUIElementAttribute, of: root), CFEqual(finalFocus, focused) else {
+            XCTFail("The read-only snapshot probe unexpectedly changed focus or window.")
+            return
+        }
+        let report: [String: Any] = [
+            "probe": "Gmail focused recipient AXComboBox metadata (values omitted)",
+            "role": role, "subrole": subrole as Any? ?? NSNull(), "label": label!,
+            "enabled": enabled as Any? ?? NSNull(), "editable": editable as Any? ?? NSNull(),
+            "valueSettable": settable(kAXValueAttribute as String) as Any? ?? NSNull(),
+            "selectedTextSettable": settable(kAXSelectedTextAttribute as String) as Any? ?? NSNull(),
+            "valueType": valueType, "valueByteLength": valueByteLength as Any? ?? NSNull(),
+            "selectionType": selectionType, "selectionLocation": selectionLocation as Any? ?? NSNull(),
+            "selectionLength": selectionLength as Any? ?? NSNull(),
+            "protected": protected as Any? ?? NSNull(), "hidden": hidden as Any? ?? NSNull(),
+            "ancestorRoles": ancestors, "reachedFocusedWindow": reachedWindow,
+            "sameMailWebAreaURL": webAreaURL!, "snapshotAvailable": snapshotAvailable,
+            "elapsedSeconds": Date().timeIntervalSince(started)
+        ]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "gmail-focused-recipient-editor-metadata.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 2.0, "AX metadata probe exceeded its bound")
+        XCTAssertTrue(snapshotAvailable, "The observed focused recipient combo has valid editable AX state")
+    }
+
     func testOptInSafariAddressFieldFingerprintAndLifecycleStability() async throws {
         guard ProcessInfo.processInfo.environment["RUN_SAFARI_FOCUS_STABILITY_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_SAFARI_FOCUS_STABILITY_PROBE=1 to sample an already-open Safari address field.")
@@ -418,6 +554,100 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         }
     }
 
+    func testEditableTextSnapshotAcceptsDeepButBoundedFocusedControlAncestry() throws {
+        for referenceCount in [14, 31, 32] {
+            let graph = AXTextGraph()
+            var groups: [String] = []
+            for index in 0 ..< referenceCount - 2 {
+                let name = "deep-group-\(index)"
+                _ = graph.addNode(name)
+                graph.set(name, kAXRoleAttribute, kAXGroupRole as NSString)
+                groups.append(name)
+            }
+            graph.set("destination", kAXParentAttribute, graph.element(groups[0]))
+            for index in groups.indices {
+                let parent = index + 1 < groups.count ? graph.element(groups[index + 1]) : graph.element("window")
+                graph.set(groups[index], kAXParentAttribute, parent)
+            }
+            let snapshot = ComputerUseAccessibilityTextTarget(access: graph.access).snapshot()
+            XCTAssertNotNil(snapshot, "A valid editable field reaching its focused window within \(referenceCount) references must be observable")
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+
+        let webGraph = AXTextGraph()
+        var webGroups: [String] = []
+        for index in 0 ..< 11 {
+            let name = "web-group-\(index)"
+            _ = webGraph.addNode(name)
+            webGraph.set(name, kAXRoleAttribute, kAXGroupRole as NSString)
+            webGroups.append(name)
+        }
+        let webArea = webGraph.addNode("web-area")
+        webGraph.set("web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+        webGraph.set("web-area", kAXDocumentAttribute, "https://example.test/" as NSString)
+        webGraph.set("destination", kAXRoleAttribute, kAXComboBoxRole as NSString)
+        webGraph.set("destination", kAXTitleAttribute, "To recipients" as NSString)
+        webGraph.set("destination", kAXParentAttribute, webGraph.element(webGroups[0]))
+        for index in webGroups.indices {
+            let parent = index + 1 < webGroups.count ? webGraph.element(webGroups[index + 1])
+                : webArea
+            webGraph.set(webGroups[index], kAXParentAttribute, parent)
+        }
+        webGraph.set("web-area", kAXParentAttribute, webGraph.element("window"))
+        XCTAssertNotNil(ComputerUseAccessibilityTextTarget(access: webGraph.access).snapshot(),
+            "A deep editable combo inside a web area with a document URL must remain observable")
+        XCTAssertTrue(webGraph.writes.isEmpty)
+    }
+
+    func testEditableTextSnapshotRejectsOverLimitCyclicDetachedAndForeignAncestry() throws {
+        func graphWithAncestors(_ referenceCount: Int) -> (AXTextGraph, [String]) {
+            let graph = AXTextGraph()
+            var groups: [String] = []
+            for index in 0 ..< referenceCount - 2 {
+                let name = "bounded-group-\(index)"
+                _ = graph.addNode(name)
+                graph.set(name, kAXRoleAttribute, kAXGroupRole as NSString)
+                groups.append(name)
+            }
+            graph.set("destination", kAXParentAttribute, graph.element(groups[0]))
+            for index in groups.indices {
+                let parent = index + 1 < groups.count ? graph.element(groups[index + 1]) : graph.element("window")
+                graph.set(groups[index], kAXParentAttribute, parent)
+            }
+            return (graph, groups)
+        }
+
+        let (tooDeep, _) = graphWithAncestors(33)
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: tooDeep.access).snapshot(), "An ancestry beyond the 32-reference bound must fail closed")
+
+        let (cyclic, cyclicGroups) = graphWithAncestors(14)
+        cyclic.set(cyclicGroups.last!, kAXParentAttribute, cyclic.element(cyclicGroups[0]))
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: cyclic.access).snapshot(), "A cycle must not produce editable authority")
+
+        let (detached, _) = graphWithAncestors(14)
+        detached.set("destination", kAXParentAttribute, nil)
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: detached.access).snapshot(), "A detached field must fail closed")
+
+        let (foreign, foreignGroups) = graphWithAncestors(14)
+        _ = foreign.addNode("foreign-window")
+        foreign.set("foreign-window", kAXRoleAttribute, kAXWindowRole as NSString)
+        foreign.set(foreignGroups.last!, kAXParentAttribute, foreign.element("foreign-window"))
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: foreign.access).snapshot(), "A field that reaches a different window must fail closed")
+        for graph in [tooDeep, cyclic, detached, foreign] { XCTAssertTrue(graph.writes.isEmpty) }
+    }
+
+    func testEditableTextSnapshotRejectsAncestryReadThatExceedsDeadline() throws {
+        let graph = AXTextGraph()
+        graph.afterRead = { element, attribute in
+            if element == "destination", attribute == kAXRoleAttribute { Thread.sleep(forTimeInterval: 0.8) }
+        }
+        let started = ContinuousClock.now
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: graph.access).snapshot(),
+            "A late first AX reply must not produce a text snapshot")
+        XCTAssertLessThan(started.duration(to: .now), .seconds(2))
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
     func testNativeTypingAndOtherFieldReadsPreserveTheExplicitTarget() throws {
         for web in [false, true] {
             let graph = AXTextGraph()
@@ -521,7 +751,11 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             return proposal
         }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer {
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try? FileManager.default.removeItem(at: directory)
+            }
+        }
         let executor = clarificationExecutor(graph: graph, planner: planner, directory: directory,
             planningWorker: worker, planningTimeout: 0.1)
         do { _ = try await executor.execute(taskID: "late", prompt: "Put \"blue\" in café.", progress: { _ in }); XCTFail("The planner must time out") }
@@ -532,13 +766,18 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         do { _ = try await executor.execute(taskID: "busy", prompt: "Put \"blue\" in café.", progress: { _ in }); XCTFail("No second planner may start") }
         catch { XCTAssertEqual(error as? ComputerUsePlanningWorker.Failure, .busy) }
         XCTAssertEqual(planner.goals.count, 1)
-        guard case .completed = try await executor.execute(taskID: "compiled", prompt: "Set café to \"green\".", progress: { _ in }) else {
-            return XCTFail("An exact compiled task must not depend on planning capacity")
-        }
-        XCTAssertEqual(graph.value("destination"), "green")
+        var compiledResult: ComputerUseExecutionResult?
+        var compiledFailure: Error?
+        do {
+            compiledResult = try await executor.execute(taskID: "compiled", prompt: "Set \"café\" to \"green\".", progress: { _ in })
+        } catch { compiledFailure = error }
         gate.finish(())
         await fulfillment(of: [gate.returned], timeout: 1)
         try await waitForAvailablePlanningWorker(worker)
+        if let compiledFailure { return XCTFail("Compiled task failed before cleanup: \(compiledFailure)") }
+        guard case .completed = compiledResult else {
+            return XCTFail("An exact compiled task must not depend on planning capacity")
+        }
         XCTAssertEqual(graph.value("destination"), "green", "The stale blue proposal cannot overwrite a later authorized edit")
         XCTAssertEqual(planner.goals.count, 1)
         XCTAssertEqual(graph.writes.filter { $0.attribute == kAXSelectedTextAttribute }.count, 1)

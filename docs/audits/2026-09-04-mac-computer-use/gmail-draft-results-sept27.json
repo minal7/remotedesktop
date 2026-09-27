@@ -336,6 +336,256 @@
       ],
       "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live04-sources",
       "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live04.xcresult"
+    },
+    {
+      "name": "gmail-focused-editor-metadata-probe01",
+      "result": "unknown",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 2,
+      "buildWarnings": 8,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testOptInGmailFocusedRecipientEditorMetadataProbe"
+      ],
+      "sourceSnapshot": ".build/repair-verification/gmail-focused-editor-metadata-probe01-sources",
+      "resultBundle": ".build/repair-verification/gmail-focused-editor-metadata-probe01.xcresult"
+    },
+    {
+      "name": "gmail-focused-editor-metadata-probe02",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 8,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testOptInGmailFocusedRecipientEditorMetadataProbe"
+      ],
+      "sourceSnapshot": ".build/repair-verification/gmail-focused-editor-metadata-probe02-sources",
+      "resultBundle": ".build/repair-verification/gmail-focused-editor-metadata-probe02.xcresult"
+    },
+    {
+      "name": "text-editor-ancestry-red01",
+      "result": "Failed",
+      "passed": 1,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 8,
+      "runtimeWarnings": [],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotAcceptsDeepButBoundedFocusedControlAncestry",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotRejectsOverLimitCyclicDetachedAndForeignAncestry"
+      ],
+      "sourceSnapshot": ".build/repair-verification/text-editor-ancestry-red01-sources",
+      "resultBundle": ".build/repair-verification/text-editor-ancestry-red01.xcresult"
+    },
+    {
+      "name": "text-editor-ancestry-green01",
+      "result": "Failed",
+      "passed": 36,
+      "failed": 2,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 10,
+      "runtimeWarnings": [],
+      "allIssueCount": 4,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testOptInGmailFocusedRecipientEditorMetadataProbe",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextPreservesObservedRolesAndUnknownModality",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextBoundsTitlesAndDoesNotExposeProtectedWindows",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextRejectsMetadataChangesDuringObservation",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextRejectsWithdrawalDuringTheLastAXReply",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueUsesBoundsAndNeverReadsEditableValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueExcludesProtectedHiddenAndOffWindowControls",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueRejectsChangedScopeAndWithdrawnPermission",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueBoundsCyclesItemsAndCancellation",
+        "ComputerUseAccessibilityTextTargetTests/testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues",
+        "ComputerUseAccessibilityTextTargetTests/testObservedInvalidNativeFieldsCannotReviveOldAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotAcceptsDeepButBoundedFocusedControlAncestry",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotRejectsOverLimitCyclicDetachedAndForeignAncestry",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotRejectsAncestryReadThatExceedsDeadline",
+        "ComputerUseAccessibilityTextTargetTests/testNativeTypingAndOtherFieldReadsPreserveTheExplicitTarget",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningUsesTheLabelBoundByItsSnapshot",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningLabelsDoNotReadProtectedOrEditableTitleValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeTaskRejectsRepurposedPlanningTargetAndAcceptsFreshAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningDeadlineDiscardsLateEditsButAllowsCompiledWorkWithoutAnotherPlanner",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationPlanningDeadlineRetainsExactAnswerOwnershipAndFreshRetry",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationDeadlineDoesNotRenewExpiryOrAuthorizeChangedScope",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationPreservesExactGoalAndReferencesWithFreshValuesAndNoReplay",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRejectsChangedScopeAndCannotReviveItAfterRestoration",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRejectsFormDriftWhilePlanningQuestionsOrEdits",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationBindsCancelledPlanningToOneExactAnswerTask",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationExpiryAndInvalidationDuringPlanningCannotIssueNewAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRetainsScopeAcrossQuestionsAndStopsAtTheTurnLimit",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleEventsRetireSameObjectAuthorityAfterVisibleStateReturns",
+        "ComputerUseAccessibilityTextTargetTests/testUnrelatedNativeCreationPreservesExactFieldAuthorityAcrossInputBoundaries",
+        "ComputerUseAccessibilityTextTargetTests/testRelatedOrUnscopedNativeCreationStillRetiresRetainedAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary",
+        "ComputerUseAccessibilityTextTargetTests/testNativeDestroyedLabelRejectsObservationUntilFreshLabelAuthorityExists",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleDistinguishesTextStateFromLabelMeaning",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleIgnoresUnusedLabelObjectsWithoutReadingTheirValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleEventsDuringObservationAndCapabilityChecksStopBeforeInput",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleChangesDuringPlanningRejectEditsAndClarificationAnswers",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleOverflowRetiresOldReferencesAndFreshObservationRecovers",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleCallbackRegistryOwnsExactRegistrationAndBoundsItsInbox"
+      ],
+      "sourceSnapshot": ".build/repair-verification/text-editor-ancestry-green01-sources",
+      "resultBundle": ".build/repair-verification/text-editor-ancestry-green01.xcresult"
+    },
+    {
+      "name": "text-editor-ancestry-control-baseline01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 2,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 2,
+      "runtimeWarnings": [],
+      "allIssueCount": 4,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningDeadlineDiscardsLateEditsButAllowsCompiledWorkWithoutAnotherPlanner"
+      ],
+      "sourceSnapshot": ".build/repair-verification/text-editor-ancestry-control-baseline01-sources",
+      "resultBundle": ".build/repair-verification/text-editor-ancestry-control-baseline01.xcresult"
+    },
+    {
+      "name": "native-lifecycle-controls-check01",
+      "result": "Failed",
+      "passed": 1,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 10,
+      "runtimeWarnings": [],
+      "allIssueCount": 1,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningDeadlineDiscardsLateEditsButAllowsCompiledWorkWithoutAnotherPlanner"
+      ],
+      "sourceSnapshot": ".build/repair-verification/native-lifecycle-controls-check01-sources",
+      "resultBundle": ".build/repair-verification/native-lifecycle-controls-check01.xcresult"
+    },
+    {
+      "name": "text-editor-ancestry-green02",
+      "result": "Passed",
+      "passed": 38,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 8,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseAccessibilityTextTargetTests/testOptInGmailFocusedRecipientEditorMetadataProbe",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextPreservesObservedRolesAndUnknownModality",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextBoundsTitlesAndDoesNotExposeProtectedWindows",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextRejectsMetadataChangesDuringObservation",
+        "ComputerUseAccessibilityTextTargetTests/testNativeWindowContextRejectsWithdrawalDuringTheLastAXReply",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueUsesBoundsAndNeverReadsEditableValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueExcludesProtectedHiddenAndOffWindowControls",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueRejectsChangedScopeAndWithdrawnPermission",
+        "ComputerUseAccessibilityTextTargetTests/testNativeControlCatalogueBoundsCyclesItemsAndCancellation",
+        "ComputerUseAccessibilityTextTargetTests/testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues",
+        "ComputerUseAccessibilityTextTargetTests/testObservedInvalidNativeFieldsCannotReviveOldAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotAcceptsDeepButBoundedFocusedControlAncestry",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotRejectsOverLimitCyclicDetachedAndForeignAncestry",
+        "ComputerUseAccessibilityTextTargetTests/testEditableTextSnapshotRejectsAncestryReadThatExceedsDeadline",
+        "ComputerUseAccessibilityTextTargetTests/testNativeTypingAndOtherFieldReadsPreserveTheExplicitTarget",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningUsesTheLabelBoundByItsSnapshot",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningLabelsDoNotReadProtectedOrEditableTitleValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeTaskRejectsRepurposedPlanningTargetAndAcceptsFreshAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testNativePlanningDeadlineDiscardsLateEditsButAllowsCompiledWorkWithoutAnotherPlanner",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationPlanningDeadlineRetainsExactAnswerOwnershipAndFreshRetry",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationDeadlineDoesNotRenewExpiryOrAuthorizeChangedScope",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationPreservesExactGoalAndReferencesWithFreshValuesAndNoReplay",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRejectsChangedScopeAndCannotReviveItAfterRestoration",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRejectsFormDriftWhilePlanningQuestionsOrEdits",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationBindsCancelledPlanningToOneExactAnswerTask",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationExpiryAndInvalidationDuringPlanningCannotIssueNewAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testNativeClarificationRetainsScopeAcrossQuestionsAndStopsAtTheTurnLimit",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleEventsRetireSameObjectAuthorityAfterVisibleStateReturns",
+        "ComputerUseAccessibilityTextTargetTests/testUnrelatedNativeCreationPreservesExactFieldAuthorityAcrossInputBoundaries",
+        "ComputerUseAccessibilityTextTargetTests/testRelatedOrUnscopedNativeCreationStillRetiresRetainedAuthority",
+        "ComputerUseAccessibilityTextTargetTests/testDestroyedNativeObjectsAreNeverQueriedAgainThroughAnyAXBoundary",
+        "ComputerUseAccessibilityTextTargetTests/testNativeDestroyedLabelRejectsObservationUntilFreshLabelAuthorityExists",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleDistinguishesTextStateFromLabelMeaning",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleIgnoresUnusedLabelObjectsWithoutReadingTheirValues",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleEventsDuringObservationAndCapabilityChecksStopBeforeInput",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleChangesDuringPlanningRejectEditsAndClarificationAnswers",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleOverflowRetiresOldReferencesAndFreshObservationRecovers",
+        "ComputerUseAccessibilityTextTargetTests/testNativeLifecycleCallbackRegistryOwnsExactRegistrationAndBoundsItsInbox"
+      ],
+      "sourceSnapshot": ".build/repair-verification/text-editor-ancestry-green02-sources",
+      "resultBundle": ".build/repair-verification/text-editor-ancestry-green02.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live05",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live05-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live05.xcresult"
     }
   ],
   "live01": {
@@ -357,7 +607,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "TDD for omitted focused control: when bounded accessibility capture omits current focused form UI, use existing fresh screenshot fallback. Keep capture limits and scope protections. Then rerun same real Gmail workflow; clarify fixture body punctuation before asserting exact body text.",
+  "next": "Diagnose live05 Start Page navigation rejection using retained revalidation frames. Preserve approval guards; then rerun the same real Gmail workflow.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -398,5 +648,100 @@
       "frame": "last-fara-frame.png"
     },
     "next": "Check the pinned model coordinate contract and missing AXComboBox focused-editor evidence before another live run. Do not widen approval or claim a completed draft."
+  },
+  "focusedEditorDiagnostic": {
+    "scope": "One read-only probe on an independently prepared blank Gmail compose field, not a model workflow. No field values were saved or transmitted.",
+    "probe01": "Compile-only failure: attempted assignment to an immutable Access.timeout. No tests ran. Root removed that override to observe the exact live snapshot path.",
+    "probe02": {
+      "ancestorRoles": [
+        {
+          "role": "AXComboBox"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXWebArea"
+        },
+        {
+          "role": "AXScrollArea"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXGroup"
+        },
+        {
+          "role": "AXTabGroup"
+        },
+        {
+          "role": "AXSplitGroup"
+        },
+        {
+          "role": "AXWindow"
+        }
+      ],
+      "editable": null,
+      "elapsedSeconds": 0.02465200424194336,
+      "enabled": true,
+      "hidden": null,
+      "label": "To recipients",
+      "probe": "Gmail focused recipient AXComboBox metadata (values omitted)",
+      "protected": null,
+      "reachedFocusedWindow": true,
+      "role": "AXComboBox",
+      "sameMailWebAreaURL": "https://mail.google.com/mail/u/0/#inbox?compose=new",
+      "selectedTextSettable": true,
+      "selectionLength": 0,
+      "selectionLocation": 0,
+      "selectionType": "AXValue",
+      "snapshotAvailable": false,
+      "subrole": null,
+      "valueByteLength": 0,
+      "valueSettable": true,
+      "valueType": "string"
+    },
+    "finding": "The focused recipient is writable and exposes an empty string and valid selection, but its ancestry has 14 refs including the field and window. The snapshot reader stops after 12 and cannot establish membership, producing nil.",
+    "next": "Reproduce generically in fixtures, then use a larger bounded walk with a deadline while preserving exact window, lifecycle and selection checks. Repeat this read-only real probe before Gmail E2E."
+  },
+  "coordinateContractReview": {
+    "result": "The local adapter and pinned official implementation both use a 0–1000 normalized Fara coordinate space. No mapping mismatch identified for live04. This does not establish general vision reliability or identical image preprocessing.",
+    "source": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/coord_spaces.py#L13",
+    "conversion": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/fara/fara15_agent.py#L432",
+    "local": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseRuntimeTypes.swift:269"
+  },
+  "focusedEditorRepair": {
+    "change": "Increase same-window ancestry bound from 12 to 32 refs with a 750ms publishing deadline, preserving lifecycle, cycle, scope, text-value and selection validation. Reject a known destroyed app root before fresh-scope recovery can clear its destroyed state.",
+    "red": "RED reproduced missing valid deep controls (14, 31 and 32 refs); over-limit/cyclic/detached/foreign rejection passed.",
+    "initialGreen": "36 passed / 2 failed. New ancestry checks and actual Gmail probe passed. Both failures reproduced unchanged against pre-repair production source: destroyed app root revival and existing test cleanup masking a busy error.",
+    "existingTestRepair": "Release and await blocked planner before assertion/cleanup, and quote the literal target in the existing test goal as required by the existing compiler. No grammar change. Intermediate check passed destroyed-root test and exposed busy error before the goal correction.",
+    "finalGreen": "38/38, zero skips/runtime issues, build 0 errors/8 warnings, all 55 source hashes unchanged. Includes a real read-only Gmail recipient probe: snapshotAvailable true, 0.0291509628 seconds, versus false before repair.",
+    "review": "Independent Luna review found no blocker.",
+    "accepted": "Bounded native text observation/lifecycle component; Gmail workflow is not accepted."
+  },
+  "live05": {
+    "result": "Stopped at unidentified-click approval before Gmail navigation; no accepted approvals, native control/file calls, uploads or client success terminal.",
+    "failure": "Fara remained on Safari Start Page following rejected navigation actions, then requested a click at normalized [460,453] (host [794,506]). The bounded harness rejected the unidentified click. interrupted is the cleanup result, not the initiating failure.",
+    "independentUI": "After test and inference workers exited, CUA confirmed the owned window was still Start Page. Closed only that blank test window and restored the original Drive window.",
+    "ownedWindowID": "C50301AD-F55E-4812-976D-9EA6F4997D27",
+    "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live05-attachments",
+    "limits": "This run did not reach or exercise the repaired Gmail editor. Stale-screen diagnostics need comparison with captured revalidation frames."
   }
 }

@@ -285,6 +285,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     private func snapshot(element: AXUIElement, window: AXUIElement,
                           app: Application) -> ComputerUseTextSnapshot? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         let application = app.identity
         synchronizeLifecycle()
         let revision = lifecycleRevision
@@ -297,6 +298,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         // Apply the timeout before the first query on every new AX reference.
         setTimeout(element, 0.15)
         guard let role = stringAttribute(kAXRoleAttribute, on: element) else { return nil }
+        guard ContinuousClock.now < deadline else { return nil }
         let subrole = stringAttribute(kAXSubroleAttribute, on: element) ?? ""
         let secure = subrole == kAXSecureTextFieldSubrole as String
             || boolAttribute("AXProtectedContent", on: element) == true
@@ -328,7 +330,8 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         var reachedWindow = false
         var ancestors: [AXUIElement] = []
         var ancestor: AXUIElement? = element
-        for _ in 0 ..< 12 {
+        for _ in 0 ..< 32 {
+            guard ContinuousClock.now < deadline else { return nil }
             guard let current = ancestor else { break }
             guard !ancestors.contains(where: { CFEqual($0, current) }) else { return nil }
             ancestors.append(current)
@@ -343,18 +346,19 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                     else if let url = documentValue as? URL { documentParts.append(url.absoluteString) }
                 }
             }
+            guard ContinuousClock.now < deadline else { return nil }
             if CFEqual(current, window) { reachedWindow = true; break }
             ancestor = elementAttribute(kAXParentAttribute, on: current)
         }
         // A detached element may still answer AXValue. Readability, matching
         // pixels, and an unchanged URL do not prove current document membership.
-        guard reachedWindow else { return nil }
+        guard reachedWindow, ContinuousClock.now < deadline else { return nil }
         let document = documentParts.map { "\($0.utf8.count):\($0)" }.joined()
         let label = labelFor(element)
         let identifier = stringAttribute("AXIdentifier", on: element) ?? ""
         guard label.text.utf8.count <= 256, identifier.utf8.count <= 1_024 else { return nil }
         synchronizeLifecycle()
-        guard revision == lifecycleRevision, isUsable(element), isUsable(window),
+        guard ContinuousClock.now < deadline, revision == lifecycleRevision, isUsable(element), isUsable(window),
               ancestors.allSatisfy({ isUsable($0) }), label.element.map({ isUsable($0) }) != false else { return nil }
         let shape = Shape(role: role, subrole: subrole, identifier: identifier, label: label, ancestors: ancestors)
         var binding = bindings.first(where: {
@@ -373,7 +377,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                               isWebContent: isWebContent, shape: shape)
             bindings.append(binding!)
         }
-        guard let binding else { return nil }
+        guard let binding, ContinuousClock.now < deadline else { return nil }
         valid = true
         return ComputerUseTextSnapshot(
             targetID: binding.id, value: value,
@@ -494,6 +498,14 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     private func applicationForObservation(allowFreshScope: Bool = false) -> Application? {
         let app = access.frontmost()
         synchronizeLifecycle()
+        if let app, app.identity.utf8.elementsEqual(observedApplication?.utf8 ?? "".utf8),
+           observedRoot.map({ CFEqual($0, app.root) }) == true,
+           destroyedElements.contains(where: { CFEqual($0, app.root) }) {
+            // A destroyed application AX root cannot become safe again just
+            // because fresh-scope recovery was requested. Recovery remains
+            // available for coverage loss and a genuinely new app/root.
+            return nil
+        }
         // Overflow retires every retained reference. A new observation may
         // start a new monitor and bind freshly queried controls; a lookup or
         // mutation using an old target ID must never recover that authority.
