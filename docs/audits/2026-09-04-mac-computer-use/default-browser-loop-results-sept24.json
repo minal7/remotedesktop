@@ -5,7 +5,7 @@
     "implemented": true,
     "compiled": true,
     "tested": true,
-    "accepted": "One blank-start production-composition real-Drive upload/completion/readback slice (live11) using the actual Apple planner, mac-control MCP helper and browser loader; exact newest candidate among three, one admitted upload, fresh host completion evidence, Fara termination, and independent exact-byte readback. Bounded test approvals covered chooser opening and exact-file confirmation; no custom completion checker. The separate live28 direct-executor slice also passes. Broad HostManager/iOS UI workflows, email, ambiguity and 12 GB whole-machine qualification remain unaccepted."
+    "accepted": "One blank-start production-composition real-Drive upload/completion/readback slice (live11), one complete scoped ClientModel/HostManager task pass (live26), one ambiguity-selected transfer/completion/readback pass (live09), and the separate direct-executor live28 slice. Live09 had an inaccurate final response citing an unrelated older row with a misspelled ID; final-answer evidence accuracy and repeatability remain open. Broad HostManager/iOS UI workflows, email and 12 GB whole-machine qualification remain unaccepted."
   },
   "defaultBrowser": "com.apple.Safari",
   "model": "Fara1.5-4B Q4_K_M",
@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Live26 remains one complete scoped ClientModel/HostManager task pass. Live07 verified exact two-way clarification, exact filename answer, one upload, and independent 28,273-byte SHA-256 readback; client paused before taskCompleted. Live08 regressed: with hasTiedSortValues=true, the native planner selected the first Alternate candidate instead of asking, and the bounded harness refused the resulting mismatched Upload approval; no upload. Ambiguous-transfer reliability remains unaccepted.",
+    "status": "Live26 remains one complete scoped ClientModel/HostManager task pass. Live09 also asked for exactly two tied candidates, received the exact filename answer, admitted one upload, returned taskCompleted, and passed independent 28,273-byte SHA-256 readback. Its final response cited an unrelated older file row with a misspelled ID, so final-answer evidence accuracy remains unaccepted. The native planner itself asked for clarification, so the host tie guard was not exercised in that run.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3392,6 +3392,15 @@
         "green": "Included in completion-fresh-observation-green01: 10 passed, 0 failures/skips/runtime warnings; 0 build errors, 25 warnings, 50 source hashes stable.",
         "greenEvidence": ".build/repair-verification/completion-fresh-observation-green01-summary.json",
         "qualification": "Test-oracle behavior only; live08 failed during file selection before completion."
+      },
+      {
+        "name": "ranked-file-tie-guard",
+        "change": "For ranked listFiles queries, selection is checked against the active sorted inventory. A candidate tied for best rank routes to askFile with exactly the tied candidate IDs. If that best-rank tie cannot be fully enumerated across the current page, the planner hands off safely; a unique top candidate may be selected across pages. Exact-name selection is allowed only for an unranked query, and an accepted user choice bypasses the guard. Name/semantic queries require empty sort fields.",
+        "red": "file-ranked-tie-red01: 1 passed/1 intended failure on the tied-best-candidate assertion; 0 build errors, 22 warnings, 50 source hashes stable.",
+        "green": "file-ranked-tie-green01: 13 passed, 0 failures/skips/runtime warnings; 0 build errors, 46 warnings, 50 source hashes stable.",
+        "redEvidence": ".build/repair-verification/file-ranked-tie-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/file-ranked-tie-green01-summary.json",
+        "qualification": "Component tested only. Live09 passed because the native model independently asked for clarification; the host tie-guard branch was not exercised."
       }
     ],
     "runs": [
@@ -3607,6 +3616,24 @@
         "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/1C952384-06CD-4700-860D-7AD8B1C2D3F9.txt",
         "nativeSelectionResponse": ".build/repair-verification/client-manager-ambiguous-drive-live08-attachments/7F044312-F109-430A-921B-ADFC6090E41C.json",
         "cleanup": "Canceled chooser and closed only owned Safari window AAE18F46-AD09-4D18-B11B-64D09803870B; original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 preserved."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live09",
+        "outcome": "Passed the scoped ambiguity-selected transfer and completion path: the client presented exactly two tied candidates, received the exact filename answer, admitted one upload, returned taskCompleted with the host idle, and produced fresh evidence for the exact uploaded filename and one completed upload. Independent CUA readback matched the 28,273-byte fixture SHA-256. The final response nevertheless cited an unrelated older file row with a misspelled ID, so final-answer evidence accuracy remains unaccepted. The native planner asked for clarification itself, so the host tie guard was not exercised; the test-only same-row completion fallback was also not exercised. Build: 0 errors/warnings; 53 source hashes unchanged; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live09-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live09-attachments/52E9AC53-FE13-4582-870A-C8D072F4BF3D.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live09-attachments/7634F18B-13BF-4D14-BC33-876DDDA217B3.txt",
+        "choice": {
+          "answerTaskID": "AAF202A1-A934-426C-AE19-171F404C1BA9",
+          "choiceID": "6da4cb83-fa93-465f-a4e5-7af206ad9241"
+        },
+        "independentReadback": ".build/repair-verification/client-manager-ambiguous-drive-live09-independent-readback.json",
+        "readback": {
+          "bytes": 28273,
+          "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+          "matchesSourceBytes": true
+        },
+        "qualification": "One scoped successful ambiguous transfer, completion, and byte-readback run; inaccurate final evidence citation prevents accepting final-answer accuracy or broader reliability."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3696,7 +3723,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Add a typed metadata tie guard at selectFile, preserving general LLM interpretation and explicit-name choices; keep approval gates unchanged.",
+    "next": "Correct final-answer evidence binding and repeat the ambiguity workflow under unchanged approval gates; retain the host tie-guard branch as not live-exercised.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
