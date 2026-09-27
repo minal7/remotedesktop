@@ -4607,6 +4607,7 @@ final class HostComputerUseManager: ObservableObject {
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
+        nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
         channelFactory: @escaping @MainActor (String) -> any HostComputerUseChannel = {
@@ -4627,6 +4628,7 @@ final class HostComputerUseManager: ObservableObject {
             mayAct: mayAct,
             approvalTargetProvider: approvalTargetProvider,
             actionPerformer: actionPerformer,
+            nativeTextTarget: nativeTextTarget,
             browserNavigationTask: browserNavigationFactory?(mayAct),
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,

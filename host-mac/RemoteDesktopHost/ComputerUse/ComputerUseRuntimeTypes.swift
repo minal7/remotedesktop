@@ -295,8 +295,8 @@ struct ComputerUseDesktopImage: Sendable {
         if try matchesPixels(of: other, in: context, wholePixelsOnly: true) { return true }
         // Focused-editor proof broadens only the caret exception; it does not
         // narrow the normal pointer's already-approved local context.
-        guard unchangedFocusedField == target else { return false }
-        return try matchesInsertionPointPixels(of: other, window: window, field: target,
+        guard let unchangedFocusedField, target.contains(unchangedFocusedField) else { return false }
+        return try matchesInsertionPointPixels(of: other, window: window, field: unchangedFocusedField,
             onDifference: onInsertionPointDifference)
     }
 

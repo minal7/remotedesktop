@@ -586,6 +586,79 @@
       ],
       "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live05-sources",
       "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live05.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live06",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live06-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live06.xcresult"
+    },
+    {
+      "name": "nested-editor-caret-red01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 37,
+      "runtimeWarnings": [],
+      "allIssueCount": 1,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseNativeTextIntegrationTests/testFocusedEditorCaretExceptionUsesContainedFieldWhenPointerTargetIsLarger"
+      ],
+      "sourceSnapshot": ".build/repair-verification/nested-editor-caret-red01-sources",
+      "resultBundle": ".build/repair-verification/nested-editor-caret-red01.xcresult"
+    },
+    {
+      "name": "nested-editor-caret-green01",
+      "result": "Passed",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 24,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseNativeTextIntegrationTests/testFocusedEditorPointerUsesSameLocalContextAsOrdinaryPointer",
+        "ComputerUseNativeTextIntegrationTests/testNativePointerPixelsTolerateOnlyAProvenEditorCaretAndPreserveWindowContext",
+        "ComputerUseNativeTextIntegrationTests/testNativePointerIgnoresBackgroundBeyondItsWindowButRejectsChangedTargetContext",
+        "ComputerUseNativeTextIntegrationTests/testNativeInsertionPointComparisonRejectsChangedContentAndOtherControls",
+        "ComputerUseNativeTextIntegrationTests/testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds",
+        "ComputerUseNativeTextIntegrationTests/testFocusedEditorCaretExceptionUsesContainedFieldWhenPointerTargetIsLarger"
+      ],
+      "sourceSnapshot": ".build/repair-verification/nested-editor-caret-green01-sources",
+      "resultBundle": ".build/repair-verification/nested-editor-caret-green01.xcresult"
     }
   ],
   "live01": {
@@ -607,7 +680,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Diagnose live05 Start Page navigation rejection using retained revalidation frames. Preserve approval guards; then rerun the same real Gmail workflow.",
+  "next": "Record bounded value-free lifecycle and native snapshot transitions during the same real workflow to distinguish reference churn from true value/focus changes. Inspect the final click pixel mismatch separately; do not weaken approval or input validation.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -743,5 +816,24 @@
     "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live05-attachments",
     "limits": "This run did not reach or exercise the repaired Gmail editor. Stale-screen diagnostics need comparison with captured revalidation frames."
+  },
+  "live06": {
+    "result": "Client paused with userInterventionRequired after repeated rejected input; no accepted approvals, selected file, upload or success terminal.",
+    "progress": "One browser factory call, two captured native control exchanges. Navigated Gmail, opened Compose and Fara received the now-readable recipient editor. Proposed the actual signed-in account address without an address injected into its goal; the typing was rejected before input.",
+    "rejections": "First URL type and later recipient type each failed focused text identity revalidation despite unchanged focused-field bounds. Final click at [1105,473] hit native frame [1102,458,499,36], while stable focused text frame was [1106,458,495,36]; pointer authority matched but pixel verification failed.",
+    "limits": "A stable-looking screenshot and matching field frame do not establish that its retained target/value/selection was unchanged. Need redacted lifecycle/snapshot diagnostic. Retained earlier diagnostic fields can survive later failures.",
+    "independentUI": "CUA confirmed one empty composer with focused To recipients and empty subject/body, no attachment. Discarded the blank test draft, closed only its owned window, and restored original Drive.",
+    "ownedWindowID": "6A76341D-4CC1-46C9-8F1B-AE2C86AB72DA",
+    "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live06-attachments"
+  },
+  "nestedEditorCaretRepair": {
+    "observedFailure": "Live06 pair4 changed only 66 pixels (3x22) in the focused editor within the target context, plus menu-bar pixels outside the browser window. The AX pointer target was 4 points wider than the focused text field; exact frame equality disabled the existing caret exception.",
+    "change": "After local context mismatch, allow the existing full-window caret-only comparison when the verified unchanged focused editor lies within the clickable target, and pass the actual focused-field bounds. Keep all app/window/focus/text/selection authority checks and pixel limits.",
+    "red": "One intended positive assertion failed; negative assertions passed. Build 0 errors/37 warnings; 55 stable source hashes.",
+    "green": "6/6 pass, zero skips or runtime issues; build 0 errors/24 warnings; 55 stable source hashes. Includes changed content/context, noncontained field and caret outside actual editor bounds.",
+    "testCorrection": "An older negative encoded exact frame equality by supplying a smaller fully-contained field; it now uses a genuinely noncontained field. The new regression explicitly tests the contained field contract.",
+    "diagnostic": "Gmail-only test wrapper forwards live AX access unchanged and records at most 128 value-free snapshot transitions and lifecycle events. HostManager forwards an optional injected native target; production default remains unchanged. Length equality alone does not establish nonempty value equality. No extra AX queries, UI actions or model input changes.",
+    "accepted": "Focused pointer component; Gmail workflow pending."
   }
 }

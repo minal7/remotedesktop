@@ -262,7 +262,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 matches = authorityMatches && pixelsMatch
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
                     "pointerPoint": "\(x),\(y)", "pointerAuthorityMatches": String(authorityMatches),
-                    "pointerTargetPixelsMatch": String(pixelsMatch), "pointerHasUnchangedEditorProof": String(unchangedField == target)]
+                    "pointerTargetPixelsMatch": String(pixelsMatch),
+                    "pointerHasUnchangedEditorProof": String(unchangedField.map { target.contains($0) } ?? false)]
                     lastRevalidationDiagnostic.merge(difference) { _, value in value }
                 }
             } else if surfaceScopeCheck != nil,

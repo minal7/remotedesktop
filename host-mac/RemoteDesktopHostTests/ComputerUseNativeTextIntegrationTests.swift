@@ -3114,7 +3114,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: field, unchangedFocusedField: field))
         XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: field), "No editor proof means no caret exception")
         XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: field,
-            unchangedFocusedField: CGRect(x: 110, y: 110, width: 200, height: 100)), "A different field cannot authorize the exception")
+            unchangedFocusedField: CGRect(x: 110, y: 55, width: 200, height: 20)), "A noncontained field cannot authorize the exception")
         for change in [CGRect(x: 130, y: 130, width: 8, height: 16), CGRect(x: 130, y: 70, width: 1, height: 16),
                        CGRect(x: 130, y: 150, width: 20, height: 1)] {
             XCTAssertFalse(try before.matchesPointerPixels(of: image(changing: change), window: window, target: field,
@@ -3149,6 +3149,37 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let changedTargetContext = try image(changing: CGRect(x: 110, y: 110, width: 1, height: 1))
         XCTAssertFalse(try before.matchesPointerPixels(of: changedTargetContext, window: window, target: field,
             unchangedFocusedField: field), "Changes inside the target context must still reject the pointer")
+    }
+
+    func testFocusedEditorCaretExceptionUsesContainedFieldWhenPointerTargetIsLarger() throws {
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let target = CGRect(x: 96, y: 96, width: 308, height: 38)
+        func image(changing rect: CGRect? = nil) throws -> ComputerUseDesktopImage {
+            let base = CIImage(color: .white).cropped(to: display)
+            let result: CIImage
+            if let rect {
+                let local = CGRect(x: rect.minX, y: display.maxY - rect.maxY, width: rect.width, height: rect.height)
+                result = CIImage(color: .blue).cropped(to: local).composited(over: base)
+            } else { result = base }
+            return try .init(observation: .init(image: result, displayBounds: display))
+        }
+
+        let before = try image()
+        let caret = try image(changing: CGRect(x: 130, y: 106, width: 1, height: 18))
+        XCTAssertTrue(target.contains(CGPoint(x: 99, y: 110)), "The click can be in the AX target but just outside the text frame")
+        XCTAssertFalse(field.contains(CGPoint(x: 99, y: 110)))
+        XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: target,
+            unchangedFocusedField: field), "A larger pointer target should use the contained, unchanged editor bounds for the caret-only exception")
+
+        let caretOutsideField = try image(changing: CGRect(x: 97, y: 106, width: 1, height: 18))
+        XCTAssertFalse(try before.matchesPointerPixels(of: caretOutsideField, window: window, target: target,
+            unchangedFocusedField: field), "Caret paint outside the actual focused field must still reject")
+
+        let nonContainingTarget = CGRect(x: 102, y: 96, width: 308, height: 38)
+        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: nonContainingTarget,
+            unchangedFocusedField: field), "A pointer target that does not contain the focused field cannot borrow its caret exception")
     }
 
     func testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds() throws {
