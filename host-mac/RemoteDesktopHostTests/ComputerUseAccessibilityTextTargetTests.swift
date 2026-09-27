@@ -150,6 +150,199 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         try await runOptInFocusedFieldLifecycleProbe(mode: .gmailRecipient)
     }
 
+    func testOptInGmailComposeRecipientFingerprintAndLifecycleStability() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_GMAIL_COMPOSE_RECIPIENT_STABILITY_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_COMPOSE_RECIPIENT_STABILITY_PROBE=1 to open one empty Gmail compose and observe its focused editor.")
+        }
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication, safari.bundleIdentifier == "com.apple.Safari",
+              safari.isFinishedLaunching,
+              let mailURL = URL(string: "https://mail.google.com/"),
+              workspace.urlForApplication(toOpen: mailURL)?.standardizedFileURL.path == safari.bundleURL?.standardizedFileURL.path,
+              let application = ComputerUseApplicationIdentity(runningApplication: safari) else {
+            throw XCTSkip("Default Safari must already be frontmost on Gmail; the probe never activates or navigates it.")
+        }
+        let root = AXUIElementCreateApplication(safari.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(root, 0.1)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute, of: root),
+              let initialFocus = Self.axElement(kAXFocusedUIElementAttribute, of: root),
+              let windowBounds = Self.axFrame(window) else {
+            throw XCTSkip("Safari has no readable retained Gmail window or focused element.")
+        }
+        let initialContext = Self.focusedAXContext(initialFocus, window: window)
+        guard initialContext?.isMailWebArea == true else {
+            throw XCTSkip("The initial focused element is not inside the retained mail.google.com web area.")
+        }
+
+        var recorder: AXProbeLifecycleRecorder?
+        var access = ComputerUseAccessibilityTextTarget.Access.live
+        let lifecycleFactory = access.makeLifecycleMonitor
+        access.makeLifecycleMonitor = { app in
+            let monitor = lifecycleFactory?(app) ?? ComputerUseAXLifecycleMonitor(application: app.root)
+            let wrapper = AXProbeLifecycleRecorder(monitor, focused: initialFocus, window: window,
+                appRoot: root, ancestors: initialContext?.ancestors ?? [initialFocus, window, root])
+            recorder = wrapper
+            return wrapper
+        }
+        let target = ComputerUseAccessibilityTextTarget(access: access)
+        _ = target.snapshot() // Installs the forwarding lifecycle observer before the Compose control is located.
+        guard let lifecycle = recorder else { throw XCTSkip("The real AX lifecycle observer was unavailable.") }
+        defer { lifecycle.cancel() }
+
+        let reader = ComputerUseDefaultBrowserPageReader()
+        guard let page = try reader.read(window: window, application: application, mayAct: { true }),
+              let observedURL = URL(string: page.url), observedURL.scheme == "https", observedURL.host == "mail.google.com",
+              !page.renderedAXText.localizedCaseInsensitiveContains("Compose:") else {
+            throw XCTSkip("A retained Gmail page observation was unavailable.")
+        }
+        let composeControls = page.controls.filter {
+            $0.role == "AXButton" && $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Compose") == .orderedSame && $0.enabled == true
+        }
+        guard composeControls.count == 1, let compose = composeControls.first,
+              try reader.validatedControlCenter(observation: page, controlID: compose.id,
+                  window: window, windowBounds: windowBounds, mayAct: { true }) != nil,
+              let composeElement = reader.retainedControl(observationID: page.id, controlID: compose.id,
+                  application: application, window: window),
+              Self.axBool(kAXEnabledAttribute as String, of: composeElement) == true,
+              Self.axString(kAXRoleAttribute as String, of: composeElement) == "AXButton" else {
+            throw XCTSkip("Gmail did not expose one uniquely validated enabled Compose button; no action was sent.")
+        }
+        let composePressStatus = AXUIElementPerformAction(composeElement, kAXPressAction as CFString)
+
+        var samples: [[String: Any]] = []
+        var events: [[String: Any]] = []
+        var recipientBaseline: (snapshot: ComputerUseTextSnapshot, context: FocusedAXContext)?
+        for index in 0..<32 {
+            try Task.checkCancellation()
+            var row: [String: Any] = ["index": index]
+            lifecycle.beginSample(index)
+            let frontmost = workspace.frontmostApplication?.processIdentifier == safari.processIdentifier
+            let windowMatches = Self.axElement(kAXFocusedWindowAttribute, of: root).map { CFEqual($0, window) } ?? false
+            guard frontmost, windowMatches,
+                  let focus = Self.axElement(kAXFocusedUIElementAttribute, of: root),
+                  let context = Self.focusedAXContext(focus, window: window), context.isMailWebArea else {
+                row["scopeAvailable"] = false
+                row["frontmostMatches"] = frontmost
+                row["windowMatches"] = windowMatches
+                row["focusedRoleIsRecipientCombo"] = false
+                samples.append(row)
+                events.append(contentsOf: lifecycle.takeCapturedEvents())
+                if index < 31 { try await Task.sleep(for: .milliseconds(250)) }
+                continue
+            }
+            lifecycle.updateContext(focused: focus, window: window, appRoot: root, ancestors: context.ancestors)
+            let snapshot = target.snapshot() // The target itself drains; never drain the monitor independently.
+            events.append(contentsOf: lifecycle.takeCapturedEvents())
+            let isRecipient = context.role == (kAXComboBoxRole as String)
+                && context.labels.contains(where: { $0.localizedCaseInsensitiveContains("To recipients") })
+            row["scopeAvailable"] = true
+            row["frontmostMatches"] = frontmost
+            row["windowMatches"] = windowMatches
+            row["focusedRoleIsRecipientCombo"] = isRecipient
+            row["snapshotAvailable"] = snapshot != nil
+            row["targetMatchesFirstRecipient"] = snapshot.flatMap { value in recipientBaseline.map { value.targetID == $0.snapshot.targetID } } as Any? ?? NSNull()
+            row["valueMatchesFirstRecipient"] = snapshot.flatMap { value in recipientBaseline.map { value.value == $0.snapshot.value } } as Any? ?? NSNull()
+            row["valueByteCount"] = snapshot?.value.utf8.count as Any? ?? NSNull()
+            row["selectionLocation"] = snapshot?.selection.location as Any? ?? NSNull()
+            row["selectionLength"] = snapshot?.selection.length as Any? ?? NSNull()
+            row["editable"] = snapshot?.isEditable as Any? ?? NSNull()
+            row["secure"] = snapshot?.isSecure as Any? ?? NSNull()
+            if isRecipient, let snapshot {
+                if recipientBaseline == nil { recipientBaseline = (snapshot, context) }
+                if let baseline = recipientBaseline {
+                    row["focusedHandleMatchesFirstRecipient"] = CFEqual(focus, baseline.context.element)
+                    row["ancestryMatchesFirstRecipient"] = context.ancestors.count == baseline.context.ancestors.count
+                        && zip(context.ancestors, baseline.context.ancestors).allSatisfy { CFEqual($0.0, $0.1) }
+                    row["visibleAttributesMatchFirstRecipient"] = context.role == baseline.context.role
+                        && context.subrole == baseline.context.subrole
+                        && context.identifier == baseline.context.identifier
+                        && context.labels == baseline.context.labels
+                    row["documentPartsMatchFirstRecipient"] = context.documentParts == baseline.context.documentParts
+                    row["windowTitleMatchesFirstRecipient"] = context.windowTitle == baseline.context.windowTitle
+                }
+            }
+            samples.append(row)
+            if index < 31 { try await Task.sleep(for: .milliseconds(250)) }
+        }
+        let report: [String: Any] = ["probe": "Gmail Compose recipient lifecycle (no typed value or URL serialized)",
+            "composeAXPressStatus": composePressStatus.rawValue, "composeObservationCount": samples.count,
+            "pageObservationTruncated": page.truncated,
+            "recipientFocusedAtLeastOnce": recipientBaseline != nil, "samples": samples,
+            "eventSummaryCount": events.count, "events": events,
+            "elapsedSeconds": Date().timeIntervalSince(started)]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "gmail-compose-recipient-lifecycle.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertEqual(samples.count, 32)
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 15.0)
+    }
+
+    private struct FocusedAXContext {
+        let element: AXUIElement
+        let ancestors: [AXUIElement]
+        let role: String
+        let subrole: String
+        let identifier: String
+        let labels: [String]
+        let windowTitle: String
+        let documentParts: [String]
+        let isMailWebArea: Bool
+    }
+
+    private static func focusedAXContext(_ focus: AXUIElement, window: AXUIElement) -> FocusedAXContext? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+        var current: AXUIElement? = focus
+        var ancestors: [AXUIElement] = []
+        var roles: [String] = []
+        var documentParts = [axString(kAXTitleAttribute as String, of: window) ?? ""]
+        var isMailWebArea = false
+        var reachedWindow = false
+        while let element = current, ancestors.count < 32, ContinuousClock.now < deadline {
+            if ancestors.contains(where: { CFEqual($0, element) }) { return nil }
+            _ = AXUIElementSetMessagingTimeout(element, 0.1)
+            ancestors.append(element)
+            let role = axString(kAXRoleAttribute as String, of: element) ?? ""
+            roles.append(role)
+            guard role != "AXSecureTextField", axString(kAXSubroleAttribute as String, of: element) != (kAXSecureTextFieldSubrole as String),
+                  axBool("AXProtectedContent", of: element) != true, axBool("AXHidden", of: element) != true else { return nil }
+            for attribute in [kAXDocumentAttribute as String, "AXURL"] {
+                var raw: CFTypeRef?
+                if AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
+                   let value = (raw as? String) ?? (raw as? URL)?.absoluteString {
+                    documentParts.append(value)
+                    if role == "AXWebArea", let url = URL(string: value), url.scheme == "https", url.host == "mail.google.com" {
+                        isMailWebArea = true
+                    }
+                }
+            }
+            if CFEqual(element, window) { reachedWindow = true; break }
+            current = axElement(kAXParentAttribute as String, of: element)
+        }
+        guard reachedWindow, ContinuousClock.now < deadline else { return nil }
+        let subrole = axString(kAXSubroleAttribute as String, of: focus) ?? ""
+        let identifier = axString("AXIdentifier", of: focus) ?? ""
+        let labels = [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+            kAXPlaceholderValueAttribute as String, kAXHelpAttribute as String].compactMap { axString($0, of: focus) }
+        return FocusedAXContext(element: focus, ancestors: ancestors, role: roles.first ?? "",
+            subrole: subrole, identifier: identifier, labels: labels,
+            windowTitle: axString(kAXTitleAttribute as String, of: window) ?? "",
+            documentParts: documentParts, isMailWebArea: isMailWebArea)
+    }
+
+    private static func axFrame(_ element: AXUIElement) -> CGRect? {
+        var position: CFTypeRef?, size: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &position) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+              let position, let size, CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point), AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+        return CGRect(origin: point, size: dimensions)
+    }
+
     private enum FocusedFieldProbeMode: Equatable {
         case safariAddress
         case gmailRecipient
@@ -1419,10 +1612,10 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
 
 private final class AXProbeLifecycleRecorder: ComputerUseAXLifecycleMonitoring {
     private let underlying: any ComputerUseAXLifecycleMonitoring
-    private let focused: AXUIElement
-    private let window: AXUIElement
-    private let appRoot: AXUIElement
-    private let ancestors: [AXUIElement]
+    private var focused: AXUIElement
+    private var window: AXUIElement
+    private var appRoot: AXUIElement
+    private var ancestors: [AXUIElement]
     private let lock = NSLock()
     private var activeSample = -1
     private var counts: [EventKey: Int] = [:]
@@ -1449,6 +1642,14 @@ private final class AXProbeLifecycleRecorder: ComputerUseAXLifecycleMonitoring {
     func beginSample(_ index: Int) {
         lock.lock(); defer { lock.unlock() }
         activeSample = index
+    }
+
+    func updateContext(focused: AXUIElement, window: AXUIElement, appRoot: AXUIElement, ancestors: [AXUIElement]) {
+        lock.lock(); defer { lock.unlock() }
+        self.focused = focused
+        self.window = window
+        self.appRoot = appRoot
+        self.ancestors = ancestors
     }
 
     func drain() -> [ComputerUseAXLifecycleEvent] {

@@ -5,7 +5,7 @@
   "stages": {
     "implemented": true,
     "compiled": true,
-    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in one direct probe and real Gmail run; 2 planner control cases remain failed; focused-control RED then 23/23 GREEN; live04 reached the screenshot model after Compose but stopped on an unverified click",
+    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in a direct probe and real Gmail runs; focused-control and native-control history RED/GREEN checks pass; live10 reached Gmail and Compose but failed before recipient input, then paused for approval on an unidentified click; a separate no-input probe reproduced focused recipient target retirement without explaining live10",
     "accepted": "Host delegation component and scoped browser route only. Gmail draft/attachment end-to-end remains failed."
   },
   "checks": [
@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Restore bounded typed historical native-control targets to planner context without reintroducing stale model response prose. Idle recipient target is stable; leave validation intact until another observed failure establishes a needed change. Run focused RED/GREEN, then bounded real Gmail retry.",
+  "next": "Correlate no-input recipient target retirement with live10's focus/edit-authority mismatch before changing production behavior. Keep approval and typing guards intact; add a focused regression before another Gmail run.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1039,15 +1039,42 @@
     "limits": "No typing or model execution. Does not explain live09 invalidation or prove intermittent lifecycle stability."
   },
   "nativeControlTargetHistoryRepair": {
-    "stage": "Implemented, compiled and component tested; real Gmail retry pending",
+    "stage": "Implemented, compiled and component tested; live10 reached Gmail but did not complete the draft workflow",
     "finding": "Native ControlPlanner recent_history drops prior control labels/roles while keeping only action kind and feedback. Live09 contains six native Compose proposals under truncated observations; this gap is demonstrated but does not by itself prove why each repeat occurred.",
     "redRun": "native-control-target-history-red01",
     "red": "4 passed /2 intended failures /0 skipped;6 expected assertion issues,0 runtime warnings. Build0 errors/51 warnings;54 stable source hashes. Actual executor propagation, forged-prose exclusion, feedback ordering and stale-description exclusion pass; metadata serialization and bounds fail as intended.",
     "design": "Optional typed observed-control ID/label/role is populated only from a freshly validated native browser proposal and retained by DesktopExecutor. Planner receives bounded untrusted historical target data; current observed controls alone remain eligible. No model response parsing or site-specific repeat algorithm.",
-    "limits": "No successful Gmail workflow demonstrated.",
+    "limits": "Live10 did not enter the recipient or reach file selection, attachment, or draft completion.",
     "green01": "15 passed /0 failed /0 skipped;0 test issues/runtime warnings. Build0 errors/12 warnings;55 stable source hashes. Full ControlPlanner suite plus actual executor history propagation passed.",
     "greenRun": "native-control-target-history-green02",
     "followUp": "Clarify that history alone does not make an ID selectable; a matching ID still present in current controls remains selectable. No schema or action policy change.",
     "green02": "15 passed /0 failed /0 skipped;0 test issues/runtime warnings. Build0 errors/12 warnings;55 stable source hashes. Final prompt clarifies current observed controls alone determine selectable IDs."
+  },
+  "live10": {
+    "run": "client-manager-gmail-draft-live10",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 recorded issues including the known main-thread responsiveness warning.",
+    "outcome": "Reached signed-in Gmail and opened Compose. Recipient typeText was rejected before input. The subsequent Fara proposal clicked an unidentified item at (1014, 517); the host requested approval because it was not the observed Attach files control or exact picker action, and the bounded harness accepted none. No recipient, subject, body, file selection, picker effect, attachment, upload or successful client terminal.",
+    "revalidation": "For the recipient typeText pair, screenMatches=true, focusMatches=false and editableAuthorityMatches=false. Both native snapshots showed the same To-field frame (1106,458,495,36), empty value and selection 0/0. Matching pixels/frame did not authorize typing because focused edit authority differed.",
+    "nativeHistory": "The captured second native-control request includes typed observed_control metadata from a validated prior Compose proposal. This confirms the history repair reaches the planner; it is not evidence of successful input or draft progress.",
+    "cleanup": "After the run, CUA confirmed recipient, subject and body empty with no attachment, discarded the blank draft, and left the same Gmail window open for the next no-inference probe.",
+    "attachments": {
+      "route": "client-manager-gmail-draft-live10-attachments/89A0AEC3-F6BA-45FD-A2B6-16BB87F19593.txt",
+      "outcome": "client-manager-gmail-draft-live10-attachments/607C9664-E111-4586-A700-CFD3E2CF980B.txt",
+      "nativeRequest": "client-manager-gmail-draft-live10-attachments/5366B9CC-1EAD-4DFA-A859-50574AC47B83.json",
+      "nativeResponse": "client-manager-gmail-draft-live10-attachments/F9E655AF-3646-40E3-A228-29022C283C78.json",
+      "faraRequest": "client-manager-gmail-draft-live10-attachments/86873540-22EA-4B81-A492-F57F59AFA547.json",
+      "faraResponse": "client-manager-gmail-draft-live10-attachments/04CA9754-A6EB-434C-AA48-F6FA0810EB4B.json",
+      "recipientRevalidationPair": "client-manager-gmail-draft-live10-attachments/4847A0D3-1C11-453B-8997-76A31B545D62.json"
+    },
+    "acceptance": "Gmail draft/attachment E2E remains unaccepted."
+  },
+  "recipientStabilityProbe03": {
+    "run": "gmail-compose-recipient-stability-live01",
+    "result": "1 passed / 0 failed / 0 skipped; build 0 errors / 8 warnings; 55 stable source hashes; one known main-thread responsiveness runtime warning.",
+    "finding": "A no-inference/no-typing probe captured 32 samples over 9.078 seconds. The focused recipient target ID first matched at sample 1, remained the same at samples 2–3, then retired at sample 4 alongside AXTitleChanged. The focused handle, ancestry, window title, document parts, empty value and selection 0/0 remained stable in the recipient samples. The page observation was truncated. This resembles the live10 authority mismatch but does not establish its cause; this probe did not sample a recipient frame.",
+    "method": "Read-only Compose recipient observation after a successful AXPress on Compose; no typed value, typing, send, model inference or navigation.",
+    "attachment": ".build/repair-verification/gmail-compose-recipient-stability-live01-attachments/4D7FE9B8-AAFA-4ACA-8035-3F35E807155A.json",
+    "cleanup": "CUA confirmed the diagnostic Compose fields were empty, discarded the draft, and verified no Compose panes remain; the same Gmail window is retained.",
+    "limits": "No production fix, typing result, attachment or draft-workflow acceptance. Does not prove the same event caused live10's rejected typing. No geometry frame was sampled."
   }
 }
