@@ -4025,6 +4025,95 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
     }
 
     @available(macOS 26.0, *)
+    func testOptInMailAttachmentGoalUsesBrowserOrRequestsClarificationWithoutExecuting() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_MAIL_ATTACHMENT_ROUTE_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_MAIL_ATTACHMENT_ROUTE_PROBE=1 to invoke the installed Apple planner without executing its proposal.")
+        }
+
+        let planner = AppleFoundationMCPPlanner()
+        guard planner.availability() == .available else {
+            throw XCTSkip("The installed Apple Foundation Model is unavailable: \(planner.availability())")
+        }
+        let helperPath = try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"])
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MailAttachmentRouteProbe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pool = MCPClientPool(sessionFactory: { binary, generation in
+            MCPClientSession(validatedBinary: binary, processGeneration: generation,
+                stateDirectory: directory.appendingPathComponent("helper-state", isDirectory: true))
+        })
+
+        let taskID = "live-mail-attachment-route-\(UUID().uuidString)"
+        let prompt = "In Gmail at https://mail.google.com/ using the default signed-in account, create an email draft to demo@example.invalid with subject Attachment workflow test and body Please review the attached spec. Attach the spec Excel spreadsheet from Downloads. Save as a draft; do not send."
+        var requestAttachment = Data()
+        var responseDescription = ""
+        var acceptedRoute = false
+        do {
+            try await pool.start(binaryURL: URL(fileURLWithPath: helperPath))
+            let tools = try await pool.allowedTools().filter {
+                MCPFirstComputerUseExecutor.structuredToolNames.contains($0.toolName)
+            }
+            let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt,
+                tools: tools, allowsBrowserWorkflow: true)
+            let encodedTools = try JSONEncoder().encode(tools)
+            let toolJSON = try XCTUnwrap(String(data: encodedTools, encoding: .utf8))
+            requestAttachment = try JSONSerialization.data(withJSONObject: [
+                "task_id": taskID,
+                "prompt": prompt,
+                "allows_browser_workflow": true,
+                "tools": try XCTUnwrap(JSONSerialization.jsonObject(with: Data(toolJSON.utf8))),
+            ], options: [.sortedKeys, .prettyPrinted])
+            let result = try await planner.propose(request)
+            switch result {
+            case .browserTools:
+                acceptedRoute = true
+                responseDescription = #"{"kind":"browser_tools"}"#
+            case .message(let message):
+                let boundedMessage = String(message.prefix(2_048))
+                let clarification = boundedMessage.hasPrefix("CLARIFICATION_REQUIRED:")
+                    ? boundedMessage.dropFirst("CLARIFICATION_REQUIRED:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                    : ""
+                acceptedRoute = !clarification.isEmpty || boundedMessage == "VISUAL_FALLBACK_REQUIRED"
+                responseDescription = try String(data: JSONSerialization.data(withJSONObject: [
+                    "kind": "message", "text": boundedMessage,
+                ], options: [.sortedKeys, .prettyPrinted]), encoding: .utf8) ?? "message"
+            case .proposedCall(let call):
+                responseDescription = try String(data: JSONSerialization.data(withJSONObject: [
+                    "kind": "proposed_call", "task_id": call.taskID,
+                    "server_id": call.serverID, "tool_name": call.toolName,
+                    "risk": String(describing: call.risk),
+                    "argument_keys": call.arguments.keys.sorted(),
+                ], options: [.sortedKeys, .prettyPrinted]), encoding: .utf8) ?? "proposed_call"
+            }
+            await pool.cancelAll()
+        } catch {
+            if responseDescription.isEmpty {
+                responseDescription = "error: \(String(reflecting: error).prefix(2_048))"
+            }
+            await pool.cancelAll()
+            attachMailRouteProbe(request: requestAttachment, response: responseDescription)
+            throw error
+        }
+
+        attachMailRouteProbe(request: requestAttachment, response: responseDescription)
+        XCTAssertTrue(acceptedRoute,
+            "Expected browser workflow, clarification, or explicit visual fallback. No proposal was executed; diagnostic: \(responseDescription)")
+    }
+
+    private func attachMailRouteProbe(request: Data, response: String) {
+        let input = XCTAttachment(data: request, uniformTypeIdentifier: "public.json")
+        input.name = "Mail attachment route exact bounded planner request"
+        input.lifetime = .keepAlways
+        add(input)
+        let output = XCTAttachment(string: response)
+        output.name = "Mail attachment route sanitized planner result"
+        output.lifetime = .keepAlways
+        add(output)
+    }
+
+    @available(macOS 26.0, *)
     func testOptInLiveVisualRouterUnderstandsOrdinaryLanguageAcrossSemanticSurface()
         async throws {
         let optInFlag = "/tmp/com.threadmark.remotedesktop.foundation-model-live-\(getuid())"

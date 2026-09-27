@@ -1407,47 +1407,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
-    func testDeterministicMailStartupCancellationRetiresReturnedHelperBeforeNewWork() async throws {
+    func testMailPlanningStartupCancellationRetiresReturnedHelperBeforeNewWork() async throws {
         try await assertPreparationCancellation(at: .startup)
     }
 
-    func testDeterministicMailDiscoveryCancellationCannotPrepareAnApproval() async throws {
+    func testMailPlanningDiscoveryCancellationCannotPrepareAnApproval() async throws {
         try await assertPreparationCancellation(at: .discovery)
     }
 
-    func testDeterministicMailPreparationCancellationCannotPublishOrReplayLateApproval() async throws {
+    func testMailPlanningPreparationCancellationCannotPublishOrReplayLateApproval() async throws {
         try await assertPreparationCancellation(at: .preparation)
     }
 
     func testStructuredStartupCancellationAlsoRetiresReturnedHelperWithoutPlanning() async throws {
         try await assertPreparationCancellation(at: .startup, structured: true)
-    }
-
-    func testCompleteMailRemainsModelIndependentWhilePlanningPermitIsOccupied() async throws {
-        let worker = ComputerUsePlanningWorker()
-        let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "unrelated planner occupied"),
-                                                    returned: expectation(description: "unrelated planner returned"))
-        defer { gate.finish(()) }
-        let occupied = Task { try await worker.perform { await gate.wait() } }
-        await fulfillment(of: [gate.started], timeout: 1)
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
-            visualFallback: fallback, planner: planner, clientPool: pool, planningWorker: worker)
-        let result = try await executor.execute(taskID: "exact-mail", prompt: exactPreparationPrompt,
-            tools: makeHostTools(), progress: { _ in })
-        guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("A complete Mail request needs no planner capacity") }
-        XCTAssertEqual(prepared.call.arguments["to"], .string("reviewer@example.invalid"))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
-        XCTAssertTrue(planner.proposedToolNames.isEmpty)
-        XCTAssertEqual(fallback.callCount, 0)
-        let direct = await pool.directExecuteCount(), approved = await pool.approvedExecuteCount()
-        XCTAssertEqual(direct, 0)
-        XCTAssertEqual(approved, 0)
-        gate.finish(())
-        try await occupied.value
-        await fulfillment(of: [gate.returned], timeout: 1)
     }
 
     func testStoppedHelperStartFailureJoinsEarlierCleanupWithoutMailFallback() async throws {
@@ -1506,7 +1479,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             defer { stageGate.finish(()); cleanupGate.finish(()) }
             let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "draft created",
                 advancesGenerations: true, cancellationGates: [2: cleanupGate])
-            let planner = StubMCPPlanner(mode: structured ? .clarification : .unavailable)
+            let planner = StubMCPPlanner(mode: structured ? .clarification : .draft)
             let fallback = StubVisualExecutor()
             let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
                 visualFallback: fallback, planner: planner, clientPool: pool, planningWorker: ComputerUsePlanningWorker())
@@ -1544,7 +1517,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             let stopped = await pool.loadState()
             XCTAssertEqual(stopped.cancelled, stopOnly && stage == .startup ? [1, 2] : [2])
             XCTAssertEqual(stopped.cancelAll, 0, "Cleanup must be scoped to the returned generation")
-            XCTAssertTrue(planner.proposedToolNames.isEmpty)
+            if stage == .preparation && !structured {
+                XCTAssertFalse(planner.proposedToolNames.isEmpty, "The semantic planner must run before a Mail action can be prepared")
+            } else {
+                XCTAssertTrue(planner.proposedToolNames.isEmpty,
+                    "Cancellation before proposal preparation must not plan or authorize an action")
+            }
             XCTAssertEqual(fallback.callCount, 0)
             if let stale {
                 do { _ = try await executor.continueAfterApproval(stale, tools: makeHostTools(), progress: { _ in }); XCTFail("A late preparation cannot be replayed") }
@@ -4605,8 +4583,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "27*43")
     }
 
-    func testCompletedHistoricalOpenDoesNotDivertCurrentMailRequest() async throws {
-        let planner = StubMCPPlanner(mode: .mail)
+    func testCompletedHistoricalOpenRemainsInFullCurrentMailPlannerPrompt() async throws {
+        let planner = BrowserRouteMCPPlanner(responses: [
+            "CLARIFICATION_REQUIRED: Please clarify the current email request."])
+
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
@@ -4628,10 +4608,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        guard case .mcpApprovalRequired = result else {
-            return XCTFail("Current Mail request must remain approval-bound")
-        }
+        XCTAssertEqual(result, .clarificationRequired("Please clarify the current email request."))
+        XCTAssertEqual(planner.requests.count, 1)
+        XCTAssertTrue(try XCTUnwrap(planner.requests.first?.prompt).contains(prompt))
         XCTAssertEqual(fallback.callCount, 0)
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
     }
 
     func testOpenApplicationWithChainedMailActionDoesNotBypassApproval() async throws {
@@ -4687,7 +4671,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(fallback.callCount, 0)
     }
 
-    func testDuplicateReadOnlyPlanStillKeepsIncompleteMailOutOfVisualControl() async throws {
+    func testDuplicateReadOnlyPlanPreservesPlannerFailureWithoutUnrelatedRead() async throws {
         let planner = StubMCPPlanner(mode: .repeatFocusedApp)
         let pool = StubMCPClientPool(
             tools: [try makeMailTool(), try makeFocusedAppTool()],
@@ -4700,107 +4684,144 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "task-repeated-read-mail",
-            prompt: "Send an email",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "task-repeated-read-mail",
+                prompt: "Send an email with an attachment",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(
-            result,
-            .clarificationRequired("Who should receive the email, and what should it say?"))
+        assertNativePlannerFailure(outcome)
         let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(
             directCount,
             0,
-            "An incomplete Mail request must not expose unrelated app state")
+            "A repeated unrelated read cannot authorize a Mail action")
+        XCTAssertEqual(approvedCount, 0)
         XCTAssertEqual(fallback.callCount, 0)
     }
 
-    func testUnavailableAppleModelRoutesCompleteRecentConversationSendToMailApproval() async throws {
+    func testUnavailablePlannerDoesNotSynthesizeMailApproval() async throws {
         let planner = StubMCPPlanner(mode: .unavailable)
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = """
-        Recent conversation (oldest to newest):
-        User: Send an email
-        Assistant: Who should receive the email, and what should it say?
-        Current user request: To alex@example.com with subject "Meeting time" saying The meeting is at 3 PM.
-        """
+        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+
+        do {
+            _ = try await executor.execute(
+                taskID: "mail-planner-unavailable",
+                prompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+            XCTFail("An unavailable semantic planner cannot synthesize an attachment-free approval")
+        } catch {
+            XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unavailable(.modelNotReady))
+        }
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
+    }
+
+    func testPlannerFailureDoesNotReconstructMailApproval() async throws {
+        let planner = StubMCPPlanner(mode: .generationFailure)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor()
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+
+        do {
+            _ = try await executor.execute(
+                taskID: "mail-planner-failed",
+                prompt: prompt,
+                tools: makeHostTools(),
+                progress: { _ in })
+            XCTFail("A failed planner must not reconstruct a Mail approval from the prompt")
+        } catch {
+            XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .generationFailed)
+        }
+        XCTAssertEqual(planner.proposedToolNames.count, 1)
+        XCTAssertEqual(fallback.callCount, 0)
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
+    }
+
+    func testExplicitDesktopHandoffPreservesWholeMailAttachmentGoal() async throws {
+        let planner = BrowserRouteMCPPlanner(responses: ["VISUAL_FALLBACK_REQUIRED"])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let fallback = StubVisualExecutor(result: .userInterventionRequired("Review the browser state"))
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: fallback,
+            planner: planner,
+            clientPool: pool)
+        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
-            taskID: "task-deterministic-send",
+            taskID: "mail-visual-handoff",
             prompt: prompt,
             tools: makeHostTools(),
             progress: { _ in })
 
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected deterministic Mail send approval")
-        }
-        XCTAssertEqual(prepared.call.toolName, RemoteDesktopMailMCP.toolName)
-        XCTAssertEqual(prepared.call.arguments["to"], .string("alex@example.com"))
-        XCTAssertEqual(prepared.call.arguments["subject"], .string("Meeting time"))
-        XCTAssertEqual(prepared.call.arguments["body"], .string("The meeting is at 3 PM."))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(true))
-        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertEqual(result, .userInterventionRequired("Review the browser state"))
+        XCTAssertEqual(fallback.callCount, 1)
+        XCTAssertEqual(fallback.prompts, [prompt])
+        XCTAssertEqual(fallback.trustedUserPrompts, [prompt])
+        XCTAssertEqual(planner.requests.count, 1)
+        XCTAssertTrue(try XCTUnwrap(planner.requests.first?.prompt).contains(prompt))
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(directCount, 0)
         XCTAssertEqual(approvedCount, 0)
-
-        let completed = try await executor.continueAfterApproval(
-            prepared,
-            tools: makeHostTools(),
-            progress: { _ in })
-        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
-        XCTAssertNil(completed.completionPromptDigest)
-        let directAfterApproval = await pool.directExecuteCount()
-        let approvedAfterApproval = await pool.approvedExecuteCount()
-        XCTAssertEqual(directAfterApproval, 0)
-        XCTAssertEqual(approvedAfterApproval, 1)
     }
 
-    func testUnavailableAppleModelKeepsConsecutiveCompletedEmailsIsolated() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
+    func testExplicitBrowserHandoffPreservesWholeMailAttachmentGoal() async throws {
+        let planner = BrowserRouteMCPPlanner(responses: ["BROWSER_TOOLS_REQUIRED"])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
+        let desktop = StubVisualExecutor()
+        let browser = StubVisualExecutor(result: .userInterventionRequired("Review the browser state"))
         let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: desktop,
             planner: planner,
-            clientPool: pool)
-        let prompt = """
-        Recent conversation (oldest to newest):
-        User: Send an email to first@example.com with subject First subject and body First body.
-        Assistant: Mail accepted the approved email for sending.
-        Current user request: Send an email to second@example.com with subject Second subject and body Second body.
-        """
+            clientPool: pool,
+            browserExecutorFactory: { browser })
+        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
-            taskID: "task-second-completed-email",
+            taskID: "mail-browser-handoff",
             prompt: prompt,
             tools: makeHostTools(),
             progress: { _ in })
 
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected only the second complete email to require approval")
-        }
-        XCTAssertEqual(prepared.call.arguments["to"], .string("second@example.com"))
-        XCTAssertEqual(prepared.call.arguments["subject"], .string("Second subject"))
-        XCTAssertEqual(prepared.call.arguments["body"], .string("Second body."))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(true))
-        XCTAssertEqual(fallback.callCount, 0)
+        XCTAssertEqual(result, .userInterventionRequired("Review the browser state"))
+        XCTAssertEqual(desktop.callCount, 0)
+        XCTAssertEqual(browser.callCount, 1)
+        XCTAssertEqual(browser.prompts, [prompt])
+        XCTAssertEqual(browser.trustedUserPrompts, [prompt])
+        let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
     }
 
-    func testUnavailableAppleModelClarifiesIncompleteSecondEmailWithoutReusingCompletedTurn() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
+    func testCompleteMailWithAttachmentRequirementReachesSemanticPlannerUnabridged() async throws {
+        let planner = BrowserRouteMCPPlanner(
+            responses: ["CLARIFICATION_REQUIRED: Which presentation should I attach?"])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(
@@ -4809,275 +4830,24 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = """
-        Recent conversation (oldest to newest):
-        User: Send an email to first@example.com with subject First subject and body First body.
-        Assistant: Mail accepted the approved email for sending.
-        Current user request: Send an email to second@example.com with subject Second subject
-        """
+        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
-            taskID: "task-second-incomplete-email",
+            taskID: "task-mail-attachment-requirement",
             prompt: prompt,
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        XCTAssertEqual(result, .clarificationRequired("What should the email say?"))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testUnavailableAppleModelRoutesCompleteDraftToMailApproval() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-deterministic-draft",
-            prompt: "Draft an email to sam@example.com and pat@example.com with subject \"Status\" saying Everything is on schedule.",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected deterministic Mail draft approval")
-        }
-        XCTAssertEqual(
-            prepared.call.arguments["to"],
-            .string("sam@example.com, pat@example.com"))
-        XCTAssertEqual(prepared.call.arguments["subject"], .string("Status"))
-        XCTAssertEqual(prepared.call.arguments["body"], .string("Everything is on schedule."))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testUnavailableAppleModelParsesExactSubjectAndBodySendPrompt() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-deterministic-exact-subject-body-send",
-            prompt: "Send an email to codex-computer-use-test@example.invalid with subject Remote Desktop computer use test and body This email confirms the local MCP Mail workflow completed end to end.",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected the exact Mail send to wait for approval")
-        }
-        XCTAssertEqual(
-            prepared.call.arguments["to"],
-            .string("codex-computer-use-test@example.invalid"))
-        XCTAssertEqual(
-            prepared.call.arguments["subject"],
-            .string("Remote Desktop computer use test"))
-        XCTAssertEqual(
-            prepared.call.arguments["body"],
-            .string("This email confirms the local MCP Mail workflow completed end to end."))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(true))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testUnavailableAppleModelClarifiesIncompleteMailWithoutVisualControl() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-deterministic-missing-body",
-            prompt: "Send an email to alex@example.com",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        XCTAssertEqual(result, .clarificationRequired("What should the email say?"))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testUnavailableAppleModelClarifiesAmbiguousSendVersusDraft() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-deterministic-ambiguous-action",
-            prompt: "Send an email to alex@example.com, but leave it as a draft for review; message: Hello.",
             tools: makeHostTools(),
             progress: { _ in })
 
         XCTAssertEqual(
             result,
-            .clarificationRequired("Should I send the email now, or create a draft for review?"))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testUnavailableAppleModelTreatsDraftThenSendAsExplicitSend() async throws {
-        let planner = StubMCPPlanner(mode: .unavailable)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-deterministic-draft-then-send",
-            prompt: "Draft an email to alex@example.com saying \"Hello from the local Mail route.\", then send it.",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected draft-then-send wording to require send approval")
-        }
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(true))
-        XCTAssertEqual(
-            prepared.call.arguments["body"],
-            .string("Hello from the local Mail route."))
-        XCTAssertEqual(fallback.callCount, 0)
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testCompleteMailBypassesAvailablePlannerAndVisualFallbackForExactApproval() async throws {
-        let planner = StubMCPPlanner(mode: .generationFailure)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor(
-            result: .completed("Visual fallback must not run"))
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-        let to = "neighborhood-organizer@example.invalid"
-        let cc = "neighborhood-treasurer@example.invalid"
-        let subject = "Saturday food drive follow-up"
-        let body = "Thanks for coordinating Saturday's food drive. We collected 42 boxes, and I will send the volunteer schedule tomorrow."
-        var progress: [String] = []
-
-        let result = try await executor.execute(
-            taskID: "task-mail-pre-planner-route",
-            prompt: "Send an email to \(to), CC \(cc), with subject \(subject) and body \(body)",
-            tools: makeHostTools(),
-            progress: { progress.append($0) })
-
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected an exact Mail approval without planner inference")
-        }
-        XCTAssertTrue(
-            planner.proposedToolNames.isEmpty,
-            "A complete deterministic Mail request must not invoke the Apple planner")
-        XCTAssertEqual(fallback.callCount, 0)
-        XCTAssertEqual(progress, ["Preparing the exact email for your approval…"])
-        XCTAssertEqual(prepared.call.toolName, RemoteDesktopMailMCP.toolName)
-        XCTAssertEqual(prepared.call.arguments, [
-            "to": .string(to),
-            "cc": .string(cc),
-            "subject": .string(subject),
-            "body": .string(body),
-            "send_now": .bool(true),
-        ])
-        XCTAssertEqual(
-            prepared.fingerprint,
-            MCPApprovalFingerprint(call: prepared.call))
-
-        let presentation = prepared.computerUsePresentation
-        XCTAssertEqual(
-            presentation.message,
-            "Send this email through Mail on your Mac?")
-        XCTAssertEqual(presentation.confirmLabel, "Send email")
-        XCTAssertEqual(
-            presentation.details.first(where: { $0.label == "To" })?.value,
-            to)
-        XCTAssertEqual(
-            presentation.details.first(where: { $0.label == "CC" })?.value,
-            cc)
-        XCTAssertEqual(
-            presentation.details.first(where: { $0.label == "Subject" })?.value,
-            subject)
-        XCTAssertEqual(
-            presentation.details.first(where: { $0.label == "Message" })?.value,
-            body)
-
-        let directCount = await pool.directExecuteCount()
-        let approvedCount = await pool.approvedExecuteCount()
-        XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-    }
-
-    func testCompleteMailWithoutSubjectAlsoBypassesPlannerForExactApproval() async throws {
-        let planner = StubMCPPlanner(mode: .generationFailure)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
-        let fallback = StubVisualExecutor()
-        let executor = try await MCPFirstComputerUseExecutor.load(
-            binaryURL: URL(fileURLWithPath:
-                "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
-            visualFallback: fallback,
-            planner: planner,
-            clientPool: pool)
-
-        let result = try await executor.execute(
-            taskID: "task-mail-planner-failed",
-            prompt: "Send an email to casey@example.com saying The deterministic fallback worked.",
-            tools: makeHostTools(),
-            progress: { _ in })
-
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected deterministic Mail approval before planning")
-        }
-        XCTAssertTrue(planner.proposedToolNames.isEmpty)
-        XCTAssertEqual(prepared.call.arguments["to"], .string("casey@example.com"))
-        XCTAssertEqual(prepared.call.arguments["subject"], .string(""))
-        XCTAssertEqual(
-            prepared.call.arguments["body"],
-            .string("The deterministic fallback worked."))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(true))
-        XCTAssertEqual(fallback.callCount, 0)
+            .clarificationRequired("Which presentation should I attach?"),
+            "A complete-looking mail body must not become an attachment-free approval")
+        XCTAssertEqual(planner.requests.count, 1,
+            "The semantic planner must see the full request before any Mail approval is prepared")
+        XCTAssertTrue(try XCTUnwrap(planner.requests.first?.prompt).contains(prompt),
+            "The original attachment requirement must remain in the planner prompt")
+        XCTAssertEqual(fallback.callCount, 0,
+            "An unresolved Mail request must not spill into general desktop control")
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(directCount, 0)
@@ -5176,18 +4946,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
 
-        let result = try await executor.execute(
-            taskID: "task-hallucination",
-            prompt: "Send the email",
-            tools: makeHostTools(),
-            progress: { _ in })
+        let outcome = await captureExecution {
+            try await executor.execute(
+                taskID: "task-hallucination",
+                prompt: "Send the email",
+                tools: makeHostTools(),
+                progress: { _ in })
+        }
 
-        XCTAssertEqual(
-            result,
-            .clarificationRequired("Who should receive the email, and what should it say?"))
+        assertNativePlannerFailure(outcome)
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
+        let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(directCount, 0)
+        XCTAssertEqual(approvedCount, 0)
     }
 
     func testExplicitClarificationSentinelReturnsOnlyQuestionText() async throws {

@@ -1,0 +1,125 @@
+{
+  "date": "2026-09-27",
+  "problem": "Deterministic Mail routing bypassed semantic planning and interpreted an attachment instruction as email body text, preparing a draft without an attachment.",
+  "repair": "Remove natural-language Mail mutation pre-routing and error-path reconstruction. Preserve the complete original goal through the semantic planner. Unavailable/error paths retain restricted native alternatives or original failures; explicit browser/desktop delegation uses existing guarded paths. Exact MCP approvals, typed confirmations and cancellation remain unchanged.",
+  "stages": {
+    "implemented": true,
+    "compiled": true,
+    "tested": "25 focused component tests and one actual Apple planner route-only proposal",
+    "accepted": "Component routing repair; actual email attachment workflow not accepted"
+  },
+  "checks": [
+    {
+      "name": "mail-semantic-routing-red01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "buildErrors": 0,
+      "buildWarnings": 4,
+      "sourceAudit": {
+        "sourceCount": 50,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "MCPFirstComputerUseExecutorTests/testCompleteMailWithAttachmentRequirementReachesSemanticPlannerUnabridged"
+      ],
+      "sourceSnapshot": ".build/repair-verification/mail-semantic-routing-red01-sources",
+      "resultBundle": ".build/repair-verification/mail-semantic-routing-red01.xcresult"
+    },
+    {
+      "name": "mail-semantic-routing-green02",
+      "result": "Passed",
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "buildErrors": 0,
+      "buildWarnings": 41,
+      "sourceAudit": {
+        "sourceCount": 53,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "MCPFirstComputerUseExecutorTests/testMailPlanningStartupCancellationRetiresReturnedHelperBeforeNewWork",
+        "MCPFirstComputerUseExecutorTests/testMailPlanningDiscoveryCancellationCannotPrepareAnApproval",
+        "MCPFirstComputerUseExecutorTests/testMailPlanningPreparationCancellationCannotPublishOrReplayLateApproval",
+        "MCPFirstComputerUseExecutorTests/testCompletedHistoricalOpenRemainsInFullCurrentMailPlannerPrompt",
+        "MCPFirstComputerUseExecutorTests/testDuplicateReadOnlyPlanPreservesPlannerFailureWithoutUnrelatedRead",
+        "MCPFirstComputerUseExecutorTests/testUnavailablePlannerDoesNotSynthesizeMailApproval",
+        "MCPFirstComputerUseExecutorTests/testPlannerFailureDoesNotReconstructMailApproval",
+        "MCPFirstComputerUseExecutorTests/testExplicitDesktopHandoffPreservesWholeMailAttachmentGoal",
+        "MCPFirstComputerUseExecutorTests/testExplicitBrowserHandoffPreservesWholeMailAttachmentGoal",
+        "MCPFirstComputerUseExecutorTests/testCompleteMailWithAttachmentRequirementReachesSemanticPlannerUnabridged",
+        "MCPFirstComputerUseExecutorTests/testInitialFreeTextHallucinationCannotCompleteOrVisuallyControlMail",
+        "MCPFirstComputerUseExecutorTests/testPlannerFailureNativeAlternativeCannotEnterConfiguredDesktopFactory",
+        "MCPFirstComputerUseExecutorTests/testPlanningDeadlineNeverFallsBackOrPreparesLateCalls",
+        "MCPFirstComputerUseExecutorTests/testStoppedHelperStartFailureJoinsEarlierCleanupWithoutMailFallback",
+        "MCPFirstComputerUseExecutorTests/testStructuredStartupCancellationAlsoRetiresReturnedHelperWithoutPlanning",
+        "MCPFirstComputerUseExecutorTests/testDraftProposalUsesReliableMailMCPAndWaitsForApproval",
+        "MCPFirstComputerUseExecutorTests/testSendProposalUsesReliableMailMCPAndWaitsForApproval",
+        "MCPFirstComputerUseExecutorTests/testApprovedMailConfirmationRequiresMatchingTypedStatusAndUsesHostWording",
+        "MCPFirstComputerUseExecutorTests/testWholeMailTaskProofRequiresTheCompleteCurrentLiteralRequest",
+        "MCPFirstComputerUseExecutorTests/testCompoundApprovedRequestReturnsAnActionFactWithoutWholeTaskCompletion",
+        "MCPFirstComputerUseExecutorTests/testPlannerFindsNamedContactThenStopsAtExactMailApprovalBeforeSending",
+        "MCPFirstComputerUseExecutorTests/testOpenApplicationWithChainedMailActionDoesNotBypassApproval",
+        "MCPFirstComputerUseExecutorTests/testPureOpenApplicationRequestBypassesStructuredPlanner",
+        "MCPFirstComputerUseExecutorTests/testDeterministicCalculatorCannotOverrideDivergentStructuredCurrentTurn",
+        "RemoteDesktopMailMCPTests/testPoolDoesNotRunMailBeforeExactApprovalAndRunsOnceAfter"
+      ],
+      "sourceSnapshot": ".build/repair-verification/mail-semantic-routing-green02-sources",
+      "resultBundle": ".build/repair-verification/mail-semantic-routing-green02.xcresult"
+    },
+    {
+      "name": "mail-attachment-route-live01",
+      "result": "Passed",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0,
+      "runtimeWarnings": [],
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "sourceAudit": {
+        "sourceCount": 53,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "AppleFoundationMCPPlannerTests/testOptInMailAttachmentGoalUsesBrowserOrRequestsClarificationWithoutExecuting"
+      ],
+      "sourceSnapshot": ".build/repair-verification/mail-attachment-route-live01-sources",
+      "resultBundle": ".build/repair-verification/mail-attachment-route-live01.xcresult"
+    }
+  ],
+  "excludedAttempt": {
+    "name": "mail-semantic-routing-green01",
+    "reason": "Obsolete renamed selector rejected by preflight before xcodebuild. No build or test ran."
+  },
+  "liveProposal": {
+    "name": "mail-attachment-route-live01",
+    "model": "Installed Apple Foundation Model through AppleFoundationMCPPlanner",
+    "toolInventory": "8 actual reviewed MCP tools",
+    "result": "browser_tools",
+    "modelCalls": 1,
+    "effects": 0,
+    "input": ".build/repair-verification/mail-attachment-route-live01-attachments/EB9FBA93-7171-4348-8779-AF34358E5066.json",
+    "output": ".build/repair-verification/mail-attachment-route-live01-attachments/8F77F5EF-3934-48A7-8B59-69338642AF00.txt",
+    "limits": "Direct planner diagnostic with explicit Gmail draft goal and fictional recipient. Does not exercise HostManager, account inference, file selection, attachment, sending or whole-task completion."
+  },
+  "readOnlyReadiness": "Gmail signed in in default Safari, Compose available. Temporary setup tab closed; original Drive window preserved. No draft created.",
+  "next": "Real default-browser Gmail draft with a disposable spreadsheet, exact recipient/file verification and no send. Reuse existing ClientModel/HostManager browser-picker harness; then test ordinary email-to-self wording.",
+  "open": "Actual email attachment/self-account E2E, final-answer accuracy in prior Drive live09, general workflow reliability, physical client UI and 12 GB whole-Mac qualification."
+}

@@ -241,54 +241,6 @@ final class MCPFirstComputerUseExecutor:
         let expectedDisplayValue: String
     }
 
-    /// A deliberately small parser that handles fully specified Mail before
-    /// model planning, and isolates incomplete Mail if the planner is
-    /// unavailable or fails. It never guesses a contact or hands a Mail
-    /// request to visual computer use.
-    private enum DeterministicMailDecision: Equatable {
-        case notMail
-        case clarification(String)
-        case request(DeterministicMailRequest)
-    }
-
-    private struct DeterministicMailRequest: Equatable {
-        let to: [String]
-        let cc: [String]
-        let bcc: [String]
-        let subject: String
-        let body: String
-        let sendNow: Bool
-
-        var arguments: [String: MCPJSONValue] {
-            var values: [String: MCPJSONValue] = [
-                "to": .string(to.joined(separator: ", ")),
-                "subject": .string(subject),
-                "body": .string(body),
-                "send_now": .bool(sendNow),
-            ]
-            if !cc.isEmpty {
-                values["cc"] = .string(cc.joined(separator: ", "))
-            }
-            if !bcc.isEmpty {
-                values["bcc"] = .string(bcc.joined(separator: ", "))
-            }
-            return values
-        }
-    }
-
-    private enum DeterministicMailAction: Equatable {
-        case send
-        case draft
-        case ambiguous
-        case missing
-    }
-
-    private enum DeterministicRecipientField: String, Hashable {
-        case to
-        case cc
-        case bcc
-    }
-
     /// Every planner-visible tool must have a passing real-stdio acceptance
     /// case (or, for embedded Mail, a signed-host acceptance case). Keep this
     /// internal so the release-gate tests can prevent blocked tools from
@@ -612,20 +564,6 @@ final class MCPFirstComputerUseExecutor:
             return result
         }
 
-        // A fully specified Mail mutation already has an exact, bounded local
-        // representation. Prepare its fingerprinted approval immediately so
-        // the user never waits for either local model to rediscover values the
-        // host has already parsed. Incomplete requests intentionally continue
-        // to the planner: it may resolve a named contact through read-only MCP
-        // tools or return its own clarification without weakening approval.
-        if let mailResult = try await routeCompleteMailBeforePlanner(
-            taskID: taskID,
-            prompt: prompt,
-            trustedUserPrompt: trustedUserPrompt,
-            progress: progress) {
-            return mailResult
-        }
-
         // Calculator arithmetic has a small, verifiable local representation.
         // Handle only that bounded shape before either planner/model path: the
         // host opens the real app, types the expression through the same
@@ -659,13 +597,6 @@ final class MCPFirstComputerUseExecutor:
         }
 
         if case .unavailable(let reason) = planner.availability() {
-            if let mailResult = try await routeMailWithoutPlanner(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                progress: progress) {
-                return mailResult
-            }
             return try await executeNativeAlternative(after: AppleFoundationMCPPlannerError.unavailable(reason))
         }
 
@@ -685,9 +616,6 @@ final class MCPFirstComputerUseExecutor:
             return try await executeVisualFallback(usingBrowser: true)
         } catch RoutingSignal.desktopTools {
             try checkExecutionCancellation()
-            if let mailResult = try await routeMailWithoutPlanner(
-                taskID: taskID, prompt: prompt, trustedUserPrompt: trustedUserPrompt,
-                progress: progress) { return mailResult }
             progress("Continuing with local app controls…")
             return try await executeVisualFallback()
         } catch is CancellationError {
@@ -696,16 +624,9 @@ final class MCPFirstComputerUseExecutor:
             throw CancellationError()
         } catch let error as ComputerUsePlanningWorker.Failure {
             // An expired or still-running proposal cannot authorize another
-            // planner, visual fallback, or a deterministic Mail fallback.
+            // planner or visual fallback.
             throw error
         } catch let error as AppleFoundationMCPPlannerError {
-            if let mailResult = try await routeMailWithoutPlanner(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                progress: progress) {
-                return mailResult
-            }
             guard Self.canTryNativeAlternative(after: error) else { throw error }
             return try await executeNativeAlternative(after: error)
         } catch let error as ExecutorError {
@@ -713,25 +634,7 @@ final class MCPFirstComputerUseExecutor:
 
             // Repeating a native read does not show that its capability is
             // insufficient. Only a restricted native alternative may run.
-            if let mailResult = try await routeMailWithoutPlanner(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                progress: progress) {
-                return mailResult
-            }
             return try await executeNativeAlternative(after: error)
-        } catch {
-            // A helper/read step can fail outside the planner's typed error
-            // surface. Explicit Mail still must not spill into GUI control.
-            if let mailResult = try await routeMailWithoutPlanner(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                progress: progress) {
-                return mailResult
-            }
-            throw error
         }
     }
 
@@ -2028,172 +1931,7 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
-    /// Pre-routes only complete deterministic Mail mutations. Returning nil
-    /// for incomplete Mail leaves read-only contact resolution and planner
-    /// clarification behavior intact.
-    private func routeCompleteMailBeforePlanner(
-        taskID: String,
-        prompt: String,
-        trustedUserPrompt: String,
-        progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult? {
-        guard case .request(let request) = Self.deterministicMailDecision(
-            for: prompt) else {
-            return nil
-        }
-        return try await prepareDeterministicMailApproval(
-            taskID: taskID,
-            prompt: prompt,
-            trustedUserPrompt: trustedUserPrompt,
-            request: request,
-            progress: progress)
-    }
-
-    private func routeMailWithoutPlanner(
-        taskID: String,
-        prompt: String,
-        trustedUserPrompt: String,
-        progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult? {
-        switch Self.deterministicMailDecision(for: prompt) {
-        case .notMail:
-            return nil
-
-        case .clarification(let question):
-            return .clarificationRequired(question)
-
-        case .request(let request):
-            return try await prepareDeterministicMailApproval(
-                taskID: taskID,
-                prompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                request: request,
-                progress: progress)
-        }
-    }
-
-    private func prepareDeterministicMailApproval(
-        taskID: String,
-        prompt: String,
-        trustedUserPrompt: String,
-        request: DeterministicMailRequest,
-        progress: @escaping (String) -> Void
-    ) async throws -> ComputerUseExecutionResult {
-        progress("Preparing the exact email for your approval…")
-        return try await withNewHelperGeneration { generation in
-            let allowedTools = try await clientPool.allowedTools()
-            try checkGenerationCancellation(generation)
-            guard let mailTool = allowedTools.first(where: {
-                $0.serverID == RemoteDesktopMailMCP.serverID
-                    && $0.toolName == RemoteDesktopMailMCP.toolName
-            }) else {
-                throw ExecutorError.requiredToolsMissing
-            }
-            let call = try mailTool.makeCall(
-                taskID: taskID,
-                arguments: request.arguments)
-            let prepared = try await clientPool.prepareApproval(call)
-            try checkGenerationCancellation(generation)
-            pendingApprovalState = PlanningState(
-                taskID: taskID,
-                originalPrompt: prompt,
-                trustedUserPrompt: trustedUserPrompt,
-                contactReadRequirements: Self.compileContactReadRequirements(trustedUserPrompt),
-                results: [],
-                executedCallDigests: [])
-            pendingApprovalDigest = call.canonicalDigest
-            return .mcpApprovalRequired(prepared)
-        }
-    }
-
-    private static func deterministicMailDecision(
-        for modelPrompt: String
-    ) -> DeterministicMailDecision {
-        let userSegments = deterministicUserSegments(in: modelPrompt)
-        guard !userSegments.isEmpty else { return .notMail }
-
-        let recipientSegments = userSegments.map(commandPrefix)
-        let actionSegments = userSegments.map(actionCommandText)
-        let commandText = actionSegments.joined(separator: "\n")
-        guard isDeterministicMailIntent(commandText) else { return .notMail }
-
-        let action = deterministicMailAction(in: actionSegments)
-        if action == .ambiguous || action == .missing {
-            return .clarification(
-                "Should I send the email now, or create a draft for review?")
-        }
-
-        var recipients: [DeterministicRecipientField: [String]] = [
-            .to: [], .cc: [], .bcc: [],
-        ]
-        var recipientFieldsByAddress: [String: DeterministicRecipientField] = [:]
-        for segment in recipientSegments {
-            for (address, field) in deterministicRecipients(in: segment) {
-                let key = address.lowercased()
-                if let prior = recipientFieldsByAddress[key], prior != field {
-                    return .clarification(
-                        "Which recipient field should I use for \(address): To, CC, or BCC?")
-                }
-                recipientFieldsByAddress[key] = field
-                if recipients[field]?.contains(where: {
-                    $0.caseInsensitiveCompare(address) == .orderedSame
-                }) == false {
-                    recipients[field, default: []].append(address)
-                }
-            }
-        }
-
-        let to = recipients[.to] ?? []
-        let cc = recipients[.cc] ?? []
-        let bcc = recipients[.bcc] ?? []
-        let body = deterministicMailBody(in: userSegments)
-
-        if to.isEmpty, body == nil {
-            return .clarification(
-                "Who should receive the email, and what should it say?")
-        }
-        guard !to.isEmpty else {
-            return .clarification(
-                "What email address should I use for the To recipient?")
-        }
-        guard let body, !body.isEmpty else {
-            return .clarification("What should the email say?")
-        }
-
-        let subject = deterministicMailSubject(in: userSegments) ?? ""
-        guard to.count <= RemoteDesktopMailRequest.maximumRecipientsPerField,
-              cc.count <= RemoteDesktopMailRequest.maximumRecipientsPerField,
-              bcc.count <= RemoteDesktopMailRequest.maximumRecipientsPerField,
-              [to, cc, bcc].allSatisfy({ field in
-                  field.allSatisfy {
-                      $0.utf8.count <= RemoteDesktopMailRequest.maximumRecipientBytes
-                  }
-                  && field.joined(separator: ", ").utf8.count
-                      <= RemoteDesktopMailRequest.maximumApprovalValueBytes
-              }),
-              subject.utf8.count <= RemoteDesktopMailRequest.maximumSubjectBytes,
-              body.utf8.count <= RemoteDesktopMailRequest.maximumBodyBytes,
-              !subject.contains("\0"),
-              !subject.contains("\r"),
-              !subject.contains("\n"),
-              !body.contains("\0") else {
-            return .clarification(
-                "That email is too large to prepare safely. Please shorten the recipients, subject, or message.")
-        }
-
-        return .request(DeterministicMailRequest(
-            to: to,
-            cc: cc,
-            bcc: bcc,
-            subject: subject,
-            body: body,
-            sendNow: action == .send))
-    }
-
-    /// `ComputerUsePromptRequest.modelPrompt` has a fixed, labeled format.
-    /// A completed turn is a hard Mail task boundary. Retain one preceding
-    /// user turn only when the next assistant turn is a recognized Mail
-    /// clarification and the current request is its immediate answer.
+    /// Extract the user turns from the host-labeled model prompt.
     private nonisolated static func deterministicUserSegments(
         in modelPrompt: String
     ) -> [String] {
@@ -2394,203 +2132,6 @@ final class MCPFirstComputerUseExecutor:
     ) -> Bool {
         pureOpenApplicationName(modelPrompt) != nil
     }
-
-    private static func isDeterministicMailIntent(_ commandText: String) -> Bool {
-        let hasAction = containsRegex(
-            #"\b(?:send|draft|compose|write|prepare|create|email|mail)\b"#,
-            in: commandText)
-        guard hasAction else { return false }
-        let namesMail = containsRegex(
-            #"\b(?:e[ -]?mail|mail)\b"#,
-            in: commandText)
-        let hasAddress = containsRegex(emailAddressPattern, in: commandText)
-        return namesMail || hasAddress
-    }
-
-    /// Body text is not command text. This prevents a phrase such as
-    /// "say I will send it tomorrow" from changing draft/send intent.
-    private static func commandPrefix(_ segment: String) -> String {
-        var end = segment.endIndex
-        if let body = firstRegexMatch(bodyMarkerPattern, in: segment),
-           let range = Range(body.range, in: segment) {
-            end = min(end, range.lowerBound)
-        }
-        if let subject = firstRegexMatch(subjectMarkerPattern, in: segment),
-           let range = Range(subject.range, in: segment) {
-            end = min(end, range.lowerBound)
-        }
-        return String(segment[..<end])
-    }
-
-    /// A trailing "and send it" / "leave it as a draft" is command syntax,
-    /// not message content. Retaining only this narrow suffix lets the common
-    /// "draft ... saying <body>, then send it" prompt work without treating
-    /// arbitrary words inside the body as instructions.
-    private static func actionCommandText(_ segment: String) -> String {
-        var value = commandPrefix(segment)
-        if let trailing = regexMatches(
-            trailingMailActionDirectivePattern,
-            in: segment).last,
-           let range = Range(trailing.range, in: segment) {
-            value += " " + String(segment[range])
-        }
-        return value
-    }
-
-    private static func deterministicMailAction(
-        in commandSegments: [String]
-    ) -> DeterministicMailAction {
-        for segment in commandSegments.reversed() {
-            let text = segment.lowercased()
-            let explicitlyNoSend = containsRegex(
-                #"\b(?:do\s+not|don't|dont|without)\s+send(?:ing)?\b|\b(?:draft|review)\s+only\b|\bfor\s+review\b"#,
-                in: text)
-            var positiveText = text
-            if explicitlyNoSend {
-                positiveText = replacingRegex(
-                    #"\b(?:do\s+not|don't|dont|without)\s+send(?:ing)?\b"#,
-                    in: positiveText,
-                    with: "")
-            }
-            let draft = explicitlyNoSend || containsRegex(
-                #"\b(?:draft|compose|write|prepare)\b"#,
-                in: text)
-            let positiveSend = containsRegex(
-                #"\bsend(?:ing)?\b"#,
-                in: positiveText)
-            let implicitSend = !draft && containsRegex(
-                #"\b(?:email|mail)\s+(?:to\s+)?[A-Z0-9._%+\-]+@"#,
-                in: positiveText)
-
-            // "Draft/compose ... and send it" is a common, fully specified
-            // send request. It is ambiguous only when the same turn also
-            // explicitly says not to send or asks for review first.
-            if positiveSend && explicitlyNoSend { return .ambiguous }
-            if positiveSend { return .send }
-            if explicitlyNoSend || draft { return .draft }
-            if implicitSend { return .send }
-        }
-        return .missing
-    }
-
-    private static func deterministicRecipients(
-        in commandText: String
-    ) -> [(String, DeterministicRecipientField)] {
-        guard let addressRegex = try? NSRegularExpression(
-            pattern: emailAddressPattern,
-            options: [.caseInsensitive]),
-              let labelRegex = try? NSRegularExpression(
-                pattern: #"\b(bcc|cc|to)\b\s*(?:(?::)|(?:to\b))?\s*"#,
-                options: [.caseInsensitive]) else { return [] }
-
-        let fullRange = NSRange(commandText.startIndex..., in: commandText)
-        return addressRegex.matches(in: commandText, range: fullRange).compactMap { match in
-            guard let addressRange = Range(match.range, in: commandText) else {
-                return nil
-            }
-            let prefixRange = NSRange(
-                commandText.startIndex..<addressRange.lowerBound,
-                in: commandText)
-            let label = labelRegex.matches(in: commandText, range: prefixRange)
-                .last
-                .flatMap { labelMatch -> String? in
-                    guard labelMatch.numberOfRanges > 1,
-                          let range = Range(labelMatch.range(at: 1), in: commandText) else {
-                        return nil
-                    }
-                    return String(commandText[range]).lowercased()
-                }
-            let field = DeterministicRecipientField(rawValue: label ?? "") ?? .to
-            return (String(commandText[addressRange]), field)
-        }
-    }
-
-    private static func deterministicMailBody(in segments: [String]) -> String? {
-        for segment in segments.reversed() {
-            guard let marker = firstRegexMatch(bodyMarkerPattern, in: segment),
-                  let markerRange = Range(marker.range, in: segment) else {
-                continue
-            }
-            var end = segment.endIndex
-            if let subject = regexMatches(subjectMarkerPattern, in: segment)
-                .first(where: { $0.range.location > marker.range.location }),
-               let subjectRange = Range(subject.range, in: segment) {
-                end = subjectRange.lowerBound
-            }
-            if let trailing = regexMatches(
-                trailingMailActionDirectivePattern,
-                in: segment).last,
-               trailing.range.location > marker.range.location,
-               let trailingRange = Range(trailing.range, in: segment),
-               trailingRange.lowerBound < end {
-                end = trailingRange.lowerBound
-            }
-            let value = cleanDeterministicMailValue(
-                String(segment[markerRange.upperBound..<end]),
-                removingTrailingConnector: true)
-            return value.isEmpty ? nil : value
-        }
-        return nil
-    }
-
-    private static func deterministicMailSubject(in segments: [String]) -> String? {
-        for segment in segments.reversed() {
-            guard let marker = firstRegexMatch(subjectMarkerPattern, in: segment),
-                  let markerRange = Range(marker.range, in: segment) else {
-                continue
-            }
-            var end = segment.endIndex
-            if let body = regexMatches(bodyMarkerPattern, in: segment)
-                .first(where: { $0.range.location > marker.range.location }),
-               let bodyRange = Range(body.range, in: segment) {
-                end = bodyRange.lowerBound
-            }
-            let value = cleanDeterministicMailValue(
-                String(segment[markerRange.upperBound..<end]),
-                removingTrailingConnector: true)
-            return value.isEmpty ? nil : value
-        }
-        return nil
-    }
-
-    private static func cleanDeterministicMailValue(
-        _ value: String,
-        removingTrailingConnector: Bool
-    ) -> String {
-        var result = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        result = result.trimmingCharacters(
-            in: CharacterSet(charactersIn: ":,;-").union(.whitespacesAndNewlines))
-        if removingTrailingConnector {
-            result = replacingRegex(
-                #"\s+\b(?:and|then)\s*$"#,
-                in: result,
-                with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        let quotePairs: [(Character, Character)] = [
-            ("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’"),
-        ]
-        if let first = result.first,
-           let last = result.last,
-           quotePairs.contains(where: { $0.0 == first && $0.1 == last }),
-           result.count >= 2 {
-            result.removeFirst()
-            result.removeLast()
-        }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static let emailAddressPattern =
-        #"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}"#
-
-    private static let bodyMarkerPattern =
-        #"(?:\b(?:say|saying|says)\b\s*(?:that\s+)?|\b(?:body|message)\b\s*(?::|is\b|should\s+say\b|that\b)\s*|\b(?:with|and)\s+(?:the\s+)?(?:body|message)\b\s*(?::|is\b)?\s*)"#
-
-    private static let subjectMarkerPattern =
-        #"(?:\bwith\s+(?:the\s+)?subject\b|\bsubject\b)\s*(?::|is\b|of\b)?\s*"#
-
-    private static let trailingMailActionDirectivePattern =
-        #"(?:[,;]\s*|\.\s+|\s+(?:and|then|but)\s+)(?:(?:and|then|but)\s+)?(?:send(?:\s+(?:it|this|the\s+(?:email|message)))?(?:\s+now)?|(?:do\s+not|don't|dont|without)\s+send(?:ing)?(?:\s+it)?|(?:leave|keep|open|create|save)\s+(?:it\s+)?as\s+(?:a\s+)?draft(?:\s+for\s+review)?|(?:leave|keep|open|create|save)\s+(?:a\s+)?draft(?:\s+for\s+review)?|for\s+review|review\s+(?:it\s+)?before\s+sending)\s*[.!]?\s*$"#
 
     private nonisolated static func containsRegex(
         _ pattern: String,
