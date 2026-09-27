@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run the prepared bounded live16 check to measure post-input settling. It is not yet run and cannot establish that the component caused or resolves live15. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Review the live16 native-control context and visual target localization evidence before another real Gmail run. Do not infer that delayed settling resolves earlier recipient failures. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1303,7 +1303,25 @@
     "green": "11 passed / 0 failed / 0 skipped; no issues/runtime warnings; 0 build errors / 11 warnings; 54 source hashes stable.",
     "behavior": "Removed the unchanged-token early return and unused observation property. Existing 250 ms polling now waits for 1.25 seconds of quiet (3-second cap) after every scoped input, including initially nil editor state. Fixture covers initial nil and A→B at 300 ms→C at 700 ms; existing cancellation, scope, churn and no-replay checks pass.",
     "tradeoff": "The quiet period now applies after every scoped input and may add latency. No title guard, model or prompt changed.",
-    "acceptance": "Component implemented/compiled/tested only. Live16 is prepared but not run; live15 causality remains unresolved.",
+    "acceptance": "Component implemented/compiled/tested only. Live16 did not propose recipient typing, so whether delayed settling affects the real recipient path remains unproven.",
     "artifacts": ".build/repair-verification/native-delayed-editor-red01-{summary,build,source-audit}.json and .build/repair-verification/native-delayed-editor-green01-{summary,build,source-audit}.json"
+  },
+  "live16": {
+    "run": "client-manager-gmail-draft-live16",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "One native Compose proposal. Fara tried to open the Google profile to discover the account email, proposing [838,102] (host [1448,113]); this was an unidentified target and required approval. The bounded harness accepted no click. No recipient typing proposal, recipient revalidation pair, file handoff, picker, attachment, upload or terminal.",
+    "lifecycle": "Diagnostic C197FA32-97D4-4F6C-8C03-CB14C6EEDADB.json retained 9 events with 0 drops. Recipient binding was created at 87.861 s, retired at 88.515 s after AXTitleChanged matched the field and an ancestor, recreated at 88.535 s, retired again at 88.813 s, then recreated at 88.836 s during settling before the final Fara proposal. Only URL typing had a revalidation pair. These observations do not prove the cause of earlier recipient failures or that delayed settling fixes them.",
+    "cleanup": "CUA verified one empty draft, discarded it and confirmed zero Compose panes; closed only owned Safari window 20187983-D72B-442F-ADEC-CF3D09013AE0 and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+    "acceptance": "No recipient typing, file handoff or upload. Gmail model-driven workflow remains unaccepted; delayed-settle live causality is unproven.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live16-attachments/manifest.json",
+      "diagnostic": "client-manager-gmail-draft-live16-attachments/C197FA32-97D4-4F6C-8C03-CB14C6EEDADB.json",
+      "route": "client-manager-gmail-draft-live16-attachments/B01E1822-B4BE-4656-828F-02D55D789EB2.txt",
+      "outcome": "client-manager-gmail-draft-live16-attachments/9F86C9AA-92F3-4852-8078-54DEB0EF5915.txt",
+      "nativeRequest": "client-manager-gmail-draft-live16-attachments/687EC1B8-AA9A-4E41-A7E9-5FB5C40F9A36.json",
+      "nativeResponse": "client-manager-gmail-draft-live16-attachments/C31E4EDE-2DFD-4558-9548-9194CF5FFAA7.json",
+      "faraRequest": "client-manager-gmail-draft-live16-attachments/DA5A7CDD-5844-4831-A9EC-419A8A2EA5B8.json",
+      "faraResponse": "client-manager-gmail-draft-live16-attachments/BF834AF5-6F62-4294-8B83-BAE72A7DA47E.json"
+    }
   }
 }
