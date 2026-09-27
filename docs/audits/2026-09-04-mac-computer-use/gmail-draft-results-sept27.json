@@ -1037,5 +1037,17 @@
     "method": "Read-only production AX target with a forwarding lifecycle recorder, already-focused empty Gmail recipient field, verified default Safari and mail.google.com ancestry. No external lifecycle drain, no input, navigation or inference. Aggregated notification counts preserve all consumed events without querying event objects.",
     "attachment": "E13781F7-6919-467E-A883-7742BD19BB21.json",
     "limits": "No typing or model execution. Does not explain live09 invalidation or prove intermittent lifecycle stability."
+  },
+  "nativeControlTargetHistoryRepair": {
+    "stage": "Implemented, compiled and component tested; real Gmail retry pending",
+    "finding": "Native ControlPlanner recent_history drops prior control labels/roles while keeping only action kind and feedback. Live09 contains six native Compose proposals under truncated observations; this gap is demonstrated but does not by itself prove why each repeat occurred.",
+    "redRun": "native-control-target-history-red01",
+    "red": "4 passed /2 intended failures /0 skipped;6 expected assertion issues,0 runtime warnings. Build0 errors/51 warnings;54 stable source hashes. Actual executor propagation, forged-prose exclusion, feedback ordering and stale-description exclusion pass; metadata serialization and bounds fail as intended.",
+    "design": "Optional typed observed-control ID/label/role is populated only from a freshly validated native browser proposal and retained by DesktopExecutor. Planner receives bounded untrusted historical target data; current observed controls alone remain eligible. No model response parsing or site-specific repeat algorithm.",
+    "limits": "No successful Gmail workflow demonstrated.",
+    "green01": "15 passed /0 failed /0 skipped;0 test issues/runtime warnings. Build0 errors/12 warnings;55 stable source hashes. Full ControlPlanner suite plus actual executor history propagation passed.",
+    "greenRun": "native-control-target-history-green02",
+    "followUp": "Clarify that history alone does not make an ID selectable; a matching ID still present in current controls remains selectable. No schema or action policy change.",
+    "green02": "15 passed /0 failed /0 skipped;0 test issues/runtime warnings. Build0 errors/12 warnings;55 stable source hashes. Final prompt clarifies current observed controls alone determine selectable IDs."
   }
 }

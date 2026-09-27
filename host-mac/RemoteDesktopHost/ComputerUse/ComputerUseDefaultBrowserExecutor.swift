@@ -569,7 +569,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         includeInModelHistory: false)
                 }
                 let action = ComputerUseFaraAction.pointer(.leftClick, .init(x: x, y: y))
-                return .init(response: try Self.nativeControlHistoryResponse(action, control: selectedControl), action: action)
+                return .init(response: try Self.nativeControlHistoryResponse(action, control: selectedControl), action: action,
+                    observedControl: .init(id: selectedControl.id, label: selectedControl.label, role: selectedControl.role))
             }
         },
             surfaceScopeCheck: { action in

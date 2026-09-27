@@ -15,14 +15,20 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
     let response: String
     let decision: Decision
     let includeInModelHistory: Bool
-    init(response: String, decision: Decision, includeInModelHistory: Bool = true) {
+    let observedControl: ComputerUseFaraModel.ObservedControl?
+    init(response: String, decision: Decision, includeInModelHistory: Bool = true,
+         observedControl: ComputerUseFaraModel.ObservedControl? = nil) {
         self.response = response; self.decision = decision; self.includeInModelHistory = includeInModelHistory
+        self.observedControl = observedControl
     }
-    init(response: String, action: ComputerUseFaraAction, includeInModelHistory: Bool = true) {
-        self.init(response: response, decision: .action(action), includeInModelHistory: includeInModelHistory)
+    init(response: String, action: ComputerUseFaraAction, includeInModelHistory: Bool = true,
+         observedControl: ComputerUseFaraModel.ObservedControl? = nil) {
+        self.init(response: response, decision: .action(action), includeInModelHistory: includeInModelHistory,
+            observedControl: observedControl)
     }
     init(_ proposal: ComputerUseFaraModel.Proposal) {
         response = proposal.response
+        observedControl = proposal.observedControl
         includeInModelHistory = true
         if case .askUser(let question) = proposal.action { decision = .handoff(question) }
         else { decision = .action(proposal.action) }
@@ -350,7 +356,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         session.turns += 1
         guard proposal.includeInModelHistory else { return }
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
-            actionError: session.actionError, action: proposal.action, focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState))
+            actionError: session.actionError, action: proposal.action, observedControl: proposal.observedControl,
+            focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 

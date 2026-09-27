@@ -69,11 +69,19 @@ enum ComputerUseFaraModel {
         /// Native action metadata for executor history retention, independent
         /// of the actor's response protocol. It does not authorize input.
         var action: ComputerUseFaraAction? = nil
+        /// Host-captured target for a native browser-control proposal. This is
+        /// historical context only; it never authorizes a future action.
+        var observedControl: ObservedControl? = nil
         /// Keep the actual next observation's result fields when intervening
         /// history is evicted. This is feedback, not an execution receipt.
         var resultObservation: ResultObservation? = nil
         var focusedEditor: String? = nil
         var focusedTextState: ComputerUseNativeTextState? = nil
+    }
+    struct ObservedControl: Equatable, Sendable {
+        let id: String
+        let label: String
+        let role: String
     }
     /// Bounded internal advice for a visual specialist. It carries no
     /// user authority and cannot replace the original request or its history.
@@ -247,6 +255,7 @@ enum ComputerUseFaraModel {
     struct Proposal: Equatable, Sendable {
         let response: String
         let action: ComputerUseFaraAction
+        var observedControl: ObservedControl? = nil
 
         /// Fara's browser training uses Alt+Left for Back. Apply that alias
         /// only when composing its browser executor. Native desktop decoding
@@ -256,7 +265,7 @@ enum ComputerUseFaraModel {
             guard case .key(let keys) = action, keys.count == 2,
                   keys[0].uppercased() == "ALT",
                   ["LEFT", "ARROWLEFT"].contains(keys[1].uppercased()) else { return self }
-            return .init(response: response, action: .historyBack)
+            return .init(response: response, action: .historyBack, observedControl: observedControl)
         }
     }
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: Input) throws -> URLRequest {
