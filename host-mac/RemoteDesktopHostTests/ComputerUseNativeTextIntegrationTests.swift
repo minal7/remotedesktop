@@ -1901,14 +1901,17 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             let result = try await executor.execute(taskID: scenario, prompt: "Open the requested page.",
                 trustedUserPrompt: "Open the requested page.", tools: tools, progress: { _ in })
             if scenario == "inside completion" {
-                XCTAssertEqual(result, .userInterventionRequired("I could not verify completion in the task window. Please check it before continuing."))
+                XCTAssertEqual(result, .completed("The requested page is open."))
+                XCTAssertEqual(proposals, 2, "A stale completion claim should be reconsidered from a stable fresh frame")
             } else if scenario == "outside handoff" {
                 XCTAssertEqual(result, .userInterventionRequired("Please review the sign-in page."))
             } else {
                 XCTAssertEqual(result, .completed("The requested page is open."))
             }
             XCTAssertEqual(effects, 0, scenario)
-            XCTAssertEqual(proposals, 1, "A terminal decision must not trigger more actions")
+            if scenario != "inside completion" {
+                XCTAssertEqual(proposals, 1, "A terminal decision must not trigger more actions")
+            }
         }
     }
 
@@ -1983,6 +1986,120 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(proposals, 1)
         XCTAssertEqual(checks, 1)
         XCTAssertGreaterThan(scopeChecks, 0)
+    }
+
+    func testScopedCompletionScreenChangeRequiresFreshEvidenceBeforeCompleting() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+        var screenChanged = false, proposals = 0, completionChecks = 0, effects = 0
+        var firstScreenshot: Data?
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+            canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+        let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+            launchGeneration: 1, codeIdentity: code)!
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, actionPerformer: { _ in effects += 1 },
+            screenProvider: {
+                let color = screenChanged ? CIColor(red: 0, green: 0, blue: 1, alpha: 1)
+                    : CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+                return .init(image: CIImage(color: color).cropped(to: display), displayBounds: display,
+                    frontmostWindowBounds: window)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "safari-window" },
+            frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+        let goal = "Upload the selected presentation and verify it finished uploading."
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            XCTAssertEqual(input.goal, goal)
+            if proposals == 1 {
+                XCTAssertTrue(input.history.isEmpty)
+                XCTAssertNil(input.actionError)
+                firstScreenshot = input.screenshotPNG
+                screenChanged = true // Simulate the completion toast changing while the model was planning.
+                return .init(response: "The upload is finished.", action: .reportCompletion("Verified upload"))
+            }
+            XCTAssertNotEqual(input.screenshotPNG, firstScreenshot, "The rejected claim must be reconsidered against fresh pixels")
+            XCTAssertEqual(input.history.count, 1)
+            XCTAssertEqual(input.history.first?.response, "The upload is finished.")
+            XCTAssertTrue(input.actionError?.localizedCaseInsensitiveContains("completion") == true,
+                "A stale completion claim should receive completion-specific feedback")
+            return .init(response: "The fresh page confirms the upload.", action: .reportCompletion("Freshly verified upload"))
+        }, surfaceScopeCheck: { _ in }, completeCheck: { _ in
+            completionChecks += 1
+            return true
+        })
+
+        let result = try await executor.execute(taskID: "completion-observation-refresh", prompt: goal,
+            trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .completed("Freshly verified upload"))
+        XCTAssertEqual(proposals, 2, "A changed completion observation must be replanned once from fresh evidence")
+        XCTAssertEqual(completionChecks, 1, "Only the stable second completion claim reaches the validator")
+        XCTAssertEqual(effects, 0, "Completion recovery must not synthesize input")
+    }
+
+    func testScopedCompletionScreenChangesHandOffBoundedlyAndScopeLossFailsSafely() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+        var screenChanged = false, proposals = 0, completionChecks = 0, effects = 0
+        var scopeValid = true
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+            canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+        let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+            launchGeneration: 1, codeIdentity: code)!
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, actionPerformer: { _ in effects += 1 },
+            screenProvider: {
+                let color = screenChanged ? CIColor(red: 0, green: 0, blue: 1, alpha: 1)
+                    : CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+                return .init(image: CIImage(color: color).cropped(to: display), displayBounds: display,
+                    frontmostWindowBounds: window)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "safari-window" },
+            frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            screenChanged.toggle()
+            return .init(response: "Still uploading.", action: .reportCompletion("Verified upload"))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        }, completeCheck: { _ in
+            completionChecks += 1
+            return true
+        })
+        let goal = "Upload the selected presentation and verify it finished uploading."
+        let unstable = try await executor.execute(taskID: "unstable-completion-observations", prompt: goal,
+            trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(unstable, .userInterventionRequired("I couldn't verify the next desktop action. Complete this step, then choose Resume."))
+        XCTAssertEqual(proposals, 3, "Repeated stale completion claims must hit the existing rejection bound")
+        XCTAssertEqual(completionChecks, 0)
+        XCTAssertEqual(effects, 0)
+
+        let scopeDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: scopeDirectory) }
+        scopeValid = false
+        let scopeLostExecutor = try ComputerUseDesktopExecutor(journalDirectory: scopeDirectory, propose: { _ in
+            XCTFail("A lost scoped window must fail before asking for completion")
+            return .init(response: "Done", action: .reportCompletion("Verified upload"))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        }, completeCheck: { _ in
+            completionChecks += 1
+            return true
+        })
+        do {
+            _ = try await scopeLostExecutor.execute(taskID: "scope-loss-completion", prompt: goal,
+                trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTFail("Loss of the scoped window must not accept a completion claim")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, .scopedSurfaceChanged)
+            XCTAssertEqual(effects, 0)
+        }
     }
 
     func testScopedDesktopRequiresCompletionValidatorAcceptance() async throws {

@@ -1417,6 +1417,44 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             clientEntry: true, ambiguousFileChoice: true)
     }
 
+    func testDriveUploadRowEvidenceRequiresExactNameAndUploadedStatusInSameRow() {
+        let fileName = "Remote Desktop E2E exact.pptx"
+        XCTAssertTrue(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName, "11:56 PM • Uploaded"]]))
+        XCTAssertTrue(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName, "Uploaded"]]))
+        XCTAssertTrue(Self.hasExactCompletedUploadRow(fileName: "Error budget.pptx",
+            rows: [["Error budget.pptx", "Uploaded"]]))
+        XCTAssertFalse(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName], ["11:56 PM • Uploaded"]]), "Evidence from separate rows must not combine")
+        XCTAssertFalse(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [["Remote Desktop E2E exact.pptx copy", "11:56 PM • Uploaded"]]))
+        XCTAssertFalse(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName, "Uploading"]]))
+        XCTAssertFalse(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName, "Upload failed"]]))
+        XCTAssertFalse(Self.hasExactCompletedUploadRow(fileName: fileName,
+            rows: [[fileName, "11:56 PM • Uploaded", "Upload failed"]]),
+            "A contradictory failure in the same row invalidates completion evidence")
+    }
+
+    private static func hasExactCompletedUploadRow(fileName: String, rows: [[String]]) -> Bool {
+        rows.contains { cells in
+            guard cells.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == fileName }) else {
+                return false
+            }
+            let statuses = cells
+                .filter { $0.trimmingCharacters(in: .whitespacesAndNewlines) != fileName }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            guard !statuses.contains(where: {
+                $0.contains("uploading") || $0.contains("failed") || $0.contains("error")
+            }) else { return false }
+            return statuses.contains { status in
+                return status == "uploaded" || status.hasSuffix(" • uploaded")
+            }
+        }
+    }
+
     func testOptInCapturedBrowserMenuNativeControlsComparison() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_CAPTURED_BROWSER_MENU_COMPARISON"] == "1" else {
@@ -1689,7 +1727,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var observedPageURL: String?
         var uploadEffects = 0
         var revalidationPairCount = 0
-        var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int, pickerDismissed: Bool)?
+        var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int,
+                                     pickerDismissed: Bool, toastConfirmed: Bool, rowCells: [String]?)?
         var pickerOpeningEffects = 0
         var delegatedWorkerGoal: String?
         var productionBrowserExecutor: ComputerUseDefaultBrowserExecutor?
@@ -1757,16 +1796,68 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             let uniqueURLs = Set(urls)
             return uniqueURLs.count == 1 ? uniqueURLs.first : nil
         }
+        func freshlyObservedUploadedFileRow(window: ComputerUseDefaultBrowserSession.Window,
+                                             fileName: String) throws -> [String]? {
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+            var pending: [(element: AXUIElement, inPage: Bool)] = [(window.accessibilityElement, false)]
+            var visited: [AXUIElement] = []
+            func check() throws {
+                try Task.checkCancellation()
+            }
+            func attribute(_ name: String, _ element: AXUIElement) throws -> CFTypeRef? {
+                try check()
+                guard ContinuousClock.now < deadline else { return nil }
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+                try check()
+                return ContinuousClock.now < deadline ? value : nil
+            }
+            while !pending.isEmpty, visited.count < 256, ContinuousClock.now < deadline {
+                try check()
+                let item = pending.removeFirst()
+                let element = item.element
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = try attribute(kAXRoleAttribute as String, element) as? String ?? ""
+                let inPage = item.inPage || role == "AXWebArea"
+                if role == "AXRow", inPage {
+                    let children = Array((try attribute(kAXChildrenAttribute as String, element) as? [AXUIElement] ?? []).prefix(32))
+                    var cells: [String] = []
+                    for cell in children {
+                        guard ContinuousClock.now < deadline else { break }
+                        guard try attribute(kAXRoleAttribute as String, cell) as? String == "AXCell",
+                              let value = try attribute(kAXValueAttribute as String, cell) as? String else { continue }
+                        cells.append(value)
+                    }
+                    if Self.hasExactCompletedUploadRow(fileName: fileName, rows: [cells]) { return cells }
+                    continue
+                }
+                if role == "AXWebArea", item.inPage { continue }
+                if let children = try attribute(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let remaining = max(0, 256 - visited.count - pending.count)
+                    pending.append(contentsOf: children.prefix(remaining).map { ($0, inPage) })
+                }
+            }
+            try check()
+            return nil
+        }
         func remoteUploadConfirmed() throws -> Bool {
             acceptedUploadEvidence = nil
             guard uploadToDrive, uploadEffects == 1, try currentFilePanel() == nil,
                   let window = retainedBrowserWindow(),
                   let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
                     application: window.application, mayAct: { true }),
-                  URL(string: page.url)?.host == "drive.google.com",
-                  page.renderedAXText.contains(name),
-                  page.renderedAXText.lowercased().contains("upload complete") else { return false }
-            acceptedUploadEvidence = (page.url, page.renderedAXText, uploadEffects, true)
+                  URL(string: page.url)?.host == "drive.google.com" else { return false }
+            let toastConfirmed = page.renderedAXText.contains(name)
+                && page.renderedAXText.lowercased().contains("upload complete")
+            let rowCells: [String]?
+            if toastConfirmed { rowCells = nil }
+            else { rowCells = try freshlyObservedUploadedFileRow(window: window, fileName: name) }
+            guard toastConfirmed || rowCells != nil,
+                  try currentFilePanel() == nil,
+                  try freshlyObservedBrowserURL() == page.url else { return false }
+            acceptedUploadEvidence = (page.url, page.renderedAXText, uploadEffects, true, toastConfirmed, rowCells)
             return true
         }
         let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
@@ -2444,15 +2535,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTFail("Completion validator did not retain fresh exact-file evidence. nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); uploadEffects=\(uploadEffects); result=\(result)")
                 return
             }
-            let evidenceAttachment = XCTAttachment(string: "URL: \(evidence.url)\nPicker dismissed at validation: \(evidence.pickerDismissed)\nUpload effects: \(evidence.uploadEffects)\n\(evidence.renderedAXText)")
+            let evidenceAttachment = XCTAttachment(string: "URL: \(evidence.url)\nPicker dismissed at validation: \(evidence.pickerDismissed)\nUpload effects: \(evidence.uploadEffects)\nToast evidence: \(evidence.toastConfirmed)\nSame-row AXCell values: \(String(describing: evidence.rowCells))\n\(evidence.renderedAXText)")
             evidenceAttachment.name = "Fresh Drive upload completion evidence"
             evidenceAttachment.lifetime = .keepAlways
             add(evidenceAttachment)
             XCTAssertEqual(evidence.uploadEffects, 1)
             XCTAssertTrue(evidence.pickerDismissed)
             XCTAssertEqual(URL(string: evidence.url)?.host, "drive.google.com")
-            XCTAssertTrue(evidence.renderedAXText.contains(name))
-            XCTAssertTrue(evidence.renderedAXText.lowercased().contains("upload complete"))
+            XCTAssertTrue(evidence.toastConfirmed || evidence.rowCells != nil)
             if case .completed = result { } else { XCTFail("Expected completed real upload; got \(result), error=\(String(describing: failure))") }
         } else if case .userInterventionRequired = result { } else { XCTFail("Expected handoff before picker Upload; got \(result), error=\(String(describing: failure))") }
         XCTAssertEqual(productionBrowserFactoryCalls, productionComposition ? 1 : 0,

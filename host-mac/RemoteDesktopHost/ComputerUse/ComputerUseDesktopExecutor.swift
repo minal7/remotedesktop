@@ -413,8 +413,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 } else {
                     do { try revalidate(observation, action: action, tools: tools) }
                     catch Failure.changedScreen {
-                        if surfaceScopeCheck != nil, case .action(.reportCompletion) = proposal.decision {
-                            record(proposal, observation: observation, session: session); return .userInterventionRequired("I could not verify completion in the task window. Please check it before continuing.")
+                        if surfaceScopeCheck != nil {
+                            switch proposal.decision {
+                            case .action(.reportCompletion), .completionStatus(true):
+                                throw Failure.completionUnverified
+                            default: break
+                            }
                         }
                         throw Failure.changedScreen
                     }
