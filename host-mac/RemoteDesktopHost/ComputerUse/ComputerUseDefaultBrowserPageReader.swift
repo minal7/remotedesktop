@@ -51,6 +51,9 @@ final class ComputerUseDefaultBrowserPageReader {
         let frontmost: () -> (ComputerUseApplicationIdentity, AXUIElement)?
         let read: (String, AXUIElement) -> CFTypeRef?
         let timeout: (AXUIElement, Float) -> Void
+        /// Optional read-only point hit test. A missing element is unknown;
+        /// callers resolve its bounded AX parent chain before using it.
+        var hitTestElementAtPoint: (CGPoint) -> AXUIElement? = { _ in nil }
 
         @MainActor static var live: Access {
             Access(frontmost: {
@@ -64,6 +67,14 @@ final class ComputerUseDefaultBrowserPageReader {
                 return value
             }, timeout: { element, duration in
                 _ = AXUIElementSetMessagingTimeout(element, duration)
+            }, hitTestElementAtPoint: { point in
+                let systemWide = AXUIElementCreateSystemWide()
+                _ = AXUIElementSetMessagingTimeout(systemWide, 0.1)
+                var element: AXUIElement?
+                guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success else {
+                    return nil
+                }
+                return element
             })
         }
     }
@@ -309,7 +320,43 @@ final class ComputerUseDefaultBrowserPageReader {
               }),
               Self.sameControlMetadata(originalControl, freshControl),
               let center = Self.permittedCenterMetadata(freshControl, within: windowBounds) else { return nil }
+        guard try hitPathAtPoint(center, contains: originalElement, webArea: original.webArea,
+                                 window: original.window, mayAct: mayAct) else { return nil }
         return center
+    }
+
+    private func hitPathAtPoint(_ point: CGPoint, contains control: AXUIElement, webArea: AXUIElement,
+                                window: AXUIElement, mayAct: () -> Bool) throws -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        func check() throws -> Bool {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+            return ContinuousClock.now < deadline
+        }
+        guard try check() else { return false }
+        let rawHit = access.hitTestElementAtPoint(point)
+        guard try check() else { return false }
+        guard let hit = rawHit else { return false }
+
+        var current: AXUIElement? = hit
+        var ancestors: [AXUIElement] = []
+        var foundControl = false, foundWebArea = false
+        for _ in 0..<16 {
+            guard try check() else { return false }
+            guard let element = current else { return false }
+            guard !ancestors.contains(where: { CFEqual($0, element) }) else { return false }
+            ancestors.append(element)
+            if CFEqual(element, control) { foundControl = true }
+            if CFEqual(element, webArea) { foundWebArea = true }
+            if CFEqual(element, window) { return foundControl && foundWebArea }
+
+            access.timeout(element, 0.1)
+            let rawParent = access.read(kAXParentAttribute as String, element)
+            guard try check() else { return false }
+            guard let rawParent, CFGetTypeID(rawParent) == AXUIElementGetTypeID() else { return false }
+            current = unsafeBitCast(rawParent, to: AXUIElement.self)
+        }
+        return false
     }
 
     private static func sameControlMetadata(_ lhs: Control, _ rhs: Control) -> Bool {

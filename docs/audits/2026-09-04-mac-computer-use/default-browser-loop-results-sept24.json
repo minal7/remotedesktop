@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable end-to-end. Live22 and live24 each produced one upload effect and independent 28,273-byte SHA-256 readback matching the fixture. Live24 client paused for user confirmation before completion verification; terminal nil. The app selected an older suggested file on Drive’s Home page while verifying the new upload. Live23 stale-control proposal rejection remains unexplained. The stale-control refresh is component-tested, but live24 does not establish that branch was exercised.",
+    "status": "Not accepted as reliable end-to-end. Live22 and live24 uploaded the exact file with independent matching readback but no client terminal. Explicit visual assignment continuity passes focused tests. Live25 stopped before upload at an unidentified-target approval after New was proposed behind a Marketplace modal; paired real probes confirm the point hits the overlay when covered.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3555,7 +3555,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Investigate live24’s post-upload verification decisions and premature request for user input; keep approval gates unchanged.",
+    "next": "Run the real client Drive workflow after physical-hit eligibility GREEN; unchanged approval, task completion and independent readback requirements.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
@@ -3573,6 +3573,76 @@
       "matchesSourceBytes": true,
       "appCompleted": false,
       "observedSelectionDiscrepancy": "Post-upload CUA showed an older suggested file selected on Drive’s Home page while the upload widget named the correct new fixture. Native picker exact-file selection passed."
+    },
+    "continuityAndOverlayCheckpoint": {
+      "component": {
+        "name": "native-to-visual-delegation-continuity",
+        "run": "native-visual-delegation-continuity-green01",
+        "result": "33 passed, 1 skipped, 0 failures; 0 build errors, 18 warnings, 49 source hashes stable.",
+        "qualification": "Component evidence only; does not establish full workflow completion."
+      },
+      "live25": {
+        "run": "client-manager-drive-upload-live25",
+        "result": "Failed with no file calls, accepted approvals, upload effects, or client terminal.",
+        "build": {
+          "errors": 0,
+          "warnings": 0,
+          "sourceCount": 53,
+          "sourceUnchanged": true,
+          "runtimeWarning": "Known main-thread UI-unresponsiveness warning."
+        },
+        "sequence": [
+          "Fara clicked Get Add-ons, opening the Workspace Marketplace modal over Drive.",
+          "The native planner later proposed the observed New control at [66,184], covered by the modal; the host correctly required approval for the unidentified hit, and no click effect was admitted."
+        ],
+        "evidence": {
+          "summary": ".build/repair-verification/client-manager-drive-upload-live25-summary.json",
+          "attachments": ".build/repair-verification/client-manager-drive-upload-live25-attachments/manifest.json",
+          "route": ".build/repair-verification/client-manager-drive-upload-live25-attachments/EFCE7B24-B34F-4678-9E58-F24ECDFA563F.txt",
+          "outcome": ".build/repair-verification/client-manager-drive-upload-live25-attachments/B06C9D0B-0606-4463-98CB-F19626E500D3.txt"
+        }
+      },
+      "hitProbes": {
+        "covered": {
+          "run": "default-browser-covered-control-hit-live01",
+          "result": "1/1 passed; 0 build errors/warnings; 47 source hashes stable.",
+          "point": [
+            66,
+            184
+          ],
+          "hitRole": "AXWebArea",
+          "hitLabel": null,
+          "evidence": ".build/repair-verification/default-browser-covered-control-hit-live01-attachments/ED3E4C13-F8FF-4BDA-A1BD-18DC6DB0A836.json"
+        },
+        "uncovered": {
+          "run": "default-browser-uncovered-control-hit-live01",
+          "result": "1/1 passed; 0 build errors/warnings; 47 source hashes stable.",
+          "point": [
+            66,
+            184
+          ],
+          "hitRole": "AXButton",
+          "hitLabel": "New",
+          "evidence": ".build/repair-verification/default-browser-uncovered-control-hit-live01-attachments/B36E8D4F-E83E-4179-AF7B-9D10E03F5341.json"
+        },
+        "qualification": "Paired read-only observations show the point hits the covering web area while the modal is present and the New button after it is uncovered. No production routing or approval changes are implied."
+      },
+      "next": "Continue bounded analysis without weakening the unknown-target approval gate; prior live24 upload/readback remains separate evidence and its client completion was not observed."
+    },
+    "nativeControlHitEligibility": {
+      "redRun": "native-control-hit-eligibility-red01",
+      "result": "0 passed, 1 expected failed test; all three nil/overlay/foreign-window assertions reproduced old metadata-only acceptance. Build 0 errors, 26 warnings; 49 source hashes stable; no runtime warnings.",
+      "redEvidence": ".build/repair-verification/native-control-hit-eligibility-red01-all-test-issues.json",
+      "green": "35 passed, 1 skipped, 0 failures/runtime warnings; build 0 errors, 26 warnings; 49 source hashes stable.",
+      "accepted": false,
+      "greenRun": "native-control-hit-eligibility-green01",
+      "greenEvidence": ".build/repair-verification/native-control-hit-eligibility-green01-summary.json",
+      "implementation": "Fresh global hit must reach retained control, web area and exact window through a bounded AX parent chain; unknown/covered paths reuse existing refresh/visual fallback. Cancellation, scope and approval gates remain unchanged."
+    },
+    "live25WindowCleanup": {
+      "closedOwnedWindow": "367BEDF9-C7FF-4ABD-98D3-24223048FB09",
+      "preservedOriginalWindow": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+      "method": "CUA fresh AX state and Command-W; modal had already been dismissed for paired read-only probe."
     }
   }
 }

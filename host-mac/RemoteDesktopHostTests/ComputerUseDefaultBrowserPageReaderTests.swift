@@ -304,6 +304,81 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             CGPoint(x: 100, y: 80))
     }
 
+    func testValidatedControlCenterRequiresHitPathToReachRetainedControlInSameWindow() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+        graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+        let button = graph.element("button")
+        let web = graph.element("web")
+        let window = graph.window
+        let controlID: String
+
+        do {
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let observation = try XCTUnwrap(reader.read(window: window, application: graph.identity, mayAct: { true }))
+            controlID = try XCTUnwrap(observation.controls.first?.id)
+            graph.set("button-child", kAXParentAttribute, button)
+            graph.hitTestElement = graph.element("button-child")
+            XCTAssertNotNil(try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                window: window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true }),
+                "A point hit on the retained control remains eligible")
+
+            graph.hitTestElement = nil
+            XCTAssertNil(try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                window: window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true }),
+                "Unknown point hit must not authorize the old button center")
+
+            graph.set("overlay", kAXParentAttribute, web)
+            graph.hitTestElement = graph.element("overlay")
+            XCTAssertNil(try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                window: window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true }),
+                "A covering element at the target point must block the retained button")
+
+            graph.set("foreign-button", kAXParentAttribute, graph.element("foreign-web"))
+            graph.set("foreign-web", kAXParentAttribute, graph.otherWindow)
+            graph.hitTestElement = graph.element("foreign-button")
+            XCTAssertNil(try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                window: window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true }),
+                "A hit path owned by another window must be rejected")
+        }
+    }
+
+    func testValidatedControlCenterPropagatesPauseAndCancellationDuringHitValidation() async throws {
+        for scenario in ["pause-hit", "cancel-hit", "pause-parent", "cancel-parent"] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+            graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+            let controlID = try XCTUnwrap(observation.controls.first?.id)
+            var active = true
+            if scenario.hasSuffix("hit") {
+                graph.onHitTest = {
+                    if scenario.hasPrefix("pause") { active = false }
+                    else { withUnsafeCurrentTask { $0?.cancel() } }
+                }
+            } else {
+                graph.afterRead = { node, attribute in
+                    guard node == "button", attribute == (kAXParentAttribute as String) else { return }
+                    if scenario.hasPrefix("pause") { active = false }
+                    else { withUnsafeCurrentTask { $0?.cancel() } }
+                }
+            }
+
+            do {
+                let validation = Task {
+                    try reader.validatedControlCenter(observation: observation, controlID: controlID,
+                        window: graph.window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                        mayAct: { active })
+                }
+                _ = try await validation.value
+                XCTFail("Expected \(scenario) to stop hit validation")
+            } catch ComputerUseHostTools.ToolError.paused where scenario.hasPrefix("pause") {
+            } catch is CancellationError where scenario.hasPrefix("cancel") {
+            }
+        }
+    }
+
     func testValidatedControlCenterRejectsExpandedStateChangesButAcceptsStableUnknownState() throws {
         for (initial, fresh, shouldAccept) in [
             (true as Bool?, false as Bool?, false),
@@ -585,7 +660,9 @@ private final class PageAXGraph {
     var writes: [String] = []
     var reads: [(String, String)] = []
     var afterRead: ((String, String) -> Void)?
+    var onHitTest: (() -> Void)?
     var didReplace = false
+    var hitTestElement: AXUIElement?
     let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 93001,
                                                   launchGeneration: 9)!
     let otherIdentity = ComputerUseApplicationIdentity(bundleIdentifier: "com.google.Chrome", processIdentifier: 93002,
@@ -597,7 +674,7 @@ private final class PageAXGraph {
 
     init() {
         frontmostIdentity = identity
-        for name in ["root", "window", "other-window", "web", "text", "button", "secure", "iframe", "iframe-text", "new-web"] {
+        for name in ["root", "window", "other-window", "web", "text", "button", "overlay", "secure", "iframe", "iframe-text", "new-web"] {
             refs[name] = AXUIElementCreateApplication(pid_t(93_100 + (refs.count * 2)))
         }
     }
@@ -625,9 +702,12 @@ private final class PageAXGraph {
         set("root", kAXFocusedWindowAttribute, element("window"))
         set("window", kAXRoleAttribute, "AXWindow" as NSString)
         set("window", kAXChildrenAttribute, [element("web")] as CFArray)
+        set("web", kAXParentAttribute, element("window"))
         set("web", kAXRoleAttribute, "AXWebArea" as NSString)
         set("web", "AXURL", "https://drive.google.com/drive/my-drive" as NSString)
         set("web", kAXChildrenAttribute, [element("text"), element("button"), element("secure"), element("iframe")] as CFArray)
+        set("button", kAXParentAttribute, element("web"))
+        hitTestElement = element("button")
         set("text", kAXRoleAttribute, "AXStaticText" as NSString); set("text", kAXValueAttribute, text as NSString)
         set("button", kAXRoleAttribute, "AXButton" as NSString); set("button", kAXTitleAttribute, "Open file" as NSString)
         set("secure", kAXRoleAttribute, "AXTextField" as NSString); set("secure", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
@@ -646,6 +726,9 @@ private final class PageAXGraph {
             else { result = attrs[node]?[attr] }
             afterRead?(node, attr)
             return result
-        }, timeout: { _, _ in })
+        }, timeout: { _, _ in }, hitTestElementAtPoint: { [self] _ in
+            onHitTest?()
+            return hitTestElement
+        })
     }
 }

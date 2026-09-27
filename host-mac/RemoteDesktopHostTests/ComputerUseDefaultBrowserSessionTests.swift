@@ -2543,6 +2543,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             attrs["web", default: [:]][kAXRoleAttribute as String] = "AXWebArea" as NSString
             attrs["web", default: [:]]["AXURL"] = "https://drive.google.com/drive/my-drive" as NSString
             attrs["web", default: [:]][kAXChildrenAttribute as String] = [element("button")] as CFArray
+            attrs["web", default: [:]][kAXParentAttribute as String] = window
+            attrs["button", default: [:]][kAXParentAttribute as String] = element("web")
             attrs["button", default: [:]][kAXRoleAttribute as String] = "AXButton" as NSString
             attrs["button", default: [:]][kAXTitleAttribute as String] = controlLabel as NSString
             attrs["button", default: [:]][kAXEnabledAttribute as String] = NSNumber(value: true)
@@ -2573,7 +2575,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }, read: { [self] name, ref in
                 guard let key = refs.first(where: { CFEqual($0.value, ref) })?.key else { return nil }
                 return attrs[key]?[name]
-            }, timeout: { _, _ in })
+            }, timeout: { _, _ in }, hitTestElementAtPoint: { [self] _ in element("button") })
         }
     }
 }
