@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "TDD: verify a completed text edit against its retained native target when autocomplete moves focus, while retaining focused pre-effect and per-grapheme guards. Then rerun real Gmail. The cause of pre-effect empty-field target-ID churn remains open.",
+  "next": "Execute RED regressions for caret plus single RGB-level noise and final keyboard fingerprint matching. Then implement the general guarded repair, compile/test, and retry real Gmail.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -895,7 +895,7 @@
     "next": "Reproduce generically in fixtures, then use a larger bounded walk with a deadline while preserving exact window, lifecycle and selection checks. Repeat this read-only real probe before Gmail E2E."
   },
   "coordinateContractReview": {
-    "result": "The local adapter and pinned official implementation both use a 0–1000 normalized Fara coordinate space. No mapping mismatch identified for live04. This does not establish general vision reliability or identical image preprocessing.",
+    "result": "The local adapter and pinned official implementation both use a 0\u20131000 normalized Fara coordinate space. No mapping mismatch identified for live04. This does not establish general vision reliability or identical image preprocessing.",
     "source": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/coord_spaces.py#L13",
     "conversion": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/fara/fara15_agent.py#L432",
     "local": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseRuntimeTypes.swift:269"
@@ -954,5 +954,41 @@
     "green": "33/33 TextEditor tests pass, zero skips/runtime issues; build 0 errors/47 warnings; 55 stable sources. Adds whole/selected setter focus shift, wrong/replaced target, no extra refocus/input, stopping after one Unicode grapheme on focus shift, protection and lost ownership.",
     "review": "Independent Luna review found no actionable issue.",
     "scope": "Component verified; real Gmail retained-reference availability and whole attachment workflow still require live retry."
+  },
+  "live08": {
+    "result": "Failed before Gmail navigation. URL was entered exactly; Return was rejected before any input at approval-fingerprint-dispatch. The following proposed click on an unidentified suggestion required approval and was rejected by the bounded harness. No accepted approvals, selected file, upload or successful client terminal.",
+    "evidence": "The Fara request records Return followed by explicit no-input rejection feedback. The dispatch diagnostic locates the rejection after initial revalidation; it does not identify which approval fingerprint component changed. Earlier focusMatches=false/screenMatches=true values survive from a different action and must not be attributed to Return.",
+    "readbackRepairScope": "Did not reach Gmail or exercise the retained-recipient readback repair. All 33 component tests remain green; live acceptance is pending.",
+    "diagnostic": "Four snapshot transitions, not truncated: unavailable, empty address bar, opaque target ID change while empty, exact 24-byte Gmail URL. Lifecycle log capped at 128 startup events and does not identify later churn causes.",
+    "independentUI": "After workers exited, CUA verified Start Page with exact Gmail URL in the smart search field. Closed only owned test window; original Drive restored. No Gmail draft was created in this run.",
+    "ownedWindowID": "48EEC33B-EE23-427D-97E7-4A5598ABA794",
+    "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+    "checks": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes. Three issues including the known main-thread responsiveness runtime warning.",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live08-attachments",
+    "requestAttachment": "09323D06-8893-4871-9541-AFBC868E1638.json",
+    "diagnosticAttachment": "96D2F005-4099-4D6B-88BB-39D50078E95F.json",
+    "next": "A bounded no-inference real Safari fingerprint experiment; do not weaken stale-focus or approval guards without evidence."
+  },
+  "keyFingerprintProbe01": {
+    "test": "ComputerUseDefaultBrowserSessionTests/testOptInDefaultBrowserKeyFingerprintAfterURLTyping",
+    "run": "safari-key-fingerprint-live01",
+    "result": "1/1 pass; a diagnostic pass means samples were obtained, not stable fingerprints or successful navigation. No inference, Return dispatch or navigation. Exact URL typed once without retry.",
+    "finding": "Across 12 samples over 3.572 seconds, native editor state/precondition, AX identity, action, app and retained-window presence/focus remained unchanged. Visual fingerprint differed from baseline on samples 2, 6 and 9. This identifies visual instability, not its pixel cause or the exact cause of live08.",
+    "checks": "0 build errors, 22 warnings, 55 stable source hashes, no skips. One known main-thread responsiveness runtime issue.",
+    "attachment": ".build/repair-verification/safari-key-fingerprint-live01-attachments/3BE248D2-9853-4AF5-8B7C-B8C1548B43AB.json",
+    "cleanup": "CUA independently verified exact URL in Start Page without navigation. Closed the newly created test window; original Google Drive restored. Final diagnostic windowID was null and must be retained before session teardown in the next probe.",
+    "next": "Capture one adjacent screenshot pair around visual fingerprint variation using the existing currentScreen API; keep production guards unchanged until pixel cause is understood."
+  },
+  "keyFingerprintProbe02": {
+    "run": "safari-key-fingerprint-live02",
+    "result": "1/1 diagnostic pass, 12 samples, no retry/inference/Return/navigation. Native authorities unchanged; visual fingerprint differs from baseline on samples 3, 4, 9 and 11.",
+    "pixelEvidence": "Adjacent captured pair (not atomic with fingerprint reads): 1536x992. 85 changed pixels total: 51 menu-clock pixels outside the window, 30 caret pixels at x738..739/y45..59, and four popup-border pixels changing one RGB level. Three red values 102 to 103 at x781..783/y74; one blue 134 to 133 at x764/y76. No other changed pixels. The strict existing caret matcher returns false because of the four non-caret pixels.",
+    "checks": "0 build errors, 22 warnings, 55 stable source hashes, no skips; one known main-thread responsiveness runtime warning.",
+    "attachments": ".build/repair-verification/safari-key-fingerprint-live02-attachments",
+    "beforePNG": "1BE49D39-BB95-4DA8-ADD8-3ADE9FA46C6F.png",
+    "afterPNG": "83E8184A-076A-47E9-949D-B280856C6166.png",
+    "pairMetadata": "9235B0D3-2446-4959-9678-7DF42A1BD666.json",
+    "limits": "This reproduces a visual-only unstable fingerprint with the typed Gmail URL. It does not identify the exact two frames compared during live08 final dispatch. The next repair remains conditional on unchanged native authority and bounded caret differences.",
+    "cleanup": "CUA verified exact URL without navigation, then closed only the new Start Page and restored original Drive. Window ID was deliberately redacted in this probe output; that test-only omission is corrected afterward, not yet rerun."
   }
 }

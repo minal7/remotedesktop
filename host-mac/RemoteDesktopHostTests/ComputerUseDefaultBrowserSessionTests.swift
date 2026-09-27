@@ -1631,8 +1631,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_URL_TYPING_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_URL_TYPING_PROBE=1 to type a URL into the owned default-browser window without submitting it.")
         }
+        try await runDefaultBrowserURLTypingProbe(url: "https://drive.google.com/")
+    }
+
+    func testOptInDefaultBrowserKeyFingerprintAfterURLTyping() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_KEY_FINGERPRINT_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_KEY_FINGERPRINT_PROBE=1 to sample Return fingerprints after typing a Gmail URL without dispatching Return.")
+        }
+        try await runDefaultBrowserURLTypingProbe(url: "https://mail.google.com/", sampleKeyFingerprint: true)
+    }
+
+    private func runDefaultBrowserURLTypingProbe(url: String, sampleKeyFingerprint: Bool = false) async throws {
         let taskID = UUID().uuidString
-        let url = "https://drive.google.com/"
         let goal = "Type \(url) into the empty Safari address field, then stop without pressing Return or navigating."
         let journal = FileManager.default.temporaryDirectory
             .appendingPathComponent("DefaultBrowserURLTyping-\(UUID().uuidString)", isDirectory: true)
@@ -1642,11 +1652,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
         var proposalCount = 0
+        var safeEmptyFieldRetryCount = 0
         var initialFieldVerified = false
         var typedTextReadBack = false
         var actionErrorAfterTyping: String?
         var diagnostic: [String: String] = [:]
         var windowID: String?
+        var fingerprintSamples: [[String: Any]] = []
+        var visualMismatchScreenshots: (before: Data, after: Data, metadata: [String: Any])?
         var outcome = "not started"
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: journal, propose: { input in
             proposalCount += 1
@@ -1665,6 +1678,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 try await Task.sleep(for: .seconds(12))
                 return .init(response: "Proposed one URL text entry; do not submit it.", action: .typeText(url))
             }
+            let isVerifiedEmptyAddress = editor.contains("WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD")
+                && state?.valuePrefix.isEmpty == true
+                && state?.valueUTF8Bytes == 0
+                && state?.valueUTF16Units == 0
+                && state?.truncated == false
+            if sampleKeyFingerprint, safeEmptyFieldRetryCount == 0,
+               proposalCount == 2, input.actionError != nil,
+               isVerifiedEmptyAddress, input.history.last?.action == .typeText(url) {
+                safeEmptyFieldRetryCount = 1
+                return .init(response: "The previous entry was rejected before the field changed. Retry the same URL once.",
+                    action: .typeText(url))
+            }
             typedTextReadBack = editor.contains("WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD")
                 && state?.valuePrefix == url
                 && state?.valueUTF8Bytes == url.utf8.count
@@ -1678,31 +1703,133 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         func attach(_ error: String? = nil) {
             diagnostic = executor.lastActionDiagnosticForTests
-            windowID = executor.retainedWindowForDiagnostics?.id
-            let payload: [String: Any] = [
+            if windowID == nil { windowID = executor.retainedWindowForDiagnostics?.id }
+            var payload: [String: Any] = [
                 "taskID": taskID, "outcome": outcome, "error": error.map { $0 as Any } ?? NSNull(),
-                "proposalCount": proposalCount, "initialAddressFieldVerified": initialFieldVerified,
+                "proposalCount": proposalCount, "safeEmptyFieldRetryCount": safeEmptyFieldRetryCount,
+                "initialAddressFieldVerified": initialFieldVerified,
                 "typedURLReadBackExactly": typedTextReadBack,
+                "typedURLLengthUTF8Bytes": typedTextReadBack ? (url.utf8.count as Any) : NSNull(),
                 "actionErrorAfterTyping": actionErrorAfterTyping.map { $0 as Any } ?? NSNull(),
-                "windowID": windowID.map { $0 as Any } ?? NSNull(), "lastActionDiagnostic": diagnostic,
+                "windowID": windowID.map { $0 as Any } ?? NSNull(),
+                "lastActionDiagnostic": sampleKeyFingerprint ? ([String: String]() as Any) : diagnostic,
                 "navigationSubmitted": false,
             ]
+            if sampleKeyFingerprint {
+                payload["keyFingerprintSampleCount"] = fingerprintSamples.count
+                payload["keyFingerprintSamples"] = fingerprintSamples
+            }
             if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
                 let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
-                attachment.name = "default-browser-url-typing-readback.json"
+                attachment.name = sampleKeyFingerprint ? "default-browser-key-fingerprint-probe.json" : "default-browser-url-typing-readback.json"
                 attachment.lifetime = .keepAlways
                 add(attachment)
+            }
+            if let visualMismatchScreenshots {
+                for (name, bytes) in [("before", visualMismatchScreenshots.before), ("after", visualMismatchScreenshots.after)] {
+                    let attachment = XCTAttachment(data: bytes, uniformTypeIdentifier: "public.png")
+                    attachment.name = "default-browser-key-fingerprint-visual-\(name).png"
+                    attachment.lifetime = .keepAlways
+                    add(attachment)
+                }
+                if let data = try? JSONSerialization.data(withJSONObject: visualMismatchScreenshots.metadata,
+                    options: [.prettyPrinted, .sortedKeys]) {
+                    let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+                    attachment.name = "default-browser-key-fingerprint-visual-pair.json"
+                    attachment.lifetime = .keepAlways
+                    add(attachment)
+                }
             }
         }
         do {
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: tools, progress: { _ in })
             outcome = String(describing: result)
-            attach()
+            if !sampleKeyFingerprint { attach() }
             XCTAssertTrue(initialFieldVerified, "The first proposal must be based on the verified empty Safari address field")
-            XCTAssertEqual(proposalCount, 2, "One delayed type proposal and one fresh readback/handoff proposal are expected")
+            XCTAssertEqual(proposalCount, 2 + safeEmptyFieldRetryCount,
+                "Only the opted-in fingerprint probe may make one exact-empty-field type retry")
             XCTAssertTrue(typedTextReadBack, "The fresh focused address field must contain the exact URL")
             XCTAssertNil(actionErrorAfterTyping, "Typing must not be reported as rejected")
+            if sampleKeyFingerprint {
+                let window = try XCTUnwrap(executor.retainedWindowForDiagnostics)
+                let textTarget = ComputerUseAccessibilityTextTarget()
+                guard let initialEditor = textTarget.snapshot(), initialEditor.value.utf8.elementsEqual(url.utf8) else {
+                    attach("The typed URL was not independently readable before fingerprint sampling")
+                    XCTFail("The typed URL must be independently readable before fingerprint sampling")
+                    return
+                }
+                let keyAction = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+                windowID = window.id
+                let started = ProcessInfo.processInfo.systemUptime
+                var first: ComputerUseApprovalFingerprint?
+                var previousSample: (fingerprint: ComputerUseApprovalFingerprint, image: ComputerUseDesktopImage,
+                    focusedTextFrame: CGRect?, frontmostWindowBounds: CGRect?)?
+                for index in 0..<12 {
+                    if index > 0 { try await Task.sleep(for: .milliseconds(250)) }
+                    guard ProcessInfo.processInfo.systemUptime - started < 20 else {
+                        XCTFail("Fingerprint sampling exceeded its bounded 20-second window")
+                        break
+                    }
+                    let current = try tools.prepareNativeActionFingerprint(for: keyAction)
+                    if first == nil { first = current }
+                    let baseline = try XCTUnwrap(first)
+                    let screen = try tools.currentScreen()
+                    let image = try ComputerUseDesktopImage(observation: screen)
+                    let focusedTextFrame = try tools.nativeFocusedTextFrame()
+                    let editor = textTarget.snapshot()
+                    let windows = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(window.application)
+                    let retainedWindowPresent = windows.windows.contains {
+                        $0.id == window.id && CFEqual($0.accessibilityElement, window.accessibilityElement)
+                    }
+                    fingerprintSamples.append([
+                        "sample": index,
+                        "elapsedMilliseconds": Int((ProcessInfo.processInfo.systemUptime - started) * 1_000),
+                        "actionUnchanged": current.action == baseline.action,
+                        "applicationUnchanged": current.applicationID == baseline.applicationID,
+                        "accessibilityIdentityUnchanged": current.accessibilityIdentity == baseline.accessibilityIdentity,
+                        "visualDigestUnchanged": current.visualDigest == baseline.visualDigest,
+                        "editorStillExactURL": editor?.value.utf8.elementsEqual(url.utf8) == true,
+                        "editorStateUnchanged": editor == initialEditor,
+                        "editorPreconditionUnchanged": editor?.preconditionDigest == initialEditor.preconditionDigest,
+                        "retainedWindowPresent": retainedWindowPresent,
+                        "retainedWindowFocused": windows.focusedWindowID == window.id,
+                    ])
+                    if visualMismatchScreenshots == nil, let previousSample,
+                       current.visualDigest != previousSample.fingerprint.visualDigest {
+                        let sameWindowBounds = previousSample.frontmostWindowBounds == screen.frontmostWindowBounds
+                            && screen.frontmostWindowBounds == window.identity.bounds
+                        let sameFieldBounds = previousSample.focusedTextFrame == focusedTextFrame
+                            && focusedTextFrame != nil
+                        let strictCaretMatch: Bool?
+                        if sameWindowBounds, sameFieldBounds, let focusedTextFrame,
+                           let windowBounds = screen.frontmostWindowBounds {
+                            strictCaretMatch = try previousSample.image.matchesInsertionPointPixels(of: image,
+                                window: windowBounds, field: focusedTextFrame)
+                        } else { strictCaretMatch = nil }
+                        visualMismatchScreenshots = (previousSample.image.png, image.png, [
+                            "previousSample": index - 1,
+                            "currentSample": index,
+                            "visualDigestChanged": true,
+                            "sameDisplayBounds": previousSample.image.displayBounds == image.displayBounds,
+                            "sameWindowBounds": sameWindowBounds,
+                            "sameFocusedTextFrame": sameFieldBounds,
+                            "strictCaretComparisonResult": strictCaretMatch.map { $0 as Any } ?? (NSNull() as Any),
+                        ])
+                    }
+                    previousSample = (current, image, focusedTextFrame, screen.frontmostWindowBounds)
+                }
+                attach()
+                XCTAssertEqual(fingerprintSamples.count, 12, "Collect all scheduled read-only samples within the bound")
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["actionUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["applicationUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["accessibilityIdentityUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorStillExactURL"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorStateUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorPreconditionUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["retainedWindowPresent"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["retainedWindowFocused"] as? Bool == true })
+            }
             if case .userInterventionRequired = result { } else {
                 XCTFail("Expected the explicit stop handoff after URL readback; got \(result)")
             }
