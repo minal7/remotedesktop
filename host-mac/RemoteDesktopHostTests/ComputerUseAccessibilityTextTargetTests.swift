@@ -880,6 +880,176 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         XCTAssertTrue(graph.calls.isEmpty)
     }
 
+    private func nativeControlsPriorityFixture(nestedUsefulControl: Bool = false) -> (AXTextGraph, CGRect) {
+        let graph = AXTextGraph(), window = CGRect(x: 0, y: 0, width: 900, height: 700)
+        graph.setFrame("window", window)
+        var chrome: [AXUIElement] = []
+        for index in 0..<100 {
+            let name = "chrome-button-\(index)"
+            let element = graph.addNode(name)
+            chrome.append(element)
+            graph.set(name, kAXRoleAttribute, kAXButtonRole as NSString)
+            graph.set(name, kAXTitleAttribute, "Browser control \(index)" as NSString)
+            graph.set(name, kAXParentAttribute, graph.element("window"))
+            graph.setFrame(name, CGRect(x: 10, y: 10 + CGFloat(index % 20) * 24, width: 140, height: 20))
+        }
+        let address = graph.addNode("browser-address")
+        graph.set("browser-address", kAXRoleAttribute, kAXTextFieldRole as NSString)
+        graph.set("browser-address", kAXTitleAttribute, "Browser address" as NSString)
+        graph.set("browser-address", kAXValueAttribute, "" as NSString)
+        graph.set("browser-address", "AXEditable", kCFBooleanTrue)
+        graph.set("browser-address", kAXParentAttribute, graph.element("window"))
+        graph.setFrame("browser-address", CGRect(x: 20, y: 410, width: 500, height: 24))
+        graph.setSelection("browser-address", NSRange(location: 0, length: 0))
+        _ = graph.addNode("web-area")
+        graph.set("web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+        graph.set("web-area", kAXDocumentAttribute, "https://example.test/" as NSString)
+        _ = graph.addNode("page-container")
+        graph.set("page-container", kAXRoleAttribute, kAXGroupRole as NSString)
+        graph.set("page-container", kAXParentAttribute, graph.element("window"))
+        graph.set("page-container", kAXChildrenAttribute, [graph.element("web-area")] as CFArray)
+        graph.setFrame("page-container", CGRect(x: 0, y: 450, width: 900, height: 240))
+        graph.set("web-area", kAXParentAttribute, graph.element("page-container"))
+        graph.setFrame("web-area", CGRect(x: 0, y: 450, width: 900, height: 240))
+        _ = graph.addNode("header-shell")
+        graph.set("header-shell", kAXRoleAttribute, kAXGroupRole as NSString)
+        graph.set("header-shell", kAXParentAttribute, graph.element("web-area"))
+        _ = graph.addNode("header-inner")
+        graph.set("header-inner", kAXRoleAttribute, kAXGroupRole as NSString)
+        graph.set("header-inner", kAXParentAttribute, graph.element("header-shell"))
+        graph.set("destination", kAXRoleAttribute, kAXTextFieldRole as NSString)
+        graph.set("destination", kAXTitleAttribute, "Search term" as NSString)
+        graph.set("destination", kAXValueAttribute, "" as NSString)
+        graph.set("destination", "AXEditable", kCFBooleanTrue)
+        graph.set("destination", kAXParentAttribute, graph.element("header-inner"))
+        graph.setFrame("destination", CGRect(x: 240, y: 480, width: 300, height: 24))
+        graph.setSelection("destination", NSRange(location: 0, length: 0))
+        let useful = graph.addNode("useful-page-control")
+        graph.set("useful-page-control", kAXRoleAttribute, kAXButtonRole as NSString)
+        graph.set("useful-page-control", kAXTitleAttribute, "Continue" as NSString)
+        graph.setFrame("useful-page-control", CGRect(x: 600, y: 480, width: 120, height: 28))
+        if nestedUsefulControl {
+            let nested = graph.addNode("nested-web-area")
+            graph.set("nested-web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+            graph.set("nested-web-area", kAXParentAttribute, graph.element("header-inner"))
+            graph.set("nested-web-area", kAXChildrenAttribute, [useful] as CFArray)
+            graph.set("useful-page-control", kAXParentAttribute, nested)
+            graph.set("header-inner", kAXChildrenAttribute, [graph.element("destination"), nested] as CFArray)
+        } else {
+            graph.set("useful-page-control", kAXParentAttribute, graph.element("header-inner"))
+            graph.set("header-inner", kAXChildrenAttribute, [graph.element("destination"), useful] as CFArray)
+        }
+        graph.set("header-shell", kAXChildrenAttribute, [graph.element("header-inner")] as CFArray)
+        let pageToolbar = graph.addNode("page-toolbar")
+        graph.set("page-toolbar", kAXRoleAttribute, kAXGroupRole as NSString)
+        graph.set("page-toolbar", kAXParentAttribute, graph.element("web-area"))
+        var laterPageControls: [AXUIElement] = []
+        for index in 0..<20 {
+            let name = "page-control-\(index)"
+            let control = graph.addNode(name)
+            laterPageControls.append(control)
+            graph.set(name, kAXRoleAttribute, kAXButtonRole as NSString)
+            graph.set(name, kAXTitleAttribute, "Page control \(index)" as NSString)
+            graph.set(name, kAXParentAttribute, pageToolbar)
+            graph.setFrame(name, CGRect(x: 250 + CGFloat(index % 5) * 80,
+                y: 520 + CGFloat(index / 5) * 30, width: 70, height: 24))
+        }
+        graph.set("page-toolbar", kAXChildrenAttribute, laterPageControls as CFArray)
+        graph.set("web-area", kAXChildrenAttribute, [graph.element("header-shell"), pageToolbar] as CFArray)
+        graph.set("window", kAXChildrenAttribute, (chrome + [address, graph.element("page-container")]) as CFArray)
+        graph.focused = "destination"
+        return (graph, window)
+    }
+
+    func testNativeControlsPrioritizeFocusedDocumentAndKeepFocusedChromeEditor() throws {
+        let (graph, window) = nativeControlsPriorityFixture()
+        let pageFocused = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
+            windowBounds: window, access: graph.access, mayAct: { true }))
+        let pageIndex = try XCTUnwrap(pageFocused.items.firstIndex { $0.description == "AXButton • Continue" })
+        if let chromeIndex = pageFocused.items.firstIndex(where: { $0.description == "AXButton • Browser control 0" }) {
+            XCTAssertLessThan(pageIndex, chromeIndex)
+        }
+        XCTAssertLessThanOrEqual(pageFocused.items.count, 16)
+        XCTAssertTrue(pageFocused.truncated)
+        XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 96)
+        XCTAssertTrue(graph.writes.isEmpty)
+
+        graph.focused = "browser-address"
+        let chromeChildren = (0..<100).map { graph.element("chrome-button-\($0)") }
+        graph.set("window", kAXChildrenAttribute,
+            ([graph.element("browser-address")] + chromeChildren + [graph.element("page-container")]) as CFArray)
+        graph.calls.removeAll()
+        let chromeFocused = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
+            windowBounds: window, access: graph.access, mayAct: { true }))
+        let addressIndex = try XCTUnwrap(chromeFocused.items.firstIndex { $0.description == "AXTextField • Browser address" })
+        let firstChromeIndex = try XCTUnwrap(chromeFocused.items.firstIndex { $0.description == "AXButton • Browser control 0" })
+        XCTAssertLessThan(addressIndex, firstChromeIndex)
+        XCTAssertLessThanOrEqual(chromeFocused.items.count, 16)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testNativeControlFocusedPathKeepsProtectionAndDisabledAncestors() throws {
+        for mode in ["hidden", "protected", "secure", "disabled", "nested"] {
+            let (graph, window) = nativeControlsPriorityFixture(nestedUsefulControl: mode == "nested")
+            switch mode {
+            case "hidden": graph.set("page-container", "AXHidden", kCFBooleanTrue)
+            case "protected": graph.set("page-container", "AXProtectedContent", kCFBooleanTrue)
+            case "secure": graph.set("page-container", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
+            case "disabled": graph.set("page-container", kAXEnabledAttribute, kCFBooleanFalse)
+            default: break
+            }
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
+                windowBounds: window, access: graph.access, mayAct: { true }), mode)
+            let useful = catalog.items.first { $0.description == "AXButton • Continue" }
+            if ["hidden", "protected", "secure"].contains(mode) {
+                XCTAssertNil(useful, mode)
+                XCTAssertEqual(catalog.items.first?.description, "AXButton • Browser control 0", mode)
+            } else if mode == "disabled" {
+                XCTAssertEqual(useful?.enabled, false, "A disabled focused ancestor must remain disabled")
+            } else {
+                XCTAssertNotNil(useful, "Controls nested under a web area remain in the outer document traversal")
+            }
+            XCTAssertLessThanOrEqual(catalog.items.count, 16)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeControlFocusedPathFallsBackOnForeignIncompleteOrCyclicAncestry() throws {
+        for mode in ["foreign", "incomplete", "cycle"] {
+            let (graph, window) = nativeControlsPriorityFixture()
+            switch mode {
+            case "foreign": graph.set("page-container", kAXParentAttribute, graph.element("other-window"))
+            case "incomplete": graph.set("page-container", kAXParentAttribute, nil)
+            default:
+                graph.set("page-container", kAXParentAttribute, graph.element("header-shell"))
+                graph.set("header-shell", kAXParentAttribute, graph.element("page-container"))
+            }
+            let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
+                windowBounds: window, access: graph.access, mayAct: { true }), mode)
+            XCTAssertEqual(catalog.items.first?.description, "AXButton • Browser control 0", mode)
+            XCTAssertFalse(catalog.items.contains { $0.description == "AXButton • Continue" }, mode)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeControlFocusedPathChangeDuringPrioritizedReadRejectsMixedCatalogue() throws {
+        for mode in ["focus", "parent", "hidden-container"] {
+            let (graph, window) = nativeControlsPriorityFixture()
+            var changed = false
+            graph.afterRead = { element, attribute in
+                guard !changed, element == "useful-page-control", attribute == kAXTitleAttribute else { return }
+                changed = true
+                if mode == "focus" { graph.focused = "browser-address" }
+                else if mode == "hidden-container" { graph.set("page-container", "AXHidden", kCFBooleanTrue) }
+                else { graph.set("page-container", kAXParentAttribute, graph.element("other-group")) }
+            }
+            XCTAssertNil(try ComputerUseNativeControlReader.observe(displayBounds: window,
+                windowBounds: window, access: graph.access, mayAct: { true }), mode)
+            XCTAssertTrue(changed, "The useful page control was read before the scope changed")
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
     func testNativeReferenceRejectsSemanticOrParentChangesWithIdenticalValues() throws {
         for change in ["label", "unicode-label", "label-object", "role", "subrole", "identifier", "parent"] {
             let graph = AXTextGraph()

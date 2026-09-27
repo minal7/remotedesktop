@@ -57,51 +57,124 @@ enum ComputerUseNativeControlReader {
         let observedWindow = try windowContext()
         let roles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXPopUpButton",
             "AXComboBox", "AXTextField", "AXTextArea", "AXMenuItem", "AXSlider", "AXIncrementor", "AXScrollArea"]
-        var queue: [(AXUIElement, Bool)] = [(window, false)], visited: [AXUIElement] = []
+        var visited: [AXUIElement] = [], seenForBudget: [AXUIElement] = []
+        var timedOut: [AXUIElement] = [app.root, window]
         var items: [ComputerUseNativeControls.Item] = [], truncated = false
-        while !queue.isEmpty {
-            if visited.count >= 96 || items.count >= ComputerUseNativeControls.maximumItems { truncated = true; break }
-            let (node, inheritedDisabled) = queue.removeFirst()
-            if visited.contains(where: { CFEqual($0, node) }) { continue }
-            visited.append(node); access.timeout(node, 0.1)
-            let role = try read(kAXRoleAttribute, node) as? String ?? ""
-            let subrole = try read(kAXSubroleAttribute, node) as? String ?? ""
-            if role == "AXSecureTextField" || subrole == kAXSecureTextFieldSubrole as String { continue }
-            if (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true { continue }
-            if (try read("AXHidden", node) as? NSNumber)?.boolValue == true { continue }
-            let explicitEnabled = (try read(kAXEnabledAttribute, node) as? NSNumber)?.boolValue
-            let enabled = inheritedDisabled ? false : explicitEnabled
-            if roles.contains(role), let bounds = try frame(node), windowBounds.contains(bounds) {
-                var label: String?
-                for name in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXPlaceholderValueAttribute as String,
-                             kAXHelpAttribute as String, kAXIdentifierAttribute as String] {
-                    if let value = try read(name, node) as? String,
-                       !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        var prefix = "", bytes = 0
-                        for character in value {
-                            let next = String(character)
-                            guard bytes + next.utf8.count <= 384 else { break }
-                            prefix += next; bytes += next.utf8.count
+        func noteBudget(_ node: AXUIElement) -> Bool {
+            if seenForBudget.contains(where: { CFEqual($0, node) }) { return true }
+            guard seenForBudget.count < 96 else { truncated = true; return false }
+            seenForBudget.append(node)
+            if !timedOut.contains(where: { CFEqual($0, node) }) {
+                timedOut.append(node); access.timeout(node, 0.1)
+            }
+            return true
+        }
+        func scan(_ start: [(AXUIElement, Bool)], depthFirst: Bool) throws {
+            var pending = start
+            while !pending.isEmpty {
+                if seenForBudget.count >= 96 || items.count >= ComputerUseNativeControls.maximumItems {
+                    truncated = true; return
+                }
+                let (node, inheritedDisabled): (AXUIElement, Bool) = depthFirst
+                    ? pending.removeLast() : pending.removeFirst()
+                if visited.contains(where: { CFEqual($0, node) }) { continue }
+                guard noteBudget(node) else { return }
+                visited.append(node)
+                let role = try read(kAXRoleAttribute, node) as? String ?? ""
+                let subrole = try read(kAXSubroleAttribute, node) as? String ?? ""
+                if role == "AXSecureTextField" || subrole == kAXSecureTextFieldSubrole as String { continue }
+                if (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true { continue }
+                if (try read("AXHidden", node) as? NSNumber)?.boolValue == true { continue }
+                let explicitEnabled = (try read(kAXEnabledAttribute, node) as? NSNumber)?.boolValue
+                let enabled = inheritedDisabled ? false : explicitEnabled
+                if roles.contains(role), let bounds = try frame(node), windowBounds.contains(bounds) {
+                    var label: String?
+                    for name in [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXPlaceholderValueAttribute as String,
+                                 kAXHelpAttribute as String, kAXIdentifierAttribute as String] {
+                        if let value = try read(name, node) as? String,
+                           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            var prefix = "", bytes = 0
+                            for character in value {
+                                let next = String(character)
+                                guard bytes + next.utf8.count <= 384 else { break }
+                                prefix += next; bytes += next.utf8.count
+                            }
+                            if bytes < value.utf8.count { truncated = true }
+                            if !prefix.isEmpty { label = prefix; break }
                         }
-                        if bytes < value.utf8.count { truncated = true }
-                        if !prefix.isEmpty { label = prefix; break }
+                    }
+                    let description = role + (label.map { " • " + $0 } ?? "")
+                    if let item = ComputerUseNativeControls.Item(description: description, frame: bounds, enabled: enabled, displayBounds: displayBounds) {
+                        items.append(item)
                     }
                 }
-                let description = role + (label.map { " • " + $0 } ?? "")
-                if let item = ComputerUseNativeControls.Item(description: description, frame: bounds, enabled: enabled, displayBounds: displayBounds) {
-                    items.append(item)
+                if let children = try read(kAXChildrenAttribute, node) as? [AXUIElement] {
+                    let remaining = max(0, 96 - seenForBudget.count - pending.count)
+                    if children.count > remaining { truncated = true }
+                    let additions = children.prefix(remaining).map { ($0, enabled == false) }
+                    if depthFirst { pending.append(contentsOf: additions.reversed()) }
+                    else { pending.append(contentsOf: additions) }
                 }
+                if expired { return }
             }
-            if let children = try read(kAXChildrenAttribute, node) as? [AXUIElement] {
-                let remaining = max(0, 96 - visited.count - queue.count)
-                if children.count > remaining { truncated = true }
-                queue.append(contentsOf: children.prefix(remaining).map { ($0, enabled == false) })
-            }
-            if expired { return nil }
         }
+
+        // A focused editor in a web document is often nested below generic
+        // containers, while useful controls live earlier in AX child order.
+        // Prefer the outermost document on that exact focus path, then fill
+        // from the original window BFS without exceeding the shared node cap.
+        typealias FocusPath = (elements: [AXUIElement], webArea: AXUIElement?, isSafe: Bool, disabledAboveWebArea: Bool)
+        func focusPath(from start: AXUIElement, countForBudget: Bool) throws -> FocusPath? {
+            var path: [AXUIElement] = [], current: AXUIElement? = start
+            var webArea: AXUIElement?, isSafe = true, disabledAboveWebArea = false
+            var hasSeenWebArea = false
+            while let node = current, path.count < 16 {
+                guard !path.contains(where: { CFEqual($0, node) }) else { return nil }
+                if countForBudget, !noteBudget(node) { return nil }
+                path.append(node)
+                let role = try read(kAXRoleAttribute, node) as? String ?? ""
+                let subrole = try read(kAXSubroleAttribute, node) as? String ?? ""
+                let sensitiveRole = role == "AXSecureTextField" || subrole == kAXSecureTextFieldSubrole as String
+                let protected = sensitiveRole ? false : (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+                let hidden = sensitiveRole || protected ? false : (try read("AXHidden", node) as? NSNumber)?.boolValue == true
+                if sensitiveRole || protected || hidden { isSafe = false }
+                if role == "AXWebArea" { webArea = node; hasSeenWebArea = true; disabledAboveWebArea = false }
+                else if hasSeenWebArea, (try read(kAXEnabledAttribute, node) as? NSNumber)?.boolValue == false {
+                    disabledAboveWebArea = true
+                }
+                if CFEqual(node, window) { return (path, webArea, isSafe, disabledAboveWebArea) }
+                guard let parent = try element(kAXParentAttribute, node) else { return nil }
+                current = parent
+            }
+            return nil
+        }
+
+        let initialFocus = try element(kAXFocusedUIElementAttribute, app.root)
+        let initialPath = try initialFocus.flatMap { try focusPath(from: $0, countForBudget: true) }
+        let usedPriorityPath = initialPath?.isSafe == true && initialPath?.webArea != nil
+        if let initialPath, initialPath.isSafe, let priorityWebArea = initialPath.webArea, !expired {
+            try scan([(priorityWebArea, initialPath.disabledAboveWebArea)], depthFirst: true)
+        }
+        if expired { return nil }
+        try scan([(window, false)], depthFirst: false)
+        if expired { return nil }
         // Geometry is planning data, but still must belong to the screenshot's
         // foreground window. A changed scope cannot publish a mixed catalogue.
+        let focusPathUnchanged: Bool
+        if usedPriorityPath, let initialFocus, let initialPath {
+            let finalFocus = try element(kAXFocusedUIElementAttribute, app.root)
+            let finalPath = try finalFocus.flatMap { try focusPath(from: $0, countForBudget: true) }
+            if let finalFocus, let finalPath {
+                focusPathUnchanged = CFEqual(initialFocus, finalFocus)
+                    && initialPath.elements.count == finalPath.elements.count
+                    && zip(initialPath.elements, finalPath.elements).allSatisfy { CFEqual($0.0, $0.1) }
+                    && initialPath.webArea.map { first in finalPath.webArea.map { CFEqual(first, $0) } ?? false } == true
+                    && initialPath.isSafe && finalPath.isSafe
+                    && initialPath.disabledAboveWebArea == finalPath.disabledAboveWebArea
+            } else { focusPathUnchanged = false }
+        } else { focusPathUnchanged = true }
         guard let currentWindow = try element(kAXFocusedWindowAttribute, app.root), CFEqual(currentWindow, window),
+              (!usedPriorityPath || focusPathUnchanged),
               try frame(window) == windowBounds, try windowContext() == observedWindow, !expired,
               let current = access.frontmost(), current.identity.utf8.elementsEqual(app.identity.utf8), CFEqual(current.root, app.root) else { return nil }
         try Task.checkCancellation()
