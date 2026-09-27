@@ -570,6 +570,81 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             "Only the permitted Command-L should reach the native dispatcher")
     }
 
+    func testRejectedBrowserSelectAllNamesMacShortcutWithoutDispatchingControlA() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "rejected-browser-shortcut-feedback"
+        let goal = "Select all text in the focused editor"
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        var proposals = 0
+        var proposalErrors: [String?] = []
+        var dispatched: [ComputerUsePredictedAction] = []
+        fixture.desktop.additionalAction = { action in dispatched.append(action) }
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                proposals += 1
+                proposalErrors.append(input.actionError)
+                switch proposals {
+                case 1: return .init(response: "Select the current address text.", action: .key(["Control", "a"]))
+                case 2:
+                    XCTAssertTrue(input.actionError?.contains("Control+A") == true,
+                        "Feedback should identify the exact rejected chord")
+                    XCTAssertTrue(input.actionError?.contains("Command+A") == true,
+                        "Feedback should name the supported macOS select-all chord")
+                    XCTAssertTrue(input.actionError?.localizedCaseInsensitiveContains("selection") == true,
+                        "Feedback should remind the model to inspect selection before typing")
+                    XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
+                    return .init(response: "Use the permitted macOS select-all chord.", action: .key(["Command", "a"]))
+                default:
+                    return .init(response: "Editor text selected.", decision: .completionStatus(success: true))
+                }
+            })
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        XCTAssertEqual(result, .completed("The model reported completion."))
+        XCTAssertEqual(proposals, 3)
+        XCTAssertNil(proposalErrors.first ?? nil)
+        XCTAssertEqual(dispatched, [.key(usage: 0x04, modifiers: 8)],
+            "Only the permitted Command-A should reach the native dispatcher")
+    }
+
+    func testRejectedBrowserFunctionKeyReturnsRecoverableUnsupportedFeedbackWithoutInput() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "rejected-browser-function-key-feedback"
+        let goal = "Continue with a supported browser action"
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        var proposals = 0
+        var errors: [String?] = []
+        var dispatched: [ComputerUsePredictedAction] = []
+        fixture.desktop.additionalAction = { action in dispatched.append(action) }
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                proposals += 1
+                errors.append(input.actionError)
+                if proposals == 1 {
+                    return .init(response: "Try the function key.", action: .key(["F5"]))
+                }
+                XCTAssertTrue(input.actionError?.contains("F5") == true,
+                    "Recoverable feedback should identify the unsupported key")
+                XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
+                return .init(response: "Unsupported-key feedback received.",
+                    decision: .handoff("The unsupported shortcut was not sent."))
+            })
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        guard case .userInterventionRequired = result else { return XCTFail("Expected a recoverable handoff, got \(result)") }
+        XCTAssertEqual(proposals, 2)
+        XCTAssertNil(errors[0])
+        XCTAssertTrue(dispatched.isEmpty, "Unsupported function keys must not reach the native dispatcher")
+    }
+
     func testLostBrowserWindowAndOutOfWindowPointerRemainScopedHandoffs() async throws {
         for scenario in ["lost-window", "out-of-window-pointer"] {
             let fixture = try Fixture()

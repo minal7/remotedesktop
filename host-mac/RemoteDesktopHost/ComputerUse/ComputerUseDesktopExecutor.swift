@@ -152,6 +152,20 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
     }
 
+    private static func displayKeyboardChord(_ keys: [String]) -> String {
+        let components = keys.prefix(8).map { source -> String in
+            let key = source.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch key.lowercased() {
+            case "control", "ctrl": return "Control"
+            case "command", "cmd", "meta", "super": return "Command"
+            case "option", "alt": return "Option"
+            case "shift": return "Shift"
+            default: return key.count == 1 ? key.uppercased() : String(key.prefix(32))
+            }
+        }
+        return String(components.joined(separator: "+").prefix(128))
+    }
+
     private func verifyCompletionCandidate(_ answer: String, observation: Observation,
                                            tools: ComputerUseHostTools,
                                            assertOwnership: () throws -> Void) async throws {
@@ -488,6 +502,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 record(proposal, observation: observation, session: session)
                 if case .scroll? = proposal.action {
                     session.actionError = "Native scrolling requires an explicit coordinate inside the intended pane in the foreground window. No input was sent. Inspect the current screenshot and provide that coordinate."
+                } else if case .key(let keys)? = proposal.action {
+                    let chord = Self.displayKeyboardChord(keys)
+                    session.actionError = "The proposed keyboard chord \(chord) is not supported by this native adapter. No input was sent. On macOS, Command+A selects all in the focused editor; Control and Command are distinct. Inspect the current selection before typing, because typing inserts at that selection. Choose a supported keyboard action."
                 } else {
                     session.actionError = "That action is not supported by the native desktop adapter. No input was sent. Choose a supported native action."
                 }

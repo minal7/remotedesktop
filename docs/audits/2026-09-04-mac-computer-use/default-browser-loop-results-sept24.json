@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "One complete scoped ClientModel/HostManager real-Drive task passed in live26 using the shipped client model over the in-process JSON bridge and production MCP-first executor. Original blank-start task selected the newest of three candidates, admitted one upload, returned taskCompleted, completed its ledger entry, and passed independent 28,273-byte SHA-256 readback. This does not qualify physical client UI, pairing/TLS/CloudKit, ambiguity handling, broader reliability or 12 GB. Earlier upload-only runs and failures remain distinct evidence; live26 does not establish which repair caused success.",
+    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass with independent 28,273-byte SHA-256 readback. The new ambiguous-goal client attempt failed before native file listing or clarification: initial URL typing was rejected, later key/click proposals produced malformed address text, followed by an app invalidResponse error; the final captured F5 proposal is structurally valid and the immediate error cause is unconfirmed. No native file calls, clarification, accepted approval or upload. This does not test or disprove the ambiguity-choice flow itself. Broader route/workflow coverage remains open.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3476,6 +3476,15 @@
         "freshCompletionEvidence": ".build/repair-verification/client-manager-drive-upload-live26-attachments/E222E676-6AAA-4396-9ADA-D03E2ED7C64C.txt",
         "readback": ".build/repair-verification/client-manager-drive-upload-live26-independent-readback.json",
         "qualification": "One scoped complete client-API route pass; no claim for physical client UI, pairing/TLS/CloudKit, ambiguity handling, broad reliability or 12 GB."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live01",
+        "outcome": "Failed before file listing or ambiguity clarification. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning. Fara’s first address-bar type was rejected before effect; it then proposed Return on the blank field, misdirected clicks toward Google controls, repeated Control+A unsupported feedback, a selection click and concatenated URL typing; the app later returned invalidResponse. The final captured F5 tool call is structurally valid; the next request was not captured, so the immediate error cause is unconfirmed. No native file calls, clarification, approval or upload. CUA confirmed malformed URL text in the address field. This run does not establish that the ambiguity choice flow itself is broken.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live01-summary.json",
+        "attachments": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/manifest.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/AF6E2869-0B36-4592-BE7B-0419F7DEDB40.txt",
+        "faraRequest": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/74A012B6-FB66-4D28-97A0-8A1CBC6952F6.json",
+        "faraResponse": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/169F2FAA-6524-41CA-8AAE-7264FF7A34B8.json"
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3565,7 +3574,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Test ambiguous-file choice handling using the actual client route and unchanged approval gates; do not infer that a specific repair caused live26 success.",
+    "next": "Repair Fara model-input history budgeting using resident-worker text token count plus conservative image/output reserve, then retry the real ambiguity workflow. Keep original goal, clarifications, current state, approval rules and durable action history.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
@@ -3663,6 +3672,42 @@
       "clientTerminal": "taskCompleted",
       "appCompleted": true,
       "admittedUploadEffects": 1
+    },
+    "ambiguityHarnessCompile": {
+      "run": "client-manager-ambiguous-drive-compile01",
+      "passed": 4,
+      "skipped": 1,
+      "errors": 0,
+      "buildWarnings": 16,
+      "sourceCount": 53,
+      "sourceUnchanged": true,
+      "runtimeWarnings": [],
+      "scope": "Compile and existing choice/reference components only. Live ambiguity step has not been reached."
+    },
+    "unusedModelCleanup": {
+      "evidence": ".build/repair-verification/unused-model-cleanup-sept26.json",
+      "removedBytes": 6266079680,
+      "scope": "Two verified duplicate Fara weights and one rejected Agents-A1 diagnostic model; active installed assets unchanged, comparison manifests and results retained. Available disk after cleanup20GiB."
+    },
+    "reconstructedContextProbe": {
+      "path": ".build/repair-verification/ambiguity-context-limit01/manifest.json",
+      "httpErrorBody": ".build/repair-verification/ambiguity-context-limit01/http-error-body.txt",
+      "httpStatus": 400,
+      "renderedTextTokens": 6824,
+      "multimodalPromptTokens": 8284,
+      "contextLimit": 8192,
+      "peakProcessFootprintBytes": 4104749056,
+      "workerExited": true,
+      "effects": 0,
+      "qualification": "Approximate next request reconstructed from saved final request and F5 response with unchanged screenshot/state. Confirms input overflow for that reconstruction; original failed next-request body was not captured."
+    },
+    "nativeKeyboardFeedback": {
+      "redRun": "native-keyboard-feedback-red01",
+      "red": "1 pass, 2 expected failures with 4 missing-feedback assertions; 0 build errors,16 warnings,49 stable source hashes.",
+      "greenRun": "native-keyboard-feedback-green01",
+      "green": "7 passed,0 failures/runtime warnings;0 build errors,20 warnings,49 stable source hashes.",
+      "change": "Every unsupported keyboard proposal names its bounded chord, confirms no input was sent, describes macOS Command+A versus Control, and asks the model to inspect selection before typing. No shortcut admission or typing semantics changed.",
+      "scope": "Component-only; no live rerun after feedback change yet."
     }
   }
 }
