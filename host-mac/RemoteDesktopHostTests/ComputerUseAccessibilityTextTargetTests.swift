@@ -1477,6 +1477,47 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         }
     }
 
+    func testDiagnosticObserverReportsBindingCreationAndRetirementWithoutChangingAXAccess() throws {
+        struct Run {
+            let calls: [AXTextGraph.Call]
+            let writes: [AXTextGraph.Write]
+            let events: [ComputerUseAccessibilityTextTarget.DiagnosticEvent]
+            let targetID: String
+        }
+        func exercise(observe: Bool) throws -> Run {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            var events: [ComputerUseAccessibilityTextTarget.DiagnosticEvent] = []
+            let diagnosticObserver: (@MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void)?
+            if observe {
+                diagnosticObserver = { event in events.append(event) }
+            } else {
+                diagnosticObserver = nil
+            }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access,
+                diagnosticObserver: diagnosticObserver)
+            let retained = try XCTUnwrap(target.snapshot())
+            monitor.notify(kAXTitleChangedNotification as String, element: graph.element("destination"))
+            XCTAssertNil(target.snapshot(targetID: retained.targetID))
+            XCTAssertTrue(graph.writes.isEmpty)
+            return Run(calls: graph.calls, writes: graph.writes, events: events, targetID: retained.targetID)
+        }
+
+        let withoutObserver = try exercise(observe: false)
+        let withObserver = try exercise(observe: true)
+        XCTAssertEqual(withObserver.calls.map { "\($0.element):\($0.operation)" },
+                       withoutObserver.calls.map { "\($0.element):\($0.operation)" })
+        XCTAssertEqual(withObserver.writes.count, withoutObserver.writes.count)
+        XCTAssertTrue(withoutObserver.events.isEmpty)
+        XCTAssertEqual(withObserver.events.map(\.kind), ["bindingCreated", "bindingRetired"])
+        XCTAssertEqual(withObserver.events.map(\.targetID), [withObserver.targetID, withObserver.targetID])
+        let retirement = try XCTUnwrap(withObserver.events.last)
+        XCTAssertEqual(retirement.notification, kAXTitleChangedNotification as String)
+        XCTAssertTrue(retirement.matchedReferences.contains("field"))
+        let encoded = String(decoding: try JSONEncoder().encode(withObserver.events), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("café")); XCTAssertFalse(encoded.contains("old"))
+    }
+
     func testUnrelatedElementTitleChangeDuringReadPreservesFocusedFieldAuthority() throws {
         for notification in [kAXTitleChangedNotification, kAXValueChangedNotification] {
             let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
@@ -1530,6 +1571,130 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             XCTAssertNil(target.snapshot(targetID: before.targetID), name)
             XCTAssertTrue(delivered, name)
             XCTAssertTrue(graph.writes.isEmpty, name)
+        }
+    }
+
+    func testIntermediateAncestorValueChangeDoesNotRetireUnchangedFocusedField() throws {
+        func readTrace(useWebArea: Bool, deliverOnIntermediateAncestor: Bool, duringRead: Bool) throws -> ([String], Bool) {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            if useWebArea {
+                _ = graph.addNode("web-area")
+                graph.set("web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+                graph.set("web-area", kAXParentAttribute, graph.element("window"))
+                graph.set("web-area", kAXDocumentAttribute, "https://example.test/" as NSString)
+                graph.set("group", kAXParentAttribute, graph.element("web-area"))
+            }
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            graph.calls.removeAll()
+            var retainedIDSurvived = false
+            if deliverOnIntermediateAncestor {
+                if duringRead {
+                    var delivered = false
+                    graph.afterRead = { element, attribute in
+                        guard !delivered, element == "destination", attribute == kAXValueAttribute else { return }
+                        delivered = true
+                        monitor.notify(kAXValueChangedNotification as String, element: graph.element("group"))
+                    }
+                    let current = target.snapshot(targetID: before.targetID)
+                    XCTAssertEqual(current, before)
+                    retainedIDSurvived = current?.targetID == before.targetID
+                    XCTAssertTrue(delivered)
+                } else {
+                    monitor.notify(kAXValueChangedNotification as String, element: graph.element("group"))
+                    let current = target.snapshot(targetID: before.targetID)
+                    XCTAssertEqual(current, before)
+                    retainedIDSurvived = current?.targetID == before.targetID
+                }
+            } else {
+                let current = target.snapshot(targetID: before.targetID)
+                XCTAssertEqual(current, before)
+                retainedIDSurvived = current?.targetID == before.targetID
+            }
+            XCTAssertTrue(graph.writes.isEmpty)
+            return (graph.calls.map { "\($0.element):\($0.operation)" }, retainedIDSurvived)
+        }
+
+        for useWebArea in [false, true] {
+            let baseline = try readTrace(useWebArea: useWebArea,
+                deliverOnIntermediateAncestor: false, duringRead: false)
+            for duringRead in [false, true] {
+                let observed = try readTrace(useWebArea: useWebArea,
+                    deliverOnIntermediateAncestor: true, duringRead: duringRead)
+                XCTAssertEqual(observed.0, baseline.0, "Lifecycle classification must not add AX reads")
+                XCTAssertTrue(observed.1)
+            }
+        }
+    }
+
+    func testValueChangeOnWindowOrWebDocumentRootStillRetiresFocusedField() throws {
+        for useWebArea in [false, true] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            if useWebArea {
+                _ = graph.addNode("web-area")
+                graph.set("web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+                graph.set("web-area", kAXParentAttribute, graph.element("window"))
+                graph.set("web-area", kAXDocumentAttribute, "https://example.test/" as NSString)
+                graph.set("group", kAXParentAttribute, graph.element("web-area"))
+            }
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            monitor.notify(kAXValueChangedNotification as String,
+                           element: graph.element(useWebArea ? "web-area" : "window"))
+            XCTAssertNil(target.snapshot(targetID: before.targetID))
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testFocusedFieldValueChangeDuringSnapshotStillRetiresAuthority() throws {
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let before = try XCTUnwrap(target.snapshot())
+        var delivered = false
+        graph.afterRead = { element, attribute in
+            guard !delivered, element == "destination", attribute == kAXValueAttribute else { return }
+            delivered = true
+            graph.set("destination", kAXValueAttribute, "changed" as NSString)
+            monitor.notify(kAXValueChangedNotification as String, element: graph.element("destination"))
+        }
+        XCTAssertNil(target.snapshot(targetID: before.targetID))
+        XCTAssertTrue(delivered)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testIntermediateValueEventCannotAuthorizeChangedFieldOrUsedLabel() throws {
+        for change in ["value", "selection"] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            if change == "value" { graph.set("destination", kAXValueAttribute, "changed" as NSString) }
+            else { graph.setSelection("destination", NSRange(location: 0, length: 0)) }
+            monitor.notify(kAXValueChangedNotification as String, element: graph.element("group"))
+            _ = target.snapshot(targetID: before.targetID)
+            XCTAssertThrowsError(try target.replaceSelectedText("unsafe", expected: before)) {
+                XCTAssertEqual($0 as? ComputerUseTextEditError, .preconditionChanged)
+            }
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+        do {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.set("destination", kAXTitleAttribute, nil)
+            graph.set("destination", kAXTitleUIElementAttribute, graph.element("group"))
+            graph.set("group", kAXRoleAttribute, kAXStaticTextRole as NSString)
+            graph.set("group", kAXValueAttribute, "Recipient" as NSString)
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            monitor.notify(kAXValueChangedNotification as String, element: graph.element("group"))
+            XCTAssertNil(target.snapshot(targetID: before.targetID), "A used label remains identity-bearing even when it is an ancestor")
+            XCTAssertThrowsError(try target.replaceSelectedText("unsafe", expected: before)) {
+                XCTAssertEqual($0 as? ComputerUseTextEditError, .preconditionChanged)
+            }
+            XCTAssertTrue(graph.writes.isEmpty)
         }
     }
 

@@ -1160,6 +1160,7 @@ final class ComputerUseHostTools {
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         textEditor: ComputerUseTextEditor? = nil,
         nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
+        nativeTextTargetDiagnosticObserver: (@MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void)? = nil,
         browserNavigationTask: ComputerUseBrowserNavigationTask? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
@@ -1206,7 +1207,8 @@ final class ComputerUseHostTools {
         self.approvalTargetProvider = approvalTargetProvider
         self.actionPerformer = actionPerformer
         self.textEditorOverride = textEditor
-        self.textTarget = nativeTextTarget ?? ComputerUseAccessibilityTextTarget()
+        self.textTarget = nativeTextTarget ?? ComputerUseAccessibilityTextTarget(
+            diagnosticObserver: nativeTextTargetDiagnosticObserver)
         self.usesDefaultNativeTextTarget = nativeTextTarget == nil
         self.browserNavigationTask = browserNavigationTask
         self.approvedActionStepDidPost = approvedActionStepDidPost
@@ -4760,6 +4762,7 @@ final class HostComputerUseManager: ObservableObject {
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
         nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
+        nativeTextTargetDiagnosticObserver: (@MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void)? = nil,
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
         channelFactory: @escaping @MainActor (String) -> any HostComputerUseChannel = {
@@ -4781,6 +4784,7 @@ final class HostComputerUseManager: ObservableObject {
             approvalTargetProvider: approvalTargetProvider,
             actionPerformer: actionPerformer,
             nativeTextTarget: nativeTextTarget,
+            nativeTextTargetDiagnosticObserver: nativeTextTargetDiagnosticObserver,
             browserNavigationTask: browserNavigationFactory?(mayAct),
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,

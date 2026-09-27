@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run real Gmail live13 on the focused-page coverage repair; retain native-first routing and unchanged models/prompts. Do not equate component passes with Gmail acceptance.",
+  "next": "Run the bounded live15 manager-path check. Treat it as a check of current behavior, not proof that the ancestor-only event caused live14. Preserve scope, destruction, root/window/document/label, used-label and lifecycle-coverage guards. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1214,7 +1214,66 @@
     "red": "native-page-focused-coverage-red01: 0 passed / 2 failed / 0 skipped, 3 intended assertions; build 0 errors / 10 warnings; 24 stable sources; no runtime warnings.",
     "green": "native-page-focused-coverage-green01: 21 passed / 0 failed / 0 skipped; build 0 errors / 2 warnings; 55 stable sources; no issues or runtime warnings.",
     "review": "Independent Luna review found no blocker; preserves browser chrome, nil focus, secure/hidden nodes, nested documents, and existing control authority.",
-    "acceptance": "Component-tested only; real Gmail live13 prepared, not executed at this checkpoint. Does not establish live12 cause.",
+    "acceptance": "Component-tested only (21/21). Live13 failed during typing/revalidation before reaching the branch that would assess whether focused-page coverage prevents duplicate drafts. Does not establish live12 cause.",
     "open": "An unrelated control omitted after the 32-control cap may still leave truncated=false; separate reporting bug, not fixed here."
+  },
+  "live13": {
+    "run": "client-manager-gmail-draft-live13",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "One captured native-control response proposed Compose. URL typing was rejected, Return and address-bar clicks/typing followed, then recipient typing was rejected. Fara proposed an unidentified click at (1059,478); host requested approval and the harness accepted none. The client remained at approvalRequired, with no file handoff, picker, attachment, upload or terminal.",
+    "revalidation": "Pair 1 URL type had unchanged screen/frame but focus and editable authority mismatches. Pair 2 recipient type had the same frame but focus/editable authority and screen mismatches. This run does not isolate why those bindings changed.",
+    "cleanup": "CUA confirmed one owned Gmail draft with empty To, subject and body and no attachment, discarded it, verified no Compose panes remained, closed owned Safari window 7F89F750-99FE-4F49-BF77-D94DB8523280, and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+    "coverageRepair": "Run used the focused-page coverage build (21 focused tests pass), but failed during typing/revalidation before assessing whether omitted focused-page branches would cause duplicate Compose actions. No live effectiveness claim.",
+    "acceptance": "No file picker or upload; Gmail model-driven draft/attachment E2E remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live13-attachments/manifest.json",
+      "route": "client-manager-gmail-draft-live13-attachments/5DB8A3F0-6BE2-4359-92AD-3AFB6F6E920A.txt",
+      "outcome": "client-manager-gmail-draft-live13-attachments/2CA44F9E-1826-45BF-8BF4-6DAE272DEED9.txt",
+      "faraRequest": "client-manager-gmail-draft-live13-attachments/027E144F-F7F8-448B-812A-78C95C1CD5D5.json",
+      "faraResponse": "client-manager-gmail-draft-live13-attachments/63068419-4956-4A0B-A08A-EFC2396F3FA7.json",
+      "nativeRequest": "client-manager-gmail-draft-live13-attachments/D90B4319-0D28-4CA5-A4AE-D35DBDD4651D.json",
+      "nativeResponse": "client-manager-gmail-draft-live13-attachments/6E07F709-F1E5-498D-B680-49846B32C44D.json",
+      "revalidationPairs": [
+        "client-manager-gmail-draft-live13-attachments/0B2B5B98-966B-4643-815F-ED4838637DA4.json",
+        "client-manager-gmail-draft-live13-attachments/74608440-A208-40C1-BC93-C19E81AC341D.json"
+      ]
+    }
+  },
+  "nativeTextLifecycleDiagnosticGreen03": {
+    "run": "native-text-lifecycle-diagnostic-green03",
+    "result": "24 passed / 0 failed / 0 skipped; no test issues/runtime warnings; 0 build errors / 44 warnings; 55 source hashes stable.",
+    "method": "Focused native lifecycle diagnostic/regression suite; includes a value-free passive diagnostic test. No Gmail model proposal or live workflow acceptance.",
+    "artifact": ".build/repair-verification/native-text-lifecycle-diagnostic-green03-{summary,build,source-audit}.json",
+    "priorAttempts": "GREEN01 and GREEN02 were compile-only failures (Swift diagnostic failure in the Gmail test initializer; then ambiguous fixture append/generic inference). Zero tests ran in either."
+  },
+  "live14": {
+    "run": "client-manager-gmail-draft-live14",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 55 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "One Compose proposal. The client later requested approval for an unidentified click at (1014,518); the bounded harness accepted none. No file handoff, picker, attachment, upload or successful terminal.",
+    "lifecycle": "Diagnostic 4394364F-62AD-472B-A969-D1931D276959.json retained 7 events with 0 drops. URL target IDs retired after AXTitleChanged events referencing window/document-root/ancestor. The recipient target was created at 91.920 s, retired at 106.087 s after AXValueChanged whose matched reference was only an ancestor, then recreated at 106.104 s. Pair 2 showed screenMatches=true but focusMatches/editableAuthorityMatches=false with the same frame; there were two pairs total. Fara’s final proposal intended a Subject click at [1014,518], but the physical item was unidentified and approval was not accepted. This is evidence for a narrowly scoped fixture, not proof that the event caused prior failures.",
+    "cleanup": "CUA confirmed To, subject and body empty with no attachment, discarded the draft, verified no Compose panes remained, closed only owned Safari window 07BA9B38-3051-4A15-AC34-18DED2497B76 and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
+    "acceptance": "No attachment or upload; Gmail model-driven workflow remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live14-attachments/manifest.json",
+      "diagnostic": "client-manager-gmail-draft-live14-attachments/4394364F-62AD-472B-A969-D1931D276959.json",
+      "route": "client-manager-gmail-draft-live14-attachments/FF91AE8A-5B1E-4528-913B-E54A2A11EDBE.txt",
+      "revalidationPairs": [
+        "client-manager-gmail-draft-live14-attachments/06F1484D-5B54-4B19-863C-E30A1B1896EB.json",
+        "client-manager-gmail-draft-live14-attachments/CA65B66A-EBF6-4C35-891E-CDC5C7145A12.json"
+      ],
+      "outcome": "client-manager-gmail-draft-live14-attachments/03AF2F0A-AD27-436B-B37A-EC54E122D94E.txt"
+    },
+    "revalidation": "Pair 1 URL type had unchanged screen/frame but focus and editable authority mismatches. Pair 2 recipient-intended click at normalized [640,428] had focus and target-pixel mismatch. The final Subject-intended click at [1014,518] was separately identified as an unidentified item and paused for approval."
+  },
+  "nativeIntermediateValueRed01": {
+    "run": "native-intermediate-value-red01",
+    "result": "2 passed / 1 failed / 0 skipped; 5 assertion issues; 0 build errors / 8 warnings; 55 source hashes stable; no runtime warnings.",
+    "finding": "The positive test testIntermediateAncestorValueChangeDoesNotRetireUnchangedFocusedField failed because the focused text snapshot became nil after an intermediate ancestor-only AXValueChanged event. Two hard-boundary negative tests passed. This is RED evidence only; no GREEN or live acceptance yet.",
+    "artifacts": ".build/repair-verification/native-intermediate-value-red01-{summary,build,source-audit}.json and .build/repair-verification/native-intermediate-value-green01-{summary,build,source-audit}.json",
+    "greenRun": "native-intermediate-value-green01",
+    "green": "28 passed / 0 failed / 0 skipped; no test issues/runtime warnings; 0 build errors / 31 warnings; 55 source hashes stable.",
+    "behavior": "Intermediate ancestor-only AXValueChanged events that do not supply label/document identity no longer retire the unchanged focused-field snapshot. Existing hard-boundary behavior remains covered.",
+    "coverage": "Includes a positive web-content case, target value/selection mutation checks, and a negative used-label case; two hard-boundary negative cases already passed RED01.",
+    "acceptance": "Component implemented, compiled and tested only. Live15 is prepared but not executed; live14 causality remains unproven and Gmail workflow is not accepted."
   }
 }

@@ -2580,6 +2580,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var clientFailureReason: String?
         var receivedApprovalDiagnostics: [String] = []
         var lastClientExecutorResult: String?
+        var nativeTextTargetDiagnostics: [ComputerUseAccessibilityTextTarget.DiagnosticEvent] = []
+        var droppedNativeTextTargetDiagnostics = 0
         var seenManagerApprovals = Set<String>()
         if clientEntry {
             guard let productionMCPExecutor else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
@@ -2592,6 +2594,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
             let pending = CompositionPendingStore()
             let observer = DriveClientExecutorObserver(productionMCPExecutor)
+            let textTargetDiagnosticObserver: (@MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void)?
+            if gmailDraft {
+                textTargetDiagnosticObserver = { event in
+                    if nativeTextTargetDiagnostics.count < 256 { nativeTextTargetDiagnostics.append(event) }
+                    else { droppedNativeTextTargetDiagnostics += 1 }
+                }
+            } else {
+                textTargetDiagnosticObserver = nil
+            }
             observer.willBeginVisualEffect = { action in
                 switch managerApprovalStage {
                 case "picker": pickerOpeningEffects += 1
@@ -2602,6 +2613,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }
             let manager = HostComputerUseManager(injector: InputInjector(), executor: observer,
                 taskLedger: .init(fileURL: directory.appendingPathComponent("client-manager-ledger.json")),
+                nativeTextTargetDiagnosticObserver: textTargetDiagnosticObserver,
                 channelFactory: { _ in mailbox })
             let client = ClientModel(hostName: "Remote Desktop Host", pairingCode: pairingCode,
                 hostID: hostID, sessionID: sessionID, pendingStore: pending, channel: bridge,
@@ -3030,6 +3042,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             summary.name = "Client and HostComputerUseManager envelope route"
             summary.lifetime = .keepAlways
             add(summary)
+        }
+        if gmailDraft {
+            struct DiagnosticArchive: Encodable {
+                let events: [ComputerUseAccessibilityTextTarget.DiagnosticEvent]
+                let dropped: Int
+            }
+            let archive = DiagnosticArchive(events: nativeTextTargetDiagnostics,
+                                            dropped: droppedNativeTextTargetDiagnostics)
+            let attachment = XCTAttachment(data: try JSONEncoder().encode(archive), uniformTypeIdentifier: "public.json")
+            attachment.name = "Gmail native text target lifecycle diagnostics"
+            attachment.lifetime = .keepAlways
+            add(attachment)
         }
         let activeBrowserExecutor = productionBrowserExecutor ?? directExecutor
         XCTAssertTrue(selectedBeforeUpload, "No exact selected-file handoff. Result=\(String(describing: result)); error=\(String(describing: failure)); sessionFailure=\(activeBrowserExecutor.lastSessionFailureForDiagnostics); nativeCalls=\(nativeCalls); nativeControlCalls=\(nativeControlCalls); proposals=\(proposals); actionErrors=\(actionErrors); diagnostic=\(activeBrowserExecutor.lastActionDiagnosticForTests)")

@@ -129,6 +129,17 @@ protocol ComputerUseNativeTextTarget: AnyObject {
 /// launch, window, and the nearest exposed document identity.
 @MainActor
 final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
+    struct DiagnosticEvent: Codable, Sendable {
+        let elapsedMilliseconds: Int64
+        let instanceID: String
+        let targetID: String
+        let kind: String
+        let reason: String
+        let eventKind: String?
+        let notification: String?
+        let matchedReferences: [String]
+    }
+
     struct Application {
         let identity: String
         let root: AXUIElement
@@ -218,6 +229,9 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         }
     }
     private let access: Access
+    private let diagnosticObserver: (@MainActor (DiagnosticEvent) -> Void)?
+    private let diagnosticInstanceID = UUID().uuidString
+    private let diagnosticStartUptime = ProcessInfo.processInfo.systemUptime
     private var bindings: [Binding] = []
     private var observedApplication: String?
     private var observedRoot: AXUIElement?
@@ -227,7 +241,11 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     private var lifecycleUnavailable = false
     private var snapshotLifecycleCapture: SnapshotLifecycleCapture?
 
-    init(access: Access? = nil) { self.access = access ?? .live }
+    init(access: Access? = nil,
+         diagnosticObserver: (@MainActor (DiagnosticEvent) -> Void)? = nil) {
+        self.access = access ?? .live
+        self.diagnosticObserver = diagnosticObserver
+    }
     deinit { lifecycle?.cancel() }
 
     func snapshot() -> ComputerUseTextSnapshot? {
@@ -317,15 +335,26 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         let application = app.identity
         synchronizeLifecycle()
         var valid = false
+        var failureReason = "invalidRead"
         defer {
             // Once this exact object was observed as invalid, a later return
             // to its old visible state must receive new authority.
-            if !valid { bindings.removeAll { CFEqual($0.element, element) } }
+            if !valid {
+                let removed = bindings.filter { CFEqual($0.element, element) }
+                bindings.removeAll { CFEqual($0.element, element) }
+                for binding in removed {
+                    emitDiagnostic(binding, kind: "bindingRetired", reason: failureReason)
+                }
+            }
+        }
+        func beforeDeadline() -> Bool {
+            guard ContinuousClock.now < deadline else { failureReason = "deadline"; return false }
+            return true
         }
         // Apply the timeout before the first query on every new AX reference.
         setTimeout(element, 0.15)
         guard let role = stringAttribute(kAXRoleAttribute, on: element) else { return nil }
-        guard ContinuousClock.now < deadline else { return nil }
+        guard beforeDeadline() else { return nil }
         let subrole = stringAttribute(kAXSubroleAttribute, on: element) ?? ""
         let secure = subrole == kAXSecureTextFieldSubrole as String
             || boolAttribute("AXProtectedContent", on: element) == true
@@ -358,7 +387,7 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         var ancestors: [AXUIElement] = []
         var ancestor: AXUIElement? = element
         for _ in 0 ..< 32 {
-            guard ContinuousClock.now < deadline else { return nil }
+            guard beforeDeadline() else { return nil }
             guard let current = ancestor else { break }
             guard !ancestors.contains(where: { CFEqual($0, current) }) else { return nil }
             ancestors.append(current)
@@ -373,21 +402,22 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                     else if let url = documentValue as? URL { documentParts.append(url.absoluteString) }
                 }
             }
-            guard ContinuousClock.now < deadline else { return nil }
+            guard beforeDeadline() else { return nil }
             if CFEqual(current, window) { reachedWindow = true; break }
             ancestor = elementAttribute(kAXParentAttribute, on: current)
         }
         // A detached element may still answer AXValue. Readability, matching
         // pixels, and an unchanged URL do not prove current document membership.
-        guard reachedWindow, ContinuousClock.now < deadline else { return nil }
+        guard reachedWindow, beforeDeadline() else { return nil }
         let document = documentParts.map { "\($0.utf8.count):\($0)" }.joined()
         let label = labelFor(element)
         let identifier = stringAttribute("AXIdentifier", on: element) ?? ""
         guard label.text.utf8.count <= 256, identifier.utf8.count <= 1_024 else { return nil }
         synchronizeLifecycle()
-        guard ContinuousClock.now < deadline,
+        guard beforeDeadline(),
               !snapshotEventsInvalidate(capture, app: app, window: window, element: element,
-                                        ancestors: ancestors, labelElement: label.element),
+                                        documentRoot: documentRoot, ancestors: ancestors,
+                                        labelElement: label.element),
               isUsable(element), isUsable(window),
               ancestors.allSatisfy({ isUsable($0) }), label.element.map({ isUsable($0) }) != false else { return nil }
         let shape = Shape(role: role, subrole: subrole, identifier: identifier, label: label, ancestors: ancestors)
@@ -399,15 +429,20 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         })
         if binding == nil {
             // Old references cannot be revived by matching a label/position.
+            let replaced = bindings.filter { CFEqual($0.element, element) }
             bindings.removeAll { CFEqual($0.element, element) }
+            for old in replaced {
+                emitDiagnostic(old, kind: "bindingRetired", reason: "contextOrShapeChanged")
+            }
             guard bindings.count < 64 else { return nil }
             binding = Binding(id: UUID().uuidString, application: application,
                               element: element, window: window, document: document,
                               documentRoot: documentRoot,
                               isWebContent: isWebContent, shape: shape)
             bindings.append(binding!)
+            emitDiagnostic(binding!, kind: "bindingCreated", reason: "observed")
         }
-        guard let binding, ContinuousClock.now < deadline else { return nil }
+        guard let binding, beforeDeadline() else { return nil }
         valid = true
         return ComputerUseTextSnapshot(
             targetID: binding.id, value: value,
@@ -425,14 +460,24 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     private func snapshotEventsInvalidate(_ capture: SnapshotLifecycleCapture, app: Application,
                                           window: AXUIElement, element: AXUIElement,
-                                          ancestors: [AXUIElement], labelElement: AXUIElement?) -> Bool {
+                                          documentRoot: AXUIElement, ancestors: [AXUIElement],
+                                          labelElement: AXUIElement?) -> Bool {
         guard !capture.overflowed else { return true }
         let observedReferences = [app.root, window, element] + ancestors + (labelElement.map { [$0] } ?? [])
         return capture.events.contains { event in
             switch event.kind {
             case .scopeChanged, .coverageLost:
                 return true
-            case .created, .elementChanged, .valueChanged, .destroyed:
+            case .valueChanged:
+                guard let source = event.element else { return true }
+                if CFEqual(source, app.root) || CFEqual(source, window) || CFEqual(source, documentRoot)
+                    || CFEqual(source, element) || labelElement.map({ CFEqual($0, source) }) == true {
+                    return true
+                }
+                // Intermediate wrapper values are not part of field identity;
+                // the field's own value and selection are freshly checked.
+                return false
+            case .created, .elementChanged, .destroyed:
                 guard let source = event.element else { return true }
                 return observedReferences.contains { CFEqual($0, source) }
             }
@@ -565,6 +610,10 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         // mutation using an old target ID must never recover that authority.
         if app?.identity.utf8.elementsEqual(observedApplication?.utf8 ?? "".utf8) != true
             || (allowFreshScope && lifecycleUnavailable) {
+            for binding in bindings {
+                emitDiagnostic(binding, kind: "bindingRetired", reason: "applicationScopeChanged",
+                               matchedReferences: ["appRoot"])
+            }
             lifecycle?.cancel(); lifecycle = nil
             bindings.removeAll(); destroyedElements.removeAll()
             lifecycleUnavailable = false; lifecycleRevision = UUID()
@@ -583,53 +632,89 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         guard let lifecycle else { return }
         let drained = lifecycle.drain()
         snapshotLifecycleCapture?.append(drained)
-        for event in drained {
-            if event.kind == .created, let element = event.element,
-               observedRoot.map({ CFEqual($0, element) }) != true,
-               !bindings.contains(where: { $0.mentions(element) }) {
-                // A newly created, unrelated object cannot repurpose a retained
-                // reference. Do not interrupt a read in progress either. Focus,
-                // modal scope and destruction events still retire authority;
-                // fresh object/ancestry/value/selection checks remain mandatory.
-                // Compare locally: this handle may already have been destroyed.
-                continue
+        for event in drained { processLifecycleEvent(event) }
+    }
+
+    private func processLifecycleEvent(_ event: ComputerUseAXLifecycleEvent) {
+        if event.kind == .created, let element = event.element,
+           observedRoot.map({ CFEqual($0, element) }) != true,
+           !bindings.contains(where: { $0.mentions(element) }) {
+            // A newly created, unrelated object cannot repurpose a retained
+            // reference. Compare locally: this handle may already be destroyed.
+            return
+        }
+        lifecycleRevision = UUID()
+        let before = diagnosticObserver == nil ? [] : bindings
+        var reason = String(describing: event.kind)
+        switch event.kind {
+        case .coverageLost:
+            lifecycleUnavailable = true; bindings.removeAll(); reason = "coverageLost"
+        case .scopeChanged:
+            bindings.removeAll(); reason = "scopeChanged"
+        case .created:
+            guard let element = event.element else { bindings.removeAll(); reason = "createdWithoutSource"; break }
+            if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
+            else { bindings.removeAll { $0.mentions(element) } }
+        case .elementChanged:
+            guard let element = event.element else { return }
+            if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
+            else { bindings.removeAll { $0.mentions(element) } }
+        case .valueChanged:
+            // Field text is rechecked; labels and page/document identity stay
+            // sensitive, while intermediate wrappers are not field metadata.
+            guard let element = event.element else { return }
+            if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
+            else {
+                bindings.removeAll { binding in
+                    let isUsedLabel = binding.shape.label.element.map { CFEqual($0, element) } == true
+                    let isField = CFEqual(binding.element, element)
+                    let isPageOrDocument = CFEqual(binding.window, element) || CFEqual(binding.documentRoot, element)
+                    return isUsedLabel || (!isField && isPageOrDocument)
+                }
             }
-            lifecycleRevision = UUID()
-            switch event.kind {
-            case .coverageLost:
+        case .destroyed:
+            guard let element = event.element else { return }
+            bindings.removeAll { $0.mentions(element) }
+            if !destroyedElements.contains(where: { CFEqual($0, element) }) {
+                if destroyedElements.count < 1_024 { destroyedElements.append(element) }
+                else { lifecycleUnavailable = true; bindings.removeAll(); reason = "destroyedOverflow" }
+            }
+            if observedRoot.map({ CFEqual($0, element) }) == true {
                 lifecycleUnavailable = true; bindings.removeAll()
-            case .scopeChanged:
-                bindings.removeAll()
-            case .created:
-                guard let element = event.element else { bindings.removeAll(); continue }
-                if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
-                else { bindings.removeAll { $0.mentions(element) } }
-            case .elementChanged:
-                guard let element = event.element else { continue }
-                if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
-                else { bindings.removeAll { $0.mentions(element) } }
-            case .valueChanged:
-                // Field value/selection edits do not repurpose a control.
-                // Label and enclosing-context values can change its meaning.
-                guard let element = event.element else { continue }
-                if observedRoot.map({ CFEqual($0, element) }) == true { bindings.removeAll() }
-                else {
-                    bindings.removeAll { binding in
-                        binding.shape.label.element.map { CFEqual($0, element) } == true
-                            || (!CFEqual(binding.element, element) && binding.mentions(element))
-                    }
-                }
-            case .destroyed:
-                guard let element = event.element else { continue }
-                bindings.removeAll { $0.mentions(element) }
-                if !destroyedElements.contains(where: { CFEqual($0, element) }) {
-                    guard destroyedElements.count < 1_024 else {
-                        lifecycleUnavailable = true; bindings.removeAll(); continue
-                    }
-                    destroyedElements.append(element)
-                }
-                if observedRoot.map({ CFEqual($0, element) }) == true { lifecycleUnavailable = true; bindings.removeAll() }
             }
         }
+        guard diagnosticObserver != nil else { return }
+        for binding in before where !bindings.contains(where: { $0.id == binding.id }) {
+            emitDiagnostic(binding, kind: "bindingRetired", reason: reason, event: event,
+                matchedReferences: diagnosticMatches(binding, event: event))
+        }
+    }
+
+    private func diagnosticMatches(_ binding: Binding, event: ComputerUseAXLifecycleEvent) -> [String] {
+        switch event.kind {
+        case .scopeChanged: return ["scope"]
+        case .coverageLost: return ["coverage"]
+        case .created, .elementChanged, .valueChanged, .destroyed: break
+        }
+        guard let source = event.element else { return ["unknownSource"] }
+        var matches: [String] = []
+        if observedRoot.map({ CFEqual($0, source) }) == true { matches.append("appRoot") }
+        if CFEqual(binding.window, source) { matches.append("window") }
+        if CFEqual(binding.element, source) { matches.append("field") }
+        if CFEqual(binding.documentRoot, source) { matches.append("documentRoot") }
+        if binding.shape.ancestors.contains(where: { CFEqual($0, source) }) { matches.append("ancestor") }
+        if binding.shape.label.element.map({ CFEqual($0, source) }) == true { matches.append("label") }
+        return matches
+    }
+
+    private func emitDiagnostic(_ binding: Binding, kind: String, reason: String,
+                                event: ComputerUseAXLifecycleEvent? = nil,
+                                matchedReferences: [String] = []) {
+        guard let diagnosticObserver else { return }
+        diagnosticObserver(DiagnosticEvent(
+            elapsedMilliseconds: Int64(max(0, (ProcessInfo.processInfo.systemUptime - diagnosticStartUptime) * 1_000)),
+            instanceID: diagnosticInstanceID, targetID: binding.id, kind: kind, reason: reason,
+            eventKind: event.map { String(describing: $0.kind) }, notification: event?.notification,
+            matchedReferences: matchedReferences))
     }
 }
