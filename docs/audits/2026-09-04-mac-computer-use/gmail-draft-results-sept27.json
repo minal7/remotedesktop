@@ -5,7 +5,7 @@
   "stages": {
     "implemented": true,
     "compiled": true,
-    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in a direct probe and real Gmail runs; focused-control and native-control history RED/GREEN checks pass; live10 reached Gmail and Compose but failed before recipient input, then paused for approval on an unidentified click; a separate no-input probe reproduced focused recipient target retirement without explaining live10",
+    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in a direct probe and real Gmail runs; focused-control and native-control history RED/GREEN checks pass; live10/live11 model-driven Gmail attempts failed before recipient completion; commit 1ed89b0 adds component-tested post-action settling; a separate scripted typing probe successfully entered and independently read back the exact recipient without revalidation rejects",
     "accepted": "Host delegation component and scoped browser route only. Gmail draft/attachment end-to-end remains failed."
   },
   "checks": [
@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Correlate no-input recipient target retirement with live10's focus/edit-authority mismatch before changing production behavior. Keep approval and typing guards intact; add a focused regression before another Gmail run.",
+  "next": "Run an effect-free Fara replay of the captured live11 request with general known-unsent typing-recovery guidance. The scripted recipient-entry probe does not explain live11; no production prompt change has been made.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1076,5 +1076,41 @@
     "attachment": ".build/repair-verification/gmail-compose-recipient-stability-live01-attachments/4D7FE9B8-AAFA-4ACA-8035-3F35E807155A.json",
     "cleanup": "CUA confirmed the diagnostic Compose fields were empty, discarded the draft, and verified no Compose panes remain; the same Gmail window is retained.",
     "limits": "No production fix, typing result, attachment or draft-workflow acceptance. Does not prove the same event caused live10's rejected typing. No geometry frame was sampled."
+  },
+  "nativeEditorSettle": {
+    "commit": "1ed89b0",
+    "redRun": "native-editor-settle-red01",
+    "red": "0 passed / 1 failed / 0 skipped; 2 assertion issues; build 0 errors / 9 warnings; 54 stable source hashes.",
+    "greenRun": "native-editor-settle-green01",
+    "green": "10 passed / 0 failed / 0 skipped; 0 issues/runtime warnings; build 0 errors / 52 warnings; 54 stable source hashes.",
+    "behavior": "After an action changes the native focused-editor stability token, the executor polls every 250 ms for 1.25 seconds of stable token (3-second cap), checking current task/app/surface throughout. It never replays the action; existing approval and pre-effect guards remain unchanged.",
+    "limits": "Component behavior only. Live11 still rejected recipient typing, so the active Gmail path has not validated this as a live fix."
+  },
+  "live11": {
+    "run": "client-manager-gmail-draft-live11",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "Reached Gmail, typed the URL and submitted Return; one native Compose proposal followed. The recipient typeText was rejected before input. The subsequent Fara click at (1059,473) targeted an unidentified item, so the host requested approval because it was not the observed Attach files control or exact picker action; the bounded harness accepted none. No file handoff, recipient/subject/body entry, picker effect, attachment, upload or successful terminal.",
+    "revalidation": "The recipient pair reported focusMatches=false, editableAuthorityMatches=false and screenMatches=false, while the text frame stayed (1106,458,495,36); both visible values and selections were empty. This differs from live10's matching screen digest and does not isolate the cause.",
+    "nativeControl": "One Compose proposal. Typed observed-control history remains captured; no file selection was reached.",
+    "cleanup": "CUA confirmed all draft fields empty with no attachment, discarded the draft, and verified no Compose panes remain. The same owned Gmail window D75C839E-20C0-4E62-9334-1DF52631B4D8 is retained for the next no-inference diagnostic. The previous live10/probe window had been closed and original Drive restored before this run.",
+    "attachments": {
+      "route": "client-manager-gmail-draft-live11-attachments/32ECC74A-90AA-4D68-BB73-2EAB70586D4A.txt",
+      "outcome": "client-manager-gmail-draft-live11-attachments/E1054C60-3065-4D2D-8E88-23B9789C5389.txt",
+      "recipientRevalidationPair": "client-manager-gmail-draft-live11-attachments/D3404BD6-251E-4E4D-B886-5D4B13560112.json",
+      "faraRequest": "client-manager-gmail-draft-live11-attachments/33FD3CE8-D8A6-4133-B7D5-ECBDC8F271EB.json",
+      "faraResponse": "client-manager-gmail-draft-live11-attachments/8BB6877F-3F5F-46DA-9826-38F5308CF97E.json",
+      "nativeRequest": "client-manager-gmail-draft-live11-attachments/098288A9-4F16-40C1-9E3E-D5AA48C31C21.json",
+      "nativeResponse": "client-manager-gmail-draft-live11-attachments/43BFA655-4673-4533-9A75-CA0651CAD62E.json"
+    },
+    "acceptance": "Gmail draft/attachment E2E remains unaccepted."
+  },
+  "scriptedRecipientTypingLive01": {
+    "run": "gmail-scripted-recipient-typing-live01",
+    "result": "1 diagnostic passed / 0 failed / 0 skipped; build 0 errors / 8 warnings; 55 stable source hashes; one known main-thread responsiveness runtime warning.",
+    "behavior": "Over 23.035 seconds, three scripted proposals included one successful recipient type dispatch after a 13-second no-inference delay. Revalidation reject count was zero. The final native focused-text snapshot was unavailable because focus had moved to an AXStaticText autocomplete suggestion; typingValueMatchesExpected=false is therefore not an independent input failure.",
+    "independentReadback": "CUA independently read the To recipients combo box and confirmed the exact intended account address. Subject and body remained empty, with no attachment. This validates only the scripted recipient text-entry slice, not model-driven Gmail behavior or the attachment workflow.",
+    "cleanup": "CUA discarded the recipient-only draft, verified no Compose pane remains, and retained the same Gmail window D75C839E-20C0-4E62-9334-1DF52631B4D8.",
+    "attachment": ".build/repair-verification/gmail-scripted-recipient-typing-live01-attachments/C6F988A9-B778-47CF-B642-16A24F85FFED.json",
+    "limits": "No subject/body entry, file selection, attachment, send, task completion, or production prompt change. Does not establish the cause of live11's typing rejection."
   }
 }

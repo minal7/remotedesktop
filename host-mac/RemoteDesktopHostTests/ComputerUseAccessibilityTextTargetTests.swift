@@ -281,6 +281,153 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 15.0)
     }
 
+    func testOptInGmailScriptedRecipientTypingAfterPlanningDelay() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_GMAIL_SCRIPTED_RECIPIENT_TYPING_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_SCRIPTED_RECIPIENT_TYPING_PROBE=1 to open one empty Gmail compose, wait through a planning interval, and type without sending.")
+        }
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication, safari.bundleIdentifier == "com.apple.Safari",
+              safari.isFinishedLaunching,
+              let mailURL = URL(string: "https://mail.google.com/"),
+              workspace.urlForApplication(toOpen: mailURL)?.standardizedFileURL.path == safari.bundleURL?.standardizedFileURL.path,
+              let application = ComputerUseApplicationIdentity(runningApplication: safari) else {
+            throw XCTSkip("Default Safari must already be frontmost on Gmail; this probe never opens or navigates a window.")
+        }
+        let appRoot = AXUIElementCreateApplication(safari.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(appRoot, 0.1)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute, of: appRoot),
+              let initialFocus = Self.axElement(kAXFocusedUIElementAttribute, of: appRoot),
+              let initialContext = Self.focusedAXContext(initialFocus, window: window),
+              initialContext.isMailWebArea,
+              let windowBounds = Self.axFrame(window) else {
+            throw XCTSkip("The retained Safari window is not a readable Gmail page.")
+        }
+
+        var recorder: AXProbeLifecycleRecorder?
+        var access = ComputerUseAccessibilityTextTarget.Access.live
+        let lifecycleFactory = access.makeLifecycleMonitor
+        access.makeLifecycleMonitor = { app in
+            let monitor = lifecycleFactory?(app) ?? ComputerUseAXLifecycleMonitor(application: app.root)
+            let wrapper = AXProbeLifecycleRecorder(monitor, focused: initialFocus, window: window,
+                appRoot: appRoot, ancestors: initialContext.ancestors)
+            recorder = wrapper
+            return wrapper
+        }
+        let target = ComputerUseAccessibilityTextTarget(access: access)
+        _ = target.snapshot()
+        guard let lifecycle = recorder else { throw XCTSkip("The forwarding AX lifecycle observer was unavailable.") }
+        defer { lifecycle.cancel() }
+
+        let reader = ComputerUseDefaultBrowserPageReader()
+        guard let page = try reader.read(window: window, application: application, mayAct: { true }),
+              let pageURL = URL(string: page.url), pageURL.scheme == "https", pageURL.host == "mail.google.com",
+              !page.renderedAXText.localizedCaseInsensitiveContains("Compose:") else {
+            throw XCTSkip("Gmail must be on its main page with no existing compose pane.")
+        }
+        let composeButtons = page.controls.filter {
+            $0.role == "AXButton" && $0.enabled == true
+                && $0.label.trimmingCharacters(in: .whitespacesAndNewlines).localizedCaseInsensitiveCompare("Compose") == .orderedSame
+        }
+        guard composeButtons.count == 1, let compose = composeButtons.first,
+              let center = try reader.validatedControlCenter(observation: page, controlID: compose.id,
+                  window: window, windowBounds: windowBounds, mayAct: { true }) else {
+            throw XCTSkip("No unique fresh enabled Compose control was available; no action was sent.")
+        }
+
+        var proposals = 0
+        var proposalTimes: [TimeInterval] = []
+        var planningDelayCompletedAt: TimeInterval?
+        var executionResult = "not started"
+        var typedDispatches = 0
+        var revalidationDiagnostics: [[String: String]] = []
+        let journalDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gmail-scripted-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journalDirectory, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journalDirectory) }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { !Task.isCancelled },
+            nativeTextTarget: target)
+        let executor = try ComputerUseDesktopExecutor(
+            journalDirectory: journalDirectory,
+            propose: { input in
+                proposals += 1
+                proposalTimes.append(Date().timeIntervalSince(started))
+                lifecycle.beginSample(proposals)
+                switch proposals {
+                case 1:
+                    guard let bounds = input.desktopDisplayBounds, bounds.width > 0, bounds.height > 0 else {
+                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    }
+                    let point = ComputerUseFaraAction.Point(
+                        x: (Double(center.x - bounds.minX) / Double(bounds.width)) * 1000,
+                        y: (Double(center.y - bounds.minY) / Double(bounds.height)) * 1000)
+                    return .init(response: "Open the compose form.", action: .pointer(.leftClick, point))
+                case 2:
+                    if let focus = Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot),
+                       let context = Self.focusedAXContext(focus, window: window) {
+                        lifecycle.updateContext(focused: focus, window: window, appRoot: appRoot,
+                            ancestors: context.ancestors)
+                    }
+                    try await Task.sleep(for: .seconds(13)) // Model-planning delay, with no UI or keyboard input.
+                    planningDelayCompletedAt = Date().timeIntervalSince(started)
+                    lifecycle.beginSample(2_001)
+                    return .init(response: "Enter the recipient.", action: .typeText("spiderali97@gmail.com"))
+                default:
+                    return .init(response: "Stop before sending.", decision: .handoff("Recipient typing probe finished; no email was sent."))
+                }
+            }, surfaceScopeCheck: { _ in
+                try Task.checkCancellation()
+                guard workspace.frontmostApplication?.processIdentifier == safari.processIdentifier,
+                      let activeWindow = Self.axElement(kAXFocusedWindowAttribute, of: appRoot), CFEqual(activeWindow, window),
+                      let activeFocus = Self.axElement(kAXFocusedUIElementAttribute, of: appRoot),
+                      let activeContext = Self.focusedAXContext(activeFocus, window: window), activeContext.isMailWebArea else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                lifecycle.updateContext(focused: activeFocus, window: window, appRoot: appRoot,
+                    ancestors: activeContext.ancestors)
+            }, revalidationFailureObserver: { _, _, _, diagnostics in
+                revalidationDiagnostics.append(diagnostics.merging(["elapsedSeconds": String(Date().timeIntervalSince(started))]) { _, new in new })
+            }, onSuccessfulDispatch: { action in
+                if case .typeText = action { typedDispatches += 1 }
+            })
+        do {
+            let result = try await executor.execute(taskID: "gmail-scripted-recipient-\(UUID().uuidString)",
+                prompt: "Open the Gmail compose form and enter a recipient. Do not send.",
+                trustedUserPrompt: "Open the Gmail compose form and enter a recipient. Do not send.",
+                tools: tools, progress: { _ in })
+            executionResult = String(describing: result)
+        } catch {
+            executionResult = "error: \(error.localizedDescription)"
+        }
+        let recipientSnapshot = target.snapshot()
+        let currentFocus = Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot)
+        let postActionSnapshot = target.snapshot()
+        let events = lifecycle.takeCapturedEvents()
+        let report: [String: Any] = [
+            "probe": "scripted Gmail compose and delayed recipient typing; no send action",
+            "composeControlWasValidated": true, "proposalCount": proposals,
+            "proposalTimesSeconds": proposalTimes, "planningDelayCompletedAtSeconds": planningDelayCompletedAt as Any? ?? NSNull(),
+            "executionResult": executionResult,
+            "typedDispatchCount": typedDispatches,
+            "typingSnapshotAvailable": recipientSnapshot != nil,
+            "typingValueByteCount": recipientSnapshot?.value.utf8.count as Any? ?? NSNull(),
+            "typingValueMatchesExpected": recipientSnapshot?.value == "spiderali97@gmail.com",
+            "typingTargetMatchesPostActionSnapshot": recipientSnapshot.map { $0.targetID == postActionSnapshot?.targetID } as Any? ?? NSNull(),
+            "focusedRoleAfterAction": currentFocus.flatMap { Self.axString(kAXRoleAttribute as String, of: $0) } as Any? ?? NSNull(),
+            "lifecycleEventSummaries": events, "revalidationDiagnosticCount": revalidationDiagnostics.count,
+            "revalidationDiagnostics": revalidationDiagnostics, "elapsedSeconds": Date().timeIntervalSince(started)
+        ]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "gmail-scripted-recipient-typing.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 35)
+        XCTAssertLessThanOrEqual(proposals, 3)
+        XCTAssertLessThanOrEqual(typedDispatches, 1)
+    }
+
     private struct FocusedAXContext {
         let element: AXUIElement
         let ancestors: [AXUIElement]
