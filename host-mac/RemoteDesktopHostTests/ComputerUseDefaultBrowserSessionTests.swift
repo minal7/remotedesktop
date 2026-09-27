@@ -209,6 +209,133 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testFileChoiceContinuationBindsVisualApprovalToAnswerTaskAndKeepsOriginalGoal() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let goal = "Upload the last presentation in Downloads to Google Drive and verify completion"
+        let originatingTaskID = "file-choice-origin-task"
+        let answerTaskID = "file-choice-answer-task"
+        let downloads = fixture.root.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        for (index, name) in ["Alpha deck.pptx", "Beta deck.pptx"].enumerated() {
+            try Data([UInt8(index + 1)]).write(to: downloads.appendingPathComponent(name))
+        }
+        let tiedModifiedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        for name in ["Alpha deck.pptx", "Beta deck.pptx"] {
+            try FileManager.default.setAttributes([.modificationDate: tiedModifiedAt],
+                ofItemAtPath: downloads.appendingPathComponent(name).path)
+        }
+        var dispatchedActions: [ComputerUsePredictedAction] = []
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in
+                .init(context: "AXButton • Upload • OKButton", applicationID: fixture.app.bundleIdentifier,
+                    accessibilityIdentity: "window:\(fixture.desktop.focusedID ?? "none")")
+            }, actionPerformer: { action in
+                dispatchedActions.append(action)
+                fixture.desktop.fileOpenPanel = nil
+            },
+            screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            frontmostApplicationIdentityProvider: { fixture.app },
+            frontmostApplicationProvider: { fixture.app.bundleIdentifier })
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: originatingTaskID, goal: goal, tools: fixture.tools)
+        let selectedURL = downloads.appendingPathComponent("Beta deck.pptx")
+        let primaryBounds = CGRect(x: 320, y: 300, width: 90, height: 32)
+        fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: "new",
+            bounds: CGRect(x: 160, y: 100, width: 600, height: 400), focused: true,
+            selectedFileURLs: [selectedURL], primaryActionBounds: primaryBounds, primaryActionEnabled: true)
+        var visualInputs: [ComputerUseFaraModel.Input] = []
+        var catalogCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualInputs.append(input)
+                XCTAssertEqual(input.goal, goal, "The original trusted task remains the visual planner's goal")
+                return .init(response: "Press Return on the selected native file.", action: .key(["Return"]))
+            }, nativeFilePlanner: { input in
+                XCTAssertEqual(input.goal, goal, "The native selector also retains the original task")
+                guard let files = input.localFileCatalog else { return nil }
+                if files.inventoryState == .notQueried {
+                    catalogCalls += 1
+                    return .init(kind: .localFileOperation, reference: "", text: "List presentation files",
+                        localFileOperation: .listFiles(query: .init(fileKind: .presentation,
+                            sort: .init(field: .modifiedAt, direction: .descending)), cursor: nil))
+                }
+                guard files.selectedCandidate == nil else { return nil }
+                let ids = files.page.candidates.map(\.id)
+                guard ids.count == 2 else { return nil }
+                return .init(kind: .localFileOperation, reference: "", text: "Which presentation?",
+                    localFileOperation: .askFile(question: "Which presentation?", candidateIDs: ids))
+            }, localFileCatalogFactory: { taskID in
+                catalogCalls += 1
+                return try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: downloads, pageSize: 8)
+            })
+
+        let initial = try await executor.execute(taskID: originatingTaskID, prompt: goal, trustedUserPrompt: goal,
+            tools: tools, progress: { _ in })
+        guard case .clarificationRequired = initial else { return XCTFail("Expected a real tied-choice continuation") }
+        let pending = try XCTUnwrap(executor.clarification(taskID: originatingTaskID))
+        let choice = try XCTUnwrap(pending.choices?.first(where: { $0.label == "Beta deck.pptx" }))
+        let foreignChoice = try RemoteDesktopHost.ComputerUseClarificationChoice(id: "foreign-candidate", label: "Foreign deck.pptx")
+        do {
+            _ = try await executor.continueClarification(taskID: answerTaskID, originatingTaskID: "foreign-origin",
+                goal: pending.goal, selectedChoice: choice, progress: { _ in })
+            XCTFail("A foreign origin must not consume the retained file choice")
+        } catch {}
+        do {
+            _ = try await executor.continueClarification(taskID: answerTaskID, originatingTaskID: originatingTaskID,
+                goal: pending.goal, selectedChoice: foreignChoice, progress: { _ in })
+            XCTFail("A choice that was not offered must not consume the retained file choice")
+        } catch {}
+        let resumed = try await executor.continueClarification(taskID: answerTaskID,
+            originatingTaskID: originatingTaskID, goal: pending.goal, selectedChoice: choice, progress: { _ in })
+
+        guard case .approvalRequired(_, let action, let continuation) = resumed else {
+            return XCTFail("The accepted choice should continue to the normal native approval boundary; got \(resumed)")
+        }
+        XCTAssertEqual(action, .key(usage: 0x28, modifiers: 0))
+        XCTAssertEqual(continuation.taskID, answerTaskID,
+            "HostManager validates visual approval against the active answer-task envelope")
+        XCTAssertNotEqual(continuation.taskID, originatingTaskID)
+        XCTAssertEqual(visualInputs.map(\.goal), [goal])
+        XCTAssertEqual(catalogCalls, 2)
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Only initial browser setup occurred; approval has not dispatched")
+
+        let firstFingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        let forgedRootContinuation = ComputerUseVisualApprovalContinuation(taskID: originatingTaskID,
+            nonce: continuation.nonce, browserPageEvidence: continuation.browserPageEvidence,
+            nativeBrowserTarget: continuation.nativeBrowserTarget)
+        do {
+            try await executor.performApprovedVisualAction(forgedRootContinuation, action: action,
+                fingerprint: firstFingerprint, tools: tools, willBeginEffect: {})
+            XCTFail("The original task ID cannot forge approval for the answer task")
+        } catch {}
+        XCTAssertTrue(dispatchedActions.isEmpty, "A forged task binding cannot dispatch the approved action")
+        try await executor.performApprovedVisualAction(continuation, action: action, fingerprint: firstFingerprint,
+            tools: tools, willBeginEffect: {})
+        let afterFirstApproval = try await executor.continueAfterApprovedVisualAction(continuation, action: action,
+            tools: tools, progress: { _ in })
+        guard case .approvalRequired(_, let nextAction, let nextContinuation) = afterFirstApproval else {
+            return XCTFail("The post-action proposal should retain the answer task's normal approval boundary; got \(afterFirstApproval)")
+        }
+        XCTAssertEqual(nextAction, .key(usage: 0x28, modifiers: 0))
+        XCTAssertEqual(nextContinuation.taskID, answerTaskID,
+            "Later approval tokens must remain bound to the answer task across DesktopExecutor's continuation")
+        XCTAssertEqual(visualInputs.map(\.goal), [goal, goal])
+
+        do {
+            try await executor.performApprovedVisualAction(continuation, action: action,
+                fingerprint: firstFingerprint, tools: tools, willBeginEffect: {})
+            XCTFail("A consumed approval token cannot authorize a later proposal")
+        } catch {}
+        XCTAssertEqual(dispatchedActions, [action], "The second proposal is not dispatched before its approval")
+    }
+
     func testWindowCreationWaitsForTransientAXLossOrAmbiguityWithoutRepeatingInput() async throws {
         for failure in [ComputerUseDefaultBrowserSession.Failure.targetLost, .ambiguousWindows] {
             let fixture = try Fixture()

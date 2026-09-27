@@ -50,6 +50,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws -> ComputerUseExecutionResult?
     /// Called only after native input returned and its dispatch journal was verified.
     typealias SuccessfulDispatchHandler = @MainActor @Sendable (ComputerUsePredictedAction) -> Void
+    /// Optional active envelope identity for host-managed clarifications.
+    /// The durable desktop session and trusted goal remain rooted at taskID.
+    typealias ApprovalTaskIDProvider = @MainActor @Sendable () -> String?
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -96,6 +99,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let revalidationFailureObserver: RevalidationFailureObserver?
     private let localFileOperationHandler: LocalFileOperationHandler?
     private let onSuccessfulDispatch: SuccessfulDispatchHandler
+    private let approvalTaskIDProvider: ApprovalTaskIDProvider?
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
@@ -116,12 +120,14 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileOperationHandler: LocalFileOperationHandler? = nil,
          onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
+         approvalTaskIDProvider: ApprovalTaskIDProvider? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
         self.revalidationFailureObserver = revalidationFailureObserver
         self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
         self.onSuccessfulDispatch = onSuccessfulDispatch
+        self.approvalTaskIDProvider = approvalTaskIDProvider
     }
 
     private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
@@ -429,7 +435,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     }
                     if let reason = tools.approvalReason(for: action) {
                         try checkScopedSurface(action)
-                        let pending = Approval(taskID: taskID, proposal: proposal, action: action,
+                        let pending = Approval(taskID: approvalTaskIDProvider?() ?? taskID, proposal: proposal, action: action,
                             observation: observation, fingerprint: fingerprint, message: reason)
                         session.approval = pending
                         return pending.result

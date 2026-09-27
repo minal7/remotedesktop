@@ -561,7 +561,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
-            onSuccessfulDispatch: { scope.successfulDispatch($0) }, finishRun: {
+            onSuccessfulDispatch: { scope.successfulDispatch($0) },
+            approvalTaskIDProvider: { scope.executionTaskID }, finishRun: {
                 // Desktop finishRun also runs when it returns an approval
                 // continuation. Keep explicit task advice for that bounded
                 // continuation; prepare, picker priority, and cancellation
