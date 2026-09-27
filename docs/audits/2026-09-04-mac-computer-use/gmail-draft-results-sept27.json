@@ -5,8 +5,8 @@
   "stages": {
     "implemented": true,
     "compiled": true,
-    "tested": "13 focused component tests; real Gmail workflow attempted twice",
-    "accepted": "Host delegation repair at component level; Gmail attachment E2E remains failed"
+    "tested": "13 focused host-clarification checks pass; routing failure reproduced then browser route observed in one direct probe and real Gmail run; 2 planner control cases remain failed",
+    "accepted": "Host delegation component and scoped browser route only. Gmail draft/attachment end-to-end remains failed."
   },
   "checks": [
     {
@@ -147,6 +147,105 @@
       ],
       "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live02-sources",
       "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live02.xcresult"
+    },
+    {
+      "name": "self-recipient-route-red01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 8,
+      "runtimeWarnings": [],
+      "allIssueCount": 1,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailAttachmentRoutesToBrowserWithoutInventingArguments"
+      ],
+      "sourceSnapshot": ".build/repair-verification/self-recipient-route-red01-sources",
+      "resultBundle": ".build/repair-verification/self-recipient-route-red01.xcresult"
+    },
+    {
+      "name": "self-recipient-route-green01",
+      "result": "Failed",
+      "passed": 3,
+      "failed": 2,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 21,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailAttachmentRoutesToBrowserWithoutInventingArguments",
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailRouteControlUsesMailForExplicitDraft",
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailRouteControlClarifiesVagueEmailRequest",
+        "MCPFirstComputerUseExecutorTests/testSendProposalUsesReliableMailMCPAndWaitsForApproval",
+        "RemoteDesktopMailMCPTests/testPoolDoesNotRunMailBeforeExactApprovalAndRunsOnceAfter"
+      ],
+      "sourceSnapshot": ".build/repair-verification/self-recipient-route-green01-sources",
+      "resultBundle": ".build/repair-verification/self-recipient-route-green01.xcresult"
+    },
+    {
+      "name": "self-recipient-control-baseline01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 2,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 21,
+      "runtimeWarnings": [],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailRouteControlUsesMailForExplicitDraft",
+        "AppleFoundationMCPPlannerTests/testOptInSelfRecipientGmailRouteControlClarifiesVagueEmailRequest"
+      ],
+      "sourceSnapshot": ".build/repair-verification/self-recipient-control-baseline01-sources",
+      "resultBundle": ".build/repair-verification/self-recipient-control-baseline01.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live03",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 21,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 56,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live03-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live03.xcresult"
     }
   ],
   "live01": {
@@ -168,6 +267,24 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Clarify capability descriptions and grounded-argument requirements in planner instructions; validate same goal with one no-effects route probe plus native Mail and underspecified-goal controls before another real run. No intent regex exception or hardcoded account address.",
-  "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification."
+  "next": "TDD for omitted focused control: when bounded accessibility capture omits current focused form UI, use existing fresh screenshot fallback. Keep capture limits and scope protections. Then rerun same real Gmail workflow; clarify fixture body punctuation before asserting exact body text.",
+  "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
+  "capabilityDescriptionRepair": {
+    "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
+    "directPlanner": "RED proposed native Mail for the exact failed user goal. Candidate chose browser_tools. Direct probe contains the exact user text but not the production planning wrapper.",
+    "controls": "Candidate and pre-candidate native-Mail controls both dropped the final body period. Vague email: baseline invented recipient/body and proposed Mail; candidate asks for details but incorrectly prefixes TASK_COMPLETE. These failures remain open, not accepted.",
+    "testNameCaution": "self-recipient-route-green01 is a run identifier, not an all-green result: 3 passed / 2 failed.",
+    "guardReview": "Production refuses unproven TASK_COMPLETE with no host-projected read result; closest existing tests cover plain-prose hallucination and consequential completion after a read, not this exact zero-result sentinel case."
+  },
+  "live03": {
+    "result": "Failed at shared 420-second task deadline, surfaced as stepLimit; cleanup-inclusive XCTest elapsed 430.624 seconds",
+    "browserFactoryCalls": 1,
+    "admittedUploadEffects": 0,
+    "behavior": "Opened Gmail in retained default Safari window. Captured 20 native-control exchanges selected Compose repeatedly; snapshots were truncated at 32 controls and eventually contained only generic inbox headings. The native planner did not receive a screenshot or the focused composer control. The last captured Fara proposal was the initial Return for Gmail navigation.",
+    "independentUI": "After all test/model processes exited, CUA confirmed three exposed blank Compose containers and focused To recipients AXComboBox in the same Safari window. No recipient, subject, body or attachment was populated. Draft count remained 23. One blank test draft was discarded, then only the owned Gmail window was closed, restoring original Drive window.",
+    "ownedWindowID": "E8BBDBF1-9280-4B68-8266-89FA1088A2A4",
+    "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live03-attachments",
+    "limits": "Capture archive caps at 20 native exchanges; not a claim that only 20 attempts occurred. No screenshot/upload/completion acceptance."
+  }
 }

@@ -14,8 +14,9 @@ enum RemoteDesktopMailMCP {
     static let toolName = "remote_desktop_mail"
 
     static let reviewedDescription = """
-    Create a visible email draft in Apple Mail, or send it after explicit user approval. \
-    Recipients are comma, semicolon, or newline separated. Set send_now to false to open \
+    Create a visible plain-text email draft in Apple Mail, or send it after explicit user approval. \
+    This tool works only with Apple Mail; it cannot access webmail, discover the account's email address, \
+    or attach files. Recipients are comma, semicolon, or newline separated. Set send_now to false to open \
     a draft for review, or true only when the user explicitly asked to send now. Mail uses \
     the user's default sending account; this tool does not silently select another account.
     """

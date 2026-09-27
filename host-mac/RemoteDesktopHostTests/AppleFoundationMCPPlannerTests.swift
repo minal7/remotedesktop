@@ -4026,10 +4026,48 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
 
     @available(macOS 26.0, *)
     func testOptInMailAttachmentGoalUsesBrowserOrRequestsClarificationWithoutExecuting() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_MAIL_ATTACHMENT_ROUTE_PROBE"] == "1" else {
-            throw XCTSkip("Set RUN_MAIL_ATTACHMENT_ROUTE_PROBE=1 to invoke the installed Apple planner without executing its proposal.")
-        }
+        try await runOptInMailPlannerProbe(
+            flag: "RUN_MAIL_ATTACHMENT_ROUTE_PROBE",
+            prompt: "In Gmail at https://mail.google.com/ using the default signed-in account, create an email draft to demo@example.invalid with subject Attachment workflow test and body Please review the attached spec. Attach the spec Excel spreadsheet from Downloads. Save as a draft; do not send.",
+            expectation: .browserOrClarification)
+    }
 
+    @available(macOS 26.0, *)
+    func testOptInSelfRecipientGmailAttachmentRoutesToBrowserWithoutInventingArguments() async throws {
+        try await runOptInMailPlannerProbe(
+            flag: "RUN_SELF_RECIPIENT_GMAIL_ROUTE_PROBE",
+            prompt: "Using the default signed-in Gmail account at https://mail.google.com/, create a draft email to my own email address for that account with subject Remote Desktop attachment draft 5DABAE68-FD72-4788-8724-4B73D4E356EF and body Please review the attached spreadsheet.. Attach the spreadsheet named Remote Desktop E2E Spec 8C9577E5-028B-405B-9B56-2D0CD39149D5.xlsx from Downloads, leave the draft open for review, and do not send it.",
+            expectation: .browser)
+    }
+
+    @available(macOS 26.0, *)
+    func testOptInSelfRecipientGmailRouteControlUsesMailForExplicitDraft() async throws {
+        try await runOptInMailPlannerProbe(
+            flag: "RUN_SELF_RECIPIENT_GMAIL_ROUTE_PROBE",
+            prompt: "In Apple Mail, create a draft email to demo@example.invalid with subject Plain draft control and body Hello from the test. Do not send it.",
+            expectation: .mailDraft)
+    }
+
+    @available(macOS 26.0, *)
+    func testOptInSelfRecipientGmailRouteControlClarifiesVagueEmailRequest() async throws {
+        try await runOptInMailPlannerProbe(
+            flag: "RUN_SELF_RECIPIENT_GMAIL_ROUTE_PROBE",
+            prompt: "Send an email.",
+            expectation: .clarification)
+    }
+
+    private enum LiveMailPlannerExpectation {
+        case browser
+        case browserOrClarification
+        case mailDraft
+        case clarification
+    }
+
+    private func runOptInMailPlannerProbe(flag: String, prompt: String,
+                                          expectation: LiveMailPlannerExpectation) async throws {
+        guard ProcessInfo.processInfo.environment[flag] == "1" else {
+            throw XCTSkip("Set \(flag)=1 to invoke the installed Apple planner without executing its proposal.")
+        }
         let planner = AppleFoundationMCPPlanner()
         guard planner.availability() == .available else {
             throw XCTSkip("The installed Apple Foundation Model is unavailable: \(planner.availability())")
@@ -4044,62 +4082,78 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             MCPClientSession(validatedBinary: binary, processGeneration: generation,
                 stateDirectory: directory.appendingPathComponent("helper-state", isDirectory: true))
         })
-
         let taskID = "live-mail-attachment-route-\(UUID().uuidString)"
-        let prompt = "In Gmail at https://mail.google.com/ using the default signed-in account, create an email draft to demo@example.invalid with subject Attachment workflow test and body Please review the attached spec. Attach the spec Excel spreadsheet from Downloads. Save as a draft; do not send."
         var requestAttachment = Data()
         var responseDescription = ""
-        var acceptedRoute = false
+        var browserTools = false
+        var clarification: String?
+        var call: MCPToolCall?
         do {
             try await pool.start(binaryURL: URL(fileURLWithPath: helperPath))
             let tools = try await pool.allowedTools().filter {
                 MCPFirstComputerUseExecutor.structuredToolNames.contains($0.toolName)
             }
-            let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt,
-                tools: tools, allowsBrowserWorkflow: true)
             let encodedTools = try JSONEncoder().encode(tools)
-            let toolJSON = try XCTUnwrap(String(data: encodedTools, encoding: .utf8))
             requestAttachment = try JSONSerialization.data(withJSONObject: [
-                "task_id": taskID,
-                "prompt": prompt,
-                "allows_browser_workflow": true,
-                "tools": try XCTUnwrap(JSONSerialization.jsonObject(with: Data(toolJSON.utf8))),
+                "task_id": taskID, "prompt": prompt, "allows_browser_workflow": true,
+                "tools": try XCTUnwrap(JSONSerialization.jsonObject(with: encodedTools)),
             ], options: [.sortedKeys, .prettyPrinted])
-            let result = try await planner.propose(request)
+            let result = try await planner.propose(MCPProposalPlanningRequest(
+                taskID: taskID, prompt: prompt, tools: tools, allowsBrowserWorkflow: true))
             switch result {
             case .browserTools:
-                acceptedRoute = true
+                browserTools = true
                 responseDescription = #"{"kind":"browser_tools"}"#
             case .message(let message):
-                let boundedMessage = String(message.prefix(2_048))
-                let clarification = boundedMessage.hasPrefix("CLARIFICATION_REQUIRED:")
-                    ? boundedMessage.dropFirst("CLARIFICATION_REQUIRED:".count).trimmingCharacters(in: .whitespacesAndNewlines)
-                    : ""
-                acceptedRoute = !clarification.isEmpty || boundedMessage == "VISUAL_FALLBACK_REQUIRED"
+                let bounded = String(message.prefix(2_048))
+                let prefix = "CLARIFICATION_REQUIRED:"
+                clarification = bounded.hasPrefix(prefix)
+                    ? String(bounded.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    : nil
                 responseDescription = try String(data: JSONSerialization.data(withJSONObject: [
-                    "kind": "message", "text": boundedMessage,
+                    "kind": "message", "text": bounded,
                 ], options: [.sortedKeys, .prettyPrinted]), encoding: .utf8) ?? "message"
-            case .proposedCall(let call):
+            case .proposedCall(let proposed):
+                call = proposed
                 responseDescription = try String(data: JSONSerialization.data(withJSONObject: [
-                    "kind": "proposed_call", "task_id": call.taskID,
-                    "server_id": call.serverID, "tool_name": call.toolName,
-                    "risk": String(describing: call.risk),
-                    "argument_keys": call.arguments.keys.sorted(),
+                    "kind": "proposed_call", "task_id": proposed.taskID,
+                    "server_id": proposed.serverID, "tool_name": proposed.toolName,
+                    "risk": String(describing: proposed.risk),
+                    "argument_keys": proposed.arguments.keys.sorted(),
                 ], options: [.sortedKeys, .prettyPrinted]), encoding: .utf8) ?? "proposed_call"
             }
             await pool.cancelAll()
         } catch {
-            if responseDescription.isEmpty {
-                responseDescription = "error: \(String(reflecting: error).prefix(2_048))"
-            }
+            responseDescription = "error: \(String(reflecting: error).prefix(2_048))"
             await pool.cancelAll()
             attachMailRouteProbe(request: requestAttachment, response: responseDescription)
             throw error
         }
-
         attachMailRouteProbe(request: requestAttachment, response: responseDescription)
-        XCTAssertTrue(acceptedRoute,
-            "Expected browser workflow, clarification, or explicit visual fallback. No proposal was executed; diagnostic: \(responseDescription)")
+
+        switch expectation {
+        case .browser:
+            XCTAssertTrue(browserTools, "Expected browser routing for signed-in account discovery and attachment support: \(responseDescription)")
+        case .browserOrClarification:
+            XCTAssertTrue(browserTools || clarification?.isEmpty == false || responseDescription.contains("VISUAL_FALLBACK_REQUIRED"),
+                "Expected browser routing, clarification, or explicit visual fallback; no proposal was executed: \(responseDescription)")
+        case .mailDraft:
+            let expected = try XCTUnwrap(call, "Expected a typed Mail draft proposal: \(responseDescription)")
+            XCTAssertEqual(expected.serverID, RemoteDesktopMailMCP.serverID)
+            XCTAssertEqual(expected.toolName, RemoteDesktopMailMCP.toolName)
+            XCTAssertEqual(expected.arguments["to"], .string("demo@example.invalid"))
+            XCTAssertEqual(expected.arguments["subject"], .string("Plain draft control"))
+            XCTAssertEqual(expected.arguments["body"], .string("Hello from the test."))
+            XCTAssertEqual(expected.arguments["send_now"], .bool(false))
+            for field in ["cc", "bcc"] {
+                XCTAssertTrue(expected.arguments[field] == nil || expected.arguments[field] == .string(""),
+                    "The planner must not invent additional recipients.")
+            }
+            XCTAssertTrue(Set(expected.arguments.keys).isSubset(of: ["to", "cc", "bcc", "subject", "body", "send_now"]))
+        case .clarification:
+            XCTAssertTrue(clarification?.isEmpty == false, "Expected a nonempty clarification without proposing a tool: \(responseDescription)")
+            XCTAssertNil(call, "A vague request must not produce a tool proposal.")
+        }
     }
 
     private func attachMailRouteProbe(request: Data, response: String) {

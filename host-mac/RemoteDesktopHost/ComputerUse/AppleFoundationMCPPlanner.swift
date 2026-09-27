@@ -5473,7 +5473,7 @@ private extension AppleFoundationMCPPlanner {
         }
 
         let browserInstructions = browserToolName.map { name in
-            "Use the provided \(name) tool for browser navigation, web searches, native page reading and following links. It selects the host's retained browser workflow for the complete original user goal. It takes no arguments and does not itself open a page or activate a computer-use model. The workflow uses Mac tools first and does not require a visual-model package to start. Browser access is an available host capability, never missing user information. Select that tool when browser navigation is the next needed step."
+            "Use the provided \(name) tool for browser navigation, web searches, native page reading, following links, filling forms and uploading local files through a site's chooser. It selects the host's retained browser workflow for the complete original user goal, can observe the signed-in web account when the page exposes it, and can hand off for sign-in. It takes no arguments and does not itself open a page or activate a computer-use model. The workflow uses Mac tools first and does not require a visual-model package to start. Browser access is an available host capability, never missing user information. Select that tool when browser interaction is the next needed step."
         } ?? "Only the provided Mac tools are available in this planning call."
         let instructions = """
         You plan the next step for a local Mac assistant. Everything remains on this Mac.
@@ -5482,8 +5482,9 @@ private extension AppleFoundationMCPPlanner {
         Never claim a proposed tool ran or succeeded. The host validates policy and asks for approval separately.
         Use the provided Mac tools first, including accessible website content or controls when a provided tool supports the needed step.
         Choose the next step within the complete user goal. Preserve specified destinations, source requirements, dates and stop conditions. A tool that can advance this step need not complete the entire task at once.
+        Ground every proposed argument in the user request or observed tool results. Never invent placeholder values, recipient addresses or account details. Observe available page or Mac evidence to resolve required values; if a required value cannot be established, ask one focused question. Do not silently substitute a different application or destination for the one the user specified.
         \(browserInstructions)
-        If required information is missing or ambiguous, respond exactly as CLARIFICATION_REQUIRED: followed by one short question, without calling a tool.
+        Ask only for information or choices the user must supply, not facts available through observation. When such input is missing or ambiguous, respond exactly as CLARIFICATION_REQUIRED: followed by one short question, without calling a tool.
         Only after a local read-only tool result proves the informational request is complete, respond exactly as TASK_COMPLETE: followed by the short result.
         Never use TASK_COMPLETE to claim a consequential action occurred; sends, creates, Shortcut runs, orders, purchases, payments, submissions, and similar changes complete only from the approved tool result.
         For a non-browser step that the provided tools cannot perform, respond exactly: VISUAL_FALLBACK_REQUIRED
@@ -6382,7 +6383,7 @@ struct FoundationBrowserRouteTool: Tool {
     let name: String
     let parameterSchema: GenerationSchema
     let capture: FoundationMCPProposalCapture
-    let description = "Use the host browser to carry out the complete original user request: open URLs, search the web, read native page records and follow links. Mac tools run before any computer-use model. This only proposes a route; no page or model is opened here."
+    let description = "Use the host browser to carry out the complete original user request: open URLs, search the web, read native page records, follow links, fill forms and upload local files through a site's chooser. It can observe a signed-in web account when the page exposes it and hand off for sign-in. Mac tools run before any computer-use model. This only proposes a route; no page or model is opened here."
     var parameters: GenerationSchema { parameterSchema }
     var includesSchemaInInstructions: Bool { true }
     static let inputSchema: MCPJSONValue = .object(["type": .string("object"), "properties": .object([:]),
