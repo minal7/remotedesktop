@@ -2130,6 +2130,22 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(proposals, 1)
         XCTAssertEqual(effects, 1)
         XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+        let settleDiagnostic = executor.lastRevalidationDiagnostic
+        XCTAssertEqual(settleDiagnostic["blockedAt"], "editor-settle-timeout")
+        let allowedDiagnosticKeys: Set<String> = ["blockedAt", "sampleCount", "tokenChangeCount",
+            "nilSampleCount", "elapsedMs", "quietMs"]
+        XCTAssertEqual(Set(settleDiagnostic.keys), allowedDiagnosticKeys)
+        let sampleCount = try XCTUnwrap(Int(settleDiagnostic["sampleCount"] ?? ""))
+        let changeCount = try XCTUnwrap(Int(settleDiagnostic["tokenChangeCount"] ?? ""))
+        let nilCount = try XCTUnwrap(Int(settleDiagnostic["nilSampleCount"] ?? ""))
+        let elapsed = try XCTUnwrap(Int(settleDiagnostic["elapsedMs"] ?? ""))
+        let quiet = try XCTUnwrap(Int(settleDiagnostic["quietMs"] ?? ""))
+        XCTAssertGreaterThan(sampleCount, 1)
+        XCTAssertGreaterThan(changeCount, 0)
+        XCTAssertEqual(nilCount, 0, "This scenario churns between valid nonnil target tokens")
+        XCTAssertTrue((2_500...3_500).contains(elapsed))
+        XCTAssertTrue((0...1_250).contains(quiet))
+        XCTAssertFalse(settleDiagnostic.values.contains(where: { $0.contains("churn") || $0.contains("focused") }))
 
         churn?.cancel()
         churn = nil

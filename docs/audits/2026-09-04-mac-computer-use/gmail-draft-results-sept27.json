@@ -780,8 +780,8 @@
     "missingRequirement": "Requested Gmail destination and spreadsheet attachment",
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
-  "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Evaluate a bounded startup-settle regression before another live Gmail run. No title/pixel authority changes or model prompt changes are established; do not infer that settling resolves AXTitleChanged invalidation. The recipient approval gate and page-context ordering were not exercised in live18. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded test approvals now cover the observed Gmail Attach files click, exact selected-file picker confirmation, and one freshly verified recipient-autocomplete Return; the exact recipient, subject, body and attachment oracle remains required. The autocomplete exception is test-only; production Return policy is unchanged, and Send is never allowed. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
+  "next": "Diagnose the scoped quiet/focus stop after Compose before another live Gmail run. Do not infer that initial settling or page-context ordering fixes the observed stop. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1373,5 +1373,43 @@
         "client-manager-gmail-draft-live18-attachments/4A29C401-D011-43E7-87C1-7E58B0D4D6F9.json"
       ]
     }
+  },
+  "nativeInitialEditorSettle": {
+    "redRun": "native-initial-editor-red01",
+    "red": "0 passed / 1 failed; 4 expected assertions (old A/value empty; proposal before 1.8 s); 0 build errors / 9 warnings; 55 stable sources.",
+    "greenRun": "native-initial-editor-green01",
+    "green": "13 passed / 0 skipped / 0 issues/runtime warnings; 0 build errors / 13 warnings; 55 stable sources.",
+    "implementation": "Seven-line DesktopExecutor change: on turn 0, wait for the initial scoped observation to settle, then use the existing fresh-observation loop. No history or effects are added.",
+    "behavior": "Uses existing 250 ms polling, 1.25 s quiet interval and 3 s cap. Expected initial latency is about 1.35 s.",
+    "coverage": "Tests cover the first fresh ready observation and cancellation/scope loss before any proposal or effect; existing post-input quiet and no-replay regressions remain passing.",
+    "qualification": "Component implemented/compiled/tested only. Live18 observed a binding retirement but did not establish notification arrival time; the component’s causal relevance to that run is unproven."
+  },
+  "live19": {
+    "run": "client-manager-gmail-draft-live19",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "The client paused after native Compose with “The intended browser window changed or is unavailable. Restore it, then choose Resume.” No recipient typing proposal or recipient-approval decision, native file call, file handoff, picker, attachment, upload or terminal occurred. The recorded sessionFailure is nil and does not establish the exact cause.",
+    "lifecycle": "Diagnostic F30F5957-F4E5-4C8D-93ED-0A60D188CE20.json retained 9 events with 0 drops. Address-bar binding created at 9.397 s and retired at 9.782 s on AXTitleChanged matching window/document-root/ancestor. Later recipient-field bindings were created and retired on AXTitleChanged during the run; they do not show a typing proposal or exercise the recipient-approval gate. Do not attribute the pause to those events without direct evidence.",
+    "cleanup": "CUA observed one Compose pane with empty recipient, subject and body and no attachment; discarded it, verified zero Compose panes, closed only owned Safari window 64C86FC0-4EB5-4706-B894-454D427C6E6F and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923. No worker remained; installed host untouched.",
+    "acceptance": "No recipient or file workflow progress. Gmail model-driven workflow remains unaccepted; initial-settle causality is unproven.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live19-attachments/manifest.json",
+      "lifecycle": "client-manager-gmail-draft-live19-attachments/F30F5957-F4E5-4C8D-93ED-0A60D188CE20.json",
+      "route": "client-manager-gmail-draft-live19-attachments/EFD5E7C5-0E63-4C41-86D6-9AC3A4F8BC6F.txt",
+      "outcome": "client-manager-gmail-draft-live19-attachments/44704D78-FC12-42A1-857A-F6768DDFEB1C.txt",
+      "nativeRequest": "client-manager-gmail-draft-live19-attachments/4130947F-CF3F-42FF-B729-3B044D276D23.json",
+      "nativeResponse": "client-manager-gmail-draft-live19-attachments/A44A3235-9053-45ED-A5B6-1A7FF68706FF.json",
+      "faraRequest": "client-manager-gmail-draft-live19-attachments/5EFDD88A-76F6-450E-AB42-BCCAB6ABF97C.json",
+      "faraResponse": "client-manager-gmail-draft-live19-attachments/2019F909-78DB-4E6B-B883-A32FCC0B259E.json"
+    }
+  },
+  "nativeSettleTimeoutDiagnostic": {
+    "status": "Implementation added; compilation pending.",
+    "purpose": "Record only bounded scalar settle-timeout facts (blockedAt, sample/token/nil counts, elapsed and quiet milliseconds) when scoped editor settling reaches its cap; no user text, credentials or control labels.",
+    "test": "One focused test asserts the exact diagnostic-key allowlist and timeout shape.",
+    "files": [
+      "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift",
+      "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift"
+    ],
+    "qualification": "Diagnostic-only instrumentation; no behavioral or live-workflow acceptance."
   }
 }

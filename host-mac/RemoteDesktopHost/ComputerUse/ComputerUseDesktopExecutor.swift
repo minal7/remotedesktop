@@ -176,6 +176,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             break
         }
 
+        let settleStarted = ContinuousClock.now
         let currentToken = try tools.nativeFocusedEditorObservation()?.stabilityToken
         guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
 
@@ -185,12 +186,18 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         var lastToken = currentToken
         var quietSince = ContinuousClock.now
+        var sampleCount = 1
+        var tokenChangeCount = 0
+        var nilSampleCount = currentToken == nil ? 1 : 0
         while ContinuousClock.now < settleDeadline {
             try await Task.sleep(for: .milliseconds(250))
             guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
             let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
+            sampleCount += 1
+            if token == nil { nilSampleCount += 1 }
             guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
             if token != lastToken {
+                tokenChangeCount += 1
                 lastToken = token
                 quietSince = ContinuousClock.now
             } else if ContinuousClock.now - quietSince >= .seconds(1.25) {
@@ -200,6 +207,19 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
         // The input already returned and was recorded. Do not route a settle
         // timeout through changedScreen, whose feedback says no input was sent.
+        let timedOutAt = ContinuousClock.now
+        func milliseconds(_ duration: Duration) -> String {
+            let components = duration.components
+            return String(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
+        }
+        lastRevalidationDiagnostic = [
+            "blockedAt": "editor-settle-timeout",
+            "sampleCount": String(sampleCount),
+            "tokenChangeCount": String(tokenChangeCount),
+            "nilSampleCount": String(nilSampleCount),
+            "elapsedMs": milliseconds(settleStarted.duration(to: timedOutAt)),
+            "quietMs": milliseconds(quietSince.duration(to: timedOutAt))
+        ]
         throw Failure.scopedSurfaceChanged
     }
 
