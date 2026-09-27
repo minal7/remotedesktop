@@ -3517,6 +3517,7 @@ final class ComputerUseHostTools {
             },
             mayAct: mayAct)
         if textEditorOverride == nil {
+            editor.readEditedTarget = { [textTarget] targetID in textTarget.snapshot(targetID: targetID) }
             editor.replaceValue = { [textTarget, injector, mayAct] value, expected in
                 try injector.performHostEffectIfAllowed(ifAllowed: mayAct) {
                     try textTarget.replaceWebValue(value, expected: expected)

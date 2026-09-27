@@ -659,6 +659,107 @@
       ],
       "sourceSnapshot": ".build/repair-verification/nested-editor-caret-green01-sources",
       "resultBundle": ".build/repair-verification/nested-editor-caret-green01.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live07",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 6,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live07-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live07.xcresult"
+    },
+    {
+      "name": "retained-editor-readback-red01",
+      "result": "Failed",
+      "passed": 1,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 9,
+      "runtimeWarnings": [],
+      "allIssueCount": 2,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseTextEditorTests/testHostToolsVerifyTargetReadbackAfterSetterMovesFocus",
+        "ComputerUseTextEditorTests/testHostToolsTargetSpecificReadbackStillRejectsWrongOrReplacedTarget"
+      ],
+      "sourceSnapshot": ".build/repair-verification/retained-editor-readback-red01-sources",
+      "resultBundle": ".build/repair-verification/retained-editor-readback-red01.xcresult"
+    },
+    {
+      "name": "retained-editor-readback-green01",
+      "result": "Passed",
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 47,
+      "runtimeWarnings": [],
+      "allIssueCount": 0,
+      "sourceAudit": {
+        "sourceCount": 55,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseTextEditorTests/testSameFieldCaretValueAndProtectionChangesStopBeforeAnotherUnicodeStroke",
+        "ComputerUseTextEditorTests/testUnicodeStrokeAdmissionRejectsChangedStateAndInvalidUnitsWithoutPosting",
+        "ComputerUseTextEditorTests/testNativeAndVisualUnicodeDeliveryPreserveExactPayloadAndEditMode",
+        "ComputerUseTextEditorTests/testHostToolsVerifyTargetReadbackAfterSetterMovesFocus",
+        "ComputerUseTextEditorTests/testHostToolsTargetSpecificReadbackStillRejectsWrongOrReplacedTarget",
+        "ComputerUseTextEditorTests/testHostToolsUnicodeReadbackStopsWhenFocusMovesAfterFirstGrapheme",
+        "ComputerUseTextEditorTests/testHostToolsTextEditStillRejectsProtectionAndLostOwnership",
+        "ComputerUseTextEditorTests/testVerificationReadCannotReturnSuccessAfterDeadlineTakeoverOrCancellation",
+        "ComputerUseTextEditorTests/testUnicodeCannotAdvanceUntilThePrecedingValueAndCaretAreConfirmed",
+        "ComputerUseTextEditorTests/testContextDriftBetweenTextAdaptersStopsSelectionSettersAndLaterChunks",
+        "ComputerUseTextEditorTests/testContextReadCannotRetargetAnEditOrOutliveItsDeadline",
+        "ComputerUseTextEditorTests/testNativeFocusAndSelectionSideEffectsStopLiteralAndCopyBeforeText",
+        "ComputerUseTextEditorTests/testNativeUnicodeStopsAtChangedFocusOrRequirementAndReleasesThePendingKey",
+        "ComputerUseTextEditorTests/testNativeDispatchPreservesTargetsAcrossCopiesRepeatedEditsAndUnrelatedReads",
+        "ComputerUseTextEditorTests/testEmptyUnicodeFallbackCannotClaimInputButSupportedSetterCan",
+        "ComputerUseTextEditorTests/testSlowPreflightCannotStartMutationAfterDeadline",
+        "ComputerUseTextEditorTests/testExactWhitespaceUnicodeAndLongTextSurviveVerifiedChunks",
+        "ComputerUseTextEditorTests/testInsertReplaceAndAppendHaveDistinctVerifiedResults",
+        "ComputerUseTextEditorTests/testSameValueCanBeEnteredIntoTwoDistinctFields",
+        "ComputerUseTextEditorTests/testDroppedInputIsUncertainAndNeverReplayed",
+        "ComputerUseTextEditorTests/testAutoCorrectionDivergenceIsNotReportedAsSuccess",
+        "ComputerUseTextEditorTests/testPauseAfterFirstChunkStopsBeforeAnySecondChunk",
+        "ComputerUseTextEditorTests/testTargetReplacementDuringEditDoesNotTypeIntoNewField",
+        "ComputerUseTextEditorTests/testChangedInitialValueOrSelectionRejectsBeforeInput",
+        "ComputerUseTextEditorTests/testOversizedAndProtectedPayloadsRejectBeforeInput",
+        "ComputerUseTextEditorTests/testAXEditIsReadBackWithoutPostingUnicode",
+        "ComputerUseTextEditorTests/testFailedAXDeliveryNeverFallsBackToDuplicateUnicode",
+        "ComputerUseTextEditorTests/testHostVerifiedActionPropagatesMissingInputInsteadOfSuccess",
+        "ComputerUseTextEditorTests/testApprovalTextDigestChangesForSelectionContentAndDocument",
+        "ComputerUseTextEditorTests/testAccessibilitySetterCannotStartAfterTakeoverClosesInputGate",
+        "ComputerUseTextEditorTests/testWholeValueSetterFailureNeverFallsBackToAnotherEffect",
+        "ComputerUseTextEditorTests/testTextDeadlineStopsAfterCurrentAttemptWithoutReplayingIt",
+        "ComputerUseTextEditorTests/testPacedUnicodeTakeoverReleasesStrokeAndStartsNoFurtherKey"
+      ],
+      "sourceSnapshot": ".build/repair-verification/retained-editor-readback-green01-sources",
+      "resultBundle": ".build/repair-verification/retained-editor-readback-green01.xcresult"
     }
   ],
   "live01": {
@@ -680,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Record bounded value-free lifecycle and native snapshot transitions during the same real workflow to distinguish reference churn from true value/focus changes. Inspect the final click pixel mismatch separately; do not weaken approval or input validation.",
+  "next": "TDD: verify a completed text edit against its retained native target when autocomplete moves focus, while retaining focused pre-effect and per-grapheme guards. Then rerun real Gmail. The cause of pre-effect empty-field target-ID churn remains open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -835,5 +936,23 @@
     "testCorrection": "An older negative encoded exact frame equality by supplying a smaller fully-contained field; it now uses a genuinely noncontained field. The new regression explicitly tests the contained field contract.",
     "diagnostic": "Gmail-only test wrapper forwards live AX access unchanged and records at most 128 value-free snapshot transitions and lifecycle events. HostManager forwards an optional injected native target; production default remains unchanged. Length equality alone does not establish nonempty value equality. No extra AX queries, UI actions or model input changes.",
     "accepted": "Focused pointer component; Gmail workflow pending."
+  },
+  "live07": {
+    "result": "Client terminal unableToComplete: exact text edit could not be confirmed (deliveryUncertain). No approvals, picker or upload; harness outcome failed.",
+    "independentUI": "After workers exited, CUA showed the expanded To recipients AXComboBox contained the exact signed-in own address. Focus was on an autocomplete suggestion AXStaticText instead of the combo. Subject/body empty; no attachment. Discarded the incomplete test draft, closed only owned Gmail window, restored original Drive.",
+    "ownedWindowID": "548C674C-6C9F-408D-8E49-94849FC1BC65",
+    "originalWindowRestored": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
+    "diagnostic": "Snapshot timeline has 8 transitions, not truncated. It confirms opaque target IDs changed for an empty address bar and later empty recipient field while value length (zero), selection and flags were unchanged. Final snapshot becomes unavailable after the typed recipient. Lifecycle recorder reached its 128-row cap on startup noise, so it does not identify the causes of later ID churn.",
+    "likelyFailurePath": "HostTools text editor reads only the currently focused element for both pre-effect validation and post-effect readback. The latter cannot observe the still-present edited combo once autocomplete moves AX focus. A retained-target readback must keep all current binding/window/lifecycle checks; this is a code-based hypothesis for the observed deliveryUncertain until tested.",
+    "caretScope": "No claim that the contained-caret branch was exercised in this run; that repair has its six-test component gate.",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live07-attachments",
+    "diagnosticAttachment": "5261DBE3-B1B1-4EF1-8CBE-E90343D68489.json"
+  },
+  "retainedEditorReadbackRepair": {
+    "change": "HostTools supplies the text editor with target-ID readback for post-effect verification only. Pre-effect and per-grapheme input checks still read current focus. Missing retained target does not fall back to a different focused control. Existing app/window/document/lifecycle, exact bytes, ownership, deadline and protected-field checks remain.",
+    "red": "1 pass / 1 intended failure; both native setter variants failed with deliveryUncertain after moving focus, despite exact retained target value. Wrong value and unavailable target rejected. Build 0 errors/9 warnings; 55 stable sources.",
+    "green": "33/33 TextEditor tests pass, zero skips/runtime issues; build 0 errors/47 warnings; 55 stable sources. Adds whole/selected setter focus shift, wrong/replaced target, no extra refocus/input, stopping after one Unicode grapheme on focus shift, protection and lost ownership.",
+    "review": "Independent Luna review found no actionable issue.",
+    "scope": "Component verified; real Gmail retained-reference availability and whole attachment workflow still require live retry."
   }
 }

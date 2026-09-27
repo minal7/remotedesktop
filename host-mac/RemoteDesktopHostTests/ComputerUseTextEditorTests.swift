@@ -126,6 +126,103 @@ final class ComputerUseTextEditorTests: XCTestCase {
         }
     }
 
+    func testHostToolsVerifyTargetReadbackAfterSetterMovesFocus() async throws {
+        let expected = "person@example.com"
+        for setter in [NativeFields.Setter.whole, .selected] {
+            let fields = NativeFields(setter: setter)
+            fields.afterInput = { [weak fields] in fields?.focusedID = "autocomplete" }
+            let tools = ComputerUseHostTools(injector: InputInjector(eventPoster: { _ in XCTFail("A supported AX setter must not post keys") }),
+                mayAct: { true }, nativeTextTarget: fields)
+
+            do { try await tools.editFocusedText(expected, mode: .replaceAll) }
+            catch { XCTFail("The retained target has the exact edited value after focus moves: \(error)") }
+
+            XCTAssertEqual(fields.values["destination"], expected)
+            XCTAssertEqual(fields.focusedID, "autocomplete")
+            XCTAssertEqual(fields.edits.count, 1)
+            XCTAssertEqual(fields.focusCalls, 0)
+        }
+    }
+
+    func testHostToolsTargetSpecificReadbackStillRejectsWrongOrReplacedTarget() async throws {
+        for outcome in ["wrong-value", "replaced-target"] {
+            let fields = NativeFields(setter: .whole)
+            fields.afterInput = { [weak fields] in
+                guard let fields else { return }
+                if outcome == "wrong-value" { fields.setValue("destination", "different value") }
+                else { fields.values.removeValue(forKey: "destination") }
+                fields.focusedID = "autocomplete"
+            }
+            let tools = ComputerUseHostTools(injector: InputInjector(eventPoster: { _ in XCTFail("A supported AX setter must not post keys") }),
+                mayAct: { true }, nativeTextTarget: fields)
+
+            do {
+                try await tools.editFocusedText("person@example.com", mode: .replaceAll)
+                XCTFail("Target-specific readback must still require the exact original target and value")
+            } catch {
+                XCTAssertEqual(error as? ComputerUseTextEditError, .deliveryUncertain)
+            }
+            XCTAssertEqual(fields.focusedID, "autocomplete")
+            XCTAssertEqual(fields.edits.count, 1)
+            XCTAssertEqual(fields.focusCalls, 0)
+        }
+    }
+
+    func testHostToolsUnicodeReadbackStopsWhenFocusMovesAfterFirstGrapheme() async throws {
+        let fields = NativeFields(setter: .unicode), events = UnicodeStrokeEvents()
+        var applied = 0
+        fields.beforeRead = { [weak fields] in
+            guard let fields else { return }
+            let input = events.downTexts
+            guard input.count > applied else { return }
+            for text in input.dropFirst(applied) { fields.receiveUnicode(text) }
+            applied = input.count
+            if applied == 1 { fields.focusedID = "autocomplete" }
+        }
+        let tools = ComputerUseHostTools(injector: InputInjector(eventPoster: { events.record($0) }),
+            mayAct: { true }, nativeTextTarget: fields)
+
+        await assertError(.deliveryUncertain) {
+            try await tools.editFocusedText("ab", mode: .insert)
+        }
+
+        XCTAssertEqual(events.downTexts, ["a"])
+        XCTAssertEqual(events.upTexts, ["a"])
+        XCTAssertEqual(fields.values["destination"], "olda")
+        XCTAssertEqual(fields.focusCalls, 0)
+    }
+
+    func testHostToolsTextEditStillRejectsProtectionAndLostOwnership() async throws {
+        for reason in ["secure", "read-only", "paused"] {
+            let fields = NativeFields(setter: .whole)
+            if reason == "secure" { fields.secureIDs.insert("destination") }
+            if reason == "read-only" { fields.readOnlyIDs.insert("destination") }
+            let tools = ComputerUseHostTools(injector: InputInjector(eventPoster: { _ in XCTFail("Rejected edit must not post keys") }),
+                mayAct: { reason != "paused" }, nativeTextTarget: fields)
+            do {
+                try await tools.editFocusedText("new", mode: .replaceAll)
+                XCTFail("Expected \(reason) to reject the edit")
+            } catch {
+                let expected: ComputerUseTextEditError = reason == "secure" ? .secureTarget
+                    : reason == "read-only" ? .unavailableTarget : .interrupted
+                XCTAssertEqual(error as? ComputerUseTextEditError, expected)
+            }
+            XCTAssertTrue(fields.edits.isEmpty)
+            XCTAssertEqual(fields.focusCalls, 0)
+        }
+
+        let fields = NativeFields(setter: .whole)
+        var active = true
+        fields.afterInput = { [weak fields] in fields?.focusedID = "autocomplete"; active = false }
+        let tools = ComputerUseHostTools(injector: InputInjector(eventPoster: { _ in XCTFail("The AX setter should not post keys") }),
+            mayAct: { active }, nativeTextTarget: fields)
+        await assertError(.interrupted) {
+            try await tools.editFocusedText("new", mode: .replaceAll)
+        }
+        XCTAssertEqual(fields.edits.count, 1, "The already-dispatched setter is retained but not reported as complete")
+        XCTAssertEqual(fields.focusCalls, 0)
+    }
+
     func testVerificationReadCannotReturnSuccessAfterDeadlineTakeoverOrCancellation() async throws {
         for reason in ["deadline", "takeover", "cancel", "context"] {
             let field = Field("old")

@@ -79,6 +79,10 @@ struct ComputerUseTextEditor {
     /// A provider must check that state at the key-down admission boundary.
     let postUnicode: (String, ComputerUseTextSnapshot) async throws -> Void
     let mayAct: () -> Bool
+    /// Verifies a dispatched edit against its retained target even if the
+    /// application's focus moves to an autocomplete or confirmation control.
+    /// Nil preserves the focused-field readback used by standalone callers.
+    var readEditedTarget: ((String) throws -> ComputerUseTextSnapshot?)? = nil
     var wait: () async throws -> Void = {
         try await Task.sleep(for: .milliseconds(25))
     }
@@ -207,7 +211,10 @@ struct ComputerUseTextEditor {
             }
             guard uptime() < deadline else { throw ComputerUseTextEditError.deadlineExceeded }
             try validateContext()
-            guard let current = try read(), current.targetID == target,
+            let current: ComputerUseTextSnapshot?
+            if let readEditedTarget { current = try readEditedTarget(target) }
+            else { current = try read() }
+            guard let current, current.targetID == target,
                   current.isEditable, !current.isSecure else {
                 throw ComputerUseTextEditError.deliveryUncertain
             }
