@@ -428,6 +428,391 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         XCTAssertLessThanOrEqual(typedDispatches, 1)
     }
 
+    func testOptInGmailBodyNativeTextTargetDiagnostic() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_BODY_NATIVE_TEXT_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_BODY_NATIVE_TEXT_DIAGNOSTIC=1 with an unsent Gmail compose body focused.")
+        }
+        let strategy = environment["GMAIL_BODY_NATIVE_TEXT_STRATEGY"] ?? "production"
+        guard strategy == "production" || strategy == "selectedText" || strategy == "unicode" else {
+            XCTFail("GMAIL_BODY_NATIVE_TEXT_STRATEGY must be production, selectedText, or unicode.")
+            return
+        }
+        guard let expectedWindowID = environment["GMAIL_BODY_NATIVE_TEXT_WINDOW_ID"] else {
+            XCTFail("The opted-in probe requires GMAIL_BODY_NATIVE_TEXT_WINDOW_ID for the owned Safari window.")
+            return
+        }
+        let expectedBody = "Remote Desktop body edit diagnostic \(UUID().uuidString)"
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication, safari.bundleIdentifier == "com.apple.Safari",
+              safari.isFinishedLaunching,
+              let mailURL = URL(string: "https://mail.google.com/"),
+              workspace.urlForApplication(toOpen: mailURL)?.standardizedFileURL.path == safari.bundleURL?.standardizedFileURL.path,
+              let application = ComputerUseApplicationIdentity(runningApplication: safari) else {
+            XCTFail("Default Safari must already be frontmost; the diagnostic will not open or navigate a window.")
+            return
+        }
+        let appRoot = AXUIElementCreateApplication(safari.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(appRoot, 0.1)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute as String, of: appRoot),
+              let initialWindow = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(application)
+                .windows.first(where: { CFEqual($0.accessibilityElement, window) }),
+              let axWindowID = Self.axString("AXIdentifier", of: window),
+              initialWindow.id == expectedWindowID || axWindowID == expectedWindowID
+                || axWindowID.components(separatedBy: "UUID=").last == expectedWindowID,
+              let focus = Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot),
+              let context = Self.focusedAXContext(focus, window: window), context.isMailWebArea,
+              Self.axString(kAXRoleAttribute as String, of: focus) == "AXTextArea",
+              [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+               kAXPlaceholderValueAttribute as String, kAXHelpAttribute as String]
+                .compactMap({ Self.axString($0, of: focus) })
+                .contains(where: { $0.localizedCaseInsensitiveContains("Message Body") }) else {
+            XCTFail("The opted-in probe requires the exact owned Gmail window and its focused Message Body field; no text was entered.")
+            return
+        }
+
+        func rawAttribute(_ name: String, on element: AXUIElement) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func isSettable(_ name: String, on element: AXUIElement) -> Bool? {
+            var settable = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(element, name as CFString, &settable) == .success else { return nil }
+            return settable.boolValue
+        }
+        func metadata(_ element: AXUIElement) -> [String: Any] {
+            _ = AXUIElementSetMessagingTimeout(element, 0.1)
+            let rawValue = rawAttribute(kAXValueAttribute as String, on: element)
+            let value = rawValue as? String
+            let valueStartsWithExpectedBody = value?.hasPrefix(expectedBody)
+            let suffixAfterExpectedPrefix = valueStartsWithExpectedBody == true
+                ? String(value!.dropFirst(expectedBody.count)) : nil
+            let numberOfCharacters = rawAttribute("AXNumberOfCharacters", on: element) as? NSNumber
+            var rangeBytes: Int?
+            var rangeMatchesExpected: Bool?
+            var rangeMatchesValue: Bool?
+            let observedLength = numberOfCharacters?.intValue ?? value?.utf16.count
+            if let observedLength, (0...4_096).contains(observedLength) {
+                var range = CFRange(location: 0, length: observedLength)
+                if let rangeValue = AXValueCreate(.cfRange, &range) {
+                    var returned: CFTypeRef?
+                    if AXUIElementCopyParameterizedAttributeValue(element,
+                        kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &returned) == .success,
+                       let rangeText = returned as? String {
+                        rangeBytes = rangeText.utf8.count
+                        rangeMatchesExpected = rangeText.utf8.elementsEqual(expectedBody.utf8)
+                        rangeMatchesValue = value.map { rangeText.utf8.elementsEqual($0.utf8) }
+                    }
+                }
+            }
+            let rawSelection = rawAttribute(kAXSelectedTextRangeAttribute as String, on: element)
+            let placeholder = Self.axString(kAXPlaceholderValueAttribute as String, of: element)
+            var selectionLocation: Int?
+            var selectionLength: Int?
+            if let rawSelection, CFGetTypeID(rawSelection) == AXValueGetTypeID() {
+                var selected = CFRange()
+                if AXValueGetValue(rawSelection as! AXValue, .cfRange, &selected) {
+                    selectionLocation = selected.location
+                    selectionLength = selected.length
+                }
+            }
+            return [
+                "role": Self.axString(kAXRoleAttribute as String, of: element) ?? "",
+                "subrole": Self.axString(kAXSubroleAttribute as String, of: element) as Any? ?? NSNull(),
+                "domTagName": Self.axString("AXDOMTagName", of: element) as Any? ?? NSNull(),
+                "placeholderByteLength": placeholder?.utf8.count as Any? ?? NSNull(),
+                "placeholderEqualsValue": placeholder.flatMap { p in value.map { p.utf8.elementsEqual($0.utf8) } } as Any? ?? NSNull(),
+                "valueType": rawValue.map { CFGetTypeID($0) == CFStringGetTypeID() ? "string" : "other" } ?? "missing",
+                "valueByteLength": value?.utf8.count as Any? ?? NSNull(),
+                "valueMatchesExpected": value?.utf8.elementsEqual(expectedBody.utf8) as Any? ?? NSNull(),
+                "valueStartsWithExpectedBody": valueStartsWithExpectedBody as Any? ?? NSNull(),
+                "suffixUTF16LengthAfterExpectedPrefix": suffixAfterExpectedPrefix?.utf16.count as Any? ?? NSNull(),
+                "suffixContainsOnlyLineTerminators": suffixAfterExpectedPrefix.map {
+                    $0.unicodeScalars.allSatisfy { $0 == "\r" || $0 == "\n" }
+                } as Any? ?? NSNull(),
+                "numberOfCharacters": numberOfCharacters as Any? ?? NSNull(),
+                "stringForRangeByteLength": rangeBytes as Any? ?? NSNull(),
+                "stringForRangeMatchesExpected": rangeMatchesExpected as Any? ?? NSNull(),
+                "stringForRangeMatchesValue": rangeMatchesValue as Any? ?? NSNull(),
+                "selectedTextRangeAvailable": rawSelection != nil,
+                "selectionLocation": selectionLocation as Any? ?? NSNull(),
+                "selectionLength": selectionLength as Any? ?? NSNull(),
+                "valueSettable": isSettable(kAXValueAttribute as String, on: element) as Any? ?? NSNull(),
+                "selectedTextSettable": isSettable(kAXSelectedTextAttribute as String, on: element) as Any? ?? NSNull(),
+                "selectedTextRangeSettable": isSettable(kAXSelectedTextRangeAttribute as String, on: element) as Any? ?? NSNull(),
+            ]
+        }
+
+        var lifecycleEvents: [ComputerUseAccessibilityTextTarget.DiagnosticEvent] = []
+        var droppedLifecycleEvents = 0
+        let diagnosticObserver: @MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void = { event in
+            if lifecycleEvents.count < 256 { lifecycleEvents.append(event) }
+            else { droppedLifecycleEvents += 1 }
+        }
+        let journal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gmail-body-native-text-diagnostic-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journal) }
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { !Task.isCancelled },
+            nativeTextTargetDiagnosticObserver: diagnosticObserver)
+        let selectedTextTarget = strategy == "selectedText"
+            ? ComputerUseAccessibilityTextTarget(diagnosticObserver: diagnosticObserver) : nil
+        var proposals = 0
+        var typedDispatches = 0
+        var selectedTextSetterCalls = 0
+        var selectedTextSetterResult: Bool?
+        var selectedTextInitialTargetID: String?
+        var unicodeAttemptedGraphemes = 0
+        var unicodeCompletedGraphemes = 0
+        var unicodeFirstScopeMatched: Bool?
+        var unicodeLastScopeMatched: Bool?
+        var initialProjection: [String: Any] = [:]
+        var initialInput: [String: Any] = [:]
+        var finalProjection: [String: Any] = [:]
+        var resultSummary = "not started"
+        var errorType: String?
+        var finalEditor: [String: Any] = [:]
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: journal, propose: { input in
+            proposals += 1
+            if proposals == 1 {
+                guard input.focusedEditor?.localizedCaseInsensitiveContains("Message Body") == true else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                initialProjection = metadata(focus)
+                initialInput = [
+                    "focusedEditorRoleSummary": input.focusedEditor ?? "",
+                    "valueByteLength": input.focusedTextState?.valueUTF8Bytes as Any? ?? NSNull(),
+                    "valueUTF16Units": input.focusedTextState?.valueUTF16Units as Any? ?? NSNull(),
+                    "selectionLocation": input.focusedTextState?.selection.location as Any? ?? NSNull(),
+                    "selectionLength": input.focusedTextState?.selection.length as Any? ?? NSNull(),
+                    "truncated": input.focusedTextState?.truncated as Any? ?? NSNull(),
+                ]
+                return .init(response: "Enter one diagnostic body value, then stop without sending.",
+                    action: .typeText(expectedBody))
+            }
+            return .init(response: "Stop before any send action.",
+                decision: .handoff("Body typing diagnostic finished; no message was sent."), includeInModelHistory: false)
+        }, surfaceScopeCheck: { _ in
+            try Task.checkCancellation()
+            guard workspace.frontmostApplication?.processIdentifier == safari.processIdentifier,
+                  let activeWindow = Self.axElement(kAXFocusedWindowAttribute as String, of: appRoot),
+                  CFEqual(activeWindow, window),
+                  let activeFocus = Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot),
+                  let activeContext = Self.focusedAXContext(activeFocus, window: window), activeContext.isMailWebArea else {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+        }, onSuccessfulDispatch: { action in
+            if case .typeText = action { typedDispatches += 1 }
+        })
+        func currentOriginalScopeMatches() -> Bool {
+            guard !Task.isCancelled, Date().timeIntervalSince(started) < 60,
+                  workspace.frontmostApplication?.processIdentifier == safari.processIdentifier,
+                  let activeWindow = Self.axElement(kAXFocusedWindowAttribute as String, of: appRoot),
+                  CFEqual(activeWindow, window),
+                  let activeFocus = Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot),
+                  CFEqual(activeFocus, focus),
+                  let activeContext = Self.focusedAXContext(activeFocus, window: window) else { return false }
+            return !Task.isCancelled && Date().timeIntervalSince(started) < 60 && activeContext.isMailWebArea
+        }
+        if let selectedTextTarget, currentOriginalScopeMatches(),
+           let before = selectedTextTarget.snapshot(), before.isEditable, !before.isSecure {
+            selectedTextInitialTargetID = before.targetID
+            initialProjection = metadata(focus)
+            initialInput = [
+                "strategy": "selectedText",
+                "valueByteLength": before.value.utf8.count,
+                "valueUTF16Units": before.value.utf16.count,
+                "selectionLocation": before.selection.location,
+                "selectionLength": before.selection.length,
+            ]
+            if currentOriginalScopeMatches() {
+                selectedTextSetterCalls = 1
+                do {
+                    selectedTextSetterResult = try InputInjector().performHostEffectIfAllowed(ifAllowed: { !Task.isCancelled }) {
+                        try selectedTextTarget.replaceSelectedText(expectedBody, expected: before)
+                    }
+                    resultSummary = selectedTextSetterResult == true ? "selectedTextReturnedTrue"
+                        : selectedTextSetterResult == false ? "selectedTextReturnedFalse" : "selectedTextUnsupported"
+                } catch {
+                    errorType = error is ComputerUseTextEditError
+                        ? String(describing: error as! ComputerUseTextEditError) : String(reflecting: type(of: error))
+                    resultSummary = "selectedTextThrew"
+                }
+            } else {
+                resultSummary = "scopeChangedBeforeSetter"
+            }
+        } else if strategy == "selectedText" {
+            resultSummary = "focusedBodySnapshotUnavailable"
+        } else if strategy == "unicode" {
+            initialProjection = metadata(focus)
+            if currentOriginalScopeMatches() {
+                let injector = InputInjector()
+                for character in expectedBody {
+                    guard !Task.isCancelled else {
+                        resultSummary = "unicodeCancelled"
+                        break
+                    }
+                    let scopeBefore = currentOriginalScopeMatches()
+                    if unicodeFirstScopeMatched == nil { unicodeFirstScopeMatched = scopeBefore }
+                    unicodeLastScopeMatched = scopeBefore
+                    guard scopeBefore else {
+                        resultSummary = "scopeChangedBeforeUnicodeStroke"
+                        break
+                    }
+                    unicodeAttemptedGraphemes += 1
+                    let delivered = await injector.applyTextStroke(String(character), ifAllowed: {
+                        !Task.isCancelled && currentOriginalScopeMatches()
+                    }, beforePosting: {
+                        !Task.isCancelled && currentOriginalScopeMatches()
+                    })
+                    let scopeAfter = currentOriginalScopeMatches()
+                    unicodeLastScopeMatched = scopeAfter
+                    guard delivered, scopeAfter else {
+                        resultSummary = delivered ? "scopeChangedAfterUnicodeStroke" : "unicodeStrokeRejected"
+                        break
+                    }
+                    unicodeCompletedGraphemes += 1
+                }
+                if unicodeCompletedGraphemes == expectedBody.count {
+                    resultSummary = "unicodeStrokesCompleted"
+                }
+            } else {
+                resultSummary = "scopeChangedBeforeUnicodeInput"
+            }
+        } else {
+            do {
+                let result = try await executor.execute(taskID: "gmail-body-edit-diagnostic-\(UUID().uuidString)",
+                    prompt: "Type one diagnostic value in the currently focused Gmail message body and stop. Do not send.",
+                    trustedUserPrompt: "Type one diagnostic value in the currently focused Gmail message body and stop. Do not send.",
+                    tools: tools, progress: { _ in })
+                switch result {
+                case .userInterventionRequired: resultSummary = "userInterventionRequired"
+                case .unableToComplete: resultSummary = "unableToComplete"
+                case .completed: resultSummary = "completed"
+                case .clarificationRequired: resultSummary = "clarificationRequired"
+                case .browserClarificationRequired: resultSummary = "browserClarificationRequired"
+                case .approvalRequired: resultSummary = "approvalRequired"
+                case .mcpApprovalRequired: resultSummary = "mcpApprovalRequired"
+                case .browserResearchProgress: resultSummary = "browserResearchProgress"
+                case .browserResearchAnswer: resultSummary = "browserResearchAnswer"
+                }
+            } catch {
+                if let textError = error as? ComputerUseTextEditError {
+                    errorType = String(describing: textError)
+                } else if let desktopError = error as? ComputerUseDesktopExecutor.Failure {
+                    errorType = String(describing: desktopError)
+                } else {
+                    errorType = String(reflecting: type(of: error))
+                }
+                resultSummary = "threw"
+            }
+        }
+        if (strategy == "selectedText" && selectedTextSetterCalls == 1)
+            || (strategy == "unicode" && unicodeCompletedGraphemes > 0) {
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        let finalApplication = workspace.frontmostApplication.flatMap {
+            ComputerUseApplicationIdentity(runningApplication: $0)
+        }
+        let finalWindows = finalApplication == application
+            ? try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application) : nil
+        let finalWindow = finalWindows?.windows.first(where: { $0.id == initialWindow.id })
+        let finalFocus = finalApplication == application
+            ? Self.axElement(kAXFocusedUIElementAttribute as String, of: appRoot) : nil
+        let finalFocusMatchesInitial = finalFocus.map { CFEqual($0, focus) } ?? false
+        let finalContext = finalFocusMatchesInitial ? finalFocus.flatMap { Self.focusedAXContext($0, window: window) } : nil
+        let finalScopeMatches = finalApplication == application
+            && finalWindow.map { CFEqual($0.accessibilityElement, window) } == true
+            && finalWindows?.focusedWindowID == initialWindow.id
+            && finalFocusMatchesInitial && finalContext?.isMailWebArea == true
+        if finalScopeMatches, let finalFocus {
+            finalProjection = metadata(finalFocus)
+            if let selectedTextTarget {
+                let after = selectedTextTarget.snapshot()
+                finalEditor = [
+                    "present": after != nil,
+                    "valueByteLength": after?.value.utf8.count as Any? ?? NSNull(),
+                    "valueUTF16Units": after?.value.utf16.count as Any? ?? NSNull(),
+                    "matchesExpected": after.map { $0.value.utf8.elementsEqual(expectedBody.utf8) } as Any? ?? NSNull(),
+                    "targetIDUnchanged": after.map { $0.targetID == selectedTextInitialTargetID } as Any? ?? NSNull(),
+                    "selectionLocation": after?.selection.location as Any? ?? NSNull(),
+                    "selectionLength": after?.selection.length as Any? ?? NSNull(),
+                ]
+            } else {
+                do {
+                    let observation = try tools.nativeFocusedEditorObservation()
+                    finalEditor = [
+                        "present": observation != nil,
+                        "valueByteLength": observation?.textState?.valueUTF8Bytes as Any? ?? NSNull(),
+                        "valueUTF16Units": observation?.textState?.valueUTF16Units as Any? ?? NSNull(),
+                        "matchesExpected": observation?.textState?.valuePrefix.utf8.elementsEqual(expectedBody.utf8) as Any? ?? NSNull(),
+                        "truncated": observation?.textState?.truncated as Any? ?? NSNull(),
+                    ]
+                } catch {
+                    finalEditor = ["readFailed": true]
+                }
+            }
+        } else {
+            finalProjection = ["readSkippedOutsideOriginalFocusedScope": true]
+            finalEditor = ["readSkippedOutsideOriginalFocusedScope": true]
+        }
+        let report: [String: Any] = [
+            "windowID": initialWindow.id,
+            "sameFrontmostApplicationAndWindowAfterAction": finalScopeMatches,
+            "finalFocusedElementMatchesOriginal": finalFocusMatchesInitial,
+            "result": resultSummary,
+            "strategy": strategy,
+            "expectedBodyByteLength": expectedBody.utf8.count,
+            "expectedBodyUTF16Length": expectedBody.utf16.count,
+            "errorType": errorType as Any? ?? NSNull(),
+            "proposalCount": proposals,
+            "typedDispatchCount": typedDispatches,
+            "selectedTextSetterCalls": selectedTextSetterCalls,
+            "selectedTextSetterResult": selectedTextSetterResult as Any? ?? NSNull(),
+            "unicodeAttemptedGraphemes": unicodeAttemptedGraphemes,
+            "unicodeCompletedGraphemes": unicodeCompletedGraphemes,
+            "unicodeFirstScopeMatched": unicodeFirstScopeMatched as Any? ?? NSNull(),
+            "unicodeLastScopeMatched": unicodeLastScopeMatched as Any? ?? NSNull(),
+            "initialFocusedField": initialProjection,
+            "initialDesktopProjection": initialInput,
+            "finalFocusedField": finalProjection,
+            "finalEditorProjection": finalEditor,
+            "lifecycleEvents": try JSONSerialization.jsonObject(with: JSONEncoder().encode(lifecycleEvents)),
+            "droppedLifecycleEvents": droppedLifecycleEvents,
+            "lastDesktopDiagnostic": executor.lastRevalidationDiagnostic,
+            "elapsedSeconds": Date().timeIntervalSince(started),
+            "sendActionProposed": false,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "gmail-body-native-text-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 60)
+        if strategy == "selectedText" {
+            XCTAssertEqual(selectedTextSetterCalls, 1)
+            XCTAssertNotNil(selectedTextSetterResult)
+            XCTAssertEqual(selectedTextSetterResult, true)
+            XCTAssertEqual(finalEditor["matchesExpected"] as? Bool, true)
+            XCTAssertEqual(finalProjection["valueMatchesExpected"] as? Bool, true)
+        } else if strategy == "unicode" {
+            XCTAssertEqual(unicodeAttemptedGraphemes, expectedBody.count)
+            XCTAssertEqual(unicodeCompletedGraphemes, expectedBody.count)
+            XCTAssertEqual(unicodeFirstScopeMatched, true)
+            XCTAssertEqual(unicodeLastScopeMatched, true)
+            XCTAssertEqual(finalEditor["matchesExpected"] as? Bool, true)
+            XCTAssertEqual(finalProjection["valueMatchesExpected"] as? Bool, true)
+        } else {
+            XCTAssertEqual(proposals, 2, "The single body edit must reach the next observation before reporting diagnostics.")
+            XCTAssertEqual(typedDispatches, 1, "The probe sends exactly one diagnostic body edit and never retries it.")
+            XCTAssertEqual(finalEditor["matchesExpected"] as? Bool, true)
+            XCTAssertEqual(finalProjection["valueMatchesExpected"] as? Bool, true)
+        }
+    }
+
     private struct FocusedAXContext {
         let element: AXUIElement
         let ancestors: [AXUIElement]

@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded test approvals now cover the observed Gmail Attach files click, exact selected-file picker confirmation, and one freshly verified recipient-autocomplete Return; the exact recipient, subject, body and attachment oracle remains required. The autocomplete exception is test-only; production Return policy is unchanged, and Send is never allowed. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run live23 against the final-poll fix. Live22 did not exercise the adjacent-caret path; no live causal conclusion follows. Keep the alternate attachment-picker route and 12 GB whole-Mac qualification open.",
+  "next": "TDD an explicit visual-keyboard route while keeping the MCP exact-edit path unchanged. Validate scope and target identity per keystroke; this keyboard diagnostic does not establish production visual routing.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1495,5 +1495,65 @@
     "coverage": "Continuous churn, no replay, cancellation, scope loss and delayed-focus transitions at 700/1700 ms pass; fresh ready state and single-effect assertions pass.",
     "acceptance": "Component implemented/compiled/tested only. Live22 timed out before this final-poll path could establish a real Gmail effect; live23 is pending.",
     "artifacts": ".build/repair-verification/native-editor-final-poll-red01-{summary,build,source-audit}.json and .build/repair-verification/native-editor-final-poll-green01-{summary,build,source-audit}.json"
+  },
+  "live23": {
+    "run": "client-manager-gmail-draft-live23",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "One exact recipient-autocomplete Return approval/effect and exact subject entry occurred. Body text was entered, but CUA’s observed AX value was “Please review the attached spreadsheet.Press / to write using your Gmail & Drive”; do not claim the exact body oracle passed. No file was selected, picker opened, attachment uploaded, task completed or message sent.",
+    "finalPause": "The final Fara action requested body typing. The cause of the subsequent pause remains unproven. An earlier rejected subject click at [624,480] mapped to point 1078,536 while the header changed from “Draft saved” to “New Message” with a caret; a retry succeeded, so this pair is not evidence for the final pause cause.",
+    "diagnostic": "No OCR hang was observed in this run; one run does not establish an OCR recurrence rate.",
+    "partialState": "CUA verified owned window FFAA5FC6-B986-4B0C-9361-56090161E11C, exact subject 3464F5EE-D906-4E2C-A560-45A9CF49AE2C, self-recipient label, body value including Gmail helper text, and no attachment. Draft was discarded; zero Compose panes remained.",
+    "cleanup": "Closed only the owned Safari window and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923. No owned workers remained.",
+    "acceptance": "Recipient and subject progress only; exact body oracle, file attachment and completion unverified. Gmail model-driven workflow remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live23-attachments/manifest.json",
+      "summary": ".build/repair-verification/client-manager-gmail-draft-live23-summary.json",
+      "lifecycle": "client-manager-gmail-draft-live23-attachments/F6341231-9A0D-4EEA-BD3F-1541BB766048.json",
+      "route": "client-manager-gmail-draft-live23-attachments/29D5AFB8-2BA8-4384-84C1-F691772B4D75.txt",
+      "outcome": "client-manager-gmail-draft-live23-attachments/9EE87952-5F99-46C1-B11C-285A65C212A5.txt",
+      "faraRequest": "client-manager-gmail-draft-live23-attachments/350BDA3F-0EBD-4E52-804A-D337C4D9970D.json",
+      "faraResponse": "client-manager-gmail-draft-live23-attachments/3D42F455-3F0A-45A2-AA7E-77609B2CC411.json",
+      "failure": "client-manager-gmail-draft-live23-attachments/2649B624-7721-4722-9FA0-81354B77043C.txt"
+    },
+    "cuAExperiment": "In a separate CUA-owned Safari window D04EB88B-CED2-4BA4-85D6-3DCDAB616D72, a fresh empty Gmail Compose had no To/subject; focused body AXValue included Gmail helper text. An ordinary pressKey(\"x\") changed the body AXValue to exactly \"x\" (helper text remained separately exposed). Draft discarded, zero Compose panes verified, owned window closed and original Drive window restored. This is a small native-key observation, not an app E2E pass and not proof of which AX setter the host uses; the whole-value web setter may synthesize helper text into its expected value.",
+    "fixtureCleanup": "Disposable fixture A898CE89...xlsx was verified absent after the run."
+  },
+  "nativeGmailBodyDiagnostic": {
+    "run": "native-gmail-body-diagnostic02",
+    "result": "6 passed / 1 failed test with 4 body assertions / 0 skipped; 0 build errors / 42 warnings; 55 stable sources; 5 issues including the known main-thread responsiveness warning.",
+    "probe": "No-inference probe using the production-default native text target. Report 7313598E-97EA-468D-862E-56F7EF87C877.json records 5.01 s, initial AXValue of 42 helper bytes, an AXValue write returning success at 4,818 ms, and readback of 115 bytes for a 72-byte payload plus helper text. That projected sum is 114 bytes; the extra byte is unclassified. AXValueChanged at document-root/ancestor retired the binding at 4,877 ms. The value mutation occurred, but delivery was uncertain; one body proposal produced zero successful dispatch callbacks.",
+    "interpretation": "This demonstrates a body write/readback mismatch in the diagnostic, not necessarily the cause of live23’s pause and not a general production setter failure. Six scope/cancellation regressions passed. The new blockedAt diagnostic stages compiled but were not reported as observed in this diagnostic; mutation-returned observer metadata was recorded.",
+    "uiCleanup": "CUA observed the helper text concatenated into the body, discarded the draft and verified zero Compose panes. Owned Safari window C97FC7C4 remains open for the next diagnostic; no Send occurred.",
+    "next": "Test a keyboard primitive in a no-inference diagnostic before proposing a production change.",
+    "artifacts": {
+      "manifest": ".build/repair-verification/native-gmail-body-diagnostic02-attachments/manifest.json",
+      "report": ".build/repair-verification/native-gmail-body-diagnostic02-attachments/7313598E-97EA-468D-862E-56F7EF87C877.json",
+      "summary": ".build/repair-verification/native-gmail-body-diagnostic02-summary.json",
+      "build": ".build/repair-verification/native-gmail-body-diagnostic02-build.json",
+      "sourceAudit": ".build/repair-verification/native-gmail-body-diagnostic02-source-audit.json"
+    }
+  },
+  "nativeGmailSelectedTextDiagnostic": {
+    "run": "native-gmail-selected-text-diagnostic01",
+    "result": "0 passed / 1 failed test / 0 skipped; 0 build errors / 8 warnings; 55 stable sources; 3 issues including the known main-thread responsiveness warning.",
+    "probe": "Direct AXSelectedText on the production-default target, no inference, elapsed 0.396 s including a 250 ms wait. It returned success, but the body remained at its 42-byte Gmail helper value and selection remained 0. Target ID, app, window and focused reference stayed the same; no typed payload was observed.",
+    "interpretation": "This is a no-op and does not validate changing production to AXSelectedText. It does not establish the cause of live23’s pause.",
+    "cleanup": "The empty diagnostic draft was discarded; no Send or production behavior change occurred. Owned Safari window C97FC7C4 remains available for the next probe.",
+    "next": "Run a no-inference keyboard primitive probe.",
+    "artifacts": {
+      "report": ".build/repair-verification/native-gmail-selected-text-diagnostic01-attachments/36D615E8-E3E4-410E-8EA6-B875194BEF74.json"
+    }
+  },
+  "nativeGmailKeyboardPrimitiveDiagnostic": {
+    "run": "native-gmail-unicode-diagnostic01",
+    "result": "1 passed / 0 skipped; 0 build errors / 8 warnings; 55 stable sources; 1 known main-thread responsiveness warning.",
+    "probe": "Report F2F5D2D4-6D38-4F82-9349-D8488505AF21.json: 2.889 s; 72 attempted/completed characters; exact 72-byte and UTF-16 readback; selection 72; no Gmail helper or suffix; same app, window and physical body reference.",
+    "scope": "Test-only native keyboard primitive guarded by scope for each stroke. The final observation confirms the physical body reference; this does not prove stable targetID across per-keystroke rereads or production visual routing.",
+    "acceptance": "Component diagnostic only. No production behavior change or Gmail E2E acceptance.",
+    "next": "TDD an explicit visual-keyboard route while preserving the MCP exact-edit path unchanged.",
+    "artifacts": {
+      "report": ".build/repair-verification/native-gmail-unicode-diagnostic01-attachments/F2F5D2D4-6D38-4F82-9349-D8488505AF21.json"
+    },
+    "cleanup": "CUA verified the exact probe sentence with no Gmail helper text, discarded the draft, verified zero Compose panes, closed only owned Safari window C97FC7C4, and restored original Drive window 2FE12A41. No test or inference workers remain."
   }
 }

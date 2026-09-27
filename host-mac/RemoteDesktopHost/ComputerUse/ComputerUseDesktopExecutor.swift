@@ -156,37 +156,44 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         try await Task.sleep(for: .milliseconds(100))
         guard surfaceScopeCheck != nil else { return }
         let scopeDeadline = ContinuousClock.now.advanced(by: .seconds(1))
-        func checkActiveApplication() throws {
+        func scopedFailure(_ stage: String) -> Failure {
+            lastRevalidationDiagnostic = ["blockedAt": stage]
+            return .scopedSurfaceChanged
+        }
+        func checkActiveApplication(_ stage: String) throws {
             try Task.checkCancellation(); try tools.requireActive()
             let app = tools.frontmostApplicationSnapshot()
             guard app.identity == observation.fingerprint.frontmostApplicationIdentity,
-                  app.policyName == observation.fingerprint.frontmostApplication else { throw Failure.scopedSurfaceChanged }
+                  app.policyName == observation.fingerprint.frontmostApplication else { throw scopedFailure(stage) }
         }
-        func currentScopeIsValid() throws -> Bool {
-            try checkActiveApplication()
+        func currentScopeIsValid(activeBefore: String, activeAfter: String) throws -> Bool {
+            try checkActiveApplication(activeBefore)
             do { try checkScopedSurface() }
             catch Failure.scopedSurfaceChanged { return false }
-            try checkActiveApplication()
+            try checkActiveApplication(activeAfter)
             return true
         }
         while true {
-            try checkActiveApplication()
+            try checkActiveApplication("scope-wait-active-app-before-check")
             do { try checkScopedSurface() }
             catch Failure.scopedSurfaceChanged {
-                guard ContinuousClock.now < scopeDeadline else { throw Failure.scopedSurfaceChanged }
+                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure("scope-wait-deadline") }
                 // A native sheet can briefly leave AX focus unavailable. Wait
                 // for the existing scope to validate; never replay the input
                 // or ask the model to act on the transitional surface.
                 try await Task.sleep(for: .milliseconds(100))
                 continue
             }
-            try checkActiveApplication()
+            try checkActiveApplication("scope-wait-active-app-after-check")
             break
         }
 
         let settleStarted = ContinuousClock.now
         let currentToken = try tools.nativeFocusedEditorObservation()?.stabilityToken
-        guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+        guard try currentScopeIsValid(activeBefore: "initial-editor-sample-active-app-before-check",
+                                      activeAfter: "initial-editor-sample-active-app-after-check") else {
+            throw scopedFailure("initial-editor-sample-scope-invalid")
+        }
 
         // A newly focused native field may appear after this first sample, and
         // can emit delayed AX title/ancestry events. Settle the exact observed
@@ -199,11 +206,17 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         var nilSampleCount = currentToken == nil ? 1 : 0
         while ContinuousClock.now < settleDeadline {
             try await Task.sleep(for: .milliseconds(250))
-            guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+            guard try currentScopeIsValid(activeBefore: "settle-active-app-before-editor-sample",
+                                          activeAfter: "settle-active-app-after-pre-sample-scope") else {
+                throw scopedFailure("settle-scope-invalid-before-editor-sample")
+            }
             let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
             sampleCount += 1
             if token == nil { nilSampleCount += 1 }
-            guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
+            guard try currentScopeIsValid(activeBefore: "settle-active-app-before-post-sample-check",
+                                          activeAfter: "settle-active-app-after-post-sample-scope") else {
+                throw scopedFailure("settle-scope-invalid-after-editor-sample")
+            }
             if token != lastToken {
                 tokenChangeCount += 1
                 lastToken = token

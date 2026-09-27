@@ -211,6 +211,8 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         let eventKind: String?
         let notification: String?
         let matchedReferences: [String]
+        let mutationAttribute: String?
+        let mutationStatusCode: Int32?
     }
 
     struct Application {
@@ -664,7 +666,10 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             throw ComputerUseTextEditError.preconditionChanged
         }
         try Task.checkCancellation()
-        return access.write(attribute, value, binding.element)
+        let result = access.write(attribute, value, binding.element)
+        emitDiagnostic(binding, kind: "mutationReturned", reason: "setterReturned",
+                       mutationAttribute: attribute, mutationStatusCode: result.rawValue)
+        return result
     }
 
     private func applicationForObservation(allowFreshScope: Bool = false) -> Application? {
@@ -782,12 +787,15 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     private func emitDiagnostic(_ binding: Binding, kind: String, reason: String,
                                 event: ComputerUseAXLifecycleEvent? = nil,
-                                matchedReferences: [String] = []) {
+                                matchedReferences: [String] = [],
+                                mutationAttribute: String? = nil,
+                                mutationStatusCode: Int32? = nil) {
         guard let diagnosticObserver else { return }
         diagnosticObserver(DiagnosticEvent(
             elapsedMilliseconds: Int64(max(0, (ProcessInfo.processInfo.systemUptime - diagnosticStartUptime) * 1_000)),
             instanceID: diagnosticInstanceID, targetID: binding.id, kind: kind, reason: reason,
             eventKind: event.map { String(describing: $0.kind) }, notification: event?.notification,
-            matchedReferences: matchedReferences))
+            matchedReferences: matchedReferences, mutationAttribute: mutationAttribute,
+            mutationStatusCode: mutationStatusCode))
     }
 }
