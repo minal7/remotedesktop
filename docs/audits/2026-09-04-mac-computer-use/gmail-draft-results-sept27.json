@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run an effect-free Fara replay of the captured live11 request with general known-unsent typing-recovery guidance. The scripted recipient-entry probe does not explain live11; no production prompt change has been made.",
+  "next": "Run one bounded live Gmail retry after the scoped lifecycle GREEN; treat it as a check of the active path, not proof that the RED02 event caused live11. Keep the 12 GB whole-Mac target unqualified.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1092,7 +1092,7 @@
     "outcome": "Reached Gmail, typed the URL and submitted Return; one native Compose proposal followed. The recipient typeText was rejected before input. The subsequent Fara click at (1059,473) targeted an unidentified item, so the host requested approval because it was not the observed Attach files control or exact picker action; the bounded harness accepted none. No file handoff, recipient/subject/body entry, picker effect, attachment, upload or successful terminal.",
     "revalidation": "The recipient pair reported focusMatches=false, editableAuthorityMatches=false and screenMatches=false, while the text frame stayed (1106,458,495,36); both visible values and selections were empty. This differs from live10's matching screen digest and does not isolate the cause.",
     "nativeControl": "One Compose proposal. Typed observed-control history remains captured; no file selection was reached.",
-    "cleanup": "CUA confirmed all draft fields empty with no attachment, discarded the draft, and verified no Compose panes remain. The same owned Gmail window D75C839E-20C0-4E62-9334-1DF52631B4D8 is retained for the next no-inference diagnostic. The previous live10/probe window had been closed and original Drive restored before this run.",
+    "cleanup": "CUA confirmed all draft fields empty with no attachment, discarded the draft and verified no Compose panes remained. After the subsequent probes, the owned Gmail window D75C839E-20C0-4E62-9334-1DF52631B4D8 was closed with Cmd-Shift-W and the original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 restored.",
     "attachments": {
       "route": "client-manager-gmail-draft-live11-attachments/32ECC74A-90AA-4D68-BB73-2EAB70586D4A.txt",
       "outcome": "client-manager-gmail-draft-live11-attachments/E1054C60-3065-4D2D-8E88-23B9789C5389.txt",
@@ -1109,8 +1109,38 @@
     "result": "1 diagnostic passed / 0 failed / 0 skipped; build 0 errors / 8 warnings; 55 stable source hashes; one known main-thread responsiveness runtime warning.",
     "behavior": "Over 23.035 seconds, three scripted proposals included one successful recipient type dispatch after a 13-second no-inference delay. Revalidation reject count was zero. The final native focused-text snapshot was unavailable because focus had moved to an AXStaticText autocomplete suggestion; typingValueMatchesExpected=false is therefore not an independent input failure.",
     "independentReadback": "CUA independently read the To recipients combo box and confirmed the exact intended account address. Subject and body remained empty, with no attachment. This validates only the scripted recipient text-entry slice, not model-driven Gmail behavior or the attachment workflow.",
-    "cleanup": "CUA discarded the recipient-only draft, verified no Compose pane remains, and retained the same Gmail window D75C839E-20C0-4E62-9334-1DF52631B4D8.",
+    "cleanup": "CUA discarded the recipient-only draft and verified no Compose pane remained; the Gmail window was retained for subsequent diagnostics, then closed after the probes.",
     "attachment": ".build/repair-verification/gmail-scripted-recipient-typing-live01-attachments/C6F988A9-B778-47CF-B642-16A24F85FFED.json",
     "limits": "No subject/body entry, file selection, attachment, send, task completion, or production prompt change. Does not establish the cause of live11's typing rejection."
+  },
+  "recipientRecoveryProbe01": {
+    "run": "fara-recipient-recovery-probe01",
+    "scope": "Effect-free replay of the exact captured live11 Fara request; no UI, input, navigation or production prompt change.",
+    "finding": "Guidance said that a rejected typing action does not itself mean focus was lost and directed retrying the requested text when fresh focused-editor evidence still identified the intended field and showed the text absent. Fara instead proposed left_click at [613,424], matching the original recovery click.",
+    "usage": "5773 prompt / 80 completion tokens; 12.576 s total; one worker; sampled peak process RSS 4211834880 bytes (24 samples).",
+    "cleanup": "Worker exited cleanly and temporary credential was removed.",
+    "limits": "Sampled process RSS excludes unsampled peaks and whole-app/Metal accounting; not a 12 GB whole-Mac qualification. No live11 cause established.",
+    "artifacts": ".build/repair-verification/fara-recipient-recovery-probe01/"
+  },
+  "recipientRecoveryFeedbackProbe01": {
+    "run": "fara-recipient-recovery-feedback-probe01",
+    "scope": "Effect-free replay of the same captured live11 Fara request with last-error feedback wording; no UI, input, navigation or production prompt change.",
+    "finding": "Feedback said native validation changing does not itself mean focus was lost, and directed inspection of fresh focused-editor/value evidence before retrying text. Fara again proposed left_click at [613,424].",
+    "usage": "5720 prompt / 87 completion tokens; 12.255 s total; one worker; sampled peak process RSS 4217929728 bytes (24 samples).",
+    "cleanup": "Worker exited cleanly and temporary credential was removed.",
+    "limits": "Sampled process RSS excludes unsampled peaks and whole-app/Metal accounting; not a 12 GB whole-Mac qualification. Neither replay establishes live11 cause.",
+    "artifacts": ".build/repair-verification/fara-recipient-recovery-feedback-probe01/"
+  },
+  "nativeUnrelatedLifecycleRed02": {
+    "run": "native-unrelated-lifecycle-red02",
+    "result": "0 passed / 1 failed / 0 skipped; intended RED assertion; 0 build errors / 8 warnings; 22 source hashes unchanged; no runtime warnings.",
+    "finding": "testUnrelatedElementTitleChangeDuringReadPreservesFocusedFieldAuthority failed: the focused text snapshot became nil after an unrelated element title change during the read. This reproduces the scoped invalidation behavior in a fixture; it does not prove that the same event caused live11’s recipient typing rejection.",
+    "next": "A narrowly scoped event-invalidation repair and GREEN validation are pending; consider a live retry only after that evidence.",
+    "artifacts": ".build/repair-verification/native-unrelated-lifecycle-red02-{summary,build,source-audit}.json and .build/repair-verification/native-unrelated-lifecycle-green01-{summary,build,source-audit}.json",
+    "greenRun": "native-unrelated-lifecycle-green01",
+    "green": "23 passed / 0 failed / 0 skipped; no test issues/runtime warnings; 0 build errors / 25 warnings; 55 source hashes stable.",
+    "scope": "Snapshot-scoped capture retains lifecycle events drained during the focused snapshot, including outer focus/window lookup and nested AX reads, up to 256. Only events affecting the app root, window, focused element, its ancestors or label source, plus scope/coverage changes, nil-source events or overflow invalidate this snapshot. Existing lifecycle retirement/tombstones and whole-fields revision check remain in place.",
+    "independentReview": "Read-only review found no actionable blocker: destroyed event references are compared locally without AX queries; unrelated events may advance the global revision but do not invalidate the focused snapshot unless they affect its observed references.",
+    "limits": "Component tests only. The finding does not establish that this event caused live11’s typing rejection; one bounded real Gmail retry is pending."
   }
 }

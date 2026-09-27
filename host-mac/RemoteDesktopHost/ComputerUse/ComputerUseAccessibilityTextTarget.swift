@@ -201,6 +201,22 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                 || shape.label.element.map { CFEqual($0, other) } == true
         }
     }
+    private final class SnapshotLifecycleCapture {
+        // Attribute helpers drain lifecycle notifications throughout AX IPC;
+        // retain them until the read scope is known, then compare handles locally.
+        private(set) var events: [ComputerUseAXLifecycleEvent] = []
+        private(set) var overflowed = false
+
+        func append(_ drained: [ComputerUseAXLifecycleEvent]) {
+            guard !overflowed else { return }
+            guard drained.count <= 256 - events.count else {
+                overflowed = true
+                events.removeAll(keepingCapacity: false)
+                return
+            }
+            events.append(contentsOf: drained)
+        }
+    }
     private let access: Access
     private var bindings: [Binding] = []
     private var observedApplication: String?
@@ -209,17 +225,20 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     private var lifecycleRevision = UUID()
     private var destroyedElements: [AXUIElement] = []
     private var lifecycleUnavailable = false
+    private var snapshotLifecycleCapture: SnapshotLifecycleCapture?
 
     init(access: Access? = nil) { self.access = access ?? .live }
     deinit { lifecycle?.cancel() }
 
     func snapshot() -> ComputerUseTextSnapshot? {
         guard let app = applicationForObservation(allowFreshScope: true) else { return nil }
-        let root = app.root
-        setTimeout(root, 0.15)
-        guard let element = elementAttribute(kAXFocusedUIElementAttribute, on: root),
-              let window = elementAttribute(kAXFocusedWindowAttribute, on: root) else { return nil }
-        return snapshot(element: element, window: window, app: app)
+        return withSnapshotLifecycleCapture { _ in
+            let root = app.root
+            setTimeout(root, 0.15)
+            guard let element = elementAttribute(kAXFocusedUIElementAttribute, on: root),
+                  let window = elementAttribute(kAXFocusedWindowAttribute, on: root) else { return nil }
+            return snapshot(element: element, window: window, app: app)
+        }
     }
 
     /// Bounded discovery in the current window. Labels are untrusted planning
@@ -264,14 +283,16 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
     func snapshot(targetID: String) -> ComputerUseTextSnapshot? {
         guard let app = applicationForObservation(),
               let retained = bindings.first(where: { $0.id == targetID }) else { return nil }
-        let root = app.root
-        setTimeout(root, 0.15)
-        guard let window = elementAttribute(kAXFocusedWindowAttribute, on: root),
-              CFEqual(window, retained.window),
-              app.identity.utf8.elementsEqual(retained.application.utf8),
-              let value = snapshot(element: retained.element, window: window, app: app),
-              value.targetID == targetID else { return nil }
-        return value
+        return withSnapshotLifecycleCapture { _ in
+            let root = app.root
+            setTimeout(root, 0.15)
+            guard let window = elementAttribute(kAXFocusedWindowAttribute, on: root),
+                  CFEqual(window, retained.window),
+                  app.identity.utf8.elementsEqual(retained.application.utf8),
+                  let value = snapshot(element: retained.element, window: window, app: app),
+                  value.targetID == targetID else { return nil }
+            return value
+        }
     }
 
     func focus(expected: ComputerUseTextSnapshot) throws -> Bool {
@@ -285,10 +306,16 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     private func snapshot(element: AXUIElement, window: AXUIElement,
                           app: Application) -> ComputerUseTextSnapshot? {
+        withSnapshotLifecycleCapture { capture in
+            snapshot(element: element, window: window, app: app, capture: capture)
+        }
+    }
+
+    private func snapshot(element: AXUIElement, window: AXUIElement, app: Application,
+                          capture: SnapshotLifecycleCapture) -> ComputerUseTextSnapshot? {
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         let application = app.identity
         synchronizeLifecycle()
-        let revision = lifecycleRevision
         var valid = false
         defer {
             // Once this exact object was observed as invalid, a later return
@@ -358,7 +385,10 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         let identifier = stringAttribute("AXIdentifier", on: element) ?? ""
         guard label.text.utf8.count <= 256, identifier.utf8.count <= 1_024 else { return nil }
         synchronizeLifecycle()
-        guard ContinuousClock.now < deadline, revision == lifecycleRevision, isUsable(element), isUsable(window),
+        guard ContinuousClock.now < deadline,
+              !snapshotEventsInvalidate(capture, app: app, window: window, element: element,
+                                        ancestors: ancestors, labelElement: label.element),
+              isUsable(element), isUsable(window),
               ancestors.allSatisfy({ isUsable($0) }), label.element.map({ isUsable($0) }) != false else { return nil }
         let shape = Shape(role: role, subrole: subrole, identifier: identifier, label: label, ancestors: ancestors)
         var binding = bindings.first(where: {
@@ -383,6 +413,30 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
             targetID: binding.id, value: value,
             selection: NSRange(location: selection.location, length: selection.length),
             isEditable: true, isSecure: false)
+    }
+
+    private func withSnapshotLifecycleCapture<T>(_ body: (SnapshotLifecycleCapture) -> T) -> T {
+        if let snapshotLifecycleCapture { return body(snapshotLifecycleCapture) }
+        let capture = SnapshotLifecycleCapture()
+        snapshotLifecycleCapture = capture
+        defer { snapshotLifecycleCapture = nil }
+        return body(capture)
+    }
+
+    private func snapshotEventsInvalidate(_ capture: SnapshotLifecycleCapture, app: Application,
+                                          window: AXUIElement, element: AXUIElement,
+                                          ancestors: [AXUIElement], labelElement: AXUIElement?) -> Bool {
+        guard !capture.overflowed else { return true }
+        let observedReferences = [app.root, window, element] + ancestors + (labelElement.map { [$0] } ?? [])
+        return capture.events.contains { event in
+            switch event.kind {
+            case .scopeChanged, .coverageLost:
+                return true
+            case .created, .elementChanged, .valueChanged, .destroyed:
+                guard let source = event.element else { return true }
+                return observedReferences.contains { CFEqual($0, source) }
+            }
+        }
     }
 
     func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool {
@@ -527,7 +581,9 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
 
     private func synchronizeLifecycle() {
         guard let lifecycle else { return }
-        for event in lifecycle.drain() {
+        let drained = lifecycle.drain()
+        snapshotLifecycleCapture?.append(drained)
+        for event in drained {
             if event.kind == .created, let element = event.element,
                observedRoot.map({ CFEqual($0, element) }) != true,
                !bindings.contains(where: { $0.mentions(element) }) {

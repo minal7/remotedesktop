@@ -1477,6 +1477,118 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         }
     }
 
+    func testUnrelatedElementTitleChangeDuringReadPreservesFocusedFieldAuthority() throws {
+        for notification in [kAXTitleChangedNotification, kAXValueChangedNotification] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            let unrelated = graph.addNode("unrelated")
+            graph.set("unrelated", kAXRoleAttribute, kAXButtonRole as NSString)
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            var delivered = false
+            graph.afterRead = { element, attribute in
+                guard !delivered, element == "destination", attribute == kAXValueAttribute else { return }
+                delivered = true
+                monitor.notify(notification as String, element: unrelated)
+            }
+            XCTAssertEqual(target.snapshot(targetID: before.targetID), before, "\(notification) on unrelated button")
+            XCTAssertTrue(delivered)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let before = try XCTUnwrap(target.snapshot())
+        graph.afterRead = { element, attribute in
+            if element == "destination", attribute == kAXValueAttribute {
+                monitor.notify(kAXTitleChangedNotification as String, element: graph.element("destination"))
+            }
+        }
+        XCTAssertNil(target.snapshot(targetID: before.targetID), "A title change on the focused field still retires its meaning")
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testFieldOrAncestorLifecycleEventDuringReadRetiresAuthority() throws {
+        let cases: [(String, String, String)] = [
+            ("field title", "destination", kAXTitleChangedNotification as String),
+            ("ancestor layout", "group", kAXLayoutChangedNotification as String),
+            ("label value", "label", kAXValueChangedNotification as String),
+            ("root title", "application", kAXTitleChangedNotification as String)
+        ]
+        for (name, changedElement, notification) in cases {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            if changedElement == "label" { graph.set("destination", kAXTitleAttribute, nil) }
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            var delivered = false
+            graph.afterRead = { element, attribute in
+                guard !delivered, element == "destination", attribute == kAXValueAttribute else { return }
+                delivered = true
+                monitor.notify(notification, element: graph.element(changedElement))
+            }
+            XCTAssertNil(target.snapshot(targetID: before.targetID), name)
+            XCTAssertTrue(delivered, name)
+            XCTAssertTrue(graph.writes.isEmpty, name)
+        }
+    }
+
+    func testNilSourceScopeAndCoverageEventsRetireObservation() throws {
+        for kind in [ComputerUseAXLifecycleEvent.Kind.scopeChanged, .coverageLost, .elementChanged, .valueChanged] {
+            let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let before = try XCTUnwrap(target.snapshot())
+            var delivered = false
+            graph.afterRead = { element, attribute in
+                guard !delivered, element == "destination", attribute == kAXValueAttribute else { return }
+                delivered = true
+                monitor.record(.init(kind: kind, element: nil))
+            }
+            XCTAssertNil(target.snapshot(targetID: before.targetID), "\(kind) with nil source")
+            XCTAssertTrue(delivered)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testFocusChangeDuringInitialFocusedElementLookupRejectsMixedSnapshot() throws {
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        var delivered = false
+        graph.afterRead = { element, attribute in
+            guard !delivered, element == "application", attribute == kAXFocusedUIElementAttribute else { return }
+            delivered = true
+            graph.focused = "source"
+            monitor.notify(kAXFocusedWindowChangedNotification as String, element: graph.element("application"))
+        }
+        XCTAssertNil(target.snapshot(), "Focus changing during the initial focus/window lookup must discard the mixed snapshot")
+        XCTAssertTrue(delivered)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testScopedLifecycleEventAccumulatorOverflowFailsClosed() throws {
+        let graph = AXTextGraph(), monitor = AXFixtureLifecycleMonitor()
+        let unrelated = graph.addNode("unrelated")
+        graph.set("unrelated", kAXRoleAttribute, kAXButtonRole as NSString)
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let before = try XCTUnwrap(target.snapshot())
+        var boundaryCount = 0
+        graph.afterRead = { _, _ in
+            guard boundaryCount < 9 else { return }
+            boundaryCount += 1
+            // Each batch is drained at the next AX boundary, so the test covers
+            // bounded per-observation accumulation rather than inbox overflow.
+            for _ in 0..<32 {
+                monitor.notify(kAXTitleChangedNotification as String, element: unrelated)
+            }
+        }
+        XCTAssertNil(target.snapshot(targetID: before.targetID), "Too many distinct lifecycle events in one observation must fail closed")
+        XCTAssertGreaterThan(boundaryCount, 8)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
     func testUnrelatedNativeCreationPreservesExactFieldAuthorityAcrossInputBoundaries() throws {
         for notification in [kAXCreatedNotification, kAXWindowCreatedNotification] {
             for unrelated in ["other-window", "source", "other-label"] {
