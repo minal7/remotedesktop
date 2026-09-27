@@ -721,11 +721,84 @@ struct ComputerUseFrontmostApplicationSnapshot: Equatable, Sendable {
     }
 }
 
+struct ComputerUseKeyboardCaretEvidence {
+    let applicationIdentity: ComputerUseApplicationIdentity
+    let window: ComputerUseFrontmostWindowCaptureIdentity
+    let text: ComputerUseTextSnapshot
+    let frame: CGRect
+    let image: ComputerUseDesktopImage
+}
+
 struct ComputerUseApprovalFingerprint: Equatable {
     let action: ComputerUsePredictedAction
     let applicationID: String
     let accessibilityIdentity: String
     let visualDigest: String?
+    let keyboardCaretEvidence: ComputerUseKeyboardCaretEvidence?
+
+    init(action: ComputerUsePredictedAction, applicationID: String, accessibilityIdentity: String,
+         visualDigest: String?, keyboardCaretEvidence: ComputerUseKeyboardCaretEvidence? = nil) {
+        self.action = action
+        self.applicationID = applicationID
+        self.accessibilityIdentity = accessibilityIdentity
+        self.visualDigest = visualDigest
+        self.keyboardCaretEvidence = keyboardCaretEvidence
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.action == rhs.action && lhs.applicationID == rhs.applicationID
+            && lhs.accessibilityIdentity == rhs.accessibilityIdentity && lhs.visualDigest == rhs.visualDigest
+    }
+
+    func matchesForFinalDispatch(_ other: Self) -> Bool {
+        guard let evidence = keyboardCaretEvidence,
+              let otherEvidence = other.keyboardCaretEvidence else {
+            return keyboardCaretEvidence == nil && other.keyboardCaretEvidence == nil && self == other
+        }
+        guard self.action == other.action,
+              self.applicationID == other.applicationID,
+              self.accessibilityIdentity == other.accessibilityIdentity,
+              case .key = self.action,
+              Self.hasEligibleKeyboardEvidence(evidence, applicationID: applicationID),
+              Self.hasEligibleKeyboardEvidence(otherEvidence, applicationID: other.applicationID),
+              evidence.applicationIdentity == otherEvidence.applicationIdentity,
+              evidence.window == otherEvidence.window,
+              evidence.text == otherEvidence.text,
+              evidence.frame == otherEvidence.frame,
+              evidence.image.displayBounds == otherEvidence.image.displayBounds,
+              evidence.image.pixelWidth == otherEvidence.image.pixelWidth,
+              evidence.image.pixelHeight == otherEvidence.image.pixelHeight else { return false }
+
+        // Preserve exact legacy matching once the extra proof has been
+        // validated. Otherwise permit only a verified insertion-caret repaint.
+        if self == other { return true }
+        return (try? evidence.image.matchesInsertionPointPixels(of: otherEvidence.image,
+            window: evidence.window.bounds, field: evidence.frame)) == true
+    }
+
+    private static func hasEligibleKeyboardEvidence(
+        _ evidence: ComputerUseKeyboardCaretEvidence, applicationID: String
+    ) -> Bool {
+        let app = evidence.applicationIdentity
+        let window = evidence.window.bounds
+        let display = evidence.image.displayBounds
+        let text = evidence.text
+        func finite(_ rect: CGRect) -> Bool {
+            !rect.isNull && !rect.isEmpty
+                && [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy(\.isFinite)
+        }
+        let selection = text.selection
+        return app.codeIdentity != nil
+            && app.bundleIdentifier == applicationID
+            && app.processIdentifier == evidence.window.applicationProcessIdentifier
+            && finite(window) && finite(display) && finite(evidence.frame)
+            && window.contains(evidence.frame) && display.contains(window)
+            && display.contains(evidence.frame)
+            && evidence.image.pixelWidth > 0 && evidence.image.pixelHeight > 0
+            && !text.targetID.isEmpty && text.isEditable && !text.isSecure
+            && selection.location >= 0 && selection.length == 0
+            && selection.location <= (text.value as NSString).length
+    }
 }
 
 fileprivate struct ComputerUsePreparedApproval {
@@ -1043,6 +1116,7 @@ final class ComputerUseHostTools {
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
     private let textTarget: any ComputerUseNativeTextTarget
+    private let usesDefaultNativeTextTarget: Bool
     private let textEditorOverride: ComputerUseTextEditor?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
     private var browserToolProposals: (id: UUID, taskID: String, propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools)?
@@ -1133,6 +1207,7 @@ final class ComputerUseHostTools {
         self.actionPerformer = actionPerformer
         self.textEditorOverride = textEditor
         self.textTarget = nativeTextTarget ?? ComputerUseAccessibilityTextTarget()
+        self.usesDefaultNativeTextTarget = nativeTextTarget == nil
         self.browserNavigationTask = browserNavigationTask
         self.approvedActionStepDidPost = approvedActionStepDidPost
         self.screenProvider = screenProvider
@@ -2556,6 +2631,14 @@ final class ComputerUseHostTools {
         }
         let target = try approvalTarget(for: action)
         var accessibilityIdentity = target.accessibilityIdentity
+        var keyboardEvidence: ComputerUseKeyboardCaretEvidence?
+        var capturedVisualDigest: String?
+        if case .key = action,
+           let captured = try liveKeyboardCaretCapture(for: target) {
+            keyboardEvidence = captured.evidence
+            capturedVisualDigest = captured.visualDigest
+            accessibilityIdentity += "|text-state=\(captured.evidence.text.preconditionDigest)"
+        }
         if case .typeText = action,
            actionPerformer == nil, approvalTargetProvider == nil {
             guard let textSnapshot = try currentTextSnapshot() else {
@@ -2572,10 +2655,77 @@ final class ComputerUseHostTools {
             action: action,
             applicationID: target.applicationID,
             accessibilityIdentity: accessibilityIdentity,
-            visualDigest: try visualDigest(around: target.visualCheckpoints))
+            visualDigest: try capturedVisualDigest ?? visualDigest(around: target.visualCheckpoints),
+            keyboardCaretEvidence: keyboardEvidence)
         return ComputerUsePreparedApproval(
             message: message,
             fingerprint: fingerprint)
+    }
+
+    private func liveKeyboardCaretCapture(for target: ApprovalTarget) throws ->
+        (evidence: ComputerUseKeyboardCaretEvidence, visualDigest: String)? {
+        guard usesLiveFrontmostApplicationIdentity,
+              usesDefaultNativeTextTarget,
+              actionPerformer == nil, approvalTargetProvider == nil, screenProvider == nil,
+              textEditorOverride == nil, planningAccessibilityIdentityProvider == nil,
+              accessibilityContextProvider == nil, mcpFocusedTextSnapshotProvider == nil,
+              authenticationContextProvider == nil, screenCaptureConsentContextProvider == nil,
+              frontmostApplicationIdentityProvider == nil else { return nil }
+        guard let runningApp = NSWorkspace.shared.frontmostApplication,
+              !runningApp.isTerminated,
+              let app = ComputerUseApplicationIdentity(runningApplication: runningApp),
+              app.codeIdentity != nil else { return nil }
+        guard app.bundleIdentifier == target.applicationID,
+              let windowBefore = liveFrontmostWindowSnapshot(),
+              windowBefore.applicationProcessIdentifier == app.processIdentifier else {
+            throw ToolError.approvalTargetChanged
+        }
+        guard target.accessibilityIdentity != "unavailable" else { return nil }
+        guard let focusedBefore = focusedElement() else { throw ToolError.approvalTargetChanged }
+        let focusedSnapshotBefore = accessibilitySnapshot(for: focusedBefore)
+        guard focusedSnapshotBefore.identity == target.accessibilityIdentity else {
+            throw ToolError.approvalTargetChanged
+        }
+        guard
+              let frame = focusedSnapshotBefore.frame,
+              let textBefore = try currentTextSnapshot(),
+              textBefore.isEditable, !textBefore.isSecure, textBefore.selection.length == 0,
+              textBefore.selection.location >= 0,
+              textBefore.selection.location <= (textBefore.value as NSString).length,
+              !textBefore.targetID.isEmpty,
+              !frame.isEmpty,
+              windowBefore.bounds.contains(frame),
+              [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite) else {
+            return nil
+        }
+
+        // Once an eligible focused editor was observed, any later target or
+        // scope change invalidates the capture instead of dropping its proof.
+        let displayID = CGMainDisplayID()
+        let displayBounds = CGDisplayBounds(displayID)
+        guard displayBounds.width > 0, displayBounds.height > 0,
+              displayBounds.contains(windowBefore.bounds) else { return nil }
+        guard let image = CGDisplayCreateImage(displayID) else { throw ToolError.screenshotUnavailable }
+        guard let runningAppAfter = NSWorkspace.shared.frontmostApplication,
+              !runningAppAfter.isTerminated,
+              let appAfter = ComputerUseApplicationIdentity(runningApplication: runningAppAfter),
+              appAfter == app,
+              let windowAfter = liveFrontmostWindowSnapshot(), windowAfter == windowBefore,
+              let focusedAfter = focusedElement(), CFEqual(focusedBefore, focusedAfter),
+              let textAfter = try currentTextSnapshot(), textAfter == textBefore,
+              CGMainDisplayID() == displayID, CGDisplayBounds(displayID) == displayBounds else {
+            throw ToolError.approvalTargetChanged
+        }
+        let focusedSnapshotAfter = accessibilitySnapshot(for: focusedAfter)
+        guard focusedSnapshotAfter.identity == focusedSnapshotBefore.identity,
+              focusedSnapshotAfter.frame == frame else { throw ToolError.approvalTargetChanged }
+        let desktopImage = try ComputerUseDesktopImage(observation: ComputerUseScreenObservation(
+            image: CIImage(cgImage: image), displayBounds: displayBounds,
+            frontmostWindowBounds: windowBefore.bounds))
+        guard let digest = try Self.approvalVisualDigest(around: target.visualCheckpoints, image: image,
+            displayBounds: displayBounds, window: windowBefore) else { throw ToolError.approvalTargetUnavailable }
+        return (ComputerUseKeyboardCaretEvidence(applicationIdentity: app, window: windowBefore,
+            text: textBefore, frame: frame, image: desktopImage), digest)
     }
 
     fileprivate func performApproved(
@@ -2604,7 +2754,7 @@ final class ComputerUseHostTools {
         // Recheck AX/pixels after the asynchronous browser read. The approved
         // page and the current native target must both still match.
         let current = try prepareApproval(for: action).fingerprint
-        guard current == fingerprint else {
+        guard current.matchesForFinalDispatch(fingerprint) else {
             throw ToolError.approvalTargetChanged
         }
         try willBeginEffect()

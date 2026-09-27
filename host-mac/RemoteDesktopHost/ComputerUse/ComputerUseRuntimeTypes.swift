@@ -317,7 +317,17 @@ struct ComputerUseDesktopImage: Sendable {
                 for y in 0..<height {
                     for x in 0..<width {
                         let i = (y * width + x) * 4
-                        if (0..<4).contains(where: { first[i + $0] != second[i + $0] }) {
+                        let fieldX = Int(rect.minX) + x
+                        let fieldY = Int(rect.minY) + y
+                        let inField = fieldPixels.contains(CGPoint(x: fieldX, y: fieldY))
+                        let alphaChanged = first[i + 3] != second[i + 3]
+                        let rgbDifference = max(abs(Int(first[i]) - Int(second[i])),
+                            max(abs(Int(first[i + 1]) - Int(second[i + 1])),
+                                abs(Int(first[i + 2]) - Int(second[i + 2]))))
+                        // Permit only one-level RGB tolerance outside the
+                        // verified editor. Alpha and editor pixels stay exact;
+                        // larger changes still enter the caret-footprint check.
+                        if alphaChanged || (inField ? rgbDifference > 0 : rgbDifference > 1) {
                             left = min(left, x); top = min(top, y); right = max(right, x); bottom = max(bottom, y)
                         }
                     }

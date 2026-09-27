@@ -3182,6 +3182,195 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             unchangedFocusedField: field), "A pointer target that does not contain the focused field cannot borrow its caret exception")
     }
 
+    func testFinalDispatchCaretEvidenceMatchesOnlyWhenItsPixelsAndSnapshotPermitIt() throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let base = try finalDispatchImage()
+        let caret = try finalDispatchImage(changes: [(130, 110, 0, 0, 0, 255), (130, 111, 0, 0, 0, 255),
+            (130, 112, 0, 0, 0, 255), (130, 113, 0, 0, 0, 255), (130, 114, 0, 0, 0, 255),
+            (130, 115, 0, 0, 0, 255), (130, 116, 0, 0, 0, 255), (130, 117, 0, 0, 0, 255),
+            (130, 118, 0, 0, 0, 255), (130, 119, 0, 0, 0, 255), (130, 120, 0, 0, 0, 255),
+            (130, 121, 0, 0, 0, 255)])
+        XCTAssertTrue(try base.matchesInsertionPointPixels(of: caret, window: window, field: field))
+
+        let text = ComputerUseTextSnapshot(targetID: "field", value: "Gmail address",
+            selection: NSRange(location: 13, length: 0), isEditable: true, isSecure: false)
+        let signedApp = try finalDispatchApplicationIdentity()
+        let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 7,
+            accessibilityWindowHash: 9, bounds: window)
+        let beforeEvidence = ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+            text: text, frame: field, image: base)
+        let afterEvidence = ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+            text: text, frame: field, image: caret)
+        let before = ComputerUseApprovalFingerprint(action: action, applicationID: signedApp.bundleIdentifier,
+            accessibilityIdentity: "focused-field", visualDigest: "before", keyboardCaretEvidence: beforeEvidence)
+        let after = ComputerUseApprovalFingerprint(action: action, applicationID: signedApp.bundleIdentifier,
+            accessibilityIdentity: "focused-field", visualDigest: "after", keyboardCaretEvidence: afterEvidence)
+        XCTAssertNotEqual(before, after, "Legacy equality must remain exact over its original four fields")
+        XCTAssertTrue(before.matchesForFinalDispatch(after), "A proven caret-only repaint may qualify for the final keyboard check")
+
+        let sameLegacyFieldsDifferentEvidence = ComputerUseApprovalFingerprint(action: action, applicationID: signedApp.bundleIdentifier,
+            accessibilityIdentity: "focused-field", visualDigest: "before",
+            keyboardCaretEvidence: ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+                text: .init(targetID: "field", value: "different text", selection: text.selection,
+                    isEditable: true, isSecure: false), frame: field, image: base))
+        XCTAssertFalse(before.matchesForFinalDispatch(sameLegacyFieldsDifferentEvidence),
+            "Evidence-bearing fingerprints must compare the editor snapshot even when the legacy fields match")
+    }
+
+    func testFinalDispatchCaretComparisonAllowsOnlyOneLevelRGBNoiseOutsideTheCaret() throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let base = try finalDispatchImage()
+        let noisyCaret = try finalDispatchImage(changes: [
+            (130, 110, 0, 0, 0, 255), (130, 111, 0, 0, 0, 255), (130, 112, 0, 0, 0, 255),
+            (130, 113, 0, 0, 0, 255), (130, 114, 0, 0, 0, 255), (130, 115, 0, 0, 0, 255),
+            (130, 116, 0, 0, 0, 255), (130, 117, 0, 0, 0, 255), (130, 118, 0, 0, 0, 255),
+            (130, 119, 0, 0, 0, 255), (130, 120, 0, 0, 0, 255), (130, 121, 0, 0, 0, 255),
+            (450, 250, 129, 127, 129, 255)])
+        XCTAssertTrue(try base.matchesInsertionPointPixels(of: noisyCaret, window: window, field: field),
+            "A one-level RGB capture fluctuation outside the caret should pass the bounded helper")
+
+        let signedApp = try finalDispatchApplicationIdentity()
+        let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 7,
+            accessibilityWindowHash: 9, bounds: window)
+        let text = ComputerUseTextSnapshot(targetID: "field", value: "unchanged", selection: NSRange(location: 9, length: 0),
+            isEditable: true, isSecure: false)
+        func fingerprint(image: ComputerUseDesktopImage, digest: String) -> ComputerUseApprovalFingerprint {
+            let evidence = ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+                text: text, frame: field, image: image)
+            return .init(action: action, applicationID: signedApp.bundleIdentifier, accessibilityIdentity: "focused-field",
+                visualDigest: digest, keyboardCaretEvidence: evidence)
+        }
+        XCTAssertTrue(fingerprint(image: base, digest: "before").matchesForFinalDispatch(
+            fingerprint(image: noisyCaret, digest: "after")))
+    }
+
+    func testFinalDispatchCaretComparisonRejectsLargerRGBAndAlphaChanges() throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let base = try finalDispatchImage()
+        let caretAndNoise: [(Int, Int, UInt8, UInt8, UInt8, UInt8)] = [
+            (130, 110, 0, 0, 0, 255), (130, 111, 0, 0, 0, 255), (130, 112, 0, 0, 0, 255),
+            (130, 113, 0, 0, 0, 255), (130, 114, 0, 0, 0, 255), (130, 115, 0, 0, 0, 255),
+            (130, 116, 0, 0, 0, 255), (130, 117, 0, 0, 0, 255), (130, 118, 0, 0, 0, 255),
+            (130, 119, 0, 0, 0, 255), (130, 120, 0, 0, 0, 255), (130, 121, 0, 0, 0, 255),
+        ]
+        let twoLevel = try finalDispatchImage(changes: caretAndNoise + [(450, 250, 130, 128, 128, 255)])
+        let alphaNoise = try finalDispatchImage(changes: caretAndNoise + [(450, 250, 127, 127, 127, 254)])
+        let inFieldNoise = try finalDispatchImage(changes: caretAndNoise + [(180, 120, 129, 128, 128, 255)])
+        let signedApp = try finalDispatchApplicationIdentity()
+        let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 7,
+            accessibilityWindowHash: 9, bounds: window)
+        let text = ComputerUseTextSnapshot(targetID: "field", value: "unchanged", selection: NSRange(location: 9, length: 0),
+            isEditable: true, isSecure: false)
+        func fingerprint(image: ComputerUseDesktopImage, digest: String) -> ComputerUseApprovalFingerprint {
+            .init(action: action, applicationID: signedApp.bundleIdentifier, accessibilityIdentity: "focused-field", visualDigest: digest,
+                keyboardCaretEvidence: .init(applicationIdentity: signedApp, window: identity, text: text, frame: field, image: image))
+        }
+        for changed in [twoLevel, alphaNoise, inFieldNoise] {
+            XCTAssertFalse(fingerprint(image: base, digest: "before").matchesForFinalDispatch(
+                fingerprint(image: changed, digest: "after")))
+        }
+    }
+
+    func testFinalDispatchCaretEvidenceRequiresSameEligibleKeyboardTarget() throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let image = try finalDispatchImage()
+        let baseText = ComputerUseTextSnapshot(targetID: "field", value: "unchanged",
+            selection: NSRange(location: 9, length: 0), isEditable: true, isSecure: false)
+        let signedApp = try finalDispatchApplicationIdentity()
+        let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 7,
+            accessibilityWindowHash: 9, bounds: window)
+        func fingerprint(action: ComputerUsePredictedAction, evidence: ComputerUseKeyboardCaretEvidence?) -> ComputerUseApprovalFingerprint {
+            .init(action: action, applicationID: signedApp.bundleIdentifier, accessibilityIdentity: "focused-field",
+                visualDigest: "same", keyboardCaretEvidence: evidence)
+        }
+        let baseEvidence = ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+            text: baseText, frame: field, image: image)
+        let original = fingerprint(action: action, evidence: baseEvidence)
+        var invalid = [ComputerUseApprovalFingerprint]()
+        invalid.append(fingerprint(action: action, evidence: nil))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: try finalDispatchApplicationIdentity(bundleIdentifier: "org.example.Other"), window: identity, text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: try finalDispatchApplicationIdentity(processIdentifier: 8),
+            window: identity, text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp,
+            window: .init(applicationProcessIdentifier: 7, accessibilityWindowHash: 10, bounds: window),
+            text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp,
+            window: .init(applicationProcessIdentifier: 8, accessibilityWindowHash: 9, bounds: window),
+            text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: try finalDispatchApplicationIdentity(launchGeneration: 2),
+            window: identity, text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: try finalDispatchApplicationIdentity(teamIdentifier: "OTHER"),
+            window: identity, text: baseText, frame: field, image: image)))
+        let unsignedApp = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: signedApp.bundleIdentifier,
+            processIdentifier: signedApp.processIdentifier, launchGeneration: signedApp.launchGeneration))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: unsignedApp, window: identity,
+            text: baseText, frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: baseText, frame: CGRect(x: 499, y: 100, width: 300, height: 30), image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: baseText, frame: field, image: try finalDispatchImage(displayBounds: CGRect(x: 1, y: 0, width: 640, height: 400)))))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "replacement", value: baseText.value, selection: baseText.selection,
+                isEditable: true, isSecure: false), frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "field", value: "changed", selection: baseText.selection,
+                isEditable: true, isSecure: false), frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "field", value: baseText.value, selection: NSRange(location: 8, length: 1),
+                isEditable: true, isSecure: false), frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "field", value: baseText.value, selection: baseText.selection,
+                isEditable: false, isSecure: false), frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: baseText, frame: CGRect(x: 101, y: 100, width: 300, height: 30), image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "field", value: baseText.value, selection: baseText.selection,
+                isEditable: true, isSecure: true), frame: field, image: image)))
+        invalid.append(fingerprint(action: action, evidence: .init(applicationIdentity: signedApp, window: identity,
+            text: .init(targetID: "field", value: baseText.value, selection: NSRange(location: 8, length: 1),
+                isEditable: true, isSecure: false), frame: field, image: image)))
+        invalid.append(fingerprint(action: .click(x: 120, y: 110, button: 1, count: 1), evidence: baseEvidence))
+        for candidate in invalid {
+            XCTAssertFalse(original.matchesForFinalDispatch(candidate))
+        }
+    }
+
+    private func finalDispatchImage(displayBounds: CGRect = CGRect(x: 0, y: 0, width: 640, height: 400),
+        changes: [(Int, Int, UInt8, UInt8, UInt8, UInt8)] = []) throws -> ComputerUseDesktopImage {
+        let width = 640, height = 400
+        var bytes = Data(repeating: 128, count: width * height * 4)
+        for pixel in 0..<(width * height) { bytes[pixel * 4 + 3] = 255 }
+        for (x, y, red, green, blue, alpha) in changes {
+            let offset = (y * width + x) * 4
+            bytes[offset] = red; bytes[offset + 1] = green; bytes[offset + 2] = blue; bytes[offset + 3] = alpha
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: bytes as CFData))
+        let image = try XCTUnwrap(CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: width * 4, space: XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB)),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider,
+            decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        return try ComputerUseDesktopImage(observation: .init(image: CIImage(cgImage: image),
+            displayBounds: displayBounds))
+    }
+
+    private func finalDispatchApplicationIdentity(bundleIdentifier: String = "org.example.Browser",
+        processIdentifier: pid_t = 7, launchGeneration: UInt64 = 1, teamIdentifier: String? = "TEST") throws -> ComputerUseApplicationIdentity {
+        let path = "/fixture/\(bundleIdentifier).app"
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: bundleIdentifier,
+            canonicalBundlePath: path, canonicalExecutablePath: "\(path)/Contents/MacOS/Browser",
+            designatedRequirement: "fixture requirement", teamIdentifier: teamIdentifier, platformIdentifier: nil)
+        return try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: bundleIdentifier,
+            processIdentifier: processIdentifier, launchGeneration: launchGeneration, codeIdentity: code))
+    }
+
     func testNativeWindowComparisonExcludesPartialPixelsFromOutsideItsBounds() throws {
         let bounds = CGRect(x: -400, y: 100, width: 1728, height: 1117)
         for window in [CGRect(x: -180, y: 625, width: 640, height: 332),

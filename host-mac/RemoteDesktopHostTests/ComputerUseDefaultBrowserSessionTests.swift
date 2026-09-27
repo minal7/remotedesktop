@@ -32,200 +32,6 @@ private final class NativeControlExchangeCapture: @unchecked Sendable {
 }
 
 @MainActor
-private final class GmailFocusDiagnosticTarget: ComputerUseNativeTextTarget {
-    private let target: ComputerUseAccessibilityTextTarget
-    private var previous: (id: String, bytes: Int, units: Int, selection: NSRange, editable: Bool, secure: Bool)?
-    private var previousWasNil: Bool?
-    private var transitions: [[String: Any]] = []
-    private var truncated = false
-    private var lifecycleBox = GmailAXLifecycleBox()
-    private var lifecycleLog = GmailAXLifecycleLog()
-
-    init() {
-        let base = ComputerUseAccessibilityTextTarget.Access.live
-        let refs = GmailAXReferenceBox()
-        let originalMonitor = base.makeLifecycleMonitor
-        let lifecycleBox = GmailAXLifecycleBox()
-        let lifecycleLog = GmailAXLifecycleLog()
-        let access = ComputerUseAccessibilityTextTarget.Access(
-            frontmost: {
-                let app = base.frontmost()
-                refs.setApplication(app?.root)
-                return app
-            },
-            read: { name, element in
-                let value = base.read(name, element)
-                refs.observe(name, element: element, value: value)
-                return value
-            },
-            canSet: base.canSet,
-            write: base.write,
-            timeout: base.timeout,
-            makeLifecycleMonitor: { app in
-                let monitor = originalMonitor?(app) ?? ComputerUseAXLifecycleMonitor(application: app.root)
-                let recorder = GmailAXLifecycleRecorder(monitor, references: refs, log: lifecycleLog)
-                lifecycleBox.set(recorder)
-                return recorder
-            })
-        target = ComputerUseAccessibilityTextTarget(access: access)
-        self.lifecycleBox = lifecycleBox
-        self.lifecycleLog = lifecycleLog
-    }
-
-    func snapshot() -> ComputerUseTextSnapshot? {
-        let value = target.snapshot()
-        record(value)
-        return value
-    }
-    func snapshot(targetID: String) -> ComputerUseTextSnapshot? {
-        let value = target.snapshot(targetID: targetID)
-        record(value)
-        return value
-    }
-    func fields() -> [ComputerUseTextField] { target.fields() }
-    func focus(expected: ComputerUseTextSnapshot) throws -> Bool { try target.focus(expected: expected) }
-    func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool { try target.select(range, expected: expected) }
-    func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
-        try target.replaceSelectedText(text, expected: expected)
-    }
-    func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
-        try target.replaceWebValue(value, expected: expected)
-    }
-
-    private func record(_ snapshot: ComputerUseTextSnapshot?) {
-        let next = snapshot.map { ($0.targetID, $0.value.utf8.count, $0.value.utf16.count,
-            $0.selection, $0.isEditable, $0.isSecure) }
-        let changed: Bool
-        if let next, let previous {
-            changed = previous.id != next.0 || previous.bytes != next.1 || previous.units != next.2
-                || previous.selection != next.3 || previous.editable != next.4 || previous.secure != next.5
-        } else { changed = previousWasNil != (next == nil) }
-        guard changed else { return }
-        guard transitions.count < 128 else { truncated = true; return }
-        var row: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime,
-            "index": transitions.count, "available": next != nil]
-        if let old = previous, let next {
-            row["targetIDChanged"] = old.id != next.0
-            row["valueLengthChanged"] = old.bytes != next.1 || old.units != next.2
-            row["selectionChanged"] = old.selection != next.3
-            row["editableChanged"] = old.editable != next.4
-            row["secureChanged"] = old.secure != next.5
-        }
-        if let next {
-            row["valueUTF8Bytes"] = next.1; row["valueUTF16Units"] = next.2
-            row["selectionLocation"] = next.3.location; row["selectionLength"] = next.3.length
-            row["editable"] = next.4; row["secure"] = next.5
-            previous = (next.0, next.1, next.2, next.3, next.4, next.5)
-        } else { previous = nil }
-        previousWasNil = next == nil
-        transitions.append(row)
-    }
-
-    func jsonData() throws -> Data {
-        let lifecycle = lifecycleBox.get()
-        _ = lifecycle?.drain()
-        return try JSONSerialization.data(withJSONObject: ["snapshotTransitions": transitions,
-            "snapshotTransitionsTruncated": truncated, "lifecycleEvents": lifecycleLog.events,
-            "lifecycleEventsTruncated": lifecycleLog.truncated], options: [.prettyPrinted, .sortedKeys])
-    }
-}
-
-private final class GmailAXLifecycleBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var recorder: GmailAXLifecycleRecorder?
-    func set(_ value: GmailAXLifecycleRecorder) { lock.lock(); recorder = value; lock.unlock() }
-    func get() -> GmailAXLifecycleRecorder? { lock.lock(); defer { lock.unlock() }; return recorder }
-}
-
-private final class GmailAXReferenceBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var app: AXUIElement?
-    private var window: AXUIElement?
-    private var focus: AXUIElement?
-    private var ancestors: [AXUIElement] = []
-    func setApplication(_ value: AXUIElement?) {
-        lock.lock(); defer { lock.unlock() }
-        let changed: Bool
-        if let old = app { changed = value.map { !CFEqual(old, $0) } ?? true }
-        else { changed = value != nil }
-        if changed {
-            window = nil; focus = nil; ancestors.removeAll()
-        }
-        app = value
-    }
-    func observe(_ name: String, element: AXUIElement, value: CFTypeRef?) {
-        lock.lock(); defer { lock.unlock() }
-        if name == kAXFocusedWindowAttribute {
-            let next = value.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID()
-                ? unsafeBitCast($0, to: AXUIElement.self) : nil }
-            let changed: Bool
-            if let old = window { changed = next.map { !CFEqual(old, $0) } ?? true }
-            else { changed = next != nil }
-            if changed {
-                focus = nil; ancestors.removeAll()
-            }
-            window = next
-        } else if name == kAXFocusedUIElementAttribute {
-            let next = value.flatMap { CFGetTypeID($0) == AXUIElementGetTypeID()
-                ? unsafeBitCast($0, to: AXUIElement.self) : nil }
-            let changed: Bool
-            if let old = focus { changed = next.map { !CFEqual(old, $0) } ?? true }
-            else { changed = next != nil }
-            if changed {
-                ancestors.removeAll()
-            }
-            focus = next
-        } else if name == kAXParentAttribute,
-                  (focus.map({ CFEqual($0, element) }) == true || ancestors.contains(where: { CFEqual($0, element) })),
-                  let value, CFGetTypeID(value) == AXUIElementGetTypeID() {
-            let parent = unsafeBitCast(value, to: AXUIElement.self)
-            if ancestors.count < 20 && !ancestors.contains(where: { CFEqual($0, parent) }) { ancestors.append(parent) }
-        }
-    }
-    func matches(_ element: AXUIElement?) -> [String: Any] {
-        lock.lock(); defer { lock.unlock() }
-        guard let element else { return ["focus": false, "window": false, "application": false, "ancestor": false] }
-        return ["focus": focus.map { CFEqual($0, element) } ?? false,
-            "window": window.map { CFEqual($0, element) } ?? false,
-            "application": app.map { CFEqual($0, element) } ?? false,
-            "ancestor": ancestors.contains { CFEqual($0, element) }]
-    }
-}
-
-private final class GmailAXLifecycleRecorder: ComputerUseAXLifecycleMonitoring {
-    private let underlying: any ComputerUseAXLifecycleMonitoring
-    private let references: GmailAXReferenceBox
-    private let log: GmailAXLifecycleLog
-    init(_ underlying: any ComputerUseAXLifecycleMonitoring, references: GmailAXReferenceBox, log: GmailAXLifecycleLog) {
-        self.underlying = underlying; self.references = references; self.log = log
-    }
-    func drain() -> [ComputerUseAXLifecycleEvent] {
-        let pending = underlying.drain()
-        for event in pending {
-            var row: [String: Any] = ["uptime": ProcessInfo.processInfo.systemUptime,
-                "kind": String(describing: event.kind), "notification": event.notification as Any? ?? NSNull()]
-            row.merge(references.matches(event.element)) { _, value in value }
-            log.append(row)
-        }
-        return pending
-    }
-    func cancel() { underlying.cancel() }
-}
-
-private final class GmailAXLifecycleLog: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [[String: Any]] = []
-    private var wasTruncated = false
-    var events: [[String: Any]] { lock.lock(); defer { lock.unlock() }; return storage }
-    var truncated: Bool { lock.lock(); defer { lock.unlock() }; return wasTruncated }
-    func append(_ row: [String: Any]) {
-        lock.lock(); defer { lock.unlock() }
-        guard storage.count < 128 else { wasTruncated = true; return }
-        storage.append(row)
-    }
-}
-
-@MainActor
 final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     private final class FakeDesktop {
         var windows: [ComputerUseDefaultBrowserSession.Window] = []
@@ -1789,6 +1595,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         "applicationUnchanged": current.applicationID == baseline.applicationID,
                         "accessibilityIdentityUnchanged": current.accessibilityIdentity == baseline.accessibilityIdentity,
                         "visualDigestUnchanged": current.visualDigest == baseline.visualDigest,
+                        "keyboardCaretEvidencePresent": current.keyboardCaretEvidence != nil,
+                        "finalDispatchMatchesBaseline": baseline.matchesForFinalDispatch(current),
                         "editorStillExactURL": editor?.value.utf8.elementsEqual(url.utf8) == true,
                         "editorStateUnchanged": editor == initialEditor,
                         "editorPreconditionUnchanged": editor?.preconditionDigest == initialEditor.preconditionDigest,
@@ -1824,6 +1632,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["actionUnchanged"] as? Bool == true })
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["applicationUnchanged"] as? Bool == true })
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["accessibilityIdentityUnchanged"] as? Bool == true })
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["keyboardCaretEvidencePresent"] as? Bool == true },
+                    "Every stable focused address-field sample should carry bounded caret evidence")
+                XCTAssertTrue(fingerprintSamples.allSatisfy { $0["finalDispatchMatchesBaseline"] as? Bool == true },
+                    "Caret-only visual changes must pass the final-dispatch matcher without requiring an unchanged visual digest")
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorStillExactURL"] as? Bool == true })
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorStateUnchanged"] as? Bool == true })
                 XCTAssertTrue(fingerprintSamples.allSatisfy { $0["editorPreconditionUnchanged"] as? Bool == true })
@@ -2751,7 +2563,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var managerClientID: String?
         var managerSessionID: String?
         var managerPairingCode: String?
-        var gmailFocusDiagnostic: GmailFocusDiagnosticTarget?
         var managerTerminal: ClientUpdate?
         var managerTerminalMessages: [ClientUpdate] = []
         var managerApprovalStage: String?
@@ -2775,7 +2586,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID,
                 clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
             let pending = CompositionPendingStore()
-            if gmailDraft { gmailFocusDiagnostic = GmailFocusDiagnosticTarget() }
             let observer = DriveClientExecutorObserver(productionMCPExecutor)
             observer.willBeginVisualEffect = { action in
                 switch managerApprovalStage {
@@ -2787,7 +2597,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }
             let manager = HostComputerUseManager(injector: InputInjector(), executor: observer,
                 taskLedger: .init(fileURL: directory.appendingPathComponent("client-manager-ledger.json")),
-                nativeTextTarget: gmailFocusDiagnostic,
                 channelFactory: { _ in mailbox })
             let client = ClientModel(hostName: "Remote Desktop Host", pairingCode: pairingCode,
                 hostID: hostID, sessionID: sessionID, pendingStore: pending, channel: bridge,
@@ -3114,12 +2923,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         clientModel?.stop()
         clientManager?.stop()
         await clientManager?.shutdown()
-        if let diagnostic = gmailFocusDiagnostic {
-            let attachment = XCTAttachment(data: try diagnostic.jsonData(), uniformTypeIdentifier: "public.json")
-            attachment.name = "Gmail focused text target and AX lifecycle transitions"
-            attachment.lifetime = .keepAlways
-            add(attachment)
-        }
         if productionComposition, result != nil {
             do {
                 let confirmed = gmailDraft ? try remoteGmailDraftConfirmed() : try remoteUploadConfirmed()
@@ -3209,6 +3012,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         if clientEntry {
             let summary = XCTAttachment(string: "Transport: in-process LocalHostComputerUseChannel JSON bridge (no CloudKit/TLS enrollment)\n"
+                + "Native text target: production default (no Gmail test override)\n"
                 + "Task ID: \(String(describing: managerTaskID))\nClient terminal: \(String(describing: managerTerminal?.outcome))\n"
                 + "Wire terminal messages: \(managerTerminalMessages.map { "\($0.outcome): \($0.text)" })\n"
                 + "Failure state captured before shutdown: \(clientFailureDiagnostic ?? "none")\n"

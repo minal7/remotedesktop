@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Execute RED regressions for caret plus single RGB-level noise and final keyboard fingerprint matching. Then implement the general guarded repair, compile/test, and retry real Gmail.",
+  "next": "Identify the real native-text authority invalidation and verify screenshot coordinate contract from live09 before another full Gmail run. Preserve native ownership, cancellation, authentication and exact-file requirements.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -895,7 +895,7 @@
     "next": "Reproduce generically in fixtures, then use a larger bounded walk with a deadline while preserving exact window, lifecycle and selection checks. Repeat this read-only real probe before Gmail E2E."
   },
   "coordinateContractReview": {
-    "result": "The local adapter and pinned official implementation both use a 0\u20131000 normalized Fara coordinate space. No mapping mismatch identified for live04. This does not establish general vision reliability or identical image preprocessing.",
+    "result": "The local adapter and pinned official implementation both use a 0–1000 normalized Fara coordinate space. No mapping mismatch identified for live04. This does not establish general vision reliability or identical image preprocessing.",
     "source": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/coord_spaces.py#L13",
     "conversion": "https://github.com/microsoft/fara/blob/a675d6d61c41c47ae87bacefeab22caad18e3e84/src/fara/agents/fara/fara15_agent.py#L432",
     "local": "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseRuntimeTypes.swift:269"
@@ -990,5 +990,38 @@
     "pairMetadata": "9235B0D3-2446-4959-9678-7DF42A1BD666.json",
     "limits": "This reproduces a visual-only unstable fingerprint with the typed Gmail URL. It does not identify the exact two frames compared during live08 final dispatch. The next repair remains conditional on unchanged native authority and bounded caret differences.",
     "cleanup": "CUA verified exact URL without navigation, then closed only the new Start Page and restored original Drive. Window ID was deliberately redacted in this probe output; that test-only omission is corrected afterward, not yet rerun."
+  },
+  "keyboardCaretDispatchRepair": {
+    "stage": "Implemented, compiled, component tested and real Safari capture/matcher tested; Gmail pending",
+    "redRun": "keyboard-caret-dispatch-red01",
+    "red": "1 passed / 3 intended failures / 0 skipped; 15 expected assertion issues; 0 runtime warnings. Build 0 errors / 65 warnings; 54 stable source hashes. Tests establish the missing caret/rendering comparison and exact editor evidence checks; the strict stub intentionally preserves current behavior.",
+    "plan": "Keep legacy fingerprint equality exact. Add a final native keyboard comparison that binds signed app/window/exact editor state and permits only the existing bounded insertion-point difference. Ignore only one RGB level within that guarded image comparison; alpha and meaningful outside-field changes remain strict. Collect evidence from the same image already used for the fingerprint.",
+    "limits": "13 focused checks and real Safari capture/matcher pass. Live09 reached Gmail but failed later during compose with no attachment; keyboard repair does not establish full Gmail workflow acceptance.",
+    "greenRun": "keyboard-caret-dispatch-green01",
+    "green": "13 passed / 0 failed / 0 skipped; 0 test issues and runtime warnings. Build 0 errors / 65 warnings; 55 stable source hashes. Tests cover caret acceptance, one-level RGB tolerance outside the editor, strict in-editor RGB and alpha changes, signed app/process/window/field/text/selection identity, one-sided evidence, single-use approval and pre-/post-dispatch rejection.",
+    "implementation": "Real default-native keyboard approvals derive the digest and caret evidence from one capture bracketed by exact native authority checks. Final dispatch verifies that evidence before the legacy equality fast path. Legacy fingerprint equality remains exact. The guarded caret comparison permits one RGB level outside the editor only; editor pixels and alpha remain strict.",
+    "safariRun": "safari-key-fingerprint-live03",
+    "safari": "1 passed / 0 failed / 0 skipped. Build 0 errors / 0 warnings; 55 stable source hashes. One known main-thread responsiveness runtime warning. All 12 samples retained exact native authority, carried keyboard evidence, and matched final dispatch; 5 samples differed in legacy visual digest. Initial URL typing needed one safe empty-field retry after known-unsent rejection. No Return, navigation or inference was executed.",
+    "safariAttachments": [
+      "65C3E529-DF47-46BC-8F94-628B812A3AC0.json",
+      "C607CE97-646C-4AB9-9D65-06765C110009.json"
+    ],
+    "safariCleanup": "CUA independently observed Start Page with exact Gmail URL; closed only owned window 0F572380-BCB5-4505-B367-AD146A0F41D5 and confirmed original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 restored."
+  },
+  "live09": {
+    "run": "client-manager-gmail-draft-live09",
+    "stage": "Failed real E2E; no acceptance",
+    "result": "0 passed / 1 failed / 0 skipped. Build 0 errors / 0 warnings; 55 stable source hashes. 3 recorded test issues including one known main-thread responsiveness warning.",
+    "outcome": "Reached Gmail after URL entry and Return. Failed with stepLimit; client terminal nil, zero approval envelopes, picker effects, native file calls, upload effects or exact selected-file observations. Multiple empty Compose panes and an emoji picker remained. No recipient, subject, body or attachment was completed.",
+    "diagnosis": "Four retained rejection pairs include initial URL typing with unchanged pixels but changed editable authority; two clicks outside the Safari window at host y1070/1071; and recipient typing with unchanged pixels but changed editable authority. The final diagnostic dictionary contains accumulated keys from multiple attempts and is not evidence that every field describes the final action. The Fara transcript contains known-unsent rejections; exact typing invalidation cause remains unresolved.",
+    "attachments": {
+      "clientRoute": "7E4A17AE-C203-458A-89D2-6B7D39063756.txt",
+      "outcome": "0D8AAECE-C359-4C8B-85B2-AA8B4EF0C5F4.txt",
+      "faraRequest": "15F5B669-502C-4145-A843-F16941357CA7.json",
+      "faraResponse": "FCF40A86-FEDA-4A2E-927D-341DF4DA75BA.json"
+    },
+    "independentReview": "CUA after workers exited confirmed Gmail in owned window FAD7375E-254B-4489-BC9D-D19A57C0BEBE with multiple empty compose panes and emoji picker. Dismissed emoji picker and discarded one visibly empty draft. Other panes were left because their creation history is not established. Owned window retained temporarily for a read-only native-field probe.",
+    "limits": "No attachment, task completion, saved draft persistence or Gmail workflow acceptance. Test used production-default native text target and one-worker resource profile.",
+    "nativePlanningReview": "Six captured native Compose proposals, each followed by a Fara observation focused on To recipients. The earliest truncated page snapshot and single final Fara screenshot do not prove each proposal created a pane or establish whether any pane predated the task. Do not infer an exact created-pane count."
   }
 }
