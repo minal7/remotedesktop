@@ -66,7 +66,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let focusedTextFrame: CGRect?
         let focusedEditor: String?
         let focusedTextState: ComputerUseNativeTextState?
-        let focusedTextStabilityToken: String?
         let nativeControls: ComputerUseNativeControls?
     }
     private final class Approval {
@@ -179,10 +178,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
         let currentToken = try tools.nativeFocusedEditorObservation()?.stabilityToken
         guard try currentScopeIsValid() else { throw Failure.scopedSurfaceChanged }
-        guard currentToken != observation.focusedTextStabilityToken else { return }
 
-        // Newly focused native fields can emit delayed AX title/ancestry events;
-        // settle their exact observed identity before asking the model to plan.
+        // A newly focused native field may appear after this first sample, and
+        // can emit delayed AX title/ancestry events. Settle the exact observed
+        // identity before asking the model to plan, even when this sample is unchanged.
         let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         var lastToken = currentToken
         var quietSince = ContinuousClock.now
@@ -275,7 +274,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
             focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState,
-            focusedTextStabilityToken: editor?.stabilityToken,
             nativeControls: controls)
     }
 

@@ -1912,6 +1912,57 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(proposals, 2)
     }
 
+    func testScopedDesktopWaitsForDelayedEditorFocusAfterClick() async throws {
+        for initiallyFocused in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var current: ComputerUseTextSnapshot? = initiallyFocused
+                ? ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
+                    isEditable: true, isSecure: false)
+                : nil
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+            var effects = 0, proposals = 0
+            var effectStarted: Date?
+            var transition: Task<Void, Never>?
+            defer { transition?.cancel() }
+            let tools = desktopTestTools(focus: { current?.preconditionDigest ?? "no-focused-editor" },
+                textEditor: editor, perform: { _ in
+                    effects += 1
+                    effectStarted = Date()
+                    transition = Task { @MainActor in
+                        do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+                        current = ComputerUseTextSnapshot(targetID: "B", value: "", selection: NSRange(location: 0, length: 0),
+                            isEditable: true, isSecure: false)
+                        do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+                        current = ComputerUseTextSnapshot(targetID: "C", value: "", selection: NSRange(location: 0, length: 0),
+                            isEditable: true, isSecure: false)
+                    }
+                })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                proposals += 1
+                if proposals == 1 {
+                    XCTAssertEqual(current?.targetID, initiallyFocused ? "A" : nil)
+                    return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+                }
+                XCTAssertEqual(current?.targetID, "C", "The delayed focused editor must settle before replanning")
+                XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(effectStarted ?? Date()), 1.8,
+                    "An unchanged early sample must not end settling before asynchronous focus transitions finish")
+                XCTAssertEqual(input.history.count, 1)
+                XCTAssertEqual(input.history.first?.response, "open-compose")
+                return .init(response: "ready", decision: .handoff("The focused editor is ready for review."))
+            }, surfaceScopeCheck: { _ in })
+
+            let taskID = initiallyFocused ? "async-editor-with-initial-focus" : "async-editor-without-initial-focus"
+            let result = try await executor.execute(taskID: taskID,
+                prompt: "Open an editor.", trustedUserPrompt: "Open an editor.", tools: tools, progress: { _ in })
+            XCTAssertEqual(result, .userInterventionRequired("The focused editor is ready for review."))
+            XCTAssertEqual(effects, 1)
+            XCTAssertEqual(proposals, 2)
+            if let transition { await transition.value }
+        }
+    }
+
     func testScopedDesktopCancellationDuringEditorQuietWaitPreventsNextProposal() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
