@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass with independent 28,273-byte SHA-256 readback. The new ambiguous-goal client attempt failed before native file listing or clarification: initial URL typing was rejected, later key/click proposals produced malformed address text, followed by an app invalidResponse error; the final captured F5 proposal is structurally valid and the immediate error cause is unconfirmed. No native file calls, clarification, accepted approval or upload. This does not test or disprove the ambiguity-choice flow itself. Broader route/workflow coverage remains open.",
+    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass with exact upload, taskCompleted, ledger completion and independent 28,273-byte SHA-256 readback. Ambiguous live02 reached the picker and listed files, but the native planner selected the first of two tied newest candidates rather than asking; the bounded harness refused the upload approval. No clarification, accepted approval, upload or task completion occurred. History-budget GREEN is component evidence only: live02’s last Fara exchange used 6,229 prompt tokens and 90 completion tokens and does not prove trimming was exercised or causal. Broader route/workflow coverage remains open.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3331,6 +3331,16 @@
         "redEvidence": ".build/repair-verification/native-control-stale-refresh-red01-summary.json",
         "greenEvidence": ".build/repair-verification/native-control-stale-refresh-green01-summary.json",
         "qualification": "Component behavior only; live24 uploaded the correct file but paused during verification; branch exercise unproven."
+      },
+      {
+        "name": "fara-history-input-budget",
+        "change": "Bounds Fara input history using the resident tokenizer and image/output reserve under the existing 8,192-token context. Preserves current observation/context and durable action history; trims only the model-input copy. Existing 20-entry/65,536-byte (64 KiB) validation remains unchanged.",
+        "red01": "Invalid test fixture used wait.seconds, which the decoder does not accept; exclude it as RED evidence.",
+        "red02": "Corrected RED02: 4 expected test failures, 12 assertions; 0 build errors, 8 warnings, 49 source hashes stable, no runtime warnings.",
+        "green": "GREEN01: 10 passed, 0 failures/skips/runtime warnings; 0 build errors, 41 warnings, 49 source hashes stable.",
+        "redEvidence": ".build/repair-verification/fara-context-budget-red02-summary.json",
+        "greenEvidence": ".build/repair-verification/fara-context-budget-green01-summary.json",
+        "qualification": "Component behavior only. Live02’s last Fara exchange used 6,229 prompt tokens plus 90 completion tokens; no evidence proves trimming was exercised or caused a model behavior change."
       }
     ],
     "runs": [
@@ -3485,6 +3495,17 @@
         "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/AF6E2869-0B36-4592-BE7B-0419F7DEDB40.txt",
         "faraRequest": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/74A012B6-FB66-4D28-97A0-8A1CBC6952F6.json",
         "faraResponse": ".build/repair-verification/client-manager-ambiguous-drive-live01-attachments/169F2FAA-6524-41CA-8AAE-7264FF7A34B8.json"
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live02",
+        "outcome": "Failed after reaching the file chooser. The native planner listed presentations and selected the first of two tied newest candidates (“Alternate …”) instead of requesting clarification. The bounded harness refused the resulting Upload approval because the selected candidate was not the expected fixture. No clarification/answer, accepted approval, upload effect or client completion; client terminal nil. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live02-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live02-attachments/9BB38FE9-89DA-49BA-84CF-826112F5D392.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live02-attachments/617F6CBC-460E-4162-B5D7-1BC6E8D3C0CC.txt",
+        "nativeRequest": ".build/repair-verification/client-manager-ambiguous-drive-live02-attachments/B98B6FFA-2C0E-4AD0-8CFB-5DA540452E22.json",
+        "nativeResponse": ".build/repair-verification/client-manager-ambiguous-drive-live02-attachments/3C3C2B34-F2B3-4963-A4ED-40F30471C65E.json",
+        "qualification": "No user choice was requested or answered; this is a failed planner decision, not evidence that the clarification UI/answer protocol is broken.",
+        "cleanup": "Canceled the stopped chooser and closed only owned Safari window 23D7AD09-2C01-419F-B7AE-2CFD6068236E; preserved original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3574,7 +3595,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Repair Fara model-input history budgeting using resident-worker text token count plus conservative image/output reserve, then retry the real ambiguity workflow. Keep original goal, clarifications, current state, approval rules and durable action history.",
+    "next": "Improve ambiguity decision guidance with bounded general LLM instructions, preserving original goal, candidate IDs, and approval gates; no site/keyword routing. History-budget live causality is unproven.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
