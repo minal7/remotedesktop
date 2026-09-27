@@ -1963,6 +1963,100 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testScopedDesktopWaitsForInitialDelayedEditorFocusBeforePlanning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current: ComputerUseTextSnapshot? = ComputerUseTextSnapshot(targetID: "A", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        let began = Date()
+        var transition: Task<Void, Never>?
+        defer { transition?.cancel() }
+        transition = Task { @MainActor in
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            current = ComputerUseTextSnapshot(targetID: "B", value: "loading",
+                selection: NSRange(location: 7, length: 0), isEditable: true, isSecure: false)
+            do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+            current = ComputerUseTextSnapshot(targetID: "C", value: "ready",
+                selection: NSRange(location: 5, length: 0), isEditable: true, isSecure: false)
+        }
+        var proposals = 0
+        let tools = desktopTestTools(focus: { current?.preconditionDigest ?? "no-focused-editor" },
+            textEditor: editor, perform: { _ in XCTFail("Initial observation must not dispatch input") })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            XCTAssertEqual(current?.targetID, "C", "Planning must wait for initial focus/title churn to settle")
+            XCTAssertEqual(input.focusedTextState?.valuePrefix, "ready",
+                "The first proposal must receive the fresh editor snapshot, not the initial token")
+            XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(began), 1.8,
+                "The initial editor target must remain stable before the first model proposal")
+            XCTAssertTrue(input.history.isEmpty, "Initial stabilization must not fabricate prior actions")
+            return .init(response: "editor is ready", decision: .handoff("The editor is ready for review."))
+        }, surfaceScopeCheck: { _ in })
+
+        let result = try await executor.execute(taskID: "initial-editor-settle", prompt: "Open an editor.",
+            trustedUserPrompt: "Open an editor.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The editor is ready for review."))
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(current?.targetID, "C")
+        if let transition { await transition.value }
+    }
+
+    func testScopedDesktopCancelsInitialEditorSettlingOnStopOrScopeLoss() async throws {
+        for scenario in ["cancel", "scope"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var current: ComputerUseTextSnapshot? = ComputerUseTextSnapshot(targetID: "A", value: "",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+            var scopeValid = true
+            var transition: Task<Void, Never>?
+            var abort: Task<Void, Never>?
+            var run: Task<ComputerUseExecutionResult, Error>?
+            defer { transition?.cancel(); abort?.cancel(); run?.cancel() }
+            var effects = 0, proposals = 0
+            let tools = desktopTestTools(focus: { current?.preconditionDigest ?? "no-focused-editor" },
+                textEditor: editor, perform: { _ in effects += 1 })
+            transition = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+                current = ComputerUseTextSnapshot(targetID: "B", value: "loading",
+                    selection: NSRange(location: 7, length: 0), isEditable: true, isSecure: false)
+                do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
+                current = ComputerUseTextSnapshot(targetID: "C", value: "ready",
+                    selection: NSRange(location: 5, length: 0), isEditable: true, isSecure: false)
+            }
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                return .init(response: "unexpected proposal", decision: .handoff("Stop."))
+            }, surfaceScopeCheck: { _ in
+                guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+            })
+            run = Task { try await executor.execute(taskID: "initial-editor-abort-\(scenario)",
+                prompt: "Open an editor.", trustedUserPrompt: "Open an editor.", tools: tools, progress: { _ in }) }
+            if scenario == "cancel" {
+                abort = Task { @MainActor in
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    run?.cancel()
+                }
+                do { _ = try await run?.value; XCTFail("Stop must cancel initial editor settling") }
+                catch { XCTAssertTrue(error is CancellationError) }
+            } else {
+                abort = Task { @MainActor in
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                    scopeValid = false
+                }
+                do { _ = try await run?.value; XCTFail("Scope loss must stop initial editor settling") }
+                catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged { }
+            }
+            XCTAssertEqual(proposals, 0, scenario)
+            XCTAssertEqual(effects, 0, scenario)
+            transition?.cancel()
+            abort?.cancel()
+        }
+    }
+
     func testScopedDesktopCancellationDuringEditorQuietWaitPreventsNextProposal() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

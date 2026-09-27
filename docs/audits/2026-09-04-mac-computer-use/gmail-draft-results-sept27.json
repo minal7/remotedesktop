@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Continue the real Gmail draft test with one bounded, freshly verified recipient-autocomplete Return approval in the test harness. Keep the production Return policy and no-Send constraint unchanged. Live17 proves recipient entry but not causal attribution to the new page-control ordering. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Evaluate a bounded startup-settle regression before another live Gmail run. No title/pixel authority changes or model prompt changes are established; do not infer that settling resolves AXTitleChanged invalidation. The recipient approval gate and page-context ordering were not exercised in live18. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1351,6 +1351,27 @@
       "nativeResponse": "client-manager-gmail-draft-live17-attachments/2154A68E-F3DB-4513-9B20-FD9AD58DD348.json",
       "faraRequest": "client-manager-gmail-draft-live17-attachments/548C60AC-16D8-469F-A634-7DBA656C443A.json",
       "faraResponse": "client-manager-gmail-draft-live17-attachments/03049539-FD33-4565-95DF-709B7423BDA4.json"
+    }
+  },
+  "live18": {
+    "run": "client-manager-gmail-draft-live18",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "The attempt failed before Gmail. URL typing was rejected after its address-bar binding retired on AXTitleChanged matching window/document-root/ancestor. Fara missed the no-input feedback, pressed Return on the empty bar, then proposed a Downloads/menu-bar click rejected by pixel validation and a Sheets click on an unidentified target; the bounded harness accepted no approval. No recipient-gate approval/effect, file handoff, picker, upload or terminal.",
+    "lifecycle": "Diagnostic 4ACCCA3C-638F-4FF2-8AB6-413DE276729B.json retained 3 events with 0 drops. The address-bar binding was created at 9.299 s and retired at 23.286 s. This records the event observed by the reader, not the notification arrival time.",
+    "qualification": "The recipient approval gate and native page-context ordering were not exercised; this run does not show that either caused the failure. No draft or file effects occurred.",
+    "cleanup": "CUA found the owned Start Page window 370F55E6-05CB-4724-8CE1-B12206B04766 with no Compose panes or created drafts, closed only that window, and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923. Runtime workers were cleaned up.",
+    "acceptance": "No Gmail workflow progress; model-driven Gmail remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live18-attachments/manifest.json",
+      "lifecycle": "client-manager-gmail-draft-live18-attachments/4ACCCA3C-638F-4FF2-8AB6-413DE276729B.json",
+      "route": "client-manager-gmail-draft-live18-attachments/2EC58457-3840-4598-AC5D-89A1F46CED21.txt",
+      "outcome": "client-manager-gmail-draft-live18-attachments/A75D9E4C-A066-4C7B-9A8C-C0F9F8B60AD4.txt",
+      "faraRequest": "client-manager-gmail-draft-live18-attachments/365D1060-C6C9-4C73-8452-5A0E4C7713C0.json",
+      "faraResponse": "client-manager-gmail-draft-live18-attachments/E5B68C31-C2DB-4EBD-BA16-A706FA014AF7.json",
+      "revalidationPairs": [
+        "client-manager-gmail-draft-live18-attachments/6FC2D001-F9E8-4022-A638-7B7C5E2F0293.json",
+        "client-manager-gmail-draft-live18-attachments/4A29C401-D011-43E7-87C1-7E58B0D4D6F9.json"
+      ]
     }
   }
 }

@@ -428,6 +428,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard let session else { throw Failure.changedTask }
         let lease = try store.acquireExecution(taskID: session.journal.taskID, expected: session.journal)
         defer { lease.release() }
+        if session.turns == 0, surfaceScopeCheck != nil {
+            try Task.checkCancellation(); try lease.assertOwnership(); try checkScopedSurface()
+            let startupObservation = try observe(tools)
+            try checkScopedSurface()
+            try await waitForPostActionSurface(startupObservation, tools: tools)
+            try Task.checkCancellation(); try lease.assertOwnership(); try checkScopedSurface()
+        }
         while session.turns < 64 {
             try Task.checkCancellation(); try lease.assertOwnership()
             try checkScopedSurface()
