@@ -2015,6 +2015,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                                      pickerDismissed: Bool, toastConfirmed: Bool, rowCells: [String]?)?
         var acceptedGmailDraftEvidence: (url: String, attachmentContainer: String, draftSavedMarker: Bool)?
         var pickerOpeningEffects = 0
+        var recipientConfirmationEffects = 0
+        var recipientConfirmationApprovals = 0
         var delegatedWorkerGoal: String?
         var productionBrowserExecutor: ComputerUseDefaultBrowserExecutor?
         var productionMCPExecutor: MCPFirstComputerUseExecutor?
@@ -2172,6 +2174,120 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 current = unsafeBitCast(next, to: AXUIElement.self)
             }
             return false
+        }
+        func isObservedGmailRecipientConfirmation(_ action: ComputerUsePredictedAction,
+                                                   window: ComputerUseDefaultBrowserSession.Window) throws -> Bool {
+            guard gmailDraft, case .key(usage: 0x28, modifiers: 0) = action,
+                  let expectedRecipient = ProcessInfo.processInfo.environment["GMAIL_DRAFT_RECIPIENT"],
+                  !expectedRecipient.isEmpty,
+                  let retained = retainedBrowserWindow(), retained.id == window.id,
+                  retained.application == window.application,
+                  CFEqual(retained.accessibilityElement, window.accessibilityElement),
+                  let app = NSWorkspace.shared.frontmostApplication, !app.isTerminated,
+                  ComputerUseApplicationIdentity(runningApplication: app) == window.application,
+                  let pageURL = try freshlyObservedBrowserURL(),
+                  URL(string: pageURL)?.host == "mail.google.com" else { return false }
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+            func value(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+                guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var result: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success,
+                      !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+                return result
+            }
+            func string(_ name: String, _ element: AXUIElement) -> String? { value(name, element) as? String }
+            func containsRecipientToken(_ text: String) -> Bool {
+                text.split(whereSeparator: \.isWhitespace).contains { $0 == Substring(expectedRecipient) }
+            }
+            func isBooleanTrue(_ candidate: CFTypeRef?) -> Bool {
+                guard let candidate, CFGetTypeID(candidate) == CFBooleanGetTypeID() else { return false }
+                return CFBooleanGetValue(unsafeBitCast(candidate, to: CFBoolean.self))
+            }
+            let appRoot = AXUIElementCreateApplication(window.application.processIdentifier)
+            let scope = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(window.application)
+            guard scope.focusedWindowID == window.id,
+                  let focusedRaw = value(kAXFocusedUIElementAttribute as String, appRoot),
+                  CFGetTypeID(focusedRaw) == AXUIElementGetTypeID() else { return false }
+            let focused = unsafeBitCast(focusedRaw, to: AXUIElement.self)
+            var current = focused
+            var visited: [AXUIElement] = []
+            var sawExactFocusedStaticText = false
+            var sawList = false
+            var sawMatchingOption = false
+            var sawExpandedRecipientCombo = false
+            var recipientCombo: AXUIElement?
+            var webAreaCount = 0
+            for _ in 0..<32 {
+                guard !Task.isCancelled, ContinuousClock.now < deadline,
+                      !visited.contains(where: { CFEqual($0, current) }) else { return false }
+                visited.append(current)
+                let role = string(kAXRoleAttribute as String, current)
+                let subrole = string(kAXSubroleAttribute as String, current)
+                guard (value("AXHidden", current) as? NSNumber)?.boolValue != true,
+                      (value("AXProtectedContent", current) as? NSNumber)?.boolValue != true,
+                      role != "AXSecureTextField", subrole != (kAXSecureTextFieldSubrole as String),
+                      role != "AXSheet", role != "AXDialog" else { return false }
+                if role == "AXList" { sawList = true }
+                if role == "AXStaticText", CFEqual(current, focused) {
+                    let label = string(kAXTitleAttribute as String, current)
+                        ?? string(kAXDescriptionAttribute as String, current)
+                    let textValue = string(kAXValueAttribute as String, current)
+                    sawExactFocusedStaticText = textValue.map(containsRecipientToken) == true
+                        || label.map(containsRecipientToken) == true
+                }
+                if ["AXRow", "AXOption", "AXMenuItem"].contains(role ?? "") {
+                    let label = string(kAXTitleAttribute as String, current)
+                        ?? string(kAXDescriptionAttribute as String, current)
+                    let textValue = string(kAXValueAttribute as String, current)
+                    if textValue.map(containsRecipientToken) == true || label.map(containsRecipientToken) == true {
+                        sawMatchingOption = true
+                    }
+                }
+                if role == "AXComboBox" {
+                    let label = string(kAXTitleAttribute as String, current)
+                        ?? string(kAXDescriptionAttribute as String, current)
+                    let description = string(kAXDescriptionAttribute as String, current)
+                    let textValue = string(kAXValueAttribute as String, current)
+                    guard sawList, sawExactFocusedStaticText || sawMatchingOption,
+                          (label == "To recipients" || description == "To recipients"),
+                          isBooleanTrue(value(kAXEnabledAttribute as String, current)),
+                          isBooleanTrue(value("AXExpanded", current)),
+                          textValue == expectedRecipient else { return false }
+                    sawExpandedRecipientCombo = true
+                    recipientCombo = current
+                }
+                if role == "AXWebArea" {
+                    webAreaCount += 1
+                    guard webAreaCount == 1 else { return false }
+                    let urls = ["AXURL", kAXDocumentAttribute as String].compactMap { key -> String? in
+                        guard let raw = value(key, current) else { return nil }
+                        return (raw as? URL)?.absoluteString ?? raw as? String
+                    }
+                    guard Set(urls) == [pageURL] else { return false }
+                }
+                if CFEqual(current, window.accessibilityElement) { break }
+                guard let parent = value(kAXParentAttribute as String, current),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+                current = unsafeBitCast(parent, to: AXUIElement.self)
+            }
+            guard visited.contains(where: { CFEqual($0, window.accessibilityElement) }),
+                  webAreaCount == 1, sawExpandedRecipientCombo, sawList,
+                  sawExactFocusedStaticText || sawMatchingOption,
+                  let freshRetained = retainedBrowserWindow(), freshRetained.id == window.id,
+                  freshRetained.application == window.application,
+                  CFEqual(freshRetained.accessibilityElement, window.accessibilityElement),
+                  let freshApp = NSWorkspace.shared.frontmostApplication, !freshApp.isTerminated,
+                  ComputerUseApplicationIdentity(runningApplication: freshApp) == window.application,
+                  try freshlyObservedBrowserURL() == pageURL else { return false }
+            guard let focusedAgain = value(kAXFocusedUIElementAttribute as String, appRoot),
+                  CFGetTypeID(focusedAgain) == AXUIElementGetTypeID(),
+                  CFEqual(focused, unsafeBitCast(focusedAgain, to: AXUIElement.self)),
+                  let recipientCombo,
+                  isBooleanTrue(value(kAXEnabledAttribute as String, recipientCombo)),
+                  isBooleanTrue(value("AXExpanded", recipientCombo)),
+                  string(kAXValueAttribute as String, recipientCombo) == expectedRecipient else { return false }
+            return true
         }
         func freshlyObservedUploadedFileRow(window: ComputerUseDefaultBrowserSession.Window,
                                              fileName: String) throws -> [String]? {
@@ -2607,6 +2723,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 switch managerApprovalStage {
                 case "picker": pickerOpeningEffects += 1
                 case "upload": uploadEffects += 1
+                case "recipient":
+                    guard case .key(usage: 0x28, modifiers: 0) = action else {
+                        XCTFail("Recipient confirmation approval must remain a plain Return")
+                        managerApprovalStage = nil
+                        return
+                    }
+                    recipientConfirmationEffects += 1
                 default: XCTFail("Unexpected visual input outside the two bounded approval gates: \(action)")
                 }
                 managerApprovalStage = nil
@@ -2756,10 +2879,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         } else {
                             observedAttachFilesClick = false
                         }
+                        var confirmsGmailRecipient = false
+                        if gmailDraft, recipientConfirmationEffects == 0, recipientConfirmationApprovals == 0,
+                           pickerOpeningEffects == 0, uploadEffects == 0, panel == nil, let window {
+                            confirmsGmailRecipient = try isObservedGmailRecipientConfirmation(action, window: window)
+                        }
                         let opensNativeChooser = gmailDraft
                             ? observedAttachFilesClick
                             : message.localizedCaseInsensitiveContains("file upload")
-                        if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
+                        if confirmsGmailRecipient {
+                            recipientConfirmationApprovals += 1
+                            managerApprovalStage = "recipient"
+                        } else if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
                            opensNativeChooser,
                            case .click(let x, let y, 1, 1) = action, let window,
                            window.identity.bounds.contains(CGPoint(x: x, y: y)),
@@ -3036,7 +3167,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 + "Failure reason: \(clientFailureReason ?? String(describing: failure))\n"
                 + "Last executor result: \(lastClientExecutorResult ?? "not captured")\n"
                 + "Host activity at failure: \(managerActivityAtFailure ?? "not captured")\n"
-                + "Received approval envelopes: \(receivedApprovalDiagnostics)\nAccepted approval count: \(seenManagerApprovals.count)\nPicker effect callbacks: \(pickerOpeningEffects)\n"
+                + "Received approval envelopes: \(receivedApprovalDiagnostics)\nAccepted approval count: \(seenManagerApprovals.count)\nRecipient confirmation approvals/effects: \(recipientConfirmationApprovals)/\(recipientConfirmationEffects)\nPicker effect callbacks: \(pickerOpeningEffects)\n"
                 + "Ambiguity choice: id=\(ambiguityChoiceID ?? "none") label=\(ambiguityChoiceLabel ?? "none") answerPromptID=\(ambiguityChoicePromptID ?? "none")\n"
                 + "Upload effect callbacks: \(uploadEffects)\nTask ledger: \(directory.appendingPathComponent("client-manager-ledger.json").path)")
             summary.name = "Client and HostComputerUseManager envelope route"
@@ -3089,7 +3220,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(ambiguityChoiceLabel, name)
                 XCTAssertNotNil(ambiguityChoicePromptID)
             }
-            XCTAssertEqual(seenManagerApprovals.count, pickerOpeningEffects + uploadEffects,
+            XCTAssertEqual(recipientConfirmationApprovals, recipientConfirmationEffects,
+                "Each exact-recipient Return approval must match one dispatched effect")
+            XCTAssertTrue((0...1).contains(recipientConfirmationEffects), "Recipient confirmation must never replay")
+            XCTAssertEqual(seenManagerApprovals.count,
+                recipientConfirmationApprovals + pickerOpeningEffects + uploadEffects,
                 "Each accepted client approval must correspond to exactly one admitted native effect")
         }
         if uploadToDrive {
@@ -3108,6 +3243,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertTrue(evidence.toastConfirmed || evidence.rowCells != nil)
             if case .completed = result { } else { XCTFail("Expected completed real upload; got \(result), error=\(String(describing: failure))") }
         } else if gmailDraft {
+            XCTAssertTrue((0...1).contains(recipientConfirmationEffects))
             XCTAssertEqual(pickerOpeningEffects, 1, "Only the observed Gmail Attach files control may open the chooser")
             XCTAssertEqual(uploadEffects, 1, "Only the exact selected spreadsheet's native primary action may confirm the chooser")
             guard let evidence = acceptedGmailDraftEvidence else {
