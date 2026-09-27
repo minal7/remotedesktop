@@ -106,7 +106,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertTrue(try legacy.validatedBrowserGoal().questions.isEmpty)
     }
 
-    func testWorkerDirectiveRetainsOriginalGoalAndRejectsDesktopOrOversizeContext() throws {
+    func testWorkerDirectiveRetainsOriginalGoalOnBrowserAndDesktopAndRejectsOversizeContext() throws {
         let original = "plz chek this dont buy nething", png = try smallPNG()
         var input = ComputerUseFaraModel.Input(goal: original, screenshotPNG: png)
         input.browserWorkerDirective = .init(objective: "Read the visible return policy", constraints: "Do not purchase", completionCriteria: ["Return the observed policy"])
@@ -119,9 +119,54 @@ final class ComputerUseFaraActionTests: XCTestCase {
         XCTAssertTrue(text.contains("Do not purchase"))
         var desktop = ComputerUseFaraModel.Input(goal: original, screenshotPNG: png, surface: .desktop)
         desktop.browserWorkerDirective = input.browserWorkerDirective
-        XCTAssertThrowsError(try desktop.validateSurfaceContext())
+        XCTAssertNoThrow(try desktop.validateSurfaceContext())
+        let desktopRequest = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: desktop)
+        XCTAssertTrue(String(decoding: try XCTUnwrap(desktopRequest.httpBody), as: UTF8.self).contains(original))
         input.browserWorkerDirective = .init(objective: String(repeating: "x", count: 1_025), constraints: "", completionCriteria: ["Read it"])
         XCTAssertThrowsError(try input.validateSurfaceContext())
+    }
+
+    func testDesktopWorkerDirectiveRetainsOriginalGoalAndObservation() throws {
+        let goal = "Upload my latest presentation to Drive and verify it finished."
+        let png = try smallPNG()
+        let historyAction = call(#"{"action":"wait","time":1}"#)
+        let observedControl = try XCTUnwrap(ComputerUseNativeControls.Item(
+            description: "Drive New button", frame: CGRect(x: 10, y: 10, width: 20, height: 20),
+            enabled: true, displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100)))
+        let controls = try XCTUnwrap(ComputerUseNativeControls(items: [observedControl], truncated: false))
+        var input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: png, surface: .desktop,
+            history: [.init(screenshotPNG: png, response: historyAction, action: .wait(1))],
+            nativeControls: controls)
+        input.actionError = "Previous target was rejected; no input was sent."
+        input.browserWorkerDirective = .init(objective: "Continue the Drive upload", constraints: "Use only the default browser and selected file.",
+            completionCriteria: ["Upload the selected presentation", "Verify fresh completion evidence"])
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
+
+        let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(request.httpBody)
+        let text = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(text.contains(goal), "The complete original request remains authoritative")
+        XCTAssertTrue(text.contains("Continue the Drive upload"))
+        XCTAssertTrue(text.contains("Use only the default browser and selected file."))
+        XCTAssertTrue(text.contains("Verify fresh completion evidence"))
+        XCTAssertTrue(text.contains("Drive New button"), "Current native observation stays available")
+        let bodyObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(bodyObject["messages"] as? [[String: Any]])
+        let previousAssistantMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "assistant" })
+        XCTAssertEqual(previousAssistantMessage["content"] as? String, historyAction,
+            "Prior action history remains a separate action message alongside the directive")
+        let currentUser = try XCTUnwrap(messages.last { $0["role"] as? String == "user" })
+        let parts = try XCTUnwrap(currentUser["content"] as? [[String: Any]])
+        let currentText = try XCTUnwrap(parts.compactMap { $0["text"] as? String }.first)
+        XCTAssertTrue(currentText.contains("Drive New button"), "Current native observation stays available")
+        XCTAssertTrue(currentText.contains("Continue the Drive upload"))
+        XCTAssertTrue(currentText.contains("Use only the default browser and selected file."))
+        XCTAssertTrue(currentText.contains("Verify fresh completion evidence"))
+        XCTAssertTrue(currentText.contains("Previous target was rejected; no input was sent."),
+            "Current feedback remains with the current observation")
+        XCTAssertFalse(String(describing: messages.dropLast().map { $0["content"] ?? "" }).contains("completion_criteria"),
+            "The one-shot directive must not be copied into prior history")
     }
 
     @MainActor

@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable. Live10 completed the exact-file upload, fresh completion and independent byte/hash readback, but formal XCTest failed only a stale picker-opening-count assertion. Live11 failed on an out-of-window target. Live12/13 failed before file selection or upload; unchanged production code and stable 45-source audits. The chronology component change passed focused tests but did not resolve the workflow.",
+    "status": "Not accepted as reliable. Live20 failed before reaching Drive: the first address-bar type was rejected because focus/editable authority did not match although the text-field frame was unchanged; Fara then proposed Return on the empty bar and unrelated Favorites clicks, and the bounded test refused the unrelated approval. No file selection, upload or client terminal. The focused expanded-menu handoff component passes RED/GREEN and a read-only live Safari/Drive AX probe, but live20 never reached the menu. Earlier scoped upload/readback evidence remains separately qualified; full client-route reliability is open.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3272,6 +3272,31 @@
         "green": "browser-feedback-chronology-green01: 9/9 planner tests; 0 build errors, 8 warnings; 42 source hashes stable; no issues/runtime warnings.",
         "redEvidence": ".build/repair-verification/browser-feedback-chronology-red01-summary.json",
         "greenEvidence": ".build/repair-verification/browser-feedback-chronology-green01-summary.json"
+      },
+      {
+        "name": "structured-default-browser-visual-directive",
+        "change": "Native planner visualFallback supplies a bounded objective, constraints and completion criteria to one fresh Fara observation while retaining the original goal. New task, resume, picker, error and finish clear pending advice.",
+        "red": "3/3 expected behavior failures; build succeeded.",
+        "green": "GREEN01 16 passed/2 stale fixtures failed; corrected fixtures. GREEN02 18/18; GREEN03 19/19, zero build errors, six warnings, 42 source hashes stable.",
+        "redEvidence": ".build/repair-verification/browser-worker-directive-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/browser-worker-directive-green03-summary.json",
+        "qualification": "Component acceptance only; no whole-task or model qualification."
+      },
+      {
+        "name": "native-planner-error-scalar-diagnostics",
+        "change": "Retains only NSError domain and code in existing test diagnostics; userInfo and response text are not retained.",
+        "green": "3/3 focused checks; build succeeded; 42 source hashes stable.",
+        "evidence": ".build/repair-verification/native-control-error-diagnostic-green01-summary.json"
+      },
+      {
+        "name": "focused-expanded-menu-known-empty-handoff",
+        "change": "When the current focused retained enabled AXButton/AXPopUpButton is expanded and its local AXChildren are explicitly empty, refresh to the existing visual planner without synthetic action/history; final focus, role, enabled/expanded state and empty children are revalidated. Unknown or nonempty children do not trigger the flag; unrelated page truncation does not erase a complete local empty result.",
+        "red": "expanded-menu-handoff-red01: 0/1 with the expected native-planner-versus-visual-handoff assertion failure; 0 build errors.",
+        "green": "expanded-menu-handoff-green01: 34 passed, 1 skipped, 0 failures/build errors, 26 compiler warnings, 42 source hashes unchanged.",
+        "redEvidence": ".build/repair-verification/expanded-menu-handoff-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/expanded-menu-handoff-green01-summary.json",
+        "liveReadOnlyProbe": ".build/repair-verification/default-browser-menu-observation-live01-summary.json",
+        "qualification": "Component behavior only; read-only actual Safari/Drive AX confirmed the focused expanded AXButton had zero direct children and the flag was true despite pageTreeTruncated=true. No menu selection or upload was exercised."
       }
     ],
     "runs": [
@@ -3339,10 +3364,47 @@
         "run": "client-manager-drive-upload-live13",
         "outcome": "Unchanged repeat, 0/1 at test timeout after 310.716 s; 0 build errors/warnings, 45 source hashes unchanged, one known main-thread warning. Reached /drive/projects; actual native trace had 12 exchanges and repeatedly proposed the expanded New Folder menu. A Create proposal was rejected before input and Fara canceled the dialog; no folder creation is demonstrated. The final Fara request screenshot showed New collapsed with no File upload item visible; Fara imagined a Drive File>Upload menu and proposed a click on the macOS menu bar. No file selection, approval or upload. Outcome counter nativeControlCalls=0 is unused. Post-run CUA later showed File upload in the expanded menu; that is a separate observation, not the screenshot Fara received.",
         "evidence": ".build/repair-verification/client-manager-drive-upload-live13-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live14",
+        "outcome": "Failed with generic native planner handoff before file selection or upload; no completed native exchange retained. Build succeeded, zero errors/warnings; 45 source hashes stable.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live14-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live15",
+        "outcome": "Same generic handoff; new diagnostic identifies OSAtlasLlamaRuntimeError code 5 (invalidResponse). No selection/upload; zero build errors/warnings, 45 source hashes stable.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live15-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live16",
+        "outcome": "Timed out before client terminal completion. Exact newest presentation selected among three candidates; one upload admitted. Final native directive requested visual verification while upload was starting. Independent post-timeout Drive UI download matched 28,273 bytes and SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. This is an actual upload/readback, not a passing client test.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live16-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live17",
+        "outcome": "Failed before selection/upload after changed-pixel rejections at New. Same app/window/focus authority; no captured expected/fresh images in this run. A 420-second diagnostic allowance did not resolve the earlier failure. Build succeeded with 16 warnings; 45 hashes stable.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live17-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live18",
+        "outcome": "Build failed on Swift initializer argument order in new diagnostic observer forwarding. No UI test/inference ran. Argument order corrected before live19.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live18-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live19",
+        "outcome": "Failed after 362.277 seconds; no file selection/upload, zero approval envelopes. Seventeen native exchanges repeatedly selected the expanded menu container. Captured pair2 shows the open menu covering New; pair4 separately shows only New highlight changes. Post-run toast and selected 7:57 PM row establish an unintended Untitled folder was created; it was moved to Trash with confirmation. No pixel guard was relaxed. Build succeeded with 31 warnings; 45 hashes stable.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live19-summary.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live20",
+        "outcome": "Failed before reaching Drive; build succeeded with 0 errors/warnings and 45 source hashes unchanged. The first Fara typeText of the Drive URL was rejected: focusMatches=false and editableAuthorityMatches=false while textFrameBefore and textFrameAfter were identical. Fara ignored the rejection feedback, proposed Return on an empty address bar, clicked unrelated Favorites, and later treated Safari’s failed-page state as navigation. The bounded harness refused the unrelated Return approval. No accepted approval, file selection, upload or client terminal. The menu handoff was not reached; this is not evidence of a Drive network outage.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live20-summary.json",
+        "attachments": ".build/repair-verification/client-manager-drive-upload-live20-attachments/manifest.json",
+        "diagnosis": ".build/repair-verification/client-manager-drive-upload-live20-diagnosis.json"
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
-    "qualifications": "Live10 success does not override later reliability failures. Live12/13 show no upload. Keep prior production-composition live11 and direct-executor live28 acceptances separately scoped. Do not alter approval/input guards or infer menu-role remediation from post-run AX evidence.",
+    "qualifications": "Independent upload/readback does not establish client completion or repeatability. Live19 also demonstrates an unintended page mutation: generic Create is not covered by the existing high-impact keyword list, and the upload-only test counter does not capture arbitrary mutations. Keep the native menu observation gap, action semantics and complete-client acceptance open. Pairing, SwiftUI, CloudKit, email, ambiguity and whole-Mac 12 GB qualification remain untested here.",
     "lastBuild": {
       "errors": 0,
       "warnings": 0,
@@ -3351,7 +3413,7 @@
       ],
       "sourceCount": 45,
       "sourcesUnchangedDuringRun": true,
-      "latestRun": "client-manager-drive-upload-live13"
+      "latestRun": "client-manager-drive-upload-live20"
     },
     "nativeControlsABDiagnostic": {
       "evidence": ".build/repair-verification/fara-native-controls-ab01/summary.json",
@@ -3360,7 +3422,48 @@
       "baseline": "Reproduced the exact live13 File > Upload hallucination at [103,11].",
       "withoutNativeControls": "Invented a Downloads sidebar item and proposed [58,243], the Projects navigation area.",
       "memory": "Both serial workers stayed below the unchanged 4 GiB stop cap (peak sampled 4,211,294,208 bytes), exited, and removed credentials; not whole-Mac 12 GB qualification.",
-      "next": "Compare a trained alternative on these retained failure states before another real upload test."
-    }
+      "next": "Completed bounded trained-model and selective-history comparisons; see savedScreenModelComparisons. No production input filtering or model promotion is supported."
+    },
+    "savedScreenModelComparisons": {
+      "date": "2026-09-26",
+      "scope": "Twelve serial proposal-only requests on three exact saved Drive screenshots: nine current-screen/no-history proposals across Fara, GUI-Owl and UI-TARS, plus three Fara selective-history candidates. No generated action was executed.",
+      "currentScreenEvidence": ".build/repair-verification/drive-model-comparison01/summary.json",
+      "uiTarsEvidence": ".build/repair-verification/drive-model-comparison01/uitars-summary.json",
+      "selectiveHistoryEvidence": ".build/repair-verification/fara-observed-history01/summary.json",
+      "faraCurrentScreen": "New was a grounded next step on Home/live11 and Projects/live13; completed-upload/live10 was misread as requiring another upload. Dropping history is not supported.",
+      "guiOwl": "Home proposed Finder; Projects proposed valid intermediate My Drive navigation; completed-upload proposed clicking the existing row. No superiority shown in this limited comparison.",
+      "uiTars": "Home proposed New; Projects searched Drive for a local file; completed-upload proposed settings to inspect upload status. Coordinate transform remains uncalibrated and no app adapter was enabled.",
+      "selectiveHistory": "Removing only historical <think> prefixes while preserving exact tool calls and host native-control metadata failed all three candidate states: toolbar Downloads confusion on live11, malformed one-element click coordinate on live13, and reupload on completed live10. Baselines in commands.json were not rerun in this batch; original captured replies and previous exact live13 replay remain available.",
+      "limits": "Single next-action samples, not full-task replay. GUI-Owl and UI-TARS used their pinned model-specific prompt formats but lacked Fara host file-chooser guidance. All workers exited and removed credentials. Fara/GUI-Owl used the unchanged 4 GiB cap; UI-TARS used a diagnostic-only 5 GiB cap. No whole-Mac 12 GB qualification or model promotion.",
+      "next": "Structured handoff implemented and focused-tested; actual live results and grammar/menu diagnostics are recorded below. No production history transformation or model promotion."
+    },
+    "live16Readback": ".build/repair-verification/client-manager-drive-upload-live16-independent-readback.json",
+    "live19Diagnosis": ".build/repair-verification/client-manager-drive-upload-live19-diagnosis.json",
+    "live19Cleanup": ".build/repair-verification/client-manager-drive-upload-live19-cleanup.json",
+    "directiveGrammarDiagnostic": {
+      "evidence": ".build/repair-verification/native-directive-runtime-ab01/summary.json",
+      "scope": "Representative saved native request with current directive schema, not an exact live14/15 replay; no UI effects.",
+      "baseline": "2620 tokens fit; HTTP400 at chat completion: Failed to initialize samplers: failed to parse grammar.",
+      "variant": "Only constraints.maxLength removed: same 2620 input tokens; HTTP200 valid proposal in 12.931 seconds.",
+      "repair": "Pinned llama.cpp rejects bounded repeats above 2000. Removed 2048-character schema bound; host WorkerDirective.validate still enforces 2048 UTF-8 bytes. Schema and decoder boundary regressions pass in GREEN03.",
+      "qualification": "Request compatibility fixed; not task completion."
+    },
+    "expandedMenuDiagnostics": {
+      "liveEvidence": ".build/repair-verification/client-manager-drive-upload-live19-diagnosis.json",
+      "promptAB": ".build/repair-verification/native-expanded-menu-instruction-ab01/result/result.json",
+      "promptResult": "Exact baseline and general expanded-container instruction both chose the wrong expanded New Folder menu. Instruction not applied.",
+      "nonthinkingCandidate": ".build/repair-verification/native-nonthinking-candidate01/result/result.json",
+      "nonthinkingResult": "Changing only enable_thinking=false still chose the wrong menu container and Create in the wrong dialog. Faster (4.47/2.53 seconds), but incorrect; no production settings changed.",
+      "limits": "Four serial proposal-only completions across two experiments, one worker per experiment, unchanged 4 GiB cap, workers exited and temporary credentials removed. No effects or model promotion.",
+      "next": "Investigate the live20 native focused-editor authority mismatch before another Drive workflow. Do not relax focus/pixel/approval guards or apply the prior-target history draft. The expanded-menu component is tested, but live20 never reached a menu.",
+      "handoffComponent": {
+        "red": ".build/repair-verification/expanded-menu-handoff-red01-summary.json",
+        "green": ".build/repair-verification/expanded-menu-handoff-green01-summary.json",
+        "greenResult": "34 passed, 1 skipped, zero failures/build errors; 26 compiler warnings; 42 source hashes stable.",
+        "readOnlyLiveAXProbe": ".build/repair-verification/default-browser-menu-observation-live01-attachments/5F7D430F-60E8-4610-8F40-0D74E50AE323.json",
+        "observation": "Existing default Safari on drive.google.com; focused control is AXButton, expanded=true, direct child count 0, exact focused/observed-control match, flag=true, pageTreeTruncated=true. Read-only, no navigation/input/model; one existing main-thread runtime warning had no source location in xcresult."
+      }
+    },
+    "live20Diagnosis": ".build/repair-verification/client-manager-drive-upload-live20-diagnosis.json"
   }
 }

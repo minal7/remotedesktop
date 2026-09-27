@@ -446,6 +446,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
     private let nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)?
+    private let browserRevalidationFailureObserver:
+        ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
     private let localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
@@ -457,6 +459,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         bundle: Bundle = .main,
         runtime: OSAtlasLlamaRuntime = .shared,
         nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
+        browserRevalidationFailureObserver:
+            ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver? = nil,
         faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
@@ -470,6 +474,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.bundle = bundle
         self.runtime = runtime
         self.nativeControlInspectExchange = nativeControlInspectExchange
+        self.browserRevalidationFailureObserver = browserRevalidationFailureObserver
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
         self.localFileCatalogFactory = localFileCatalogFactory
@@ -559,7 +564,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                     cachedInputs.value = resolved
                     inputs = resolved
                 } else {
-                    return .visualFallback("The native page planner is not installed.")
+                    return .visualFallback("The native page planner is not installed.", directive: nil)
                 }
                 let endpoint = try await runtime.activateNativeText(inputs)
                 return try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page,
@@ -568,7 +573,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         } else { nativeControlPlanner = nil }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
             propose: propose, nativeFilePlanner: nativeFilePlanner, nativeControlPlanner: nativeControlPlanner,
-            finishRun: { await runtime.shutdown() })
+            finishRun: { await runtime.shutdown() },
+            revalidationFailureObserver: browserRevalidationFailureObserver)
     }
 
     private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {

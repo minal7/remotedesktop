@@ -354,6 +354,60 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testExpandedMenuWithoutObservedChildrenUsesFreshVisualHandoff() async throws {
+        let scenarios: [(name: String, expanded: Bool?, focusedElement: String?, hasMenuChildren: Bool,
+            hasActionableMenuItem: Bool, expectVisual: Bool)] = [
+                ("expanded-focused-empty", true, "button", true, false, true),
+                ("collapsed-focused-empty", false, "button", true, false, false),
+                ("expanded-focused-children-unknown", true, "button", false, false, false),
+                ("expanded-focus-unknown", true, nil, true, false, false),
+                ("expanded-focus-unrelated", true, "web", true, false, false),
+                ("expanded-with-actionable-child", true, "button", true, true, false),
+            ]
+
+        for scenario in scenarios {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let taskID = "expanded-menu-routing-\(scenario.name)"
+            let goal = "Open the upload menu, choose the requested file, and verify completion"
+            let session = try fixture.session()
+            let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+            graph.makePage(menuExpanded: scenario.expanded, focusedUIElement: scenario.focusedElement,
+                menuChildrenKnown: scenario.hasMenuChildren, includeActionableMenuItem: scenario.hasActionableMenuItem)
+            var nativeCalls = 0, visualCalls = 0
+            var visualInput: ComputerUseFaraModel.Input?
+            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+                propose: { input in
+                    visualCalls += 1
+                    visualInput = input
+                    return .init(response: "visual handoff", decision: .handoff("Review the current screenshot."))
+                }, nativeControlPlanner: { input, _ in
+                    nativeCalls += 1
+                    XCTAssertEqual(input.goal, goal)
+                    return .askUser("Native planner was reached.")
+                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: fixture.tools, progress: { _ in })
+
+            if scenario.expectVisual {
+                XCTAssertEqual(result, .userInterventionRequired("Review the current screenshot."), scenario.name)
+                XCTAssertEqual(nativeCalls, 0, scenario.name)
+                XCTAssertEqual(visualCalls, 1, scenario.name)
+                let input = try XCTUnwrap(visualInput, scenario.name)
+                XCTAssertEqual(input.goal, goal, "The full original task must survive the fresh visual handoff")
+                XCTAssertTrue(input.history.isEmpty, "The observation refresh must not invent a native action")
+                XCTAssertNil(input.actionError, "A handoff is not fabricated rejection feedback")
+            } else {
+                XCTAssertEqual(result, .userInterventionRequired("Native planner was reached."), scenario.name)
+                XCTAssertEqual(nativeCalls, 1, scenario.name)
+                XCTAssertEqual(visualCalls, 0, scenario.name)
+            }
+            XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the session's original Cmd-N may be sent")
+        }
+    }
+
     func testNativeControlInvalidProposalFallsBackWithUnchangedScreenshotInput() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -487,17 +541,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var nativeCalls = 0, visualCalls = 0
         var nativeInput: ComputerUseFaraModel.Input?
         var visualInput: ComputerUseFaraModel.Input?
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Use the visible Drive upload option",
+            constraints: "Use the original selected file and default account", completionCriteria: ["Verify fresh upload completion"])
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
             propose: { input in
                 visualCalls += 1
                 visualInput = input
                 XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.browserWorkerDirective, directive,
+                    "The structured directive should accompany the fresh screenshot exactly once")
                 return .init(response: "handoff", decision: .handoff("Review the current screenshot."))
             }, nativeControlPlanner: { input, _ in
                 nativeCalls += 1
                 nativeInput = input
                 fixture.desktop.screenColor = CIColor.white
-                return .visualFallback("The next menu item requires screenshot inspection.")
+                return .visualFallback("The next menu item requires screenshot inspection.", directive: directive)
             }, pageReader: reader)
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
@@ -515,7 +573,35 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             "A refresh is observation-only and must not add a synthetic action")
         XCTAssertEqual(observedVisualInput.actionError, observedNativeInput.actionError,
             "An observation refresh must not fabricate rejected-action feedback")
+        XCTAssertNil(observedNativeInput.browserWorkerDirective)
+        XCTAssertEqual(observedVisualInput.browserWorkerDirective, directive)
         XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the original session Cmd+N may have sent input")
+    }
+
+    func testNativeControlFailureDiagnosticsRetainOnlyErrorDomainAndCode() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "native-control-error-diagnostics"
+        let goal = "Open the upload menu"
+        let session = try fixture.session()
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        let plannerError = NSError(domain: "NativePlannerDiagnostic", code: 57,
+            userInfo: [NSLocalizedDescriptionKey: "private response text"])
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { _ in .init(response: "", decision: .handoff("Unexpected visual fallback")) },
+            nativeControlPlanner: { _, _ in throw plannerError },
+            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+
+        XCTAssertEqual(result, .userInterventionRequired(
+            "The current page controls could not be verified. Review the browser window, then choose Resume."))
+        XCTAssertEqual(executor.lastActionDiagnosticForTests["nativeControlErrorDomain"], "NativePlannerDiagnostic")
+        XCTAssertEqual(executor.lastActionDiagnosticForTests["nativeControlErrorCode"], "57")
+        XCTAssertFalse(executor.lastActionDiagnosticForTests.values.contains("private response text"))
     }
 
     func testNativeFilePanelTakesPriorityOverPendingVisualFallback() async throws {
@@ -528,18 +614,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
         graph.makePage()
         var visualCalls = 0, nativeControlCalls = 0, nativeFileCalls = 0
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Verify the upload path",
+            constraints: "Keep the original file selection", completionCriteria: ["Continue from fresh chooser state"])
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
             propose: { _ in
                 visualCalls += 1
                 return .init(response: "fallback", decision: .handoff("Unexpected visual fallback"))
-            }, nativeFilePlanner: { _ in
+            }, nativeFilePlanner: { input in
                 nativeFileCalls += 1
+                XCTAssertNil(input.browserWorkerDirective, "A newly visible picker clears the stale page directive")
                 return nil
             }, nativeControlPlanner: { _, _ in
                 nativeControlCalls += 1
                 fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: retained.id,
                     bounds: CGRect(x: 200, y: 150, width: 700, height: 500), focused: true)
-                return .visualFallback("The browser menu needs visual inspection.")
+                return .visualFallback("The browser menu needs visual inspection.", directive: directive)
             }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
@@ -816,6 +905,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
         let startsOnDrivePage = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
         let began = ContinuousClock.now
+        // Live16 reached the exact-file upload but timed out before completion verification;
+        // this single bounded retry budget is diagnostic, not a performance acceptance.
+        let timeLimit: Int64 = uploadToDrive ? (clientEntry ? 420 : productionComposition ? 300 : 240) : 150
+        let sharedDeadline = began.advanced(by: .seconds(timeLimit))
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
         let receipt = try XCTUnwrap(installedReceipt)
@@ -998,7 +1091,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     let description: String
                     switch plan {
                     case .pressControl(let id, let explanation): description = "pressControl id=\(id) explanation=\(explanation)"
-                    case .visualFallback(let reason): description = "visualFallback reason=\(reason)"
+                    case .visualFallback(let reason, let directive): description = "visualFallback reason=\(reason) directive=\(String(describing: directive))"
                     case .askUser(let question): description = "askUser question=\(question)"
                     }
                     let pageHost = URLComponents(string: page.url)?.host ?? ""
@@ -1122,6 +1215,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 installedAt: Date())
             let loader = OSAtlasVisualExecutorLoader(runtime: runtime,
                 nativeControlInspectExchange: { request, response in nativeControlExchanges.record(request, response) },
+                browserRevalidationFailureObserver: revalidationFailureObserver,
                 faraJournalDirectory: directory)
             let nativeInstaller = ComputerUseInstaller.nativeText()
             let nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs = {
@@ -1319,8 +1413,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if let hostID = managerHostID, let pairingCode = managerPairingCode {
                     managerTaskID = pendingStore.load(hostID: hostID, pairingCode: pairingCode)?.messageID
                 }
-                let deadline = ContinuousClock.now.advanced(by: .seconds(300))
-                while ContinuousClock.now < deadline {
+                while ContinuousClock.now < sharedDeadline {
                     try Task.checkCancellation()
                     if case .error(let detail) = client.state {
                         clientFailureReason = "client entered error state"
@@ -1449,7 +1542,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             return result
         }
         // The real site path makes serial native and visual model calls, followed by completion verification.
-        let timeLimit: Int64 = uploadToDrive ? (productionComposition ? 300 : 240) : 150
         let remaining = max(Int64(1), timeLimit - (ContinuousClock.now - began).components.seconds)
         let deadline = Task { try? await Task.sleep(for: .seconds(remaining)); operation.cancel() }
         var result: ComputerUseExecutionResult?
@@ -2076,8 +2168,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private let controlFrame: CGRect
         private let controlLabel: String
         private func element(_ key: String) -> AXUIElement { refs[key]! }
-        func makePage() {
+        func makePage(menuExpanded: Bool? = nil, focusedUIElement: String? = nil,
+                      menuChildrenKnown: Bool = false, includeActionableMenuItem: Bool = false) {
             attrs["root", default: [:]][kAXFocusedWindowAttribute as String] = window
+            if let focusedUIElement {
+                attrs["root", default: [:]][kAXFocusedUIElementAttribute as String] = element(focusedUIElement)
+            }
             attrs["window", default: [:]][kAXRoleAttribute as String] = "AXWindow" as NSString
             attrs["window", default: [:]][kAXChildrenAttribute as String] = [element("web")] as CFArray
             attrs["web", default: [:]][kAXRoleAttribute as String] = "AXWebArea" as NSString
@@ -2086,6 +2182,20 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             attrs["button", default: [:]][kAXRoleAttribute as String] = "AXButton" as NSString
             attrs["button", default: [:]][kAXTitleAttribute as String] = controlLabel as NSString
             attrs["button", default: [:]][kAXEnabledAttribute as String] = NSNumber(value: true)
+            if let menuExpanded {
+                attrs["button", default: [:]]["AXExpanded"] = NSNumber(value: menuExpanded)
+            }
+            if menuChildrenKnown {
+                if includeActionableMenuItem {
+                    refs["menuItem"] = AXUIElementCreateApplication(application.processIdentifier + 206)
+                    attrs["button", default: [:]][kAXChildrenAttribute as String] = [element("menuItem")] as CFArray
+                    attrs["menuItem", default: [:]][kAXRoleAttribute as String] = "AXMenuItem" as NSString
+                    attrs["menuItem", default: [:]][kAXTitleAttribute as String] = "File upload" as NSString
+                    attrs["menuItem", default: [:]][kAXEnabledAttribute as String] = NSNumber(value: true)
+                } else {
+                    attrs["button", default: [:]][kAXChildrenAttribute as String] = [] as CFArray
+                }
+            }
             var origin = controlFrame.origin, size = controlFrame.size
             attrs["button", default: [:]][kAXPositionAttribute as String] = AXValueCreate(.cgPoint, &origin)!
             attrs["button", default: [:]][kAXSizeAttribute as String] = AXValueCreate(.cgSize, &size)!

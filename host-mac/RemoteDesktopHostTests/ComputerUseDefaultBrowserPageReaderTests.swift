@@ -7,8 +7,9 @@ import AppKit
 @MainActor
 final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
     func testOptInRealDriveNativeControlSelection() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_NATIVE_CONTROL_PROBE"] == "1" else {
-            throw XCTSkip("Set RUN_DEFAULT_BROWSER_NATIVE_CONTROL_PROBE=1 to ask the installed local model to select one observed Drive AX control")
+        let menuObservationOnly = ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_MENU_OBSERVATION_PROBE"] == "1"
+        guard menuObservationOnly || ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_NATIVE_CONTROL_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_NATIVE_CONTROL_PROBE=1 for the native model probe or RUN_DEFAULT_BROWSER_MENU_OBSERVATION_PROBE=1 for read-only AX metadata")
         }
 
         let goal = "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
@@ -46,7 +47,7 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         let focusedWindow = unsafeBitCast(focusedValue, to: AXUIElement.self)
 
         let reader = ComputerUseDefaultBrowserPageReader(access: .live)
-        let pageDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+        let pageDeadline = ContinuousClock.now.advanced(by: .seconds(menuObservationOnly ? 2 : 10))
         var page: ComputerUseDefaultBrowserPageReader.Observation?
         while ContinuousClock.now < pageDeadline {
             try Task.checkCancellation()
@@ -75,6 +76,52 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         preconditionAttachment.lifetime = .keepAlways
         add(preconditionAttachment)
         let observed = try XCTUnwrap(page, "Expected the already-open Safari window to expose actual Drive AX controls within 10 seconds")
+        if menuObservationOnly {
+            var focusedUIValue: CFTypeRef?
+            let focusedUIRead = AXUIElementCopyAttributeValue(applicationElement,
+                kAXFocusedUIElementAttribute as CFString, &focusedUIValue) == .success
+            let focusedUI = focusedUIValue.flatMap { raw -> AXUIElement? in
+                guard CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+                return unsafeBitCast(raw, to: AXUIElement.self)
+            }
+            var roleValue: CFTypeRef?
+            let focusedRoleRead = focusedUI.map { AXUIElementCopyAttributeValue($0, kAXRoleAttribute as CFString, &roleValue) == .success } ?? false
+            let focusedRole = focusedRoleRead ? roleValue as? String : nil
+            var expandedValue: CFTypeRef?
+            let expandedRead = focusedUI.map { AXUIElementCopyAttributeValue($0, "AXExpanded" as CFString, &expandedValue) == .success } ?? false
+            let expanded: Any
+            if expandedRead, let value = expandedValue as? NSNumber { expanded = value.boolValue }
+            else { expanded = NSNull() }
+            var childrenValue: CFTypeRef?
+            let childrenRead = focusedUI.map { AXUIElementCopyAttributeValue($0, kAXChildrenAttribute as CFString, &childrenValue) == .success } ?? false
+            let directChildCount: Any
+            if childrenRead, let children = childrenValue as? [AXUIElement] { directChildCount = children.count }
+            else { directChildCount = NSNull() }
+            let focusedMatchesObservedControl = focusedUI.map { focused in
+                observed.controls.contains { control in
+                    guard let retained = reader.retainedControl(observationID: observed.id, controlID: control.id,
+                        application: identity, window: focusedWindow) else { return false }
+                    return CFEqual(retained, focused)
+                }
+            } ?? false
+            let menuEvidence = try JSONSerialization.data(withJSONObject: [
+                "frontmostBundleIdentifier": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
+                "focusedProcessIdentifier": safari.processIdentifier,
+                "focusedUIReadSucceeded": focusedUIRead,
+                "focusedRole": focusedRole.map { $0 as Any } ?? NSNull(),
+                "focusedExpanded": expanded,
+                "focusedDirectAXChildCount": directChildCount,
+                "focusedMatchesObservedPageControl": focusedMatchesObservedControl,
+                "focusedExpandedMenuHasNoActionableChildren": observed.focusedExpandedMenuHasNoActionableChildren,
+                "observedControlCount": observed.controls.count,
+                "pageTreeTruncated": observed.truncated
+            ], options: [.prettyPrinted, .sortedKeys])
+            let attachment = XCTAttachment(data: menuEvidence, uniformTypeIdentifier: "public.json")
+            attachment.name = "real-drive-focused-expanded-menu-ax-state.json"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            return
+        }
         let pageURL = try XCTUnwrap(URLComponents(string: observed.url))
         let observedControls = observed.controls.map { control -> [String: Any] in
             ["id": control.id, "role": control.role, "label": control.label,
@@ -210,6 +257,39 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             throw error
         }
         await runtime.shutdown()
+    }
+
+    func testFocusedExpandedMenuRequiresKnownEmptyChildrenAndStableFocus() throws {
+        for scenario in ["known-empty", "unknown-children", "actionable-child", "focus-changed"] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+            graph.set("button", "AXExpanded", NSNumber(value: true))
+            graph.set("root", kAXFocusedUIElementAttribute, graph.element("button"))
+            switch scenario {
+            case "known-empty":
+                graph.set("button", kAXChildrenAttribute, [] as CFArray)
+            case "actionable-child":
+                let child = graph.element("menu-item")
+                graph.set("button", kAXChildrenAttribute, [child] as CFArray)
+                graph.set("menu-item", kAXRoleAttribute, "AXMenuItem" as NSString)
+                graph.set("menu-item", kAXEnabledAttribute, NSNumber(value: true))
+                graph.set("menu-item", kAXTitleAttribute, "File upload" as NSString)
+            case "focus-changed":
+                graph.set("button", kAXChildrenAttribute, [] as CFArray)
+                var focusReadCount = 0
+                graph.afterRead = { node, attribute in
+                    guard node == "root", attribute == (kAXFocusedUIElementAttribute as String) else { return }
+                    focusReadCount += 1
+                    if focusReadCount == 1 {
+                        graph.set("root", kAXFocusedUIElementAttribute, graph.element("web"))
+                    }
+                }
+            default: break
+            }
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let page = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }), scenario)
+            XCTAssertEqual(page.focusedExpandedMenuHasNoActionableChildren, scenario == "known-empty", scenario)
+        }
     }
 
     func testValidatedControlCenterReturnsFreshEnabledControlCenter() throws {

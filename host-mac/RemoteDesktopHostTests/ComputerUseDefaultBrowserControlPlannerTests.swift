@@ -35,6 +35,10 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         let serializedRequest = String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self)
         XCTAssertEqual(serializedRequest.components(separatedBy: "\"properties\":{\"outcome\":").count - 1, branches.count,
                        "The wire schema must let the model choose outcome before the control ID")
+        XCTAssertTrue(serializedRequest.contains("\"properties\":{\"outcome\":{\"enum\":[\"visualFallback\"]"),
+            "Fallback schema preserves outcome-first grammar ordering")
+        XCTAssertTrue(serializedRequest.contains("\"properties\":{\"objective\":{\"maxLength\":1024"),
+            "Directive objective is emitted before its constraints and criteria")
         XCTAssertFalse(serializedRequest.contains("\"properties\":{\"control_id\":"),
                        "Alphabetic key sorting would commit the grammar to a control before the outcome")
         for branch in branches {
@@ -52,7 +56,9 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             default:
                 XCTFail("Unexpected outcome branch: \(outcomeName)")
             }
-            XCTAssertEqual(branch["required"] as? [String], ["outcome", "control_id", "explanation"])
+            XCTAssertEqual(branch["required"] as? [String], outcomeName == "visualFallback"
+                ? ["outcome", "control_id", "explanation", "worker_directive"]
+                : ["outcome", "control_id", "explanation"])
             XCTAssertEqual(branch["additionalProperties"] as? Bool, false)
         }
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
@@ -115,14 +121,77 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
 
     func testVisualFallbackAndAskUserRequireNullControlID() async throws {
         let page = try page(controls: [.init(id: "new-control", role: "AXButton", label: "New", frame: nil, enabled: true)])
+        let directive = ComputerUseFaraModel.WorkerDirective(objective: "Continue the upload",
+            constraints: "Preserve the original file choice", completionCriteria: ["Verify completion"])
         for (json, expected) in [
-            (#"{"outcome":"visualFallback","control_id":null,"explanation":"The screenshot is needed to find the next step."}"#, ComputerUseDefaultBrowserControlPlan.visualFallback("The screenshot is needed to find the next step.")),
+            (#"{"outcome":"visualFallback","control_id":null,"explanation":"The screenshot is needed to find the next step.","worker_directive":{"objective":"Continue the upload","constraints":"Preserve the original file choice","completion_criteria":["Verify completion"]}}"#,
+                ComputerUseDefaultBrowserControlPlan.visualFallback("The screenshot is needed to find the next step.", directive: directive)),
             (#"{"outcome":"askUser","control_id":null,"explanation":"Which account should receive the upload?"}"#, ComputerUseDefaultBrowserControlPlan.askUser("Which account should receive the upload?")),
         ] {
             let planner = try makePlanner(PlannerTransport(reply: try envelope(json)))
             let plan = try await planner.propose(input: makeInput(), page: page)
             XCTAssertEqual(plan, expected)
         }
+    }
+
+    func testVisualFallbackSchemaRequiresStructuredDirectiveOnlyForFallback() throws {
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"pressControl","control_id":"new-control","explanation":"Open menu."}"#)))
+        let request = try planner.makeRequest(input: makeInput(), page: page(controls: [
+            .init(id: "new-control", role: "AXButton", label: "New", frame: CGRect(x: 1, y: 2, width: 3, height: 4), enabled: true),
+        ]))
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+        let jsonSchema = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        let schema = try XCTUnwrap(jsonSchema["schema"] as? [String: Any])
+        let branches = try XCTUnwrap(schema["oneOf"] as? [[String: Any]])
+        let fallback = try XCTUnwrap(branches.first {
+            let properties = $0["properties"] as? [String: Any]
+            let outcome = properties?["outcome"] as? [String: Any]
+            return outcome?["enum"] as? [String] == ["visualFallback"]
+        })
+        let fallbackProperties = try XCTUnwrap(fallback["properties"] as? [String: Any])
+        let directive = try XCTUnwrap(fallbackProperties["worker_directive"] as? [String: Any])
+        XCTAssertEqual(directive["type"] as? String, "object")
+        XCTAssertEqual(directive["additionalProperties"] as? Bool, false)
+        XCTAssertEqual(directive["required"] as? [String], ["objective", "constraints", "completion_criteria"])
+        let directiveProperties = try XCTUnwrap(directive["properties"] as? [String: [String: Any]])
+        XCTAssertNil(directiveProperties["constraints"]?["maxLength"],
+            "The host decoder enforces the byte limit; avoid llama.cpp's unsupported 2,048-character grammar bound")
+        XCTAssertEqual(fallback["required"] as? [String], ["outcome", "control_id", "explanation", "worker_directive"])
+        for branch in branches {
+            let properties = try XCTUnwrap(branch["properties"] as? [String: Any])
+            let outcome = try XCTUnwrap(properties["outcome"] as? [String: Any])
+            if (outcome["enum"] as? [String]) != ["visualFallback"] {
+                XCTAssertNil(properties["worker_directive"], "Non-fallback outcomes must not carry a directive")
+            }
+        }
+    }
+
+    func testStructuredDirectiveBearingVisualFallbackDecodes() throws {
+        let content = #"{"outcome":"visualFallback","control_id":null,"explanation":"Use screenshot.","worker_directive":{"objective":"Choose Drive upload path","constraints":"Preserve the original account and file choice.","completion_criteria":["Upload the selected presentation","Verify fresh completion evidence"]}}"#
+        XCTAssertEqual(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page(controls: [])),
+            .visualFallback("Use screenshot.", directive: .init(objective: "Choose Drive upload path",
+                constraints: "Preserve the original account and file choice.",
+                completionCriteria: ["Upload the selected presentation", "Verify fresh completion evidence"])))
+        let criteria = (1...8).map { "Unfinished outcome \($0)" }
+        let boundaryObject: [String: Any] = ["outcome": "visualFallback", "control_id": NSNull(), "explanation": "Use screenshot.",
+            "worker_directive": ["objective": "Bounded next objective", "constraints": "Preserve all conditions",
+                "completion_criteria": criteria]]
+        let boundaryContent = String(decoding: try JSONSerialization.data(withJSONObject: boundaryObject), as: UTF8.self)
+        XCTAssertNoThrow(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: boundaryContent, page: page(controls: [])),
+            "The strict parser permits the declared eight-criterion bound")
+        var oversizedConstraints = boundaryObject
+        oversizedConstraints["worker_directive"] = ["objective": "Bounded next objective",
+            "constraints": String(repeating: "x", count: 2_049), "completion_criteria": ["Finish"]]
+        let oversizedConstraintsContent = String(decoding: try JSONSerialization.data(withJSONObject: oversizedConstraints), as: UTF8.self)
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: oversizedConstraintsContent,
+            page: page(controls: [])), "Host validation continues to enforce the 2,048-byte bound")
+        var oversized = boundaryObject
+        oversized["worker_directive"] = ["objective": "Bounded next objective", "constraints": "Preserve all conditions",
+            "completion_criteria": (1...9).map { "Unfinished outcome \($0)" }]
+        let oversizedContent = String(decoding: try JSONSerialization.data(withJSONObject: oversized), as: UTF8.self)
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: oversizedContent, page: page(controls: [])))
     }
 
     func testPlannerFailsClosedForUnknownDisabledOrUnverifiedControlIDs() async throws {
@@ -137,6 +206,11 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             #"{"outcome":"pressControl","control_id":"enabled-unknown","explanation":"Unknown state."}"#,
             #"{"outcome":"pressControl","control_id":null,"explanation":"No selection."}"#,
             #"{"outcome":"visualFallback","control_id":"enabled","explanation":"Contradictory non-null ID."}"#,
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Missing directive."}"#,
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Malformed directive.","worker_directive":{"objective":"Continue","constraints":"Keep the goal","completion_criteria":[]}}"#,
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Malformed directive.","worker_directive":{"objective":"Continue","constraints":"Keep the goal","completion_criteria":["Finish"],"extra":true}}"#,
+            #"{"outcome":"pressControl","control_id":"enabled","explanation":"Wrong branch.","worker_directive":{"objective":"Continue","constraints":"Keep the goal","completion_criteria":["Finish"]}}"#,
+            #"{"outcome":"askUser","control_id":null,"explanation":"Wrong branch.","worker_directive":{"objective":"Continue","constraints":"Keep the goal","completion_criteria":["Finish"]}}"#,
             #"{"outcome":"askUser","control_id":"enabled","explanation":"Live09 contradictory response."}"#,
             #"{"outcome":"visualFallback","control_id":"enabled","explanation":"Contradictory selection."}"#,
             #"{"outcome":"pressControl","control_id":"enabled","explanation":"Selected.","extra":true}"#,
@@ -167,7 +241,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             history: [.init(screenshotPNG: Data([2]), response: staleResponse, actionError: "Prior click was rejected; no input was sent.",
                 action: .pointer(.leftClick, .init(x: 722, y: 647)))],
             actionError: "Current rejected click. No mouse or keyboard input was sent.")
-        let transport = PlannerTransport(reply: try envelope(#"{"outcome":"visualFallback","control_id":null,"explanation":"Use the current screenshot to verify upload progress."}"#))
+        let transport = PlannerTransport(reply: try envelope(#"{"outcome":"visualFallback","control_id":null,"explanation":"Use the current screenshot to verify upload progress.","worker_directive":{"objective":"Verify the upload","constraints":"Preserve the selected file","completion_criteria":["Confirm upload completion"]}}"#))
         let planner = try makePlanner(transport)
 
         _ = try await planner.propose(input: input, page: page)

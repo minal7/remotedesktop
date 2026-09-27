@@ -31,6 +31,20 @@ final class ComputerUseDefaultBrowserPageReader {
         /// This reader does not claim those contents are complete.
         let iframeContentMayBeOmitted: Bool
         let truncated: Bool
+        let focusedExpandedMenuHasNoActionableChildren: Bool
+
+        init(id: String, application: ComputerUseApplicationIdentity, url: String, renderedAXText: String,
+             controls: [Control], iframeContentMayBeOmitted: Bool, truncated: Bool,
+             focusedExpandedMenuHasNoActionableChildren: Bool = false) {
+            self.id = id
+            self.application = application
+            self.url = url
+            self.renderedAXText = renderedAXText
+            self.controls = controls
+            self.iframeContentMayBeOmitted = iframeContentMayBeOmitted
+            self.truncated = truncated
+            self.focusedExpandedMenuHasNoActionableChildren = focusedExpandedMenuHasNoActionableChildren
+        }
     }
 
     struct Access {
@@ -117,6 +131,7 @@ final class ComputerUseDefaultBrowserPageReader {
         }
         try check()
         guard let (root, focused) = try currentScope() else { return nil }
+        let focusedUIElement = try element(kAXFocusedUIElementAttribute as String, root)
         var truncated = false
         func isPruned(_ node: AXUIElement) throws -> Bool {
             let role = try string(kAXRoleAttribute as String, node) ?? ""
@@ -152,6 +167,7 @@ final class ComputerUseDefaultBrowserPageReader {
               let parsed = URL(string: url), parsed.scheme?.lowercased() == "https", parsed.host != nil else { return nil }
 
         var text = "", controls: [Control] = [], controlRefs: [String: AXUIElement] = [:]
+        var focusedEmptyExpandedMenu: AXUIElement?
         var contextBytes = 0
         var contentQueue: [(AXUIElement, Bool)] = [(webArea, false)]
         var contentVisited: [AXUIElement] = []
@@ -191,6 +207,14 @@ final class ComputerUseDefaultBrowserPageReader {
                     ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
                 let rawExpanded = try value("AXExpanded", node)
                 let expanded = rawExpanded.flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? ($0 as? NSNumber)?.boolValue : nil }
+                let isFocusedExpandedMenu = (role == "AXButton" || role == "AXPopUpButton")
+                    && effectiveEnabled == true && expanded == true
+                    && focusedUIElement.map { CFEqual(node, $0) } == true
+                var hasKnownEmptyMenuChildren = false
+                if isFocusedExpandedMenu {
+                    let menuChildren = try value(kAXChildrenAttribute as String, node) as? [AXUIElement]
+                    hasKnownEmptyMenuChildren = menuChildren?.isEmpty == true
+                }
                 let id = UUID().uuidString
                 let safeRole = bounded(role, to: max(0, contextByteLimit - contextBytes))
                 let safeLabel = bounded(label, to: min(256, max(0, contextByteLimit - contextBytes - safeRole.utf8.count)))
@@ -200,6 +224,7 @@ final class ComputerUseDefaultBrowserPageReader {
                                             frame: try frame(node), enabled: effectiveEnabled, expanded: expanded))
                     contextBytes += cost
                     controlRefs[id] = node
+                    if hasKnownEmptyMenuChildren { focusedEmptyExpandedMenu = node }
                 } else { truncated = true }
             }
             if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
@@ -213,12 +238,26 @@ final class ComputerUseDefaultBrowserPageReader {
         guard !expired, let (afterRoot, afterWindow) = try currentScope(),
               CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow),
               let finalArea = try discoverOuterWebArea(), CFEqual(finalArea, webArea) else { return nil }
+        var focusedExpandedMenuHasNoActionableChildren = false
+        if let focusedEmptyExpandedMenu, let focusedUIElement,
+           CFEqual(focusedEmptyExpandedMenu, focusedUIElement),
+           let finalFocus = try element(kAXFocusedUIElementAttribute as String, afterRoot),
+           CFEqual(finalFocus, focusedEmptyExpandedMenu),
+           let role = try string(kAXRoleAttribute as String, focusedEmptyExpandedMenu),
+           (role == "AXButton" || role == "AXPopUpButton"),
+           (try value(kAXEnabledAttribute as String, focusedEmptyExpandedMenu) as? NSNumber)?.boolValue == true,
+           (try value("AXExpanded", focusedEmptyExpandedMenu) as? NSNumber)?.boolValue == true,
+           let finalChildren = try value(kAXChildrenAttribute as String, focusedEmptyExpandedMenu) as? [AXUIElement],
+           finalChildren.isEmpty {
+            focusedExpandedMenuHasNoActionableChildren = true
+        }
         // Re-discover the same unique outer page after content collection.
         let finalURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea)
         guard finalURL == url, !expired else { return nil }
         let observationID = UUID().uuidString
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
-            renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated)
+            renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
+            focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
             webArea: webArea, url: url, controls: controlRefs,
             controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))

@@ -141,10 +141,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var clarificationRetired = false
         var nativeFileOperationReady = false
         var visualFallbackPending = false
+        var pendingVisualDirective: ComputerUseFaraModel.WorkerDirective?
         private var pendingPickerConfirmation: (candidateID: String, action: ComputerUsePredictedAction)?
         var dispatchedPickerConfirmationCandidateID: String?
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
+        var nativeControlErrorDomainForDiagnostics: String?
+        var nativeControlErrorCodeForDiagnostics: Int?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
              localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
             self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
@@ -158,6 +161,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             pendingPickerConfirmation = nil
             if isNewTask { dispatchedPickerConfirmationCandidateID = nil }
             visualFallbackPending = false
+            pendingVisualDirective = nil
             if executionTaskID == nil { executionTaskID = id }
             if window != nil {
                 try session.validate(taskID: id, goal: goal, tools: tools)
@@ -374,7 +378,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     /// from the fresh screenshot. Real-site acceptance checks outcomes separately.
     var retainedWindowForDiagnostics: ComputerUseDefaultBrowserSession.Window? { scope.window }
     private(set) var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
-    var lastActionDiagnosticForTests: [String: String] { desktop.lastRevalidationDiagnostic }
+    var lastActionDiagnosticForTests: [String: String] {
+        var diagnostic = desktop.lastRevalidationDiagnostic
+        if let domain = scope.nativeControlErrorDomainForDiagnostics {
+            diagnostic["nativeControlErrorDomain"] = domain
+        }
+        if let code = scope.nativeControlErrorCodeForDiagnostics {
+            diagnostic["nativeControlErrorCode"] = String(code)
+        }
+        return diagnostic
+    }
     var isReady: Bool { desktop.isReady }
     var runtimeName: String { "Default-browser desktop computer use" }
     var requiresMacControlHelper: Bool { desktop.requiresMacControlHelper }
@@ -402,8 +415,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             localFileCatalogFactory: localFileCatalogFactory)
         self.scope = scope
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
+            scope.nativeControlErrorDomainForDiagnostics = nil
+            scope.nativeControlErrorCodeForDiagnostics = nil
             scope.nativeFileOperationReady = false
-            if scope.session.currentFileOpenPanel != nil { scope.visualFallbackPending = false }
+            if scope.session.currentFileOpenPanel != nil {
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
+            }
             if scope.session.currentFileOpenPanel != nil && scope.selectedCandidate == nil {
                 guard let nativeFilePlanner else {
                     return .init(response: "", decision: .handoff("Choose a file in the native picker before continuing."),
@@ -445,7 +463,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
             if scope.visualFallbackPending {
                 scope.visualFallbackPending = false
-                return try await propose(enriched)
+                var visualInput = enriched
+                visualInput.browserWorkerDirective = scope.pendingVisualDirective
+                scope.pendingVisualDirective = nil
+                return try await propose(visualInput)
             }
             guard let nativeControlPlanner, let tools = scope.tools,
                   let window = scope.session.currentWindow else { return try await propose(enriched) }
@@ -456,6 +477,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 return try await propose(enriched)
             }
             try scope.check(nil, tools)
+            if page.focusedExpandedMenuHasNoActionableChildren {
+                scope.visualFallbackPending = true
+                scope.pendingVisualDirective = nil
+                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+            }
             let plan: ComputerUseDefaultBrowserControlPlan
             do { plan = try await nativeControlPlanner(enriched, page) }
             catch is CancellationError { throw CancellationError() }
@@ -464,22 +490,33 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 // screenshot before the visual planner without replaying an action.
                 try scope.check(nil, tools)
                 scope.visualFallbackPending = true
+                scope.pendingVisualDirective = nil
                 return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             }
             catch {
+                let diagnosticError = error as NSError
+                scope.nativeControlErrorDomainForDiagnostics = diagnosticError.domain
+                scope.nativeControlErrorCodeForDiagnostics = diagnosticError.code
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
                 return .init(response: "", decision: .handoff("The current page controls could not be verified. Review the browser window, then choose Resume."),
                     includeInModelHistory: false)
             }
             switch plan {
             case .askUser(let question):
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
                 let message = String(question.trimmingCharacters(in: .whitespacesAndNewlines).prefix(1_024))
                 return .init(response: "", decision: .handoff(message.isEmpty
                     ? "The page needs your input before continuing." : message), includeInModelHistory: false)
-            case .visualFallback(let reason):
+            case .visualFallback(let reason, let directive):
                 _ = reason
                 scope.visualFallbackPending = true
+                scope.pendingVisualDirective = directive
                 return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             case .pressControl(let controlID, _):
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
                 guard let selectedControl = page.controls.first(where: { $0.id == controlID }),
                       let bounds = scope.session.currentActionBounds,
                       let center = try scope.pageReader.validatedControlCenter(observation: page, controlID: controlID,
@@ -509,7 +546,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
-            onSuccessfulDispatch: { scope.successfulDispatch($0) }, finishRun: finishRun)
+            onSuccessfulDispatch: { scope.successfulDispatch($0) }, finishRun: {
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
+                await finishRun()
+            })
     }
 
     private static func nativeControlHistoryResponse(_ action: ComputerUseFaraAction,
