@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Review the live16 native-control context and visual target localization evidence before another real Gmail run. Do not infer that delayed settling resolves earlier recipient failures. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Continue the real Gmail draft test with one bounded, freshly verified recipient-autocomplete Return approval in the test harness. Keep the production Return policy and no-Send constraint unchanged. Live17 proves recipient entry but not causal attribution to the new page-control ordering. Gmail completion and 12 GB whole-Mac qualification remain open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1279,7 +1279,7 @@
   "live15": {
     "run": "client-manager-gmail-draft-live15",
     "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
-    "outcome": "One native Compose proposal. Fara’s final Subject-intended click at [1048,473] hit an unidentified item, requested approval, and received none from the bounded harness. No file handoff, picker, attachment, upload or terminal.",
+    "outcome": "One native Compose proposal. Fara’s final To-intended click at [607,424] hit an unidentified item, requested approval, and received none from the bounded harness. No file handoff, picker, attachment, upload or terminal.",
     "lifecycle": "Diagnostic F814B001-DA4A-46B3-93B4-94C92598FDC0.json retained 7 events with 0 drops. Recipient binding created at 91.298 s, retired at 105.881 s after AXTitleChanged matched the field and an ancestor, then recreated at 105.897 s. Pair 2 reported screenMatches/focusMatches/editableAuthorityMatches=false with the same To-field frame (1106,458,495,36). This is a title-change event, not the ancestor-only AXValueChanged case covered by the GREEN component.",
     "cleanup": "CUA verified To, subject and body empty with no attachment, discarded the draft, confirmed zero Compose panes, closed only owned Safari window 2741C287-ABA4-4369-B65A-AD7CC75339A6 and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
     "acceptance": "No file picker or upload; Gmail model-driven workflow remains unaccepted. Live15 did not establish whether the tested lifecycle change affects the real path.",
@@ -1322,6 +1322,35 @@
       "nativeResponse": "client-manager-gmail-draft-live16-attachments/C31E4EDE-2DFD-4558-9548-9194CF5FFAA7.json",
       "faraRequest": "client-manager-gmail-draft-live16-attachments/DA5A7CDD-5844-4831-A9EC-419A8A2EA5B8.json",
       "faraResponse": "client-manager-gmail-draft-live16-attachments/BF834AF5-6F62-4294-8B83-BAE72A7DA47E.json"
+    }
+  },
+  "nativePageContextRepair": {
+    "commit": "8777739",
+    "redRun": "native-page-context-red01",
+    "red": "0 passed / 1 intended failure for a missing focused control; 0 build errors / 8 warnings; 54 stable source hashes.",
+    "greenRun": "native-page-context-green03",
+    "green": "12 passed / 0 skipped / 0 runtime issues; 0 build errors / 8 warnings; 54 stable source hashes. GREEN01 and GREEN02 were compile-only failures (throwing expressions in ||, then an out-of-scope Chrome fixture).",
+    "behavior": "Search the focused outer web area first, then the window, under existing 16-control/96-node bounds.",
+    "diagnostic": "A context-only model probe added the actually observed Google Account control label and estimated bounds; the proposal changed from a wrong avatar click to exact self-email typing in 10.8 seconds, without effects. Probe01 failed during preparation before worker startup. This does not qualify model behavior.",
+    "acceptance": "Component implemented/compiled/tested only. Live17 typed the exact self-recipient, but does not prove this repair caused it: the earlier To-control observation was not retained in the later native-control request.",
+    "artifacts": ".build/repair-verification/native-page-context-evidence-note.json"
+  },
+  "live17": {
+    "run": "client-manager-gmail-draft-live17",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "The URL was typed on the first try and one native Compose proposal opened the draft. Fara typed the exact signed-in self-recipient. Return, intended to accept autocomplete, required conservative approval because focus was on the account’s AXStaticText and the action could submit the current form/message. The bounded harness accepted no approval. No file handoff, picker, attachment, upload or terminal.",
+    "causality": "The final Fara request retained the earlier To focus observation but not its native-controls catalogue; therefore live17 does not prove that the page-context repair caused correct recipient typing. Lifecycle diagnostic BBB4EF20-785F-4202-BC6E-5AD7082C198E.json retained 10 events with 0 drops; recipient title events settled at 57.9/58.3 s, then a value event occurred at 75.128 s after typing. This is not a controlled attribution of the typing result.",
+    "cleanup": "CUA verified the To value was correct; subject and body were empty with no attachment. The fixture draft was discarded, the full tree showed zero Compose panes, owned Safari window 5E07839D-53ED-4A5C-866B-9436529A5736 was closed, and original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923 was restored.",
+    "acceptance": "Recipient entry only. Gmail draft workflow remains unaccepted; no attachment or send occurred.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live17-attachments/manifest.json",
+      "lifecycle": "client-manager-gmail-draft-live17-attachments/BBB4EF20-785F-4202-BC6E-5AD7082C198E.json",
+      "route": "client-manager-gmail-draft-live17-attachments/DD65236B-A5BF-44EC-8B61-EB509BF71561.txt",
+      "outcome": "client-manager-gmail-draft-live17-attachments/E66FE7A4-5340-4EC9-97DB-00AF0416F8F7.txt",
+      "nativeRequest": "client-manager-gmail-draft-live17-attachments/46E93670-39DB-4979-B36E-A752A36604C3.json",
+      "nativeResponse": "client-manager-gmail-draft-live17-attachments/2154A68E-F3DB-4513-9B20-FD9AD58DD348.json",
+      "faraRequest": "client-manager-gmail-draft-live17-attachments/548C60AC-16D8-469F-A634-7DBA656C443A.json",
+      "faraResponse": "client-manager-gmail-draft-live17-attachments/03049539-FD33-4565-95DF-709B7423BDA4.json"
     }
   }
 }
