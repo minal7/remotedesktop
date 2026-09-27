@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass. Ambiguity probe02 correctly asked for exactly two tied top candidate IDs and selected the exact named candidate when explicit; production guidance GREEN02 passes 4 checks. Live04 offered three choices including an older file. Live06 listed three candidates, offered exactly the two tied top choices, and the client answered with the intended filename. The following Upload approval failed task-identity validation before presentation to the user; accepted approvals and upload effects were zero. No ambiguous transfer is accepted. Startup retry RED/GREEN passes 10 focused tests; live05 preceded that fix, and live06 does not establish that the successful retry branch ran.",
+    "status": "Live26 remains a separate complete scoped task pass. After clarification-approval identity fix commit 5c2c0d7, live07 delivered exactly two tied choices, accepted the exact filename answer, admitted one upload, and passed independent 28,273-byte SHA-256 readback. The client then paused during completion screenshot revalidation; no taskCompleted terminal was produced. Thus ambiguity choice and transfer are verified in this run, while full task completion is not.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3366,6 +3366,16 @@
         "greenEvidence": ".build/repair-verification/browser-startup-unsent-retry-green01-summary.json",
         "qualification": "Component only; live05 preceded the retry fix, and live06 does not establish that the successful retry branch ran.",
         "redQualification": "RED01 predates the preparation-throw variant, which was added only before GREEN; do not claim RED covered that branch."
+      },
+      {
+        "name": "clarification-answer-task-approval-identity",
+        "status": "Implemented in commit 5c2c0d7; component GREEN02 passed. Full task completion still open.",
+        "red": "clarification-approval-identity-red04: 0 passed/1 failed; exactly 3 expected taskID assertion issues; 0 build errors, 22 warnings, 49 source hashes unchanged, no runtime warnings.",
+        "redEvidence": ".build/repair-verification/clarification-approval-identity-red04-summary.json",
+        "allIssues": ".build/repair-verification/clarification-approval-identity-red04-all-test-issues.json",
+        "qualification": "Component verified; live07 passed answer-task identity, exact-file transfer and byte readback, but paused before taskCompleted.",
+        "green": "GREEN01: compile-only failure from ambiguous Host/ClientCore test type; 0 tests ran. GREEN02: 6 passed, 0 failures/skips/runtime warnings; 0 build errors, 24 warnings, 50 source hashes stable.",
+        "greenEvidence": ".build/repair-verification/clarification-approval-identity-green02-summary.json"
       }
     ],
     "runs": [
@@ -3562,6 +3572,15 @@
         "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live06-attachments/BA66BCBB-6D9E-4152-A9CE-BF438F51AAC8.txt",
         "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live06-attachments/DF94214C-EC1E-4E3D-B80C-70CBB72F8201.txt",
         "qualification": "Choice delivery and answer occurred; approval was rejected before being presented, and transfer did not occur."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live07",
+        "outcome": "Reached the chooser, clarified exactly two tied top candidates, received the exact filename answer, admitted one upload, and independently verified the 28,273-byte file hash. Client paused during completion screenshot revalidation with userInterventionRequired; no taskCompleted terminal. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live07-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live07-attachments/D5D64E6E-EDB1-4FA6-9770-4729ED13200B.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live07-attachments/AF3ED532-A12A-4415-87C3-5CAD5BB38199.txt",
+        "readback": ".build/repair-verification/client-manager-ambiguous-drive-live07-independent-readback.json",
+        "qualification": "Clarification, upload and independent byte readback succeeded; full task completion did not."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3651,7 +3670,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Address the confirmed live06 task/approval identity mismatch only; do not change approval gates or add site/keyword routing.",
+    "next": "Reobserve completion after the upload toast fades; do not repeat file selection or approval changes.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
@@ -3785,6 +3804,15 @@
       "green": "7 passed,0 failures/runtime warnings;0 build errors,20 warnings,49 stable source hashes.",
       "change": "Every unsupported keyboard proposal names its bounded chord, confirms no input was sent, describes macOS Command+A versus Control, and asks the model to inspect selection before typing. No shortcut admission or typing semantics changed.",
       "scope": "Component-only; no live rerun after feedback change yet."
+    },
+    "live07Readback": {
+      "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live07-independent-readback.json",
+      "fileName": "Remote Desktop 11D08DF2-FDC6-4417-8712-3861CCA96EC8.pptx",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "clientTerminal": "userInterventionRequired",
+      "appCompleted": false
     }
   }
 }
