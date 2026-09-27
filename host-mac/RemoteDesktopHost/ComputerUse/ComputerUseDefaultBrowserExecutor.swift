@@ -474,7 +474,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             guard let page = try scope.pageReader.read(window: window.accessibilityElement,
                 application: window.application, mayAct: { (try? tools.requireActive()) != nil }) else {
                 try scope.check(nil, tools)
-                return try await propose(enriched)
+                scope.visualFallbackPending = true
+                scope.pendingVisualDirective = nil
+                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
             }
             try scope.check(nil, tools)
             if page.focusedExpandedMenuHasNoActionableChildren {

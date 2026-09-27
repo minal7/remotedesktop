@@ -354,6 +354,45 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testMissingNativePageRefreshesBeforeVisualFallback() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "missing-native-page-refresh"
+        let goal = "Continue the requested browser task from the current page"
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        var nativeCalls = 0, visualCalls = 0
+        var visualInput: ComputerUseFaraModel.Input?
+        let pageReader = ComputerUseDefaultBrowserPageReader(access: .init(frontmost: {
+            fixture.desktop.screenColor = CIColor.white
+            return nil
+        }, read: { _, _ in nil }, timeout: { _, _ in }))
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                visualCalls += 1
+                visualInput = input
+                let freshScreen = try fixture.tools.currentScreen()
+                let freshPNG = try ComputerUseDesktopImage(observation: freshScreen).png
+                XCTAssertEqual(input.screenshotPNG, freshPNG,
+                    "When native page reading fails, visual fallback must use a fresh post-read observation")
+                return .init(response: "stop", decision: .handoff("Review the fresh browser observation."))
+            }, nativeControlPlanner: { _, _ in
+                nativeCalls += 1
+                return .visualFallback("No current page controls were available", directive: nil)
+            }, pageReader: pageReader)
+
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the fresh browser observation."))
+        XCTAssertEqual(nativeCalls, 0, "A missing page must bypass native planning")
+        XCTAssertEqual(visualCalls, 1)
+        let input = try XCTUnwrap(visualInput)
+        XCTAssertEqual(input.goal, goal)
+        XCTAssertTrue(input.history.isEmpty)
+        XCTAssertNil(input.actionError)
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "No input may follow the session's initial Cmd-N")
+    }
+
     func testExpandedMenuWithoutObservedChildrenUsesFreshVisualHandoff() async throws {
         let scenarios: [(name: String, expanded: Bool?, focusedElement: String?, hasMenuChildren: Bool,
             hasActionableMenuItem: Bool, expectVisual: Bool)] = [

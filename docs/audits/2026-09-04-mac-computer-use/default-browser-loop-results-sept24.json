@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable. Live20 failed before reaching Drive: the first address-bar type was rejected because focus/editable authority did not match although the text-field frame was unchanged; Fara then proposed Return on the empty bar and unrelated Favorites clicks, and the bounded test refused the unrelated approval. No file selection, upload or client terminal. The focused expanded-menu handoff component passes RED/GREEN and a read-only live Safari/Drive AX probe, but live20 never reached the menu. Earlier scoped upload/readback evidence remains separately qualified; full client-route reliability is open.",
+    "status": "Not accepted as reliable. Live21 recovered from a rejected address-bar type, reached Drive, opened the File upload chooser, and chose the exact newest Downloads candidate, but the picker never confirmed it. Typing in the chooser Go To sheet failed with preconditionChanged; no exact picker selection or upload followed; the client ended unableToComplete. The saved lastActionDiagnostic is from the earlier address-bar rejection and does not establish the chooser failure cause. Earlier scoped upload/readback evidence remains separately qualified; full client-route reliability is open.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3297,6 +3297,14 @@
         "greenEvidence": ".build/repair-verification/expanded-menu-handoff-green01-summary.json",
         "liveReadOnlyProbe": ".build/repair-verification/default-browser-menu-observation-live01-summary.json",
         "qualification": "Component behavior only; read-only actual Safari/Drive AX confirmed the focused expanded AXButton had zero direct children and the flag was true despite pageTreeTruncated=true. No menu selection or upload was exercised."
+      },
+      {
+        "name": "nil-page-native-to-visual-refresh",
+        "red": "native-page-unavailable-refresh-red01: expected stale-screenshot assertion failed (4,193 vs. 5,102 bytes); 0 build errors, 16 warnings, 49 source hashes stable.",
+        "green": "native-page-unavailable-refresh-green01: 35 passed, 1 skipped, 0 failures/build errors, 2 compiler warnings, 42 source hashes stable, no runtime warnings.",
+        "redEvidence": ".build/repair-verification/native-page-unavailable-refresh-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/native-page-unavailable-refresh-green01-summary.json",
+        "qualification": "Component behavior only; no Drive completion inference."
       }
     ],
     "runs": [
@@ -3401,6 +3409,13 @@
         "evidence": ".build/repair-verification/client-manager-drive-upload-live20-summary.json",
         "attachments": ".build/repair-verification/client-manager-drive-upload-live20-attachments/manifest.json",
         "diagnosis": ".build/repair-verification/client-manager-drive-upload-live20-diagnosis.json"
+      },
+      {
+        "run": "client-manager-drive-upload-live21",
+        "outcome": "Failed after reaching Drive and opening File upload. The native file planner selected the exact newest candidate (Remote Desktop E2E F1354640-616D-437A-9B76-1190D0EC502E.pptx); chooser Go To path typing failed preconditionChanged. No exact picker selection, accepted approval or upload; the client ended unableToComplete, with no successful completion. The current lastActionDiagnostic is from the earlier address-bar rejection, not proof of chooser failure cause. Build: 0 errors/16 warnings; 49 source hashes unchanged; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live21-summary.json",
+        "attachments": ".build/repair-verification/client-manager-drive-upload-live21-attachments/manifest.json",
+        "diagnosis": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json"
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3485,6 +3500,10 @@
       "limits": "Scripted literal proposal validates this execution slice, not model recovery or client/HostManager reliability. The live20 rejection was not reproduced or explained. Guards unchanged.",
       "independentUIReadback": "CUA observed Start Page with the exact URL in the focused smart address field after the test; no navigation. Closed own window 3AA10D09-62B7-4F5E-AB1C-A8CE3C061C60 and preserved original 2FE12A41-3A5D-468F-B667-1FB669ED2923.",
       "next": "One bounded full client Drive retry to exercise the new menu handoff, with unchanged acceptance assertions."
+    },
+    "live21Diagnosis": {
+      "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
+      "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     }
   }
 }
