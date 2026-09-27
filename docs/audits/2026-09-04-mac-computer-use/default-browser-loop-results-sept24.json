@@ -3723,7 +3723,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Correct final-answer evidence binding and repeat the ambiguity workflow under unchanged approval gates; retain the host tie-guard branch as not live-exercised.",
+    "next": "Stop final-answer wording trials. Inspect the existing final-answer/evidence boundary for a reliable exact-target association strategy before another live workflow; do not promote a prompt variant.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
@@ -3866,6 +3866,59 @@
       "matchesSourceBytes": true,
       "clientTerminal": "userInterventionRequired",
       "appCompleted": false
+    },
+    "finalAnswerEvidencePromptReplays": {
+      "source": ".build/repair-verification/client-manager-ambiguous-drive-live09-attachments/D9B4696E-89AF-4CF2-919E-6585135EA94E.json",
+      "scope": "Four serial no-effects completions: baseline plus three candidate wording variants on captured live09 input. Original goal, observation/history and request settings preserved. No application source changed; no prompt variant promoted.",
+      "runs": [
+        {
+          "run": "fara-completion-evidence-replay01",
+          "variant": "Baseline reproduced live09; candidate changed only answer.description to require exact-target evidence.",
+          "review": "Rejected candidate: omitted the older filename but still claimed the target appeared in the list with the older row status at 11:56 PM.",
+          "seconds": 33.2009,
+          "requests": 2,
+          "peakSampledRSSBytes": 4239130624,
+          "evidence": [
+            ".build/repair-verification/fara-completion-evidence-replay01/manifest.json",
+            ".build/repair-verification/fara-completion-evidence-replay01/run-report.json",
+            ".build/repair-verification/fara-completion-evidence-replay01/review.json"
+          ]
+        },
+        {
+          "run": "fara-completion-evidence-replay02",
+          "variant": "Changed only answer.description to request concise results without unrequested supporting observations.",
+          "review": "Rejected: omitted the old filename but still assigned its 11:56 PM “You uploaded” status to the target.",
+          "seconds": 17.4998,
+          "requests": 1,
+          "peakSampledRSSBytes": 4210130944,
+          "evidence": [
+            ".build/repair-verification/fara-completion-evidence-replay02/manifest.json",
+            ".build/repair-verification/fara-completion-evidence-replay02/run-report.json",
+            ".build/repair-verification/fara-completion-evidence-replay02/review.json"
+          ]
+        },
+        {
+          "run": "fara-completion-evidence-replay03",
+          "variant": "Appended a general exact-target evidence instruction to the system message.",
+          "review": "Rejected: still claimed the target appeared in the file list with “You uploaded”; the screenshot showed the target only in the completion toast.",
+          "seconds": 16.0539,
+          "requests": 1,
+          "peakSampledRSSBytes": 4212539392,
+          "evidence": [
+            ".build/repair-verification/fara-completion-evidence-replay03/manifest.json",
+            ".build/repair-verification/fara-completion-evidence-replay03/run-report.json",
+            ".build/repair-verification/fara-completion-evidence-replay03/review.json"
+          ]
+        }
+      ],
+      "aggregate": {
+        "serialCompletions": 4,
+        "totalSeconds": 66.7545,
+        "allWorkersExited": true,
+        "temporaryCredentialsRemoved": true,
+        "effects": 0
+      },
+      "qualification": "Effect-free captured-input diagnostics only; no workflow, app behavior, prompt promotion, or whole-Mac resource acceptance."
     }
   }
 }
