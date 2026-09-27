@@ -1912,6 +1912,54 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(proposals, 2)
     }
 
+    func testScopedDesktopUsesFreshQuietSampleEvenJustPastSettleDeadline() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current = ComputerUseTextSnapshot(targetID: "A", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var effects = 0, proposals = 0
+        var effectStarted = ContinuousClock.now
+        var transition: Task<Void, Never>?
+        defer { transition?.cancel() }
+        let tools = desktopTestTools(focus: { current.preconditionDigest }, textEditor: editor, perform: { _ in
+            effects += 1
+            effectStarted = ContinuousClock.now
+            current = ComputerUseTextSnapshot(targetID: "loading", value: "loading",
+                selection: NSRange(location: 7, length: 0), isEditable: true, isSecure: false)
+            transition = Task { @MainActor in
+                do { try await Task.sleep(for: .milliseconds(700)) } catch { return }
+                current = ComputerUseTextSnapshot(targetID: "loading-2", value: "loading",
+                    selection: NSRange(location: 7, length: 0), isEditable: true, isSecure: false)
+                do { try await Task.sleep(for: .milliseconds(1_000)) } catch { return }
+                current = ComputerUseTextSnapshot(targetID: "ready", value: "ready",
+                    selection: NSRange(location: 5, length: 0), isEditable: true, isSecure: false)
+            }
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 {
+                return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+            }
+            XCTAssertGreaterThanOrEqual(ContinuousClock.now - effectStarted, .seconds(2.8))
+            XCTAssertLessThan(ContinuousClock.now - effectStarted, .seconds(5))
+            XCTAssertEqual(input.history.count, 1)
+            XCTAssertEqual(input.history.first?.response, "open-compose")
+            XCTAssertEqual(input.focusedTextState?.valuePrefix, "ready",
+                "The final quiet sample must carry the latest stable editor state")
+            return .init(response: "ready", decision: .handoff("Review the editor."))
+        }, surfaceScopeCheck: { _ in })
+
+        let result = try await executor.execute(taskID: "settle-final-sample", prompt: "Open a compose editor.",
+            trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Review the editor."))
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
+        if let transition { await transition.value }
+    }
+
     func testScopedDesktopWaitsForDelayedEditorFocusAfterClick() async throws {
         for initiallyFocused in [false, true] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded test approvals now cover the observed Gmail Attach files click, exact selected-file picker confirmation, and one freshly verified recipient-autocomplete Return; the exact recipient, subject, body and attachment oracle remains required. The autocomplete exception is test-only; production Return policy is unchanged, and Send is never allowed. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Run real Gmail live22 after the general adjacent-caret fix. Full recipient/body/subject/attachment/task-completion oracle is still required. Keep the alternate Drive-picker harness gap explicit.",
+  "next": "Run live23 against the final-poll fix. Live22 did not exercise the adjacent-caret path; no live causal conclusion follows. Keep the alternate attachment-picker route and 12 GB whole-Mac qualification open.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1468,5 +1468,32 @@
     "green": "native-pointer-adjacent-caret-green01: 5 passed, 0 skips/issues/runtime warnings; 0 build errors / 4 warnings; 55 stable entries.",
     "coverage": "Adjacent and partly overlapping target/field geometry; no-proof, field outside padded context, forged field, changed text or horizontal paint, second in-window change, and existing pointer/final-caret regressions.",
     "acceptance": "Implemented, compiled and component-tested. Full Gmail retry pending; alternate Drive-picker approval path remains outside the current test harness."
+  },
+  "live22": {
+    "run": "client-manager-gmail-draft-live22",
+    "result": "0 passed / 1 failed / 0 skipped; build 0 errors / 0 warnings; 54 stable source hashes; 3 issues including the known main-thread responsiveness warning.",
+    "outcome": "The client paused after native Compose at editor-settle-timeout before any native proposal or recipient approval. No file selection, picker, attachment, upload, completion or send occurred. The adjacent-caret path was not exercised.",
+    "settleDiagnostic": "elapsedMs=3165; quietMs=1508; sampleCount=11; tokenChangeCount=3; nilSampleCount=1. This is the captured timeout diagnostic, not evidence of a general Gmail/model failure.",
+    "otherDiagnostics": "No OCR hang was observed in this short run; it does not establish an OCR recurrence rate.",
+    "cleanup": "CUA discarded the blank draft, verified zero Compose panes, restored the original Drive window, and confirmed the disposable fixture was absent. No owned workers remained.",
+    "acceptance": "No recipient or attachment progress; Gmail model-driven workflow remains unaccepted.",
+    "attachments": {
+      "manifest": "client-manager-gmail-draft-live22-attachments/manifest.json",
+      "summary": ".build/repair-verification/client-manager-gmail-draft-live22-summary.json",
+      "build": ".build/repair-verification/client-manager-gmail-draft-live22-build.json",
+      "allIssues": ".build/repair-verification/client-manager-gmail-draft-live22-all-test-issues.json",
+      "outcome": "client-manager-gmail-draft-live22-attachments/3F1D99C6-7C0C-42DD-B0F6-DA499FDAB2D2.txt",
+      "diagnostic": "client-manager-gmail-draft-live22-attachments/6413F72B-C116-4353-93F1-D065A42BBE2A.txt"
+    }
+  },
+  "nativeEditorFinalPoll": {
+    "redRun": "native-editor-final-poll-red01",
+    "red": "0 passed / 1 intended scopedSurfaceChanged failure; 0 build errors / 9 warnings; 55 stable sources; 1 expected issue.",
+    "greenRun": "native-editor-final-poll-green01",
+    "green": "6 passed / 0 skipped / 0 issues/runtime warnings; 0 build errors / 4 warnings; 55 stable sources.",
+    "behavior": "Removes only the inner deadline guard so an already-in-flight final sample may return after the nominal deadline when the 1.25 s quiet interval is met and scope checks remain valid. The outer 3 s bound is unchanged.",
+    "coverage": "Continuous churn, no replay, cancellation, scope loss and delayed-focus transitions at 700/1700 ms pass; fresh ready state and single-effect assertions pass.",
+    "acceptance": "Component implemented/compiled/tested only. Live22 timed out before this final-poll path could establish a real Gmail effect; live23 is pending.",
+    "artifacts": ".build/repair-verification/native-editor-final-poll-red01-{summary,build,source-audit}.json and .build/repair-verification/native-editor-final-poll-green01-{summary,build,source-audit}.json"
   }
 }

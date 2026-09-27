@@ -209,7 +209,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 lastToken = token
                 quietSince = ContinuousClock.now
             } else if ContinuousClock.now - quietSince >= .seconds(1.25) {
-                guard ContinuousClock.now < settleDeadline else { break }
+                // This final in-flight sample may satisfy the quiet interval
+                // just after the nominal deadline; its scope checks still ran.
                 return
             }
         }
