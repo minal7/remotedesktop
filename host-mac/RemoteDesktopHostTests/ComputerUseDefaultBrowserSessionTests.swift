@@ -1074,6 +1074,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true, clientEntry: true)
     }
 
+    func testOptInClientManagerClarifiesAmbiguousDrivePresentationsAndUploadsSelectedFile() async throws {
+        try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true,
+            clientEntry: true, ambiguousFileChoice: true)
+    }
+
     func testOptInCapturedBrowserMenuNativeControlsComparison() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_CAPTURED_BROWSER_MENU_COMPARISON"] == "1" else {
@@ -1212,16 +1217,23 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     private func runDefaultBrowserFileProbe(uploadToDrive: Bool, productionComposition: Bool = false,
-                                            clientEntry: Bool = false) async throws {
+                                            clientEntry: Bool = false, ambiguousFileChoice: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
-        let enabled = productionComposition
-            ? environment[clientEntry ? "RUN_CLIENT_MANAGER_PRODUCTION_DRIVE_UPLOAD_PROBE" : "RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
-            : environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1"
+        let enabled = ambiguousFileChoice
+            ? environment["RUN_CLIENT_MANAGER_AMBIGUOUS_DRIVE_FILE_CHOICE_PROBE"] == "1"
+            : productionComposition
+                ? environment[clientEntry ? "RUN_CLIENT_MANAGER_PRODUCTION_DRIVE_UPLOAD_PROBE" : "RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
+                : environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1"
         guard enabled else {
-            throw XCTSkip("Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
+            throw XCTSkip(ambiguousFileChoice
+                ? "Opt-in: real client-manager ambiguity choice and one disposable Drive upload"
+                : "Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
         guard !productionComposition || uploadToDrive else { throw XCTSkip("Production composition probe covers Drive upload only") }
         guard !clientEntry || productionComposition else { throw XCTSkip("Client-manager route requires production composition") }
+        guard !ambiguousFileChoice || (clientEntry && productionComposition && uploadToDrive) else {
+            throw XCTSkip("Ambiguous file-choice probe requires the production Drive client-manager route")
+        }
         let usesNativeDelegation = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
         let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
         let startsOnDrivePage = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
@@ -1273,11 +1285,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixtureRoot) }
         let name = uploadToDrive ? "Remote Desktop E2E \(UUID().uuidString).pptx" : "Disposable Translate Picker Probe.pdf"
         let expectedURL = (uploadToDrive ? downloads : fixtureRoot).appendingPathComponent(name)
+        let alternateName = "Alternate " + name
+        let alternateURL = downloads.appendingPathComponent(alternateName)
         let olderURL = downloads.appendingPathComponent("Older " + name)
         let decoyURL = downloads.appendingPathComponent(name + ".txt")
         defer {
             if uploadToDrive {
-                for file in [expectedURL, olderURL, decoyURL] { try? FileManager.default.removeItem(at: file) }
+                for file in [expectedURL, olderURL, decoyURL, alternateURL] { try? FileManager.default.removeItem(at: file) }
             }
         }
         let pdfData = NSMutableData()
@@ -1292,8 +1306,29 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             try bytes.write(to: olderURL, options: .withoutOverwriting)
             try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: olderURL.path)
             try bytes.write(to: expectedURL, options: .withoutOverwriting)
+            var decoyModifiedAt = Date(timeIntervalSinceNow: 1)
+            if ambiguousFileChoice {
+                try bytes.write(to: alternateURL, options: .withoutOverwriting)
+                let tiedLatestDate = Date(timeIntervalSinceNow: 60)
+                decoyModifiedAt = tiedLatestDate.addingTimeInterval(1)
+                for file in [expectedURL, alternateURL] {
+                    try FileManager.default.setAttributes([.modificationDate: tiedLatestDate, .creationDate: tiedLatestDate],
+                        ofItemAtPath: file.path)
+                }
+                let expectedModifiedAt = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: expectedURL.path)[.modificationDate] as? Date)
+                let alternateModifiedAt = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: alternateURL.path)[.modificationDate] as? Date)
+                XCTAssertEqual(expectedModifiedAt, alternateModifiedAt, "The two presentation candidates must be equally recent")
+            }
             try Data("Disposable newer non-presentation decoy.".utf8).write(to: decoyURL, options: .withoutOverwriting)
-            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 1)], ofItemAtPath: decoyURL.path)
+            try FileManager.default.setAttributes([.modificationDate: decoyModifiedAt], ofItemAtPath: decoyURL.path)
+            if ambiguousFileChoice {
+                let decoyModified = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: decoyURL.path)[.modificationDate] as? Date)
+                XCTAssertGreaterThan(decoyModified, try XCTUnwrap(FileManager.default.attributesOfItem(atPath: expectedURL.path)[.modificationDate] as? Date),
+                    "The newer text decoy must not resolve presentation ambiguity")
+                XCTAssertEqual(expectedURL.pathExtension.lowercased(), "pptx")
+                XCTAssertEqual(alternateURL.pathExtension.lowercased(), "pptx")
+                XCTAssertEqual(decoyURL.pathExtension.lowercased(), "txt")
+            }
         } else { try (pdfData as Data).write(to: expectedURL) }
         let session = try ComputerUseDefaultBrowserSession(journalDirectory: directory)
         let nativeSteps = ComputerUseRuntimeBrowserStepPlanner(inputs: nativeInputs, runtime: runtime,
@@ -1599,6 +1634,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var managerTerminal: ClientUpdate?
         var managerTerminalMessages: [ClientUpdate] = []
         var managerApprovalStage: String?
+        var ambiguityQuestion: ClientUpdate?
+        var ambiguityChoiceID: String?
+        var ambiguityChoicePromptID: String?
+        var ambiguityChoiceLabel: String?
         var clientFailureDiagnostic: String?
         var managerActivityAtFailure: String?
         var clientFailureReason: String?
@@ -1797,19 +1836,55 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         let sentPrompts = await bridge.prompts()
                         if let sent = sentPrompts.last,
                            let terminal = await bridge.terminals(taskID: sent.id).last {
-                            managerTaskID = sent.id
-                            managerTerminalMessages = await bridge.terminals(taskID: sent.id)
-                            managerTerminal = terminal
-                            switch terminal.outcome {
-                            case .taskCompleted: return .completed(terminal.text)
-                            case .userInterventionRequired: return .userInterventionRequired(terminal.text)
-                            default: return .unableToComplete(terminal.text)
+                            if terminal.clarification != nil, case .answer = client.composerMode {
+                                guard ambiguousFileChoice, sent.id == terminal.taskID else {
+                                    clientFailureReason = "unexpected clarification terminal in the upload probe"
+                                    throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                                }
+                                ambiguityQuestion = terminal
+                            } else {
+                                managerTaskID = sent.id
+                                managerTerminalMessages = await bridge.terminals(taskID: sent.id)
+                                managerTerminal = terminal
+                                switch terminal.outcome {
+                                case .taskCompleted: return .completed(terminal.text)
+                                case .userInterventionRequired: return .userInterventionRequired(terminal.text)
+                                default: return .unableToComplete(terminal.text)
+                                }
                             }
                         }
                     }
-                    if case .answer = client.composerMode {
-                        clientFailureReason = "client entered answer mode without an accepted clarification"
-                        throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                    if case .answer(let reference, _) = client.composerMode {
+                        guard ambiguousFileChoice, ambiguityChoiceID == nil,
+                              reference.taskID == managerTaskID,
+                              ambiguityQuestion?.clarification == reference,
+                              ambiguityQuestion?.outcome == .userInterventionRequired,
+                              let choices = client.clarificationChoices, choices.count == 2,
+                              Set(choices.map(\.label)) == Set([name, alternateName]),
+                              Set(choices.compactMap(\.detail)).count == 1,
+                              let selected = choices.first(where: { $0.label == name }) else {
+                            clientFailureReason = "client entered an unexpected answer/choice state"
+                            throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                        }
+                        XCTAssertEqual(ambiguityQuestion?.clarificationChoices, choices,
+                            "The client must answer exactly the choices retained by the host terminal")
+                        guard client.sendClarificationChoice(selected.id) else {
+                            clientFailureReason = "client refused the exact offered file choice"
+                            throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                        }
+                        let answerPending = try XCTUnwrap(pendingStore.load(hostID: try XCTUnwrap(managerHostID),
+                            pairingCode: try XCTUnwrap(managerPairingCode)))
+                        let answer = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(answerPending.exactWireBody)
+                        guard answer.clarification == reference,
+                              answer.clarificationChoiceID == selected.id,
+                              answer.prompt.utf8.elementsEqual(name.utf8),
+                              answerPending.messageID != reference.taskID else {
+                            clientFailureReason = "typed answer did not preserve the question reference and exact offered candidate"
+                            throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
+                        }
+                        ambiguityChoiceID = selected.id
+                        ambiguityChoicePromptID = answerPending.messageID
+                        ambiguityChoiceLabel = selected.label
                     }
                     try await Task.sleep(for: .milliseconds(20))
                 }
@@ -1982,6 +2057,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 + "Last executor result: \(lastClientExecutorResult ?? "not captured")\n"
                 + "Host activity at failure: \(managerActivityAtFailure ?? "not captured")\n"
                 + "Received approval envelopes: \(receivedApprovalDiagnostics)\nAccepted approval count: \(seenManagerApprovals.count)\nPicker effect callbacks: \(pickerOpeningEffects)\n"
+                + "Ambiguity choice: id=\(ambiguityChoiceID ?? "none") label=\(ambiguityChoiceLabel ?? "none") answerPromptID=\(ambiguityChoicePromptID ?? "none")\n"
                 + "Upload effect callbacks: \(uploadEffects)\nTask ledger: \(directory.appendingPathComponent("client-manager-ledger.json").path)")
             summary.name = "Client and HostComputerUseManager envelope route"
             summary.lifetime = .keepAlways
@@ -1993,6 +2069,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         if clientEntry {
             let bridge = try XCTUnwrap(clientBridge)
             let sentPrompts = await bridge.prompts()
+            if ambiguousFileChoice {
+                let question = try XCTUnwrap(ambiguityQuestion)
+                let originalEnvelope = try XCTUnwrap(sentPrompts.first { $0.id == question.taskID })
+                let originalRequest = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(originalEnvelope.body)
+                XCTAssertTrue(originalRequest.prompt.utf8.elementsEqual(goal.utf8))
+                let answerEnvelope = try XCTUnwrap(sentPrompts.first { $0.id == ambiguityChoicePromptID })
+                let actualAnswer = try RemoteDesktopClientCore.ComputerUsePromptRequest.decodeBody(answerEnvelope.body)
+                XCTAssertEqual(actualAnswer.clarification, question.clarification)
+                XCTAssertEqual(actualAnswer.clarificationChoiceID, ambiguityChoiceID)
+                XCTAssertTrue(actualAnswer.prompt.utf8.elementsEqual(name.utf8))
+            }
             let sent = try XCTUnwrap(sentPrompts.last)
             XCTAssertEqual(sent.id, managerTaskID)
             XCTAssertEqual(sent.senderID, managerClientID)
@@ -2005,6 +2092,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(try ledger.claim(taskID: sent.id, senderID: sent.senderID,
                 sessionID: sent.sessionID, promptBody: sent.body), .completed(terminal.text))
             XCTAssertTrue((0...1).contains(pickerOpeningEffects))
+            if ambiguousFileChoice {
+                XCTAssertNotNil(ambiguityChoiceID, "The actual client must answer the host-offered multiple-choice question")
+                XCTAssertEqual(ambiguityChoiceLabel, name)
+                XCTAssertNotNil(ambiguityChoicePromptID)
+            }
             XCTAssertEqual(seenManagerApprovals.count, pickerOpeningEffects + uploadEffects,
                 "Each accepted client approval must correspond to exactly one admitted native effect")
         }
