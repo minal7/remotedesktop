@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Not accepted as reliable end-to-end. Live22 and live24 uploaded the exact file with independent matching readback but no client terminal. Explicit visual assignment continuity passes focused tests. Live25 stopped before upload at an unidentified-target approval after New was proposed behind a Marketplace modal; paired real probes confirm the point hits the overlay when covered.",
+    "status": "One complete scoped ClientModel/HostManager real-Drive task passed in live26 using the shipped client model over the in-process JSON bridge and production MCP-first executor. Original blank-start task selected the newest of three candidates, admitted one upload, returned taskCompleted, completed its ledger entry, and passed independent 28,273-byte SHA-256 readback. This does not qualify physical client UI, pairing/TLS/CloudKit, ambiguity handling, broader reliability or 12 GB. Earlier upload-only runs and failures remain distinct evidence; live26 does not establish which repair caused success.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3466,6 +3466,16 @@
         "attachments": ".build/repair-verification/client-manager-drive-upload-live24-attachments/manifest.json",
         "readback": ".build/repair-verification/client-manager-drive-upload-live24-independent-readback.json",
         "readbackQualification": "Independent upload/readback only; client completion not observed."
+      },
+      {
+        "run": "client-manager-drive-upload-live26",
+        "outcome": "Passed 1/1. Original blank-start task through shipped ClientModel/in-process JSON bridge and production MCP-first browser executor selected the newest of three candidates, admitted one upload, returned taskCompleted, and completed the ledger. Independent Safari readback matched the 28,273-byte fixture SHA-256 01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-drive-upload-live26-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-drive-upload-live26-attachments/BEA21BFC-8B87-4388-B95D-F635C62C07A3.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-drive-upload-live26-attachments/F4582019-FD3A-4658-ADE5-BD47EF46E8AB.txt",
+        "freshCompletionEvidence": ".build/repair-verification/client-manager-drive-upload-live26-attachments/E222E676-6AAA-4396-9ADA-D03E2ED7C64C.txt",
+        "readback": ".build/repair-verification/client-manager-drive-upload-live26-independent-readback.json",
+        "qualification": "One scoped complete client-API route pass; no claim for physical client UI, pairing/TLS/CloudKit, ambiguity handling, broad reliability or 12 GB."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3555,7 +3565,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Run the real client Drive workflow after physical-hit eligibility GREEN; unchanged approval, task completion and independent readback requirements.",
+    "next": "Test ambiguous-file choice handling using the actual client route and unchanged approval gates; do not infer that a specific repair caused live26 success.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
@@ -3643,6 +3653,16 @@
       "closedOwnedWindow": "367BEDF9-C7FF-4ABD-98D3-24223048FB09",
       "preservedOriginalWindow": "2FE12A41-3A5D-468F-B667-1FB669ED2923",
       "method": "CUA fresh AX state and Command-W; modal had already been dismissed for paired read-only probe."
+    },
+    "live26Readback": {
+      "evidence": ".build/repair-verification/client-manager-drive-upload-live26-independent-readback.json",
+      "fileName": "Remote Desktop E2E D9D893FB-4766-478B-84AA-6DE19F43AC4E.pptx",
+      "bytes": 28273,
+      "sha256": "01be9d0979b43d58821f38488824a199ac8f54dec1e36a0edec5b1652372ec8e",
+      "matchesSourceBytes": true,
+      "clientTerminal": "taskCompleted",
+      "appCompleted": true,
+      "admittedUploadEffects": 1
     }
   }
 }
