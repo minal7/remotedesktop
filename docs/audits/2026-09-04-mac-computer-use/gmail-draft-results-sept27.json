@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Identify the real native-text authority invalidation and verify screenshot coordinate contract from live09 before another full Gmail run. Preserve native ownership, cancellation, authentication and exact-file requirements.",
+  "next": "Restore bounded typed historical native-control targets to planner context without reintroducing stale model response prose. Idle recipient target is stable; leave validation intact until another observed failure establishes a needed change. Run focused RED/GREEN, then bounded real Gmail retry.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1020,8 +1020,22 @@
       "faraRequest": "15F5B669-502C-4145-A843-F16941357CA7.json",
       "faraResponse": "FCF40A86-FEDA-4A2E-927D-341DF4DA75BA.json"
     },
-    "independentReview": "CUA after workers exited confirmed Gmail in owned window FAD7375E-254B-4489-BC9D-D19A57C0BEBE with multiple empty compose panes and emoji picker. Dismissed emoji picker and discarded one visibly empty draft. Other panes were left because their creation history is not established. Owned window retained temporarily for a read-only native-field probe.",
+    "independentReview": "CUA after workers exited confirmed Gmail in owned window FAD7375E-254B-4489-BC9D-D19A57C0BEBE with multiple empty compose panes and emoji picker. Dismissed emoji picker and discarded one visibly empty draft. Other panes were not deleted because creation history is uncertain. After the read-only field probe, closed only the owned Gmail window; CUA confirmed original Drive window2FE12A41-3A5D-468F-B667-1FB669ED2923 restored. No message sent.",
     "limits": "No attachment, task completion, saved draft persistence or Gmail workflow acceptance. Test used production-default native text target and one-worker resource profile.",
     "nativePlanningReview": "Six captured native Compose proposals, each followed by a Fara observation focused on To recipients. The earliest truncated page snapshot and single final Fara screenshot do not prove each proposal created a pane or establish whether any pane predated the task. Do not infer an exact created-pane count."
+  },
+  "recipientStabilityProbe01": {
+    "run": "gmail-recipient-stability-live01",
+    "result": "0 passed / 0 failed / 1 skipped. Build 0 errors / 8 warnings; 54 stable source hashes; no test issues.",
+    "reason": "Ancestry/window precondition skipped after0.022s. The new test reads only AXDocument; the earlier working Gmail metadata test supports AXDocument or AXURL. This is a probe setup failure, not evidence of native-field stability.",
+    "next": "Correct test-only document attribute fallback and expose nonprivate guard booleans before retry."
+  },
+  "recipientStabilityProbe02": {
+    "run": "gmail-recipient-stability-live02",
+    "result": "1 diagnostic passed / 0 failed / 0 skipped; 0 test issues/runtime warnings. Build 0 errors / 8 warnings; 55 stable source hashes.",
+    "finding": "40 samples over15.509s had available snapshots with exact unchanged target ID, value, selection, editability, security, focus, window and frontmost app. No lifecycle events were delivered to the recording monitor. This idle probe does not reproduce the active-workflow rejection.",
+    "method": "Read-only production AX target with a forwarding lifecycle recorder, already-focused empty Gmail recipient field, verified default Safari and mail.google.com ancestry. No external lifecycle drain, no input, navigation or inference. Aggregated notification counts preserve all consumed events without querying event objects.",
+    "attachment": "E13781F7-6919-467E-A883-7742BD19BB21.json",
+    "limits": "No typing or model execution. Does not explain live09 invalidation or prove intermittent lifecycle stability."
   }
 }
