@@ -3245,7 +3245,7 @@
   "clientManagerEntryCheckpoint": {
     "scope": "Separate ClientModel/HostManager task-composer integration, not the production-drive-upload executor test series above.",
     "harness": "Shipped ClientModel.sendPrompt/respondToApproval over an in-process JSON LocalHost channel with manager polling, local monitors and ledger, forwarding to the production MCP-first executor. No Simulator.app/frontend or matching signed-in physical client was available; pairing, SwiftUI and CloudKit were not exercised.",
-    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass with exact upload, taskCompleted, ledger completion and independent 28,273-byte SHA-256 readback. Ambiguous live02 reached the picker and listed files, but the native planner selected the first of two tied newest candidates rather than asking; the bounded harness refused the upload approval. No clarification, accepted approval, upload or task completion occurred. History-budget GREEN is component evidence only: live02’s last Fara exchange used 6,229 prompt tokens and 90 completion tokens and does not prove trimming was exercised or causal. Broader route/workflow coverage remains open.",
+    "status": "Live26 remains one complete scoped ClientModel/HostManager real-Drive pass. Ambiguity probe02 correctly asked for exactly two tied top candidate IDs and selected the exact named candidate when explicit; production guidance GREEN02 passes 4 checks. Live04 offered three choices including an older file. Live06 listed three candidates, offered exactly the two tied top choices, and the client answered with the intended filename. The following Upload approval failed task-identity validation before presentation to the user; accepted approvals and upload effects were zero. No ambiguous transfer is accepted. Startup retry RED/GREEN passes 10 focused tests; live05 preceded that fix, and live06 does not establish that the successful retry branch ran.",
     "focusedFixes": [
       {
         "name": "browser-shortcut-feedback",
@@ -3341,6 +3341,31 @@
         "redEvidence": ".build/repair-verification/fara-context-budget-red02-summary.json",
         "greenEvidence": ".build/repair-verification/fara-context-budget-green01-summary.json",
         "qualification": "Component behavior only. Live02’s last Fara exchange used 6,229 prompt tokens plus 90 completion tokens; no evidence proves trimming was exercised or caused a model behavior change."
+      },
+      {
+        "name": "native-file-ambiguity-guidance",
+        "change": "Three production prompt strings clarify when to ask for clarification versus use an explicitly specified filename; no site-specific/keyword routing or protocol changes.",
+        "probe": ".build/repair-verification/file-ambiguity-guidance-probe01/semantic-assessment.json",
+        "probeResult": "Two model-only, no-effect outcomes correct: exactly two tied top candidate IDs produced askFile; an explicit filename selected the exact named candidate. No actions/effects occurred.",
+        "green": "native-file-ambiguity-guidance-green01: 4 passed, 0 failed/skips/runtime warnings; 0 build errors, 3 warnings, 49 source hashes stable.",
+        "greenEvidence": ".build/repair-verification/native-file-ambiguity-guidance-green01-summary.json",
+        "qualification": "Component and model-only probe evidence; live04/live06 show the integrated ambiguity transfer remains unaccepted."
+      },
+      {
+        "name": "native-file-ambiguity-guidance",
+        "green": "native-file-ambiguity-guidance-green02: 4 passed, 0 failed/skips/runtime warnings; 0 build errors, 3 warnings, 49 source hashes stable.",
+        "probe": ".build/repair-verification/file-ambiguity-guidance-probe02/semantic-assessment.json",
+        "probeResult": "Two model-only, no-effect outcomes correct: exactly two tied top candidate IDs produced askFile; an explicit filename selected the exact named candidate. No actions/effects occurred.",
+        "qualification": "Component and model-only probe evidence; live04/live06 show the integrated ambiguity transfer remains unaccepted."
+      },
+      {
+        "name": "browser-startup-unsent-retry",
+        "red": "browser-startup-unsent-retry-red01: 3 tests failed, 4 expected issues; 0 build errors, 22 warnings, 49 source hashes stable.",
+        "green": "browser-startup-unsent-retry-green01: 10 passed, 0 failures/skips/runtime warnings; 0 build errors, 25 warnings, 49 source hashes stable.",
+        "redEvidence": ".build/repair-verification/browser-startup-unsent-retry-red01-summary.json",
+        "greenEvidence": ".build/repair-verification/browser-startup-unsent-retry-green01-summary.json",
+        "qualification": "Component only; live05 preceded the retry fix, and live06 does not establish that the successful retry branch ran.",
+        "redQualification": "RED01 predates the preparation-throw variant, which was added only before GREEN; do not claim RED covered that branch."
       }
     ],
     "runs": [
@@ -3506,6 +3531,37 @@
         "nativeResponse": ".build/repair-verification/client-manager-ambiguous-drive-live02-attachments/3C3C2B34-F2B3-4963-A4ED-40F30471C65E.json",
         "qualification": "No user choice was requested or answered; this is a failed planner decision, not evidence that the clarification UI/answer protocol is broken.",
         "cleanup": "Canceled the stopped chooser and closed only owned Safari window 23D7AD09-2C01-419F-B7AE-2CFD6068236E; preserved original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live03",
+        "outcome": "Failed during startup before model inference or approval. No native calls, file operations or upload. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live03-summary.json",
+        "qualification": "No ambiguity decision was exercised."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live04",
+        "outcome": "Reached the file chooser and returned a clarification to the client, but the native planner offered three choices including an older presentation rather than only the two tied newest candidates. The bounded harness stopped on the unexpected choices before answer/upload. No accepted approval or upload; client returned userInterventionRequired. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live04-summary.json",
+        "nativeRequest": ".build/repair-verification/client-manager-ambiguous-drive-live04-attachments/13D82C6A-5FD3-47BE-A57F-BD063D4801D4.json",
+        "nativeResponse": ".build/repair-verification/client-manager-ambiguous-drive-live04-attachments/550AEDF7-5B86-411B-9462-C039215732F1.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live04-attachments/315CE1C7-46C1-4F9E-B6CA-3E8BDC5E91B8.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live04-attachments/874B2FE9-47F8-470F-9FCF-3E436AD29409.txt",
+        "qualification": "Clarification delivery was reached; answer/choice and upload were not exercised."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live05",
+        "outcome": "Failed early in startup with approvalTargetChanged; no native file calls or upload. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live05-summary.json",
+        "attachments": ".build/repair-verification/client-manager-ambiguous-drive-live05-attachments/manifest.json",
+        "qualification": "No ambiguity decision was exercised."
+      },
+      {
+        "run": "client-manager-ambiguous-drive-live06",
+        "outcome": "The native planner listed three candidates, then offered exactly the two tied newest choices; the client received a clarification and answered with the exact intended filename. The following Upload approval failed task-identity validation before presentation to the user; accepted approvals 0 and upload effects 0. Client terminal unableToComplete. Build: 0 errors/warnings; 53 source hashes stable; one known main-thread runtime warning.",
+        "evidence": ".build/repair-verification/client-manager-ambiguous-drive-live06-summary.json",
+        "routeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live06-attachments/BA66BCBB-6D9E-4152-A9CE-BF438F51AAC8.txt",
+        "outcomeAttachment": ".build/repair-verification/client-manager-ambiguous-drive-live06-attachments/DF94214C-EC1E-4E3D-B80C-70CBB72F8201.txt",
+        "qualification": "Choice delivery and answer occurred; approval was rejected before being presented, and transfer did not occur."
       }
     ],
     "live10Readback": ".build/repair-verification/client-manager-drive-upload-live10-independent-readback.json",
@@ -3595,7 +3651,7 @@
       "path": ".build/repair-verification/client-manager-drive-upload-live21-diagnosis.json",
       "finding": "Menu handoff, native file listing/selection, and chooser opening were reached. Text entry into the Go To sheet failed preconditionChanged; no upload; the client ended unableToComplete. Saved action diagnostic predates this failure and does not explain it."
     },
-    "next": "Improve ambiguity decision guidance with bounded general LLM instructions, preserving original goal, candidate IDs, and approval gates; no site/keyword routing. History-budget live causality is unproven.",
+    "next": "Address the confirmed live06 task/approval identity mismatch only; do not change approval gates or add site/keyword routing.",
     "live22Readback": {
       "evidence": ".build/repair-verification/client-manager-drive-upload-live22-independent-readback.json",
       "fileName": "Remote Desktop E2E 847AD3C0-FE02-4993-BED3-13F88E1E150C.pptx",
