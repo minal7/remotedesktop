@@ -45,6 +45,13 @@ struct ComputerUseLocalFileCatalog: Sendable {
         let hasMissingSortValues: Bool
     }
 
+    enum RankedBestCandidates: Equatable {
+        case unranked
+        case incomplete
+        case missingBestValue
+        case ids([String])
+    }
+
     enum Failure: Error, Equatable {
         case invalidTask
         case invalidDirectory
@@ -98,6 +105,7 @@ struct ComputerUseLocalFileCatalog: Sendable {
     private var cursors: [String: Int] = [:]
     private var inventoryWasTruncated = false
     private var hasInventory = false
+    private var currentQuery: Query?
     private var queryHasTiedSortValues = false
     private var queryHasMissingSortValues = false
 
@@ -132,6 +140,7 @@ struct ComputerUseLocalFileCatalog: Sendable {
         hasInventory = false
         queryHasTiedSortValues = false
         queryHasMissingSortValues = false
+        currentQuery = nil
 
         guard let rootIdentity = Self.lstat(approvedDirectory), rootIdentity.isDirectory else {
             throw Failure.invalidDirectory
@@ -187,9 +196,25 @@ struct ComputerUseLocalFileCatalog: Sendable {
             queryHasTiedSortValues = ordering.hasTies
             queryHasMissingSortValues = ordering.hasMissingValues
         }
+        currentQuery = query
         candidateRecords = Dictionary(uniqueKeysWithValues: records.map { ($0.candidate.id, $0) })
         hasInventory = true
         return page(startingAt: 0)
+    }
+
+    /// Returns the complete top-ranked group for a date-sorted query. Page-wide
+    /// tie flags are too coarse because they also include lower-ranked ties.
+    func rankedBestCandidates(for query: Query) -> RankedBestCandidates {
+        guard let sort = query.sort else { return .unranked }
+        guard hasInventory, currentQuery == query, !inventoryWasTruncated,
+              let first = records.first else { return .incomplete }
+        guard !queryHasMissingSortValues else { return .missingBestValue }
+        guard let firstValue = Self.date(for: first.candidate, field: sort.field) else {
+            return .missingBestValue
+        }
+        let ids = records.prefix { Self.date(for: $0.candidate, field: sort.field) == firstValue }
+            .map { $0.candidate.id }
+        return ids.isEmpty ? .incomplete : .ids(ids)
     }
 
     /// Performs bounded filesystem enumeration on its own serial worker. The

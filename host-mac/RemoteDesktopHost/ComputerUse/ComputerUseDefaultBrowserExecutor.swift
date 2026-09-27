@@ -259,7 +259,26 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             let operationTaskID = taskID
             let operationGoal = goal
             try Task.checkCancellation(); try tools.requireActive(); try check(nil, tools)
-            switch operation {
+            var checkedOperation = operation
+            if case .selectFile(let candidateID) = operation, userSelectedCandidateID == nil,
+               let context = fileContext, context.query.sort != nil, let fileCatalog {
+                switch fileCatalog.rankedBestCandidates(for: context.query) {
+                case .unranked:
+                    break
+                case .incomplete, .missingBestValue:
+                    return .userInterventionRequired("The requested file ranking cannot be verified from complete date metadata. Review the available files, then choose Resume.")
+                case .ids(let bestIDs) where bestIDs.count > 1 && bestIDs.contains(candidateID):
+                    let visibleIDs = Set(context.page.candidates.map(\.id))
+                    guard bestIDs.count <= 8, Set(bestIDs).isSubset(of: visibleIDs) else {
+                        return .userInterventionRequired("The best-ranked files span more catalog results than are currently available for a choice. Review the file list, then choose Resume.")
+                    }
+                    checkedOperation = .askFile(question: "The top files tie on the requested date ranking. Which file should be used?",
+                        candidateIDs: bestIDs)
+                case .ids:
+                    break
+                }
+            }
+            switch checkedOperation {
             case .listFiles(let query, let cursor):
                 var catalog = try fileCatalog ?? localFileCatalogFactory(taskID)
                 let page: ComputerUseLocalFileCatalog.Page

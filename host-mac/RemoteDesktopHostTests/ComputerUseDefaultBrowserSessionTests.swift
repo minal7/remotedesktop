@@ -336,6 +336,125 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(dispatchedActions, [action], "The second proposal is not dispatched before its approval")
     }
 
+    func testRankedFileSelectionClarifiesOnlyTheTiedBestCandidates() async throws {
+        let tiedAt = Date(timeIntervalSince1970: 1_700_000_100)
+        let lowerAt = tiedAt.addingTimeInterval(-100)
+        let run = try await runNativeFileSelectionScenario(files: [
+            ("Alpha deck.pptx", tiedAt), ("Beta deck.pptx", tiedAt),
+            ("Gamma deck.pptx", lowerAt), ("Delta deck.pptx", lowerAt),
+        ], sort: .init(field: .modifiedAt, direction: .descending), selectedName: "Alpha deck.pptx")
+
+        guard case .clarificationRequired = run.result else {
+            return XCTFail("A model-selected candidate tied for the best requested rank must ask the user")
+        }
+        XCTAssertEqual(Set(try XCTUnwrap(run.choices).map(\.label)), Set(["Alpha deck.pptx", "Beta deck.pptx"]))
+        XCTAssertTrue(run.selectedByVisualPlanner.isEmpty, "A tied file must not reach the browser planner as selected")
+        XCTAssertEqual(run.dispatchedInputCount, 0)
+
+        let ascendingAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let ascending = try await runNativeFileSelectionScenario(files: [
+            ("Alpha old.pptx", ascendingAt), ("Beta old.pptx", ascendingAt),
+            ("Gamma new.pptx", ascendingAt.addingTimeInterval(100)),
+        ], sort: .init(field: .createdAt, direction: .ascending), selectedName: "Alpha old.pptx")
+        guard case .clarificationRequired = ascending.result else {
+            return XCTFail("The tie guard must follow the requested date field and direction")
+        }
+        XCTAssertEqual(Set(try XCTUnwrap(ascending.choices).map(\.label)), Set(["Alpha old.pptx", "Beta old.pptx"]))
+
+        let boundary = try await runNativeFileSelectionScenario(files: [
+            ("Alpha deck.pptx", tiedAt), ("Beta deck.pptx", tiedAt), ("Gamma deck.pptx", lowerAt),
+        ], sort: .init(field: .modifiedAt, direction: .descending), selectedName: "Alpha deck.pptx", pageSize: 1)
+        if case .clarificationRequired = boundary.result {
+            XCTAssertEqual(Set(try XCTUnwrap(boundary.choices).map(\.label)), Set(["Alpha deck.pptx", "Beta deck.pptx"]))
+        } else {
+            guard case .userInterventionRequired = boundary.result else {
+                return XCTFail("An incomplete page tie must stop safely rather than complete or proceed")
+            }
+            XCTAssertTrue(boundary.selectedByVisualPlanner.isEmpty,
+                "A tie extending beyond the visible page must not select or present an incomplete set")
+        }
+        XCTAssertEqual(boundary.dispatchedInputCount, 0)
+    }
+
+    func testUniqueRankAndUnsortedExactNameSelectionRemainAllowed() async throws {
+        let newest = Date(timeIntervalSince1970: 1_700_000_300)
+        let lower = newest.addingTimeInterval(-100)
+        let unique = try await runNativeFileSelectionScenario(files: [
+            ("Unique newest.pptx", newest), ("Lower Alpha.pptx", lower), ("Lower Beta.pptx", lower),
+        ], sort: .init(field: .modifiedAt, direction: .descending), selectedName: "Unique newest.pptx")
+        guard case .userInterventionRequired = unique.result else {
+            return XCTFail("A unique highest-ranked candidate must remain selectable when only lower values tie")
+        }
+        XCTAssertEqual(unique.selectedByVisualPlanner, ["Unique newest.pptx"])
+        XCTAssertNil(unique.choices)
+        XCTAssertEqual(unique.dispatchedInputCount, 0)
+
+        let unsorted = try await runNativeFileSelectionScenario(files: [
+            ("Exact name.pptx", lower), ("Other deck.pptx", newest),
+        ], sort: nil, selectedName: "Exact name.pptx")
+        guard case .userInterventionRequired = unsorted.result else {
+            return XCTFail("An exact name-based selection without a ranking query must remain selectable")
+        }
+        XCTAssertEqual(unsorted.selectedByVisualPlanner, ["Exact name.pptx"])
+        XCTAssertNil(unsorted.choices)
+        XCTAssertEqual(unsorted.dispatchedInputCount, 0)
+    }
+
+    @MainActor
+    private func runNativeFileSelectionScenario(files: [(String, Date)],
+        sort: ComputerUseLocalFileCatalog.Sort?, selectedName: String, pageSize: Int = 8) async throws
+        -> (result: RemoteDesktopHost.ComputerUseExecutionResult,
+            choices: [RemoteDesktopHost.ComputerUseClarificationChoice]?,
+            selectedByVisualPlanner: [String], dispatchedInputCount: Int) {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let downloads = fixture.root.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        for (index, (name, modifiedAt)) in files.enumerated() {
+            let url = downloads.appendingPathComponent(name)
+            try Data([UInt8(index + 1)]).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: modifiedAt, .creationDate: modifiedAt], ofItemAtPath: url.path)
+        }
+        let taskID = UUID().uuidString
+        let goal = "Select the requested presentation from Downloads."
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let selectedURL = downloads.appendingPathComponent(selectedName)
+        fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: "new",
+            bounds: CGRect(x: 100, y: 80, width: 600, height: 400), focused: true,
+            selectedFileURLs: [selectedURL], primaryActionBounds: CGRect(x: 500, y: 420, width: 80, height: 30),
+            primaryActionEnabled: true)
+        var selectedByVisualPlanner: [String] = []
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { input in
+                if let selected = input.localFileCatalog?.selectedCandidate {
+                    selectedByVisualPlanner.append(selected.displayName)
+                }
+                return .init(response: "Stop for test inspection.", decision: .handoff("Stop for test inspection."))
+            }, nativeFilePlanner: { input in
+                guard let context = input.localFileCatalog else { return nil }
+                if context.inventoryState == .notQueried {
+                    return .init(kind: .localFileOperation, reference: "", text: "List by requested criterion",
+                        localFileOperation: .listFiles(query: .init(fileKind: .presentation, sort: sort), cursor: nil))
+                }
+                guard let candidate = context.page.candidates.first(where: { $0.displayName == selectedName }) else { return nil }
+                return .init(kind: .localFileOperation, reference: candidate.id, text: "Select unique candidate",
+                    localFileOperation: .selectFile(candidateID: candidate.id))
+            }, localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: downloads, pageSize: pageSize)
+            })
+        let beforeInput = fixture.desktop.keyCount
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        let choices: [RemoteDesktopHost.ComputerUseClarificationChoice]?
+        if case .clarificationRequired = result {
+            choices = try executor.clarification(taskID: taskID)?.choices
+        } else { choices = nil }
+        return (result, choices, selectedByVisualPlanner, fixture.desktop.keyCount - beforeInput)
+    }
+
     func testWindowCreationWaitsForTransientAXLossOrAmbiguityWithoutRepeatingInput() async throws {
         for failure in [ComputerUseDefaultBrowserSession.Failure.targetLost, .ambiguousWindows] {
             let fixture = try Fixture()
