@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreImage
 
 /// Shared native outcomes retain the provider's original response. A status
 /// carries no invented answer, and manual handoff carries no invented input.
@@ -59,6 +60,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// Optional active envelope identity for host-managed clarifications.
     /// The durable desktop session and trusted goal remain rooted at taskID.
     typealias ApprovalTaskIDProvider = @MainActor @Sendable () -> String?
+    typealias ScreenConsentRecognizer = @Sendable (CIImage) throws -> Bool
     enum Failure: Error, Equatable { case changedTask, recoveredTask, changedScreen, scopedSurfaceChanged, completionUnverified, unsupportedAction, invalidApproval, stepLimit, authentication }
     private struct Observation {
         let image: ComputerUseDesktopImage
@@ -106,6 +108,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let localFileOperationHandler: LocalFileOperationHandler?
     private let onSuccessfulDispatch: SuccessfulDispatchHandler
     private let approvalTaskIDProvider: ApprovalTaskIDProvider?
+    private let screenConsentRecognizer: ScreenConsentRecognizer
+    private let screenConsentTimeout: TimeInterval
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
@@ -127,6 +131,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          localFileOperationHandler: LocalFileOperationHandler? = nil,
          onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
          approvalTaskIDProvider: ApprovalTaskIDProvider? = nil,
+         screenConsentRecognizer: @escaping ScreenConsentRecognizer = { try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: $0) },
+         screenConsentTimeout: TimeInterval = 10,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
@@ -134,6 +140,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
         self.onSuccessfulDispatch = onSuccessfulDispatch
         self.approvalTaskIDProvider = approvalTaskIDProvider
+        self.screenConsentRecognizer = screenConsentRecognizer
+        self.screenConsentTimeout = screenConsentTimeout
     }
 
     private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
@@ -246,7 +254,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let accepted = try await completeCheck(answer)
         try Task.checkCancellation()
         try assertOwnership()
-        try revalidate(observation, action: nil, tools: tools)
+        try await revalidate(observation, action: nil, tools: tools)
+        try Task.checkCancellation()
+        try assertOwnership()
         try checkScopedSurface()
         guard accepted else { throw Failure.completionUnverified }
     }
@@ -277,7 +287,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
            ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(context) { throw Failure.authentication }
     }
 
-    private func observe(_ tools: ComputerUseHostTools, includeControls: Bool = false) throws -> Observation {
+    private func observe(_ tools: ComputerUseHostTools, includeControls: Bool = false) async throws -> Observation {
         try checkAuthentication(tools)
         let before = tools.frontmostApplicationSnapshot()
         let screen = try tools.currentScreen()
@@ -285,7 +295,18 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard before.identity == after.identity, before.policyName == after.policyName,
               screen.frontmostWindowBounds != nil else { throw Failure.changedScreen }
         try checkAuthentication(tools)
-        if try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: screen.image) { throw Failure.authentication }
+        let recognizer = screenConsentRecognizer
+        let capturedImage = screen.image
+        let requiresIntervention = try await ComputerUseObservationWorker.perform(timeout: screenConsentTimeout) {
+            try recognizer(capturedImage)
+        }
+        try Task.checkCancellation()
+        try checkAuthentication(tools)
+        try checkScopedSurface()
+        let postRecognitionApplication = tools.frontmostApplicationSnapshot()
+        guard postRecognitionApplication.identity == after.identity,
+              postRecognitionApplication.policyName == after.policyName else { throw Failure.changedScreen }
+        if requiresIntervention { throw Failure.authentication }
         let editor = try tools.nativeFocusedEditorObservation()
         let controls = try includeControls ? tools.nativeControlObservation(displayBounds: screen.displayBounds, windowBounds: screen.frontmostWindowBounds!) : nil
         let finalApplication = tools.frontmostApplicationSnapshot()
@@ -297,8 +318,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             nativeControls: controls)
     }
 
-    private func revalidate(_ expected: Observation, action: ComputerUsePredictedAction?, tools: ComputerUseHostTools) throws {
-        let fresh = try observe(tools)
+    private func revalidate(_ expected: Observation, action: ComputerUsePredictedAction?, tools: ComputerUseHostTools) async throws {
+        let fresh = try await observe(tools)
         let matches: Bool
         switch action {
         case .typeText?, .key?:
@@ -450,7 +471,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         defer { lease.release() }
         if session.turns == 0, surfaceScopeCheck != nil {
             try Task.checkCancellation(); try lease.assertOwnership(); try checkScopedSurface()
-            let startupObservation = try observe(tools)
+            let startupObservation = try await observe(tools)
             try checkScopedSurface()
             try await waitForPostActionSurface(startupObservation, tools: tools)
             try Task.checkCancellation(); try lease.assertOwnership(); try checkScopedSurface()
@@ -458,7 +479,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         while session.turns < 64 {
             try Task.checkCancellation(); try lease.assertOwnership()
             try checkScopedSurface()
-            let observation = try observe(tools, includeControls: true)
+            let observation = try await observe(tools, includeControls: true)
+            try Task.checkCancellation(); try lease.assertOwnership()
             try checkScopedSurface()
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
                 surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
@@ -485,7 +507,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     // while the model was planning must not block that read.
                     try checkScopedSurface()
                 } else {
-                    do { try revalidate(observation, action: action, tools: tools) }
+                    do { try await revalidate(observation, action: action, tools: tools) }
                     catch Failure.changedScreen {
                         if surfaceScopeCheck != nil {
                             switch proposal.decision {
@@ -603,7 +625,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                           observation: Observation, fingerprint: ComputerUseApprovalFingerprint, session: Session,
                           tools: ComputerUseHostTools, approved: Bool = false, willBeginEffect: () -> Void = {},
                           assertOwnership: () throws -> Void) async throws {
-        try revalidate(observation, action: action, tools: tools)
+        try await revalidate(observation, action: action, tools: tools)
         try checkScopedSurface(action)
         let actionID = ComputerUseTaskContract.digest([session.journal.taskID, "native-dispatch", String(session.turns)])
         let lease = try store.acquireExecution(taskID: actionID, expected: nil)

@@ -781,7 +781,7 @@
     "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
   },
   "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded test approvals now cover the observed Gmail Attach files click, exact selected-file picker confirmation, and one freshly verified recipient-autocomplete Return; the exact recipient, subject, body and attachment oracle remains required. The autocomplete exception is test-only; production Return policy is unchanged, and Send is never allowed. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
-  "next": "Diagnose the scoped quiet/focus stop after Compose before another live Gmail run. Do not infer that initial settling or page-context ordering fixes the observed stop. Gmail completion and 12 GB whole-Mac qualification remain open.",
+  "next": "Run real Gmail live21 with bounded off-main OCR. Keep optional editor quiet-timeout behavior changes deferred; require the full recipient/body/subject/attachment/task-completion oracle before accepting Gmail.",
   "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification.",
   "capabilityDescriptionRepair": {
     "change": "Truthful browser form/upload/account-observation capability descriptions, explicit native Mail webmail/account-discovery/attachment limits, and grounded-argument/destination guidance. No routing algorithms or schemas changed.",
@@ -1403,13 +1403,42 @@
     }
   },
   "nativeSettleTimeoutDiagnostic": {
-    "status": "Implementation added; compilation pending.",
+    "status": "Implemented and compiled; 3 focused checks passed. Full snapshot audit has two documentation-only changes.",
     "purpose": "Record only bounded scalar settle-timeout facts (blockedAt, sample/token/nil counts, elapsed and quiet milliseconds) when scoped editor settling reaches its cap; no user text, credentials or control labels.",
     "test": "One focused test asserts the exact diagnostic-key allowlist and timeout shape.",
     "files": [
       "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseDesktopExecutor.swift",
       "host-mac/RemoteDesktopHostTests/ComputerUseNativeTextIntegrationTests.swift"
     ],
-    "qualification": "Diagnostic-only instrumentation; no behavioral or live-workflow acceptance."
+    "qualification": "Diagnostic-only instrumentation; no behavioral or live-workflow acceptance.",
+    "tests": "3 passed / 0 failed / 0 skipped; 0 build errors / 13 warnings. The 55-entry audit has 53 unchanged entries and two changed documentation files (TODO.md and this JSON); implementation and test files are unchanged."
+  },
+  "live20": {
+    "run": "client-manager-gmail-draft-live20",
+    "result": "0 passed / 1 failed / 0 skipped; XCTest exceeded its 8-minute allowance; build 0 errors / 0 warnings; 54 source hashes unchanged; 2 issues including the known main-thread responsiveness warning.",
+    "route": "No final route or lifecycle attachment was produced before termination. Root’s SIGINT attempt found no Xcode process; the natural XCTest timeout had already ended. One orphaned llama process belonging to the owned capture probe was manually terminated; all owned workers are now stopped.",
+    "diagnostic": "XCTest spindump 3503FFA9-2124-451D-A1A9-C71A764BF38D.txt spans five seconds and 373 samples (14:50:26–31 UTC), showing synchronous DesktopExecutor.observe consent OCR waiting in Vision/TextRecognition. A separate one-second root sample at 14:50:49 UTC has 81 samples in the same path. These samples establish repeated blocked observations, not continuous blockage throughout the eight-minute test.",
+    "partialState": "Afterward CUA found the owned draft subject F8AC2... with recipient label “Michael Ali Inal” (exact email not verified), placeholder body, and no attachment. It was discarded; Compose count became zero.",
+    "cleanup": "CUA discarded the partial draft and verified zero Compose panes, closed only the owned Safari window, and restored original Drive window 2FE12A41-3A5D-468F-B667-1FB669ED2923. The owned Downloads fixture Remote Desktop E2E Spec 878537DC-E595-440F-A048-D671B3C15A02.xlsx was verified against the known fixture (4,919 bytes; SHA-256 prefix efdc1…) and removed; cleanup record is .build/repair-verification/client-manager-gmail-draft-live20-fixture-cleanup.json. No workers remain.",
+    "acceptance": "Partial draft state only; no attachment, send or terminal completion. Gmail workflow remains unaccepted.",
+    "sourceAuditQualification": "Live20 has 54 unchanged snapshot entries. Separately, native-editor-settle-diagnostic01 has 53 unchanged of 55 entries: TODO.md and this JSON changed after its initial snapshot; all implementation and test files remained unchanged.",
+    "attachments": {
+      "summary": ".build/repair-verification/client-manager-gmail-draft-live20-summary.json",
+      "build": ".build/repair-verification/client-manager-gmail-draft-live20-build.json",
+      "sourceAudit": ".build/repair-verification/client-manager-gmail-draft-live20-source-audit.json",
+      "allIssues": ".build/repair-verification/client-manager-gmail-draft-live20-all-test-issues.json",
+      "spindump": "client-manager-gmail-draft-live20-attachments/3503FFA9-2124-451D-A1A9-C71A764BF38D.txt",
+      "manifest": "client-manager-gmail-draft-live20-attachments/manifest.json",
+      "rootSample": ".build/repair-verification/client-manager-gmail-draft-live20-stack.txt"
+    }
+  },
+  "nativeDesktopConsentOCRRepair": {
+    "problem": "Live20 sampled repeatedly inside synchronous Vision consent OCR on the main thread; XCTest exceeded its eight-minute allowance.",
+    "implementation": "DesktopExecutor observation and revalidation now await the existing single-flight ComputerUseObservationWorker with its default ten-second timeout. Consent recognition semantics and input guards are unchanged. Cancellation, authentication, window/app scope and task ownership are rechecked after awaits, including before completion acceptance. A blocked underlying OCR retains worker capacity; timeout does not start another native request or imply a clear screen.",
+    "red": "native-desktop-ocr-red01: 0 passed / 1 intended failed test (2 assertions); 0 build errors / 48 warnings; 55 stable snapshot entries.",
+    "green": "native-desktop-ocr-green02: 12 passed, 0 skips/issues/runtime warnings; 0 build errors / 13 warnings; 55 stable entries. GREEN01 also passed 12 but exposed one test-helper QoS warning, removed by matching the worker priority.",
+    "completion": "native-desktop-ocr-completion01: 3 passed, 0 skips/issues/runtime warnings; 0 build errors / 4 warnings; 55 stable entries after the final completion ownership guard.",
+    "coverage": "Desktop composition off-main OCR, bounded timeout with no proposal/effect, cancellation and scope loss while OCR awaits; existing single-flight/cancellation, approval single-use, effect/no-replay and completion checks.",
+    "acceptance": "Implemented, compiled and component-tested; real Gmail retry pending. Does not qualify broad workflow reliability or the 12 GB whole-Mac target."
   }
 }

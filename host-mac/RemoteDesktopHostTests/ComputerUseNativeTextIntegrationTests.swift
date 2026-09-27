@@ -2549,6 +2549,128 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })
     }
 
+    func testDesktopScreenConsentRecognitionRunsOffMainActor() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "review", decision: .handoff("Review the current screen."))
+        }, screenConsentRecognizer: { _ in Thread.isMainThread })
+
+        let result = try await executor.execute(taskID: "off-main-screen-consent", prompt: "Review the page.",
+            trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
+
+        XCTAssertEqual(result, .userInterventionRequired("Review the current screen."),
+            "A recognizer running on the main thread returns true and must fail closed")
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 0)
+    }
+
+    func testDesktopScreenConsentRecognitionTimeoutIsBoundedAndNoEffect() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let release = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        var proposals = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "review", decision: .handoff("Review the current screen."))
+        }, screenConsentRecognizer: { _ in
+            _ = release.wait(timeout: .now() + .seconds(1))
+            finished.signal()
+            return false
+        }, screenConsentTimeout: 0.1)
+        let releaseTask = Task.detached(priority: .userInitiated) {
+            try? await Task.sleep(for: .milliseconds(350))
+            release.signal()
+        }
+        let started = ContinuousClock.now
+        do {
+            _ = try await executor.execute(taskID: "screen-consent-timeout", prompt: "Review the page.",
+                trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
+            XCTFail("A timed-out recognizer must fail closed")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseObservationWorker.Failure, .timedOut)
+        }
+        let elapsed = ContinuousClock.now - started
+        await releaseTask.value
+        XCTAssertEqual(finished.wait(timeout: .now() + .seconds(1)), .success)
+        try await waitForScreenConsentRecognizerWorker()
+        XCTAssertLessThan(elapsed, .milliseconds(300), "The main executor must not wait for blocked recognition")
+        XCTAssertEqual(proposals, 0)
+        XCTAssertEqual(effects, 0)
+    }
+
+    func testDesktopScreenConsentCancellationOrScopeLossStopsBeforePlanning() async throws {
+        for scenario in ["cancel", "scope"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let release = DispatchSemaphore(value: 0)
+            let finished = DispatchSemaphore(value: 0)
+            let invalidatedScope = DispatchSemaphore(value: 0)
+            var run: Task<ComputerUseExecutionResult, Error>?
+            var proposals = 0, effects = 0
+            defer { run?.cancel(); release.signal() }
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                return .init(response: "unexpected", decision: .handoff("Stop."))
+            }, surfaceScopeCheck: { _ in
+                if invalidatedScope.wait(timeout: .now()) == .success {
+                    invalidatedScope.signal()
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+            }, screenConsentRecognizer: { _ in
+                _ = release.wait(timeout: .now() + .seconds(1))
+                finished.signal()
+                return false
+            }, screenConsentTimeout: 2)
+            let releaseTask = Task.detached(priority: .userInitiated) {
+                try? await Task.sleep(for: .milliseconds(350))
+                release.signal()
+            }
+            run = Task { try await executor.execute(taskID: "screen-consent-\(scenario)",
+                prompt: "Review the page.", trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in }) }
+            if scenario == "cancel" {
+                let cancelTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(100))
+                    run?.cancel()
+                }
+                do { _ = try await run?.value; XCTFail("Cancellation during recognition must stop planning") }
+                catch { XCTAssertTrue(error is CancellationError) }
+                cancelTask.cancel()
+            } else {
+                let invalidateTask = Task.detached(priority: .userInitiated) {
+                    try? await Task.sleep(for: .milliseconds(100))
+                    invalidatedScope.signal()
+                }
+                do { _ = try await run?.value; XCTFail("Scope loss during recognition must stop planning") }
+                catch { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, .scopedSurfaceChanged) }
+                await invalidateTask.value
+            }
+            await releaseTask.value
+            XCTAssertEqual(finished.wait(timeout: .now() + .seconds(1)), .success)
+            try await waitForScreenConsentRecognizerWorker()
+            XCTAssertEqual(proposals, 0, scenario)
+            XCTAssertEqual(effects, 0, scenario)
+        }
+    }
+
+    private func waitForScreenConsentRecognizerWorker() async throws {
+        for _ in 0..<100 {
+            do {
+                _ = try await ComputerUseObservationWorker.perform { true }
+                return
+            } catch ComputerUseObservationWorker.Failure.busy {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+        }
+        XCTFail("The finished consent recognizer did not release worker capacity")
+    }
+
     func testGUIOwlNativeStatusAndManualHandoffRemainDistinct() async throws {
         for mode in ["success", "failure", "handoff"] {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
