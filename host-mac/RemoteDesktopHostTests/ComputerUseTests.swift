@@ -4339,144 +4339,6 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(serverRecord["createdAt"] as? Date, originalCreatedAt)
     }
 
-    func test_clarificationPolicyCollectsMissingEmailDetailsInOneQuestion() {
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for:
-                ComputerUsePromptRequest(prompt: "Send an email")),
-            "Who should receive the email, and what should it say?")
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for:
-                ComputerUsePromptRequest(prompt: "Send an email to alex@example.com")),
-            "What should the email say?")
-        XCTAssertNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(
-                prompt: "Send an email to codex-computer-use-test@example.invalid with subject Remote Desktop computer use test and body This email confirms the local MCP Mail workflow completed end to end.")))
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for:
-                ComputerUsePromptRequest(
-                    prompt: "Send an email to alex@example.com with subject Status and body")),
-            "What should the email say?")
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for:
-                ComputerUsePromptRequest(
-                    prompt: "Send an email to alex@example.com with subject Status and body:")),
-            "What should the email say?")
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for:
-                ComputerUsePromptRequest(prompt: "Send an email to say hello")),
-            "Who should receive the email? Please give me their name or email address.")
-        XCTAssertNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(
-                prompt: "To alex@example.com. Say the meeting is at 3.",
-                conversation: [
-                    .init(role: .user, text: "Send an email"),
-                    .init(
-                        role: .assistant,
-                        text: "Who should receive the email, and what should it say?"),
-                ])))
-    }
-
-    func test_clarificationPolicyDoesNotReuseCompletedEmailBody() {
-        let request = ComputerUsePromptRequest(
-            prompt: "Send an email to second@example.com with subject Second subject",
-            conversation: [
-                .init(
-                    role: .user,
-                    text: "Send an email to first@example.com with subject First subject and body First body."),
-                .init(
-                    role: .assistant,
-                    text: "Mail accepted the approved email for sending."),
-            ])
-
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for: request),
-            "What should the email say?")
-    }
-
-    func test_clarificationPolicyLetsExplicitlyReadOnlyDeliveryQuoteReachVisualSafety() {
-        XCTAssertNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(prompt: "Check the current DoorDash delivery price and ETA. Do not place the order.")))
-        XCTAssertNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(prompt: "Get the current delivered price and ETA for the DoorDash item already in my cart. If I need to sign in, let me take over; I’ll sign in and open the complete itemized quote, then hand it back. After that, only read the restaurant, item, subtotal, delivery fee, service fee, tax, total, and ETA. Don’t enter credentials, change the cart, check out, or place the order.")))
-        XCTAssertNotNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(prompt: "Get food delivered with DoorDash")))
-    }
-
-    func test_clarificationPolicyDistinguishesCoordinatedQuoteNegationFromOrderingIntent() {
-        let readOnlyQuotes = [
-            "Get the DoorDash total and ETA, but don't enter credentials or place the order.",
-            "Tell me the DoorDash delivery price. Never check out.",
-            "Get the DoorDash cost, but do not change the cart or order anything.",
-            "Get the DoorDash quote without ordering anything.",
-            "Get the DoorDash total and stop at checkout.",
-            "Get the DoorDash total and only read what is already visible.",
-        ]
-        for prompt in readOnlyQuotes {
-            XCTAssertNil(
-                ComputerUseClarificationPolicy.question(for:
-                    ComputerUsePromptRequest(prompt: prompt)),
-                prompt)
-        }
-
-        let genuineOrders = [
-            "Don't enter credentials. Order food with DoorDash and tell me the total.",
-            "Don't sign in with Apple; order food as a guest on DoorDash and tell me the total.",
-            "Don't forget to order food with DoorDash and tell me the total.",
-            "Do not cancel the order; buy food with DoorDash and tell me the total.",
-            "Get food delivered with DoorDash and tell me the total before I confirm.",
-        ]
-        for prompt in genuineOrders {
-            XCTAssertNotNil(
-                ComputerUseClarificationPolicy.question(for:
-                    ComputerUsePromptRequest(prompt: prompt)),
-                prompt)
-        }
-    }
-
-    func test_clarificationPolicyDoesNotGuessFoodOrderDetails() {
-        let question = ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(
-                prompt: "Order fried rice from my favorite restaurant using Uber Eats"))
-
-        XCTAssertTrue(question?.contains("which restaurant") == true)
-        XCTAssertTrue(question?.contains("how many") == true)
-        XCTAssertTrue(question?.contains("delivery") == true)
-
-        let addressIsNotQuantity = ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(
-                prompt: "Order fried rice from Panda Express for delivery to 123 Main Street using Uber Eats"))
-        XCTAssertTrue(addressIsNotQuantity?.contains("how many") == true)
-
-        XCTAssertNil(ComputerUseClarificationPolicy.question(for:
-            ComputerUsePromptRequest(
-                prompt: "Panda Express, one order, deliver to my default address.",
-                conversation: [
-                    .init(
-                        role: .user,
-                        text: "Order fried rice from my favorite restaurant using Uber Eats"),
-                    .init(
-                        role: .assistant,
-                        text: "Which restaurant, how many, and delivery or pickup?"),
-                ])))
-    }
-
-    func test_clarificationPolicyDoesNotReuseCompletedFoodOrderDetails() {
-        let request = ComputerUsePromptRequest(
-            prompt: "Order food",
-            conversation: [
-                .init(
-                    role: .user,
-                    text: "Order one fried rice from Panda Express for delivery to my default address using Uber Eats."),
-                .init(
-                    role: .assistant,
-                    text: "Done. Your previous order was placed."),
-            ])
-
-        XCTAssertEqual(
-            ComputerUseClarificationPolicy.question(for: request),
-            "Before I start the order, please tell me what you want to order, which restaurant, how many, delivery (and which address) or pickup, and which ordering app or website.")
-    }
-
     func test_hostSafetyPolicyRequiresApprovalWithoutModelFlag() {
         XCTAssertNotNil(ComputerUseActionSafetyPolicy.approvalReason(
             for: .click(x: 10, y: 10, button: 1, count: 1),
@@ -5793,8 +5655,8 @@ final class ComputerUseTests: XCTestCase {
             "stale envelopes must not be acknowledged by the replacement generation")
     }
 
-    func test_managerAsksForEmailDetailsBeforeModelOrScreenControl() async throws {
-        let executor = ImmediateComputerUseExecutor(results: [.completed("Unexpected")])
+    func test_managerPublishesExecutorEmailClarificationBeforeAnyAction() async throws {
+        let executor = ImmediateComputerUseExecutor(results: [.clarificationRequired("Who should receive the email, and what should it say?")])
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
@@ -5812,7 +5674,7 @@ final class ComputerUseTests: XCTestCase {
             await channel.sentMessages().contains { $0.kind == .assistant }
         }
 
-        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(executor.callCount, 1)
         XCTAssertEqual(manager.activity, .idle)
         let messages = await channel.sentMessages()
         let answerEnvelope = try XCTUnwrap(messages.first { $0.kind == .assistant })
@@ -5825,7 +5687,7 @@ final class ComputerUseTests: XCTestCase {
 
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         await Task.yield()
-        XCTAssertEqual(executor.callCount, 0, "ledger replay must not turn a question into an action")
+        XCTAssertEqual(executor.callCount, 1, "ledger replay must not rerun the planner or turn a question into an action")
     }
 
     func test_managerContinuesExactReferencedGoalThroughTwoQuestionsAndDurableReplays() async throws {
@@ -6040,6 +5902,80 @@ final class ComputerUseTests: XCTestCase {
             executor.trustedUserPrompts,
             ["To alex@example.com. Say the meeting is at 3."],
             "Prior assistant prose may be model context, but must never become host policy or terminal evidence")
+    }
+
+    func test_managerPassesSelfRecipientAttachmentGoalToExecutorUnchanged() async throws {
+        let goal = "Using the default signed-in Gmail account, draft an email to my own email address with subject Quarterly spec and body Please review. Attach the latest spec spreadsheet from Downloads and leave the draft unsent."
+        let executor = ImmediateComputerUseExecutor(results: [.completed("Draft is ready for review.")])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(kind: .prompt, body: goal)
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains {
+            $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == prompt.id
+        } && manager.activity == .idle }
+
+        XCTAssertEqual(executor.prompts, [goal])
+        XCTAssertEqual(executor.trustedUserPrompts, [goal])
+        XCTAssertEqual(ComputerUseTaskLedger(fileURL: ledgerURL).terminalOutcome(taskID: prompt.id), .taskCompleted)
+    }
+
+    func test_managerDefersEmailAndFoodClarificationToExecutorAndReplaysTerminal() async throws {
+        let goals = ["Send an email", "Get food delivered"]
+        for (index, goal) in goals.enumerated() {
+            let executor = ImmediateComputerUseExecutor(results: [.clarificationRequired("Please provide the missing details.")])
+            let channel = FakeHostComputerUseChannel()
+            let ledgerURL = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
+            defer { manager.stop() }
+            let prompt = makeEnvelope(id: "semantic-clarification-\(index)", kind: .prompt, body: goal)
+            manager.authorizePeer(senderID: prompt.senderID)
+
+            XCTAssertTrue(manager.handle(prompt, channel: channel))
+            await waitUntil { await channel.sentMessages().contains {
+                $0.kind == .assistant && (try? ComputerUseTaskUpdate.decodeBody($0.body).taskID) == prompt.id
+            } && manager.activity == .idle }
+            XCTAssertEqual(executor.prompts, [goal])
+            XCTAssertEqual(executor.trustedUserPrompts, [goal])
+            let terminal = try await clarificationUpdate(taskID: prompt.id, channel: channel)
+            XCTAssertEqual(terminal.outcome, .userInterventionRequired)
+            XCTAssertEqual(terminal.text, "Please provide the missing details.")
+
+            XCTAssertTrue(manager.handle(prompt, channel: channel), "A duplicate task must replay its durable terminal result")
+            await Task.yield()
+            XCTAssertEqual(executor.callCount, 1, "Terminal replay must not rerun semantic planning")
+            XCTAssertEqual(ComputerUseTaskLedger(fileURL: ledgerURL).terminalOutcome(taskID: prompt.id),
+                           .userInterventionRequired)
+        }
+    }
+
+    func test_managerEmptyPromptStillAsksWithoutExecuting() async throws {
+        let executor = ImmediateComputerUseExecutor(results: [.completed("Unexpected execution")])
+        let channel = FakeHostComputerUseChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(kind: .prompt, body: "")
+        manager.authorizePeer(senderID: prompt.senderID)
+
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        let terminal = try await clarificationUpdate(taskID: prompt.id, channel: channel)
+
+        XCTAssertEqual(terminal.outcome, .userInterventionRequired)
+        XCTAssertEqual(terminal.text, "What would you like me to do on your Mac?")
+        XCTAssertEqual(executor.callCount, 0)
+        XCTAssertEqual(ComputerUseTaskLedger(fileURL: ledgerURL).terminalOutcome(taskID: prompt.id),
+                       .userInterventionRequired)
     }
 
     func test_legacyExecutorDefaultReceivesOnlyTrustedCurrentUserPrompt() async throws {

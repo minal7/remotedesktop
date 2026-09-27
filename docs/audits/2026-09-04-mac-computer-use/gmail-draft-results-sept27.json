@@ -1,0 +1,173 @@
+{
+  "date": "2026-09-27",
+  "problem": "Host keyword preflight rejected an explicit own-account Gmail attachment goal before any executor ran. The next live run, after that repair, reached Apple semantic planning but proposed a native Mail draft with an invented placeholder recipient and no attachment.",
+  "repair": "Pass meaningful nonempty requests to the semantic executor. Remove unused email/food keyword clarification grammar; retain empty-input handling and legacy Mail-history question recognition. Existing approval, typed continuation, task identity and durable replay stay unchanged.",
+  "stages": {
+    "implemented": true,
+    "compiled": true,
+    "tested": "13 focused component tests; real Gmail workflow attempted twice",
+    "accepted": "Host delegation repair at component level; Gmail attachment E2E remains failed"
+  },
+  "checks": [
+    {
+      "name": "gmail-draft-harness-check01",
+      "result": "Passed",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 24,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 1,
+      "sourceAudit": {
+        "sourceCount": 53,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testPickerConfirmationEligibilityBindsOnlyEnabledExactSelectedCandidate",
+        "ComputerUseDefaultBrowserSessionTests/testApprovedActionWaitsForPickerDismissalOrHandsOffWithoutReplay",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterReturnsFreshEnabledControlCenter",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterRequiresHitPathToReachRetainedControlInSameWindow",
+        "ComputerUseDefaultBrowserPageReaderTests/testValidatedControlCenterPropagatesPauseAndCancellationDuringHitValidation",
+        "MCPFirstComputerUseExecutorTests/testExplicitBrowserHandoffPreservesWholeMailAttachmentGoal"
+      ],
+      "sourceSnapshot": ".build/repair-verification/gmail-draft-harness-check01-sources",
+      "resultBundle": ".build/repair-verification/gmail-draft-harness-check01.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live01",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 22,
+      "runtimeWarnings": [],
+      "allIssueCount": 5,
+      "sourceAudit": {
+        "sourceCount": 53,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live01-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live01.xcresult"
+    },
+    {
+      "name": "semantic-host-preflight-red01",
+      "result": "Failed",
+      "passed": 1,
+      "failed": 2,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 11,
+      "runtimeWarnings": [],
+      "allIssueCount": 14,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseTests/test_managerPassesSelfRecipientAttachmentGoalToExecutorUnchanged",
+        "ComputerUseTests/test_managerDefersEmailAndFoodClarificationToExecutorAndReplaysTerminal",
+        "ComputerUseTests/test_managerEmptyPromptStillAsksWithoutExecuting"
+      ],
+      "sourceSnapshot": ".build/repair-verification/semantic-host-preflight-red01-sources",
+      "resultBundle": ".build/repair-verification/semantic-host-preflight-red01.xcresult"
+    },
+    {
+      "name": "semantic-host-preflight-green01",
+      "result": "Passed",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 13,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 1,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseTests/test_managerPassesSelfRecipientAttachmentGoalToExecutorUnchanged",
+        "ComputerUseTests/test_managerDefersEmailAndFoodClarificationToExecutorAndReplaysTerminal",
+        "ComputerUseTests/test_managerEmptyPromptStillAsksWithoutExecuting",
+        "ComputerUseTests/test_managerUsesClarificationConversationWhenAnswerIsComplete",
+        "ComputerUseTests/test_managerContinuesExactReferencedGoalThroughTwoQuestionsAndDurableReplays",
+        "ComputerUseTests/test_managerChoiceClarificationPublishesRecoversAndForwardsTypedSelection",
+        "ComputerUseTests/test_approvalResponseIsScopedAndContinuesOnlyAfterApproval",
+        "ComputerUseTests/test_approvalDenialPerformsNoActionAndPublishesCancellation",
+        "ComputerUseTests/test_transportStopTerminalizesPendingApprovalAndInvalidatesIt",
+        "MCPFirstComputerUseExecutorTests/testExplicitBrowserHandoffPreservesWholeMailAttachmentGoal",
+        "MCPFirstComputerUseExecutorTests/testPlannerFailureDoesNotReconstructMailApproval",
+        "MCPFirstComputerUseExecutorTests/testSendProposalUsesReliableMailMCPAndWaitsForApproval",
+        "ComputerUseTests/test_managerPublishesExecutorEmailClarificationBeforeAnyAction"
+      ],
+      "sourceSnapshot": ".build/repair-verification/semantic-host-preflight-green01-sources",
+      "resultBundle": ".build/repair-verification/semantic-host-preflight-green01.xcresult"
+    },
+    {
+      "name": "client-manager-gmail-draft-live02",
+      "result": "Failed",
+      "passed": 0,
+      "failed": 1,
+      "skipped": 0,
+      "buildErrors": 0,
+      "buildWarnings": 0,
+      "runtimeWarnings": [
+        {
+          "issueType": "Runtime Warning",
+          "message": "This method should not be called on the main thread as it may lead to UI unresponsiveness."
+        }
+      ],
+      "allIssueCount": 3,
+      "sourceAudit": {
+        "sourceCount": 54,
+        "sourceUnchanged": true,
+        "changed": []
+      },
+      "testIDs": [
+        "ComputerUseDefaultBrowserSessionTests/testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet"
+      ],
+      "sourceSnapshot": ".build/repair-verification/client-manager-gmail-draft-live02-sources",
+      "resultBundle": ".build/repair-verification/client-manager-gmail-draft-live02.xcresult"
+    }
+  ],
+  "live01": {
+    "browserFactoryCalls": 0,
+    "executorCalled": false,
+    "admittedEffects": 0,
+    "result": "userInterventionRequired",
+    "reason": "Host regex treated own-account recipient as missing.",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live01-attachments"
+  },
+  "live02": {
+    "browserFactoryCalls": 0,
+    "executorCalled": true,
+    "admittedEffects": 0,
+    "result": "Unaccepted MCP approval proposal; harness stopped before approval",
+    "proposedTool": "remote_desktop_mail",
+    "proposedRecipient": "[your_email_address]@gmail.com",
+    "missingRequirement": "Requested Gmail destination and spreadsheet attachment",
+    "attachmentDirectory": ".build/repair-verification/client-manager-gmail-draft-live02-attachments"
+  },
+  "testScope": "Production ClientModel -> in-process serialized LocalHost channel -> HostManager -> MCP-first Apple planner. Bounded approvals allow only observed Gmail Attach files and exact disposable-file picker primary action. No production completion checker override. Own address is private test oracle only and never supplied to model. Physical client UI, TLS/CloudKit and actual sending are not tested.",
+  "next": "Clarify capability descriptions and grounded-argument requirements in planner instructions; validate same goal with one no-effects route probe plus native Mail and underspecified-goal controls before another real run. No intent regex exception or hardcoded account address.",
+  "open": "Gmail draft/account inference/attachment E2E, ordinary email-to-self wording, final-answer accuracy from prior Drive live09, broad browser/native-app workflows and 12 GB whole-Mac qualification."
+}

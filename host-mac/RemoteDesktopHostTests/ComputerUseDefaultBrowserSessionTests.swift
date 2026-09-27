@@ -1531,6 +1531,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true, clientEntry: true)
     }
 
+    func testOptInClientManagerDefaultBrowserCreatesGmailDraftWithSpreadsheet() async throws {
+        try await runDefaultBrowserFileProbe(uploadToDrive: false, productionComposition: true,
+            clientEntry: true, gmailDraft: true)
+    }
+
     func testOptInClientManagerClarifiesAmbiguousDrivePresentationsAndUploadsSelectedFile() async throws {
         try await runDefaultBrowserFileProbe(uploadToDrive: true, productionComposition: true,
             clientEntry: true, ambiguousFileChoice: true)
@@ -1712,30 +1717,40 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     private func runDefaultBrowserFileProbe(uploadToDrive: Bool, productionComposition: Bool = false,
-                                            clientEntry: Bool = false, ambiguousFileChoice: Bool = false) async throws {
+                                            clientEntry: Bool = false, ambiguousFileChoice: Bool = false,
+                                            gmailDraft: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
-        let enabled = ambiguousFileChoice
+        let fileWorkflow = uploadToDrive || gmailDraft
+        let destinationHost = gmailDraft ? "mail.google.com" : uploadToDrive ? "drive.google.com" : "translate.google.com"
+        let enabled = gmailDraft
+            ? environment["RUN_CLIENT_MANAGER_GMAIL_DRAFT_PROBE"] == "1"
+            : ambiguousFileChoice
             ? environment["RUN_CLIENT_MANAGER_AMBIGUOUS_DRIVE_FILE_CHOICE_PROBE"] == "1"
             : productionComposition
                 ? environment[clientEntry ? "RUN_CLIENT_MANAGER_PRODUCTION_DRIVE_UPLOAD_PROBE" : "RUN_PRODUCTION_DRIVE_UPLOAD_PROBE"] == "1"
                 : environment[uploadToDrive ? "RUN_DEFAULT_BROWSER_DRIVE_UPLOAD_PROBE" : "RUN_DEFAULT_BROWSER_FILE_PICKER_PROBE"] == "1"
         guard enabled else {
-            throw XCTSkip(ambiguousFileChoice
+            throw XCTSkip(gmailDraft
+                ? "Opt-in: client-manager production route creates a Gmail draft with one disposable spreadsheet attachment; never sends"
+                : ambiguousFileChoice
                 ? "Opt-in: real client-manager ambiguity choice and one disposable Drive upload"
                 : "Opt-in: real Fara and native planner select one disposable file in the real Safari picker")
         }
-        guard !productionComposition || uploadToDrive else { throw XCTSkip("Production composition probe covers Drive upload only") }
+        guard !gmailDraft || (productionComposition && clientEntry && !uploadToDrive) else {
+            throw XCTSkip("Gmail draft probe requires the production client-manager composition")
+        }
+        guard !productionComposition || uploadToDrive || gmailDraft else { throw XCTSkip("Production composition probe covers real mail or Drive tasks only") }
         guard !clientEntry || productionComposition else { throw XCTSkip("Client-manager route requires production composition") }
         guard !ambiguousFileChoice || (clientEntry && productionComposition && uploadToDrive) else {
             throw XCTSkip("Ambiguous file-choice probe requires the production Drive client-manager route")
         }
         let usesNativeDelegation = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_DELEGATION"] == "1"
-        let usesNativeControlPlanner = uploadToDrive && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
+        let usesNativeControlPlanner = fileWorkflow && environment["DEFAULT_BROWSER_NATIVE_CONTROLS"] == "1"
         let startsOnDrivePage = !productionComposition && uploadToDrive && environment["DEFAULT_BROWSER_DRIVE_START_ON_PAGE"] == "1"
         let began = ContinuousClock.now
         // Live16 reached the exact-file upload but timed out before completion verification;
         // this single bounded retry budget is diagnostic, not a performance acceptance.
-        let timeLimit: Int64 = uploadToDrive ? (clientEntry ? 420 : productionComposition ? 300 : 240) : 150
+        let timeLimit: Int64 = fileWorkflow ? (clientEntry ? 420 : productionComposition ? 300 : 240) : 150
         let sharedDeadline = began.advanced(by: .seconds(timeLimit))
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
         let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
@@ -1778,14 +1793,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let fixtureRoot = downloads.appendingPathComponent(".remote-desktop-picker-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: fixtureRoot) }
-        let name = uploadToDrive ? "Remote Desktop E2E \(UUID().uuidString).pptx" : "Disposable Translate Picker Probe.pdf"
-        let expectedURL = (uploadToDrive ? downloads : fixtureRoot).appendingPathComponent(name)
+        let name = gmailDraft
+            ? "Remote Desktop E2E Spec \(UUID().uuidString).xlsx"
+            : uploadToDrive ? "Remote Desktop E2E \(UUID().uuidString).pptx" : "Disposable Translate Picker Probe.pdf"
+        let expectedURL = (fileWorkflow ? downloads : fixtureRoot).appendingPathComponent(name)
         let alternateName = "Alternate " + name
         let alternateURL = downloads.appendingPathComponent(alternateName)
         let olderURL = downloads.appendingPathComponent("Older " + name)
         let decoyURL = downloads.appendingPathComponent(name + ".txt")
         defer {
-            if uploadToDrive {
+            if fileWorkflow {
                 for file in [expectedURL, olderURL, decoyURL, alternateURL] { try? FileManager.default.removeItem(at: file) }
             }
         }
@@ -1794,15 +1811,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let consumer = try XCTUnwrap(CGDataConsumer(data: pdfData as CFMutableData))
         let pdf = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &mediaBox, nil))
         pdf.beginPDFPage(nil); pdf.endPDFPage(); pdf.closePDF()
-        if uploadToDrive {
-            let source = URL(fileURLWithPath: try XCTUnwrap(environment["DEFAULT_BROWSER_DRIVE_FIXTURE"]))
+        let gmailSubject = "Remote Desktop attachment draft \(UUID().uuidString)"
+        let gmailBody = "Please review the attached spreadsheet."
+        let gmailRecipient = gmailDraft ? try XCTUnwrap(environment["GMAIL_DRAFT_RECIPIENT"]) : ""
+        if fileWorkflow {
+            let fixtureKey = gmailDraft ? "GMAIL_DRAFT_FIXTURE" : "DEFAULT_BROWSER_DRIVE_FIXTURE"
+            let source = URL(fileURLWithPath: try XCTUnwrap(environment[fixtureKey]))
             let bytes = try Data(contentsOf: source)
             XCTAssertGreaterThan(bytes.count, 1000)
-            try bytes.write(to: olderURL, options: .withoutOverwriting)
-            try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: olderURL.path)
+            if uploadToDrive {
+                try bytes.write(to: olderURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -3600)], ofItemAtPath: olderURL.path)
+            }
             try bytes.write(to: expectedURL, options: .withoutOverwriting)
             var decoyModifiedAt = Date(timeIntervalSinceNow: 1)
-            if ambiguousFileChoice {
+            if uploadToDrive && ambiguousFileChoice {
                 try bytes.write(to: alternateURL, options: .withoutOverwriting)
                 let tiedLatestDate = Date(timeIntervalSinceNow: 60)
                 decoyModifiedAt = tiedLatestDate.addingTimeInterval(1)
@@ -1814,9 +1837,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 let alternateModifiedAt = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: alternateURL.path)[.modificationDate] as? Date)
                 XCTAssertEqual(expectedModifiedAt, alternateModifiedAt, "The two presentation candidates must be equally recent")
             }
-            try Data("Disposable newer non-presentation decoy.".utf8).write(to: decoyURL, options: .withoutOverwriting)
-            try FileManager.default.setAttributes([.modificationDate: decoyModifiedAt], ofItemAtPath: decoyURL.path)
-            if ambiguousFileChoice {
+            if uploadToDrive {
+                try Data("Disposable newer non-presentation decoy.".utf8).write(to: decoyURL, options: .withoutOverwriting)
+                try FileManager.default.setAttributes([.modificationDate: decoyModifiedAt], ofItemAtPath: decoyURL.path)
+            }
+            if uploadToDrive && ambiguousFileChoice {
                 let decoyModified = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: decoyURL.path)[.modificationDate] as? Date)
                 XCTAssertGreaterThan(decoyModified, try XCTUnwrap(FileManager.default.attributesOfItem(atPath: expectedURL.path)[.modificationDate] as? Date),
                     "The newer text decoy must not resolve presentation ambiguity")
@@ -1833,7 +1858,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             })
         let nativeFileSelectionPlanner = ComputerUseMCPBrowserStepPlanner(nativeTextPlanner: { nativeSteps })
         let taskID = UUID().uuidString
-        let goal = uploadToDrive
+        let goal = gmailDraft
+            ? "Using the default signed-in Gmail account at https://mail.google.com/, create a draft email to my own email address for that account with subject \(gmailSubject) and body \(gmailBody). Attach the spreadsheet named \(name) from Downloads, leave the draft open for review, and do not send it."
+            : uploadToDrive
             ? "Upload the last presentation in Downloads to Google Drive at https://drive.google.com/ using the default signed-in account. Verify that it finished uploading."
             : "In the default browser, open https://translate.google.com/?sl=auto&tl=es&op=docs, choose \(name) from Downloads in the native file picker, then stop before pressing Upload. Do not submit the file."
         var proposals: [String] = []
@@ -1848,6 +1875,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var revalidationPairCount = 0
         var acceptedUploadEvidence: (url: String, renderedAXText: String, uploadEffects: Int,
                                      pickerDismissed: Bool, toastConfirmed: Bool, rowCells: [String]?)?
+        var acceptedGmailDraftEvidence: (url: String, attachmentContainer: String, draftSavedMarker: Bool)?
         var pickerOpeningEffects = 0
         var delegatedWorkerGoal: String?
         var productionBrowserExecutor: ComputerUseDefaultBrowserExecutor?
@@ -1915,6 +1943,67 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             let uniqueURLs = Set(urls)
             return uniqueURLs.count == 1 ? uniqueURLs.first : nil
         }
+        func isObservedGmailAttachFilesClick(_ action: ComputerUsePredictedAction,
+                                             window: ComputerUseDefaultBrowserSession.Window) throws -> Bool {
+            guard gmailDraft, case .click(let x, let y, 1, 1) = action,
+                  window.identity.bounds.contains(CGPoint(x: x, y: y)) else { return false }
+            let reader = ComputerUseDefaultBrowserPageReader()
+            guard let page = try reader.read(window: window.accessibilityElement,
+                application: window.application, mayAct: { true }),
+                  URL(string: page.url)?.host == destinationHost,
+                  let control = page.controls.first(where: {
+                      $0.role == "AXPopUpButton" && $0.label == "Attach files" && $0.enabled == true
+                          && $0.frame?.contains(CGPoint(x: x, y: y)) == true
+                  }) else { return false }
+            guard try reader.validatedControlCenter(observation: page, controlID: control.id,
+                window: window.accessibilityElement, windowBounds: window.identity.bounds,
+                mayAct: { true }) != nil else { return false }
+            func axString(_ attribute: String, _ element: AXUIElement) -> String? {
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+                    return nil
+                }
+                return value as? String
+            }
+            var hit: AXUIElement?
+            let systemWide = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(systemWide, 0.1)
+            guard AXUIElementCopyElementAtPosition(systemWide, Float(x), Float(y), &hit) == .success,
+                  var current = hit else { return false }
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(300))
+            var matchedControl = false
+            for _ in 0..<16 {
+                guard ContinuousClock.now < deadline, !Task.isCancelled else { return false }
+                if CFEqual(current, window.accessibilityElement) { return matchedControl }
+                let role = axString(kAXRoleAttribute as String, current)
+                let label = axString(kAXTitleAttribute as String, current)
+                    ?? axString(kAXDescriptionAttribute as String, current)
+                if role == "AXPopUpButton", label == "Attach files" {
+                    var positionValue: CFTypeRef?
+                    var sizeValue: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(current, kAXPositionAttribute as CFString, &positionValue) == .success,
+                          AXUIElementCopyAttributeValue(current, kAXSizeAttribute as CFString, &sizeValue) == .success,
+                          let positionValue, let sizeValue,
+                          CFGetTypeID(positionValue) == AXValueGetTypeID(),
+                          CFGetTypeID(sizeValue) == AXValueGetTypeID() else { return false }
+                    var origin = CGPoint.zero
+                    var size = CGSize.zero
+                    guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &origin),
+                          AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else { return false }
+                    let hitFrame = CGRect(origin: origin, size: size)
+                    guard control.frame.map({ abs($0.minX - hitFrame.minX) < 1
+                        && abs($0.minY - hitFrame.minY) < 1 && abs($0.width - hitFrame.width) < 1
+                        && abs($0.height - hitFrame.height) < 1 }) == true else { return false }
+                    matchedControl = true
+                }
+                var parent: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                      let next = parent, CFGetTypeID(next) == AXUIElementGetTypeID() else { return false }
+                current = unsafeBitCast(next, to: AXUIElement.self)
+            }
+            return false
+        }
         func freshlyObservedUploadedFileRow(window: ComputerUseDefaultBrowserSession.Window,
                                              fileName: String) throws -> [String]? {
             let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
@@ -1979,12 +2068,141 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             acceptedUploadEvidence = (page.url, page.renderedAXText, uploadEffects, true, toastConfirmed, rowCells)
             return true
         }
+        func remoteGmailDraftConfirmed() throws -> Bool {
+            acceptedGmailDraftEvidence = nil
+            guard gmailDraft, pickerOpeningEffects == 1, uploadEffects == 1,
+                  try currentFilePanel() == nil,
+                  let window = retainedBrowserWindow(),
+                  let page = try ComputerUseDefaultBrowserPageReader().read(
+                    window: window.accessibilityElement, application: window.application, mayAct: { true }),
+                  URL(string: page.url)?.host == destinationHost else { return false }
+
+            func attribute(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+                return value
+            }
+            struct ObservedAXValue {
+                let element: AXUIElement
+                let role: String
+                let title: String
+                let description: String
+                let value: String
+            }
+            func observedValues(in root: AXUIElement, limit: Int = 192) -> [ObservedAXValue]? {
+                var pending = [root]
+                var visited: [AXUIElement] = []
+                var values: [ObservedAXValue] = []
+                let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+                while !pending.isEmpty, visited.count < limit, ContinuousClock.now < deadline, !Task.isCancelled {
+                    let element = pending.removeFirst()
+                    guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                    visited.append(element)
+                    let role = attribute(kAXRoleAttribute as String, element) as? String ?? ""
+                    let title = attribute(kAXTitleAttribute as String, element) as? String ?? ""
+                    let description = attribute(kAXDescriptionAttribute as String, element) as? String ?? ""
+                    let value = attribute(kAXValueAttribute as String, element) as? String ?? ""
+                    values.append(ObservedAXValue(element: element, role: role, title: title,
+                                                  description: description, value: value))
+                    if role == "AXSheet" || role == "AXDialog" { continue }
+                    if let children = attribute(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                        let room = max(0, limit - visited.count - pending.count)
+                        guard children.count <= room else { return nil }
+                        pending.append(contentsOf: children)
+                    }
+                }
+                guard pending.isEmpty, !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+                return values
+            }
+
+            // Find the compose container first so inbox rows or unrelated attachment names
+            // cannot combine into evidence for this draft.
+            var pending = [window.accessibilityElement]
+            var visited: [AXUIElement] = []
+            var composeRoots: [AXUIElement] = []
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+            while !pending.isEmpty, visited.count < 512, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = pending.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = attribute(kAXRoleAttribute as String, element) as? String ?? ""
+                let names = [kAXTitleAttribute as String, kAXDescriptionAttribute as String]
+                    .compactMap { attribute($0, element) as? String }
+                if role == "AXGroup", names.contains(where: { $0.hasPrefix("Compose:") }) {
+                    composeRoots.append(element)
+                    continue
+                }
+                if role == "AXSheet" || role == "AXDialog" { continue }
+                if let children = attribute(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, 512 - visited.count - pending.count)
+                    guard children.count <= room else { return false }
+                    pending.append(contentsOf: children)
+                }
+            }
+            guard pending.isEmpty, !Task.isCancelled, ContinuousClock.now < deadline,
+                  composeRoots.count == 1,
+                  let composer = observedValues(in: composeRoots[0]) else { return false }
+            let hasSubject = composer.contains {
+                $0.role == "AXTextField" && $0.title == "Subject" && $0.value == gmailSubject
+            }
+            let hasBody = composer.contains {
+                ($0.role == "AXTextArea" || $0.role == "AXTextEntryArea")
+                    && $0.title == "Message Body" && $0.value == gmailBody
+            }
+            let recipientContainer = composer.first {
+                ($0.role == "AXGroup" || $0.role == "AXTextField")
+                    && ($0.title == "To" || $0.description == "To")
+            }
+            let hasRecipient: Bool
+            if let recipientContainer, let recipientValues = observedValues(in: recipientContainer.element) {
+                hasRecipient = recipientValues.contains { $0.role == "AXStaticText" && $0.value == gmailRecipient }
+            } else {
+                hasRecipient = false
+            }
+            let attachmentContainer = composer.first {
+                $0.role == "AXGroup"
+                    && ($0.title + $0.description + $0.value).contains("Attachment: \(name).")
+                    && ($0.title + $0.description + $0.value).contains("delete to remove it")
+            }
+            let attachmentValues: [ObservedAXValue]?
+            if let attachmentContainer {
+                attachmentValues = observedValues(in: attachmentContainer.element)
+            } else {
+                attachmentValues = nil
+            }
+            let hasAttachmentLink = attachmentValues?.contains {
+                $0.role == "AXLink"
+                    && ($0.title == name || $0.description == name || $0.value == name
+                        || $0.title.hasPrefix("\(name) (") || $0.description.hasPrefix("\(name) ("))
+            } == true
+            let hasUploadProgress = composer.contains {
+                $0.role == "AXProgressIndicator"
+                    || ($0.title + $0.description + $0.value)
+                        .localizedCaseInsensitiveContains("Uploading attachment")
+            } || attachmentValues?.contains {
+                $0.role == "AXProgressIndicator"
+                    || ($0.title + $0.description + $0.value)
+                        .localizedCaseInsensitiveContains("Uploading attachment")
+            } == true
+            guard hasRecipient, hasSubject, hasBody,
+                  let attachmentContainer, hasAttachmentLink, !hasUploadProgress,
+                  try currentFilePanel() == nil,
+                  try freshlyObservedBrowserURL() == page.url else { return false }
+            let savedMarker = composer.contains {
+                ($0.title + $0.description + $0.value).localizedCaseInsensitiveContains("Draft saved")
+            }
+            acceptedGmailDraftEvidence = (page.url,
+                attachmentContainer.title + attachmentContainer.description + attachmentContainer.value,
+                savedMarker)
+            return true
+        }
         let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
         if usesNativeControlPlanner {
             nativeControlPlanner = { (input: ComputerUseFaraModel.Input,
                 page: ComputerUseDefaultBrowserPageReader.Observation) in
                 nativeControlCalls += 1
-                if URL(string: page.url)?.host == "drive.google.com" { observedRequestedPage = true }
+                if URL(string: page.url)?.host == destinationHost { observedRequestedPage = true }
                 do {
                     let endpoint = try await runtime.activateNativeText(nativeInputs)
                     let plan = try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page,
@@ -2011,7 +2229,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             nativeControlPlanner = nil
         }
         let revalidationFailureObserver: ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
-        if uploadToDrive {
+        if fileWorkflow {
             revalidationFailureObserver = { expected, fresh, action, diagnostic in
                 guard revalidationPairCount < 4 else { return }
                 revalidationPairCount += 1
@@ -2043,7 +2261,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if session.currentFileOpenPanel == nil, let window = session.currentWindow,
                    let page = try ComputerUseDefaultBrowserPageReader().read(
                     window: window.accessibilityElement, application: window.application, mayAct: { true }),
-                   URL(string: page.url)?.host == (uploadToDrive ? "drive.google.com" : "translate.google.com") {
+                   URL(string: page.url)?.host == destinationHost {
                     observedRequestedPage = true
                 }
                 if let panel = session.currentFileOpenPanel,
@@ -2053,17 +2271,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                    panel.primaryActionEnabled == true,
                    input.localFileCatalog?.selectedCandidate?.displayName == name {
                     selectedBeforeUpload = true
-                    if !uploadToDrive {
+                    if !fileWorkflow {
                         proposals.append("test-stop-before-upload: exact selected URL verified")
                         return .init(response: "Exact disposable file selected. Stop before Upload.",
                             decision: .handoff("Review the selected disposable file before submitting it."))
                     }
-                } else if uploadToDrive, let panel = session.currentFileOpenPanel,
+                } else if fileWorkflow, let panel = session.currentFileOpenPanel,
                           panel.primaryActionEnabled == true, !panel.selectedFileURLs.isEmpty {
                     throw ComputerUseDefaultBrowserExecutor.Failure.invalidFileChoice
                 }
-                guard proposals.count < (uploadToDrive ? 20 : 12) else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
-                if uploadToDrive {
+                guard proposals.count < (fileWorkflow ? 20 : 12) else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
+                if fileWorkflow {
                     let frame = XCTAttachment(data: input.screenshotPNG, uniformTypeIdentifier: "public.png")
                     frame.name = "Drive step \(proposals.count) input"; frame.lifetime = .keepAlways; self.add(frame)
                 }
@@ -2088,7 +2306,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     faraInput = input
                 }
                 let proposal = try await runtime.proposeFara(endpoint: endpoint, input: faraInput)
-                if uploadToDrive {
+                if fileWorkflow {
                     let trace = XCTAttachment(string: "Previous action error: \(faraInput.actionError ?? "none")\n"
                         + proposal.response + "\n" + (try ComputerUseFaraModel.nativeControlsJSON(input.nativeControls)))
                     trace.name = "Drive step \(proposals.count) proposal and native controls"; trace.lifetime = .keepAlways; self.add(trace)
@@ -2097,12 +2315,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 return .init(proposal)
             }, nativeFilePlanner: { input in
                 nativeCalls += 1
-                if uploadToDrive { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
+                if fileWorkflow { XCTAssertEqual(input.goal, goal, "Native file selection must retain the complete original task") }
                 return try await nativeFileSelectionPlanner.proposeNativeFileSelection(input: input)
             }, nativeControlPlanner: nativeControlPlanner,
             completionCheck: productionComposition ? nil : { _ in try remoteUploadConfirmed() },
             revalidationFailureObserver: revalidationFailureObserver, localFileCatalogFactory: { taskID in
-                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: uploadToDrive ? downloads : fixtureRoot, pageSize: 8)
+                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: fileWorkflow ? downloads : fixtureRoot, pageSize: 8)
             })
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
         let taskExecutor: any ComputerUseExecuting
@@ -2347,18 +2565,30 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             throw ComputerUseDefaultBrowserSession.Failure.interrupted
                         }
                         let panel = try currentFilePanel()
+                        let window = retainedBrowserWindow()
+                        let freshPageURL = try freshlyObservedBrowserURL()
+                        let observedAttachFilesClick: Bool
+                        if gmailDraft, let window {
+                            observedAttachFilesClick = try isObservedGmailAttachFilesClick(action, window: window)
+                        } else {
+                            observedAttachFilesClick = false
+                        }
+                        let opensNativeChooser = gmailDraft
+                            ? observedAttachFilesClick
+                            : message.localizedCaseInsensitiveContains("file upload")
                         if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
-                           message.localizedCaseInsensitiveContains("file upload"),
-                           case .click(let x, let y, 1, 1) = action, let window = retainedBrowserWindow(),
+                           opensNativeChooser,
+                           case .click(let x, let y, 1, 1) = action, let window,
                            window.identity.bounds.contains(CGPoint(x: x, y: y)),
-                           let pageURL = try freshlyObservedBrowserURL(), URL(string: pageURL)?.host == "drive.google.com" {
+                           let pageURL = freshPageURL, URL(string: pageURL)?.host == destinationHost {
                             managerApprovalStage = "picker"
                             observedRequestedPage = true; observedPageURL = pageURL
-                        } else if let panel, panel.primaryActionEnabled == true, !panel.isNavigatingPath,
+                        } else if fileWorkflow, (!gmailDraft || pickerOpeningEffects == 1),
+                                  (!gmailDraft || message.localizedCaseInsensitiveContains("upload")),
+                                  let panel, panel.primaryActionEnabled == true, !panel.isNavigatingPath,
                                   panel.selectedFileURLs.map(\.standardizedFileURL) == [expectedURL.standardizedFileURL],
-                                  message.localizedCaseInsensitiveContains("upload"),
-                                  let pageURL = try freshlyObservedBrowserURL(),
-                                  URL(string: pageURL)?.host == "drive.google.com" {
+                                  let pageURL = freshPageURL,
+                                  URL(string: pageURL)?.host == destinationHost {
                             let primaryAction: Bool
                             switch action {
                             case .key(usage: 0x28, modifiers: 0): primaryAction = true
@@ -2367,14 +2597,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             default: primaryAction = false
                             }
                             guard primaryAction, uploadEffects == 0 else {
-                                clientFailureReason = "upload approval gate rejected action: primaryAction=\(primaryAction), uploadEffects=\(uploadEffects), priorPickerApprovalObserved=\(observedRequestedPage)"
+                                clientFailureReason = "native chooser primary-action gate rejected action: primaryAction=\(primaryAction), effects=\(uploadEffects), prior destination observed=\(observedRequestedPage)"
                                 throw ComputerUseDefaultBrowserSession.Failure.interrupted
                             }
                             selectedBeforeUpload = true
                             managerApprovalStage = "upload"
                             observedRequestedPage = true; observedPageURL = pageURL
                         } else {
-                            clientFailureReason = "approval was unrelated to the exact Drive picker-open or selected-file primary action"
+                            clientFailureReason = gmailDraft
+                                ? "approval was not the observed Gmail Attach files control or exact selected-file primary action"
+                                : "approval was unrelated to the exact Drive picker-open or selected-file primary action"
                             throw ComputerUseDefaultBrowserSession.Failure.interrupted
                         }
                         seenManagerApprovals.insert(approval.requestID)
@@ -2440,14 +2672,24 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }
             var result = try await taskExecutor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: tools, progress: { routeProgress.append($0) })
-            while uploadToDrive, case .approvalRequired(let message, let action, let continuation) = result {
+            while fileWorkflow, case .approvalRequired(let message, let action, let continuation) = result {
                 let panel = try currentFilePanel()
                 let window = retainedBrowserWindow()
+                let pageURL = try freshlyObservedBrowserURL()
+                let observedAttachFilesClick: Bool
+                if gmailDraft, let window {
+                    observedAttachFilesClick = try isObservedGmailAttachFilesClick(action, window: window)
+                } else {
+                    observedAttachFilesClick = false
+                }
+                let opensNativeChooser = gmailDraft
+                    ? observedAttachFilesClick
+                    : message.localizedCaseInsensitiveContains("file upload")
                 if panel == nil, pickerOpeningEffects == 0, uploadEffects == 0,
-                   message.localizedCaseInsensitiveContains("file upload"),
+                   opensNativeChooser,
                    case .click(let x, let y, 1, 1) = action, let window,
                    window.identity.bounds.contains(CGPoint(x: x, y: y)),
-                   let pageURL = try freshlyObservedBrowserURL(), URL(string: pageURL)?.host == "drive.google.com" {
+                   let pageURL, URL(string: pageURL)?.host == destinationHost {
                     observedRequestedPage = true
                     observedPageURL = pageURL
                     let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
@@ -2463,7 +2705,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 // The user authorized this disposable real-site upload. Admit
                 // only the exact test file's primary picker action, once.
                 let actualPageURL = try freshlyObservedBrowserURL()
-                if URL(string: actualPageURL ?? "")?.host == "drive.google.com" {
+                if URL(string: actualPageURL ?? "")?.host == destinationHost {
                     observedRequestedPage = true
                     observedPageURL = actualPageURL
                 }
@@ -2517,11 +2759,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         await clientManager?.shutdown()
         if productionComposition, result != nil {
             do {
-                _ = try remoteUploadConfirmed()
+                let confirmed = gmailDraft ? try remoteGmailDraftConfirmed() : try remoteUploadConfirmed()
+                if !confirmed {
+                    failure = ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
                 if let window = retainedBrowserWindow(),
                    let page = try ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
                     application: window.application, mayAct: { true }),
-                   URL(string: page.url)?.host == "drive.google.com" {
+                   URL(string: page.url)?.host == destinationHost {
                     observedRequestedPage = true
                     observedPageURL = page.url
                 }
@@ -2530,9 +2775,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         productionMCPExecutor?.cancelMCPWork()
         await productionClientPool?.cancelAll()
         await runtime.shutdown()
-        if uploadToDrive {
+        if fileWorkflow {
             let fixture = XCTAttachment(string: "Disposable fixture: \(name); admitted upload effects: \(uploadEffects)")
-            fixture.name = "Real Drive readback target"; fixture.lifetime = .keepAlways; add(fixture)
+            fixture.name = gmailDraft ? "Real Gmail draft attachment target" : "Real Drive readback target"
+            fixture.lifetime = .keepAlways; add(fixture)
             if let startPageSetupEvidence {
                 let setup = XCTAttachment(string: startPageSetupEvidence)
                 setup.name = "Diagnostic scripted Drive start-page setup (excluded from acceptance)"
@@ -2592,7 +2838,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         if productionComposition {
             let summary = XCTAttachment(string: "Task: \(goal)\nResult: \(String(describing: result))\nError: \(String(describing: failure))\nBrowser factory calls: \(productionBrowserFactoryCalls)\nHelper catalog: \(helperCatalogNames)\nNative file calls: \(nativeCalls)\nNative control calls: \(nativeControlCalls)\nNative catalog: \(nativeCatalogTrace)\nObserved page URL: \(String(describing: observedPageURL))\nExact selected file observed: \(selectedBeforeUpload)\nAdmitted upload effects: \(uploadEffects)\nProgress: \(routeProgress)\nFresh completion evidence: \(String(describing: acceptedUploadEvidence?.url))")
-            summary.name = "Production MCP-first real Drive upload outcome"
+            summary.name = gmailDraft
+                ? "Production MCP-first real Gmail draft outcome"
+                : "Production MCP-first real Drive upload outcome"
             summary.lifetime = .keepAlways
             add(summary)
         }
@@ -2663,6 +2911,20 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(URL(string: evidence.url)?.host, "drive.google.com")
             XCTAssertTrue(evidence.toastConfirmed || evidence.rowCells != nil)
             if case .completed = result { } else { XCTFail("Expected completed real upload; got \(result), error=\(String(describing: failure))") }
+        } else if gmailDraft {
+            XCTAssertEqual(pickerOpeningEffects, 1, "Only the observed Gmail Attach files control may open the chooser")
+            XCTAssertEqual(uploadEffects, 1, "Only the exact selected spreadsheet's native primary action may confirm the chooser")
+            guard let evidence = acceptedGmailDraftEvidence else {
+                XCTFail("Gmail draft composer did not retain the exact recipient, subject, body, and attachment in one compose subtree")
+                return
+            }
+            let attachment = XCTAttachment(string: "URL: \(evidence.url)\nExact recipient, subject, body and attachment matched in one compose subtree.\n"
+                + "Attachment container: \(evidence.attachmentContainer)\nDraft-saved marker was observed: \(evidence.draftSavedMarker)")
+            attachment.name = "Fresh Gmail draft composer evidence"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertEqual(URL(string: evidence.url)?.host, "mail.google.com")
+            if case .completed = result { } else { XCTFail("Expected the draft task to complete without sending; got \(result), error=\(String(describing: failure))") }
         } else if case .userInterventionRequired = result { } else { XCTFail("Expected handoff before picker Upload; got \(result), error=\(String(describing: failure))") }
         XCTAssertEqual(productionBrowserFactoryCalls, productionComposition ? 1 : 0,
             "The genuine Apple planner must enter the browser factory exactly once")

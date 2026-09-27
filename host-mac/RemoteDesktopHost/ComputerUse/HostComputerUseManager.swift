@@ -7026,7 +7026,7 @@ final class HostComputerUseManager: ObservableObject {
         } else if request.prompt.isEmpty {
             clarification = "What would you like me to do on your Mac?"
         } else {
-            clarification = ComputerUseClarificationPolicy.question(for: request)
+            clarification = nil
         }
         if let clarification {
             // This is a terminal response for this stable task ID. The user's
