@@ -1,10 +1,175 @@
 import ApplicationServices
 import Foundation
 import XCTest
+import AppKit
 @testable import RemoteDesktopHost
 
 @MainActor
 final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
+    func testOptInSafariAddressFieldFingerprintAndLifecycleStability() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_SAFARI_FOCUS_STABILITY_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_SAFARI_FOCUS_STABILITY_PROBE=1 to sample an already-open Safari address field.")
+        }
+
+        let workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication,
+              safari.bundleIdentifier == "com.apple.Safari",
+              safari.isFinishedLaunching else {
+            throw XCTSkip("Safari must already be frontmost; this probe never activates or opens it.")
+        }
+        guard let httpsURL = URL(string: "https://example.com/"),
+              let defaultHTTPSHandler = workspace.urlForApplication(toOpen: httpsURL),
+              defaultHTTPSHandler.standardizedFileURL.path == safari.bundleURL?.standardizedFileURL.path else {
+            throw XCTSkip("Safari is not the current default HTTPS handler.")
+        }
+        let appRoot = AXUIElementCreateApplication(safari.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(appRoot, 0.15)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute, of: appRoot),
+              let focused = Self.axElement(kAXFocusedUIElementAttribute, of: appRoot) else {
+            throw XCTSkip("Safari has no readable focused window and field.")
+        }
+        _ = AXUIElementSetMessagingTimeout(window, 0.15)
+        _ = AXUIElementSetMessagingTimeout(focused, 0.15)
+        guard Self.axString("AXIdentifier", of: focused) == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
+              Self.axString(kAXRoleAttribute as String, of: focused) == (kAXTextFieldRole as String),
+              Self.axString(kAXSubroleAttribute as String, of: focused) != (kAXSecureTextFieldSubrole as String),
+              Self.axBool("AXProtectedContent", of: focused) != true,
+              let initialValue = Self.axString(kAXValueAttribute as String, of: focused),
+              initialValue.isEmpty else {
+            throw XCTSkip("Focused element is not the verified empty Safari smart address field; no other field is read.")
+        }
+        var access = ComputerUseAccessibilityTextTarget.Access.live
+        var recordingLifecycle: AXProbeLifecycleRecorder?
+        let lifecycleFactory = access.makeLifecycleMonitor
+        access.makeLifecycleMonitor = { application in
+            let monitor = lifecycleFactory?(application) ?? ComputerUseAXLifecycleMonitor(application: application.root)
+            let recorder = AXProbeLifecycleRecorder(monitor)
+            recordingLifecycle = recorder
+            return recorder
+        }
+        let target = ComputerUseAccessibilityTextTarget(access: access)
+        guard let initialSnapshot = target.snapshot(), initialSnapshot.value.isEmpty,
+              workspace.frontmostApplication?.processIdentifier == safari.processIdentifier,
+              let focusedAfterSnapshot = Self.axElement(kAXFocusedUIElementAttribute, of: appRoot),
+              CFEqual(focusedAfterSnapshot, focused) else {
+            throw XCTSkip("Safari smart address field does not expose a bounded editable text snapshot.")
+        }
+        guard let lifecycle = recordingLifecycle else { throw XCTSkip("Safari lifecycle observer was unavailable.") }
+        defer { lifecycle.cancel() }
+
+        var retainedAncestors = [focused, window, appRoot]
+        var ancestor = Self.axElement(kAXParentAttribute as String, of: focused)
+        while let current = ancestor, retainedAncestors.count < 12 {
+            if retainedAncestors.contains(where: { CFEqual($0, current) }) { break }
+            retainedAncestors.append(current)
+            if CFEqual(current, window) || CFEqual(current, appRoot) { break }
+            _ = AXUIElementSetMessagingTimeout(current, 0.15)
+            ancestor = Self.axElement(kAXParentAttribute as String, of: current)
+        }
+
+        var samples: [[String: Any]] = []
+        var events: [[String: Any]] = []
+        let started = Date()
+        for index in 0..<40 {
+            try Task.checkCancellation()
+            var row: [String: Any] = ["index": index]
+            guard workspace.frontmostApplication?.processIdentifier == safari.processIdentifier,
+                  let currentWindow = Self.axElement(kAXFocusedWindowAttribute, of: appRoot),
+                  CFEqual(currentWindow, window),
+                  let currentFocus = Self.axElement(kAXFocusedUIElementAttribute, of: appRoot),
+                  CFEqual(currentFocus, focused),
+                  Self.axString("AXIdentifier", of: focused) == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
+                  let snapshot = target.snapshot() else {
+                row["known"] = false
+                row["snapshotAvailable"] = false
+                row["targetMatchesBaseline"] = NSNull()
+                row["valueMatchesBaseline"] = NSNull()
+                row["selectionMatchesBaseline"] = NSNull()
+                row["editableMatchesBaseline"] = NSNull()
+                row["secureMatchesBaseline"] = NSNull()
+                samples.append(row)
+                _ = lifecycle.drain()
+                Self.append(events: lifecycle.takeCapturedEvents(), to: &events,
+                    focused: focused, window: window, appRoot: appRoot, ancestors: retainedAncestors, sampleIndex: index)
+                if index < 39 { try await Task.sleep(for: .milliseconds(375)) }
+                continue
+            }
+            row["known"] = true
+            row["snapshotAvailable"] = true
+            row["targetMatchesBaseline"] = snapshot.targetID == initialSnapshot.targetID
+            row["valueMatchesBaseline"] = snapshot.value == initialSnapshot.value
+            row["valueByteCount"] = snapshot.value.utf8.count
+            row["selectionMatchesBaseline"] = snapshot.selection == initialSnapshot.selection
+            row["selectionLocation"] = snapshot.selection.location
+            row["selectionLength"] = snapshot.selection.length
+            row["editableMatchesBaseline"] = snapshot.isEditable == initialSnapshot.isEditable
+            row["editable"] = snapshot.isEditable
+            row["secureMatchesBaseline"] = snapshot.isSecure == initialSnapshot.isSecure
+            row["secure"] = snapshot.isSecure
+            samples.append(row)
+
+            _ = lifecycle.drain()
+            Self.append(events: lifecycle.takeCapturedEvents(), to: &events,
+                focused: focused, window: window, appRoot: appRoot, ancestors: retainedAncestors, sampleIndex: index)
+            if index < 39 { try await Task.sleep(for: .milliseconds(375)) }
+        }
+        _ = lifecycle.drain()
+        Self.append(events: lifecycle.takeCapturedEvents(), to: &events,
+            focused: focused, window: window, appRoot: appRoot, ancestors: retainedAncestors, sampleIndex: 39)
+        let report: [String: Any] = ["probe": "read-only Safari address field stability", "samples": samples,
+            "sampleCount": samples.count, "elapsedSeconds": Date().timeIntervalSince(started),
+            "eventCountStored": events.count, "events": events,
+            "baselineValueByteCount": initialSnapshot.value.utf8.count,
+            "baselineSelectionLocation": initialSnapshot.selection.location,
+            "baselineSelectionLength": initialSnapshot.selection.length]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "safari-address-field-stability.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertEqual(samples.count, 40)
+    }
+
+    private static func axElement(_ name: String, of element: AXUIElement) -> AXUIElement? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success,
+              let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        return (raw as! AXUIElement)
+    }
+
+    private static func axString(_ name: String, of element: AXUIElement) -> String? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success else { return nil }
+        return raw as? String
+    }
+
+    private static func axBool(_ name: String, of element: AXUIElement) -> Bool? {
+        var raw: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &raw) == .success else { return nil }
+        return raw as? Bool
+    }
+
+    private static func append(events pending: [ComputerUseAXLifecycleEvent], to output: inout [[String: Any]],
+                               focused: AXUIElement, window: AXUIElement, appRoot: AXUIElement,
+                               ancestors: [AXUIElement], sampleIndex: Int) {
+        for event in pending where output.count < 128 {
+            var item: [String: Any] = ["sampleIndex": sampleIndex, "kind": String(describing: event.kind),
+                "notification": event.notification.map { $0 as Any } ?? NSNull()]
+            if let element = event.element {
+                item["elementMatchesFocused"] = CFEqual(element, focused)
+                item["elementMatchesWindow"] = CFEqual(element, window)
+                item["elementMatchesAppRoot"] = CFEqual(element, appRoot)
+                item["elementMatchesRetainedAncestor"] = ancestors.contains(where: { CFEqual($0, element) })
+            } else {
+                item["elementMatchesFocused"] = NSNull()
+                item["elementMatchesWindow"] = NSNull()
+                item["elementMatchesAppRoot"] = NSNull()
+                item["elementMatchesRetainedAncestor"] = NSNull()
+            }
+            output.append(item)
+        }
+    }
+
     func testNativeWindowContextPreservesObservedRolesAndUnknownModality() throws {
         for (role, subrole, modal) in [("AXWindow", "AXStandardWindow", false), ("AXWindow", "AXDialog", true),
                                        ("AXSheet", "", nil), ("", "", nil)] as [(String, String, Bool?)] {
@@ -963,6 +1128,31 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             }
         }
     }
+}
+
+private final class AXProbeLifecycleRecorder: ComputerUseAXLifecycleMonitoring {
+    private let underlying: any ComputerUseAXLifecycleMonitoring
+    private let lock = NSLock()
+    private var captured: [ComputerUseAXLifecycleEvent] = []
+
+    init(_ underlying: any ComputerUseAXLifecycleMonitoring) { self.underlying = underlying }
+
+    func drain() -> [ComputerUseAXLifecycleEvent] {
+        let events = underlying.drain()
+        lock.lock()
+        captured.append(contentsOf: events.prefix(max(0, 128 - captured.count)))
+        lock.unlock()
+        return events
+    }
+
+    func takeCapturedEvents() -> [ComputerUseAXLifecycleEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let events = captured
+        captured.removeAll(keepingCapacity: true)
+        return events
+    }
+
+    func cancel() { underlying.cancel() }
 }
 
 @MainActor
