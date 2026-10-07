@@ -1,4 +1,7 @@
 import XCTest
+#if canImport(Darwin)
+import Darwin
+#endif
 @testable import RemoteDesktopHost
 
 final class RemoteDesktopMailMCPTests: XCTestCase {
@@ -34,10 +37,12 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
             "const sentSuccessfully = outgoingMessage.send()"))
         XCTAssertTrue(RemoteDesktopMailJXA.source.contains(
             "sentSuccessfully !== true"))
-        XCTAssertTrue(RemoteDesktopMailJXA.source.contains(
-            "mail.activate();\n        $.NSThread.sleepForTimeInterval(0.2);\n        const sentSuccessfully"))
-        XCTAssertTrue(RemoteDesktopMailJXA.source.contains(
-            "throw new Error('Mail rejected the send command');\n        }\n        mail.activate();"))
+        let normalizedSource = RemoteDesktopMailJXA.source.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+        XCTAssertTrue(normalizedSource.contains(
+            "mail.activate();\n$.NSThread.sleepForTimeInterval(0.2);\nconst sentSuccessfully"))
+        XCTAssertTrue(normalizedSource.contains(
+            "throw new Error('Mail rejected the send command');\n}\nmail.activate();"))
 
         let processArguments = RemoteDesktopMailJXA.processArguments
         XCTAssertEqual(processArguments, [
@@ -49,6 +54,371 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
         XCTAssertEqual(
             RemoteDesktopMailJXA.executableURL.path,
             "/usr/bin/osascript")
+    }
+
+    func testMailRecipientFieldsRequireExplicitMailboxAddresses() throws {
+        let invalidRecipients = [
+            "me", "myself", "Jordan", "Jordan Example",
+            "Jordan <jordan@example.com>",
+            "\"Jordan Example\" <jordan@example.com>",
+            "no-at-sign.example", "@example.com", "person@", "person@@example.com",
+            "person@example..com",
+        ]
+        for recipient in invalidRecipients {
+            var arguments = mailArguments(sendNow: false)
+            arguments["to"] = .string(recipient)
+            XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: arguments),
+                "To must reject non-mailboxes and unresolved labels without inventing an address: \(recipient.debugDescription)") { error in
+                    XCTAssertEqual((error as? RemoteDesktopMailRecipientFailure)?.field, .to)
+                }
+        }
+
+        for recipient in ["person@example.com\tother", "person\u{0000}@example.com"] {
+            var arguments = mailArguments(sendNow: false)
+            arguments["to"] = .string(recipient)
+            XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: arguments)) { error in
+                XCTAssertTrue(error is MCPClientError,
+                    "Control characters continue to use the existing invalid-arguments failure")
+            }
+        }
+
+        for field in ["cc", "bcc"] {
+            var arguments = mailArguments(sendNow: false)
+            arguments[field] = .string("Jordan")
+            XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: arguments),
+                "Nonblank \(field) values must follow the same explicit mailbox contract") { error in
+                    XCTAssertEqual((error as? RemoteDesktopMailRecipientFailure)?.field,
+                                   field == "cc" ? .cc : .bcc)
+                }
+        }
+
+        var emptyTo = mailArguments(sendNow: false)
+        emptyTo["to"] = .string("  , ; \n")
+        XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: emptyTo),
+            "To still requires at least one explicit mailbox address") { error in
+                XCTAssertEqual((error as? RemoteDesktopMailRecipientFailure)?.field, .to)
+            }
+
+        var blankCopies = mailArguments(sendNow: false)
+        blankCopies["cc"] = .string("  , ; \n")
+        blankCopies["bcc"] = .string("\t")
+        XCTAssertNoThrow(try RemoteDesktopMailRequest(arguments: blankCopies),
+            "Blank optional CC and BCC fields remain allowed")
+    }
+
+    func testMailboxAddressVariantsArePreservedExactlyWithoutOnlineChecks() throws {
+        let addresses = [
+            "jordan@example.com",
+            "first+tag@sub.example.invalid",
+            "máil@bücher.example",
+            "\"first last\"@example.invalid",
+        ]
+        let input = addresses.joined(separator: ", ;\n")
+        var arguments = mailArguments(sendNow: false)
+        arguments["to"] = .string(input)
+        let request = try RemoteDesktopMailRequest(arguments: arguments)
+        XCTAssertEqual(request.to, input,
+            "The parsed request must preserve the exact entered mailbox list")
+
+        let payload = try JSONDecoder().decode(
+            RecordedMailAutomationPayload.self,
+            from: request.automationPayload())
+        XCTAssertEqual(payload.to, addresses,
+            "Plus-tags, subdomains, synthetic domains, international addresses, and quoted local parts stay intact")
+    }
+
+    func testMailRecipientListLimitAppliesAfterMixedSeparators() throws {
+        let accepted = (0 ..< RemoteDesktopMailRequest.maximumRecipientsPerField)
+            .map { "person\($0)@example.invalid" }
+        var atLimit = mailArguments(sendNow: false)
+        atLimit["to"] = .string(accepted.joined(separator: ", ;\n"))
+        XCTAssertNoThrow(try RemoteDesktopMailRequest(arguments: atLimit))
+
+        var overLimit = mailArguments(sendNow: false)
+        overLimit["to"] = .string((accepted + ["extra@example.invalid"]).joined(separator: ";,"))
+        XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: overLimit),
+            "Mixed separators must not bypass the existing recipient-count bound")
+    }
+
+    func testMailAttachmentPathsAreOptionalAndAppearInTheAdvertisedSchema() throws {
+        guard case .object(let schema) = RemoteDesktopMailMCP.inputSchema,
+              case .object(let properties)? = schema["properties"],
+              case .object(let attachmentSchema)? = properties["attachment_paths"],
+              attachmentSchema["type"] == .string("array"),
+              case .array(let required)? = schema["required"] else {
+            return XCTFail("Mail must advertise an optional attachment_paths array")
+        }
+        XCTAssertFalse(required.contains(.string("attachment_paths")))
+        XCTAssertNoThrow(try MCPToolSafetyPolicy.validateArguments(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: mailArguments(sendNow: false)))
+
+        var withAttachments = mailArguments(sendNow: false)
+        withAttachments["attachment_paths"] = .array([
+            .string("/tmp/Remote Desktop attachment.txt"),
+        ])
+        XCTAssertNoThrow(try MCPToolSafetyPolicy.validateArguments(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: withAttachments))
+
+        var relativePath = mailArguments(sendNow: false)
+        relativePath["attachment_paths"] = .array([.string("Downloads/attachment.txt")])
+        XCTAssertThrowsError(try MCPToolSafetyPolicy.validateArguments(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: relativePath))
+
+        var duplicatePath = mailArguments(sendNow: false)
+        duplicatePath["attachment_paths"] = .array([
+            .string("/tmp/attachment.txt"), .string("/tmp/attachment.txt"),
+        ])
+        XCTAssertThrowsError(try MCPToolSafetyPolicy.validateArguments(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: duplicatePath))
+    }
+
+    func testChangedMailAttachmentStopsBeforePreflightLedgerAndRunner() async throws {
+        let runner = RecordingMailAutomationRunner()
+        let preflight = RecordingMailAutomationPreflight(isAllowed: true)
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentChanged-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("approval-bound.txt")
+        try Data("approved bytes".utf8).write(to: file)
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: root.appendingPathComponent("ledger.json")),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        var phase = "SDK startup"
+        do {
+            _ = try await pool.start(binaryURL: fakeBinaryURL)
+            phase = "tool discovery"
+            let availableTools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(availableTools.first(where: {
+                $0.toolName == RemoteDesktopMailMCP.toolName
+            }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "attachment-content-change", arguments: arguments)
+            phase = "approval preparation"
+            let prepared = try await pool.prepareApproval(call)
+            try Data("changed bytes".utf8).write(to: file, options: .atomic)
+
+            do {
+                _ = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
+                XCTFail("Changed attachment content must invalidate the approved action")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            let invocationCount = await runner.invocationCount()
+            let preflightCallCount = await preflight.callCount()
+            XCTAssertEqual(invocationCount, 0)
+            XCTAssertEqual(preflightCallCount, 0)
+        } catch {
+            await pool.cancelAll()
+            XCTFail("Failure during \(phase): \(error)")
+            return
+        }
+        await pool.cancelAll()
+    }
+
+    func testRepreparingSameMailCallBindsNewBytesAndRejectsStaleFingerprint() async throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentFingerprint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("same-call.txt")
+        try Data("bytes A".utf8).write(to: file)
+        let runner = RecordingMailAutomationRunner()
+        let preflight = RecordingMailAutomationPreflight(isAllowed: true)
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: root.appendingPathComponent("ledger.json")),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        var phase = "SDK startup"
+        do {
+            _ = try await pool.start(binaryURL: fakeBinaryURL)
+            phase = "tool discovery"
+            let availableTools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(availableTools.first(where: {
+                $0.toolName == RemoteDesktopMailMCP.toolName
+            }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "attachment-fingerprint-replacement", arguments: arguments)
+            phase = "approval preparation"
+            let oldApproval = try await pool.prepareApproval(call)
+            try Data("bytes B".utf8).write(to: file, options: .atomic)
+            let newApproval = try await pool.prepareApproval(call)
+            XCTAssertNotEqual(oldApproval.fingerprint.mailAttachmentDigest,
+                              newApproval.fingerprint.mailAttachmentDigest)
+
+            do {
+                _ = try await pool.performApproved(call, fingerprint: oldApproval.fingerprint)
+                XCTFail("A stale fingerprint must not consume a newer approval snapshot")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            let staleRunnerCount = await runner.invocationCount()
+            let stalePreflightCount = await preflight.callCount()
+            XCTAssertEqual(staleRunnerCount, 0)
+            XCTAssertEqual(stalePreflightCount, 0)
+
+            let result = try await pool.performApproved(call, fingerprint: newApproval.fingerprint)
+            XCTAssertFalse(result.isError)
+            let finalRunnerCount = await runner.invocationCount()
+            XCTAssertEqual(finalRunnerCount, 1)
+        } catch {
+            await pool.cancelAll()
+            XCTFail("Failure during \(phase): \(error)")
+            return
+        }
+        await pool.cancelAll()
+    }
+
+    func testCachedMailReceiptCannotConfirmDifferentApprovedAttachmentBytes() async throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentLedgerDigest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("same-path.txt")
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        try Data("content A".utf8).write(to: file)
+        let runner = RecordingMailAutomationRunner()
+        let preflight = RecordingMailAutomationPreflight(isAllowed: true)
+        var firstCallDigest: String?
+        let firstPool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: ledgerURL),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await firstPool.start(binaryURL: fakeBinaryURL)
+        do {
+            let tools = try await firstPool.allowedTools()
+            let tool = try XCTUnwrap(tools.first(where: { $0.toolName == RemoteDesktopMailMCP.toolName }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "mail-ledger-attachment-digest", arguments: arguments)
+            firstCallDigest = call.canonicalDigest
+            let approval = try await firstPool.prepareApproval(call)
+            let result = try await firstPool.performApproved(call, fingerprint: approval.fingerprint)
+            XCTAssertFalse(result.isError)
+            guard case .object(let receipt)? = result.structuredContent else {
+                throw MCPClientError.toolFailed("Expected an attached Mail receipt.")
+            }
+            XCTAssertEqual(receipt["attachment_digest"],
+                           .string(try XCTUnwrap(approval.fingerprint.mailAttachmentDigest)))
+            let cachedApproval = try await firstPool.prepareApproval(call)
+            let cachedResult = try await firstPool.performApproved(call, fingerprint: cachedApproval.fingerprint)
+            guard case .object(let cachedReceipt)? = cachedResult.structuredContent else {
+                throw MCPClientError.toolFailed("Expected a cached attached Mail receipt.")
+            }
+            XCTAssertEqual(cachedReceipt["attachment_digest"],
+                           .string(try XCTUnwrap(cachedApproval.fingerprint.mailAttachmentDigest)))
+        } catch {
+            await firstPool.cancelAll()
+            throw error
+        }
+        await firstPool.cancelAll()
+        let firstRunCount = await runner.invocationCount()
+        XCTAssertEqual(firstRunCount, 1)
+
+        try Data("content B".utf8).write(to: file, options: .atomic)
+        let secondPool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: ledgerURL),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await secondPool.start(binaryURL: fakeBinaryURL)
+        do {
+            let tools = try await secondPool.allowedTools()
+            let tool = try XCTUnwrap(tools.first(where: { $0.toolName == RemoteDesktopMailMCP.toolName }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "mail-ledger-attachment-digest", arguments: arguments)
+            // The persisted mutation key is intentionally path/call based.
+            XCTAssertEqual(call.canonicalDigest, try XCTUnwrap(firstCallDigest))
+            let approval = try await secondPool.prepareApproval(call)
+            do {
+                _ = try await secondPool.performApproved(call, fingerprint: approval.fingerprint)
+                XCTFail("A cached result for content A must not confirm approved content B")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            let finalRunCount = await runner.invocationCount()
+            XCTAssertEqual(finalRunCount, 1)
+        } catch {
+            await secondPool.cancelAll()
+            throw error
+        }
+        await secondPool.cancelAll()
+    }
+
+    func testMailAttachmentFilenameAndBytesStayJSONData() throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentPayload-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fileName = "report \"; do shell script\".txt"
+        let file = root.appendingPathComponent(fileName)
+        let bytes = Data("exact approved file bytes".utf8)
+        try bytes.write(to: file)
+        var arguments = mailArguments(sendNow: false)
+        arguments["attachment_paths"] = .array([.string(file.path)])
+        let mail = try RemoteDesktopMailRequest(arguments: arguments)
+        let snapshots = try RemoteDesktopMailAttachmentFileReader.snapshot(paths: mail.attachmentPaths)
+        let payload = try mail.automationPayload(attachments: snapshots)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+        let attachments = try XCTUnwrap(object["attachments"] as? [[String: Any]])
+        XCTAssertEqual(attachments.count, 1)
+        XCTAssertEqual(attachments[0]["file_name"] as? String, fileName)
+        XCTAssertEqual(attachments[0]["base64_data"] as? String, bytes.base64EncodedString())
+        XCTAssertFalse(RemoteDesktopMailJXA.source.contains(fileName))
+        let exactCheck = try XCTUnwrap(RemoteDesktopMailJXA.source.range(
+            of: "Mail did not confirm the exact approved attachments"))
+        let send = try XCTUnwrap(RemoteDesktopMailJXA.source.range(of: "outgoingMessage.send()"))
+        XCTAssertLessThan(exactCheck.lowerBound, send.lowerBound,
+            "Mail must verify exact attachment count and names before a send can run")
+    }
+
+    func testMailAttachmentReaderRejectsSymlinksFoldersAndFIFOs() throws {
+        #if canImport(Darwin)
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentKinds-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let regular = root.appendingPathComponent("regular.txt")
+        try Data("local fixture".utf8).write(to: regular)
+        let link = root.appendingPathComponent("linked.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: regular)
+        XCTAssertThrowsError(try RemoteDesktopMailAttachmentFileReader.snapshot(paths: [link.path]))
+        XCTAssertThrowsError(try RemoteDesktopMailAttachmentFileReader.snapshot(paths: [root.path]))
+        let fifo = root.appendingPathComponent("pipe")
+        XCTAssertEqual(fifo.path.withCString { Darwin.mkfifo($0, 0o600) }, 0)
+        XCTAssertThrowsError(try RemoteDesktopMailAttachmentFileReader.snapshot(paths: [fifo.path]))
+        #endif
     }
 
     func testInMemorySDKDiscoversAndCallsDraftAndSendSemantics() async throws {
@@ -93,6 +463,356 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
             sendNow: false))
         XCTAssertTrue(invocations[1].sendNow)
         await session.stop()
+    }
+
+    func testMailPreflightDenialRetainsPreparedApprovalWithoutClaimingOrDispatching() async throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailPreflightApproval-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("approved.txt")
+        try Data("approved bytes".utf8).write(to: file)
+        let runner = RecordingMailAutomationRunner()
+        let preflight = TypedMailAutomationPreflight(isAllowed: false)
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: ledgerURL),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        do {
+            let tools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(tools.first(where: { $0.toolName == RemoteDesktopMailMCP.toolName }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "mail-preflight-denial", arguments: arguments)
+            let prepared = try await pool.prepareApproval(call)
+            do {
+                try await pool.preflightApproved(call, fingerprint: prepared.fingerprint)
+                XCTFail("Denied Mail Automation authorization must return the typed setup error")
+            } catch let error as RemoteDesktopMailAutomationPreflightError {
+                XCTAssertEqual(error, .authorizationDenied)
+            }
+            let deniedRunCount = await runner.invocationCount()
+            XCTAssertEqual(deniedRunCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path),
+                "Denied preflight must not claim the mutation ledger")
+
+            await preflight.setAllowed(true)
+            try await pool.preflightApproved(call, fingerprint: prepared.fingerprint)
+            let preflightOnlyRunCount = await runner.invocationCount()
+            XCTAssertEqual(preflightOnlyRunCount, 0, "Preflight must not dispatch or claim the action")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path),
+                "Successful preflight alone must not claim the mutation ledger")
+            let result = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
+            XCTAssertFalse(result.isError)
+            let finalRunCount = await runner.invocationCount()
+            XCTAssertEqual(finalRunCount, 1, "The exact prepared approval must remain usable after denial")
+        } catch {
+            await pool.cancelAll()
+            throw error
+        }
+        await pool.cancelAll()
+    }
+
+    func testMailPreflightRejectsChangedBytesAndMismatchedCallIdentityBeforeAuthorization() async throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailPreflightIdentity-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("approved.txt")
+        try Data("approved bytes".utf8).write(to: file)
+        let runner = RecordingMailAutomationRunner()
+        let preflight = TypedMailAutomationPreflight(isAllowed: true)
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: ledgerURL),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        do {
+            let tools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(tools.first(where: { $0.toolName == RemoteDesktopMailMCP.toolName }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "mail-preflight-identity", arguments: arguments)
+            let prepared = try await pool.prepareApproval(call)
+            let otherTaskCall = try tool.makeCall(taskID: "mail-preflight-other-task", arguments: arguments)
+            do {
+                try await pool.preflightApproved(otherTaskCall, fingerprint: MCPApprovalFingerprint(call: otherTaskCall))
+                XCTFail("A different task must not use this pending approval")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            do {
+                try await pool.preflightApproved(call, fingerprint: MCPApprovalFingerprint(call: otherTaskCall))
+                XCTFail("A mismatched fingerprint must not preflight")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            let wrongGenerationCall = try MCPToolCall(
+                taskID: call.taskID,
+                serverID: call.serverID,
+                processGeneration: call.processGeneration + 1,
+                toolName: call.toolName,
+                arguments: call.arguments,
+                schemaDigest: call.schemaDigest,
+                risk: call.risk,
+                approval: call.approvalDisplay)
+            do {
+                try await pool.preflightApproved(
+                    wrongGenerationCall,
+                    fingerprint: MCPApprovalFingerprint(call: wrongGenerationCall))
+                XCTFail("A stale process generation must not preflight")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .staleCall)
+            }
+            try Data("changed bytes".utf8).write(to: file, options: .atomic)
+            do {
+                try await pool.preflightApproved(call, fingerprint: prepared.fingerprint)
+                XCTFail("Changed attachment bytes must invalidate preflight")
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .approvalMismatch)
+            }
+            let authorizationCount = await preflight.callCount()
+            let runCount = await runner.invocationCount()
+            XCTAssertEqual(authorizationCount, 0)
+            XCTAssertEqual(runCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path),
+                "Rejected preflight inputs must not claim the mutation ledger")
+        } catch {
+            await pool.cancelAll()
+            throw error
+        }
+        await pool.cancelAll()
+    }
+
+    func testCanceledMailPreflightDoesNotClaimOrDispatchPreparedAction() async throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailPreflightCancellation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("approved.txt")
+        try Data("approved bytes".utf8).write(to: file)
+        let runner = RecordingMailAutomationRunner()
+        let preflight = SuspendingMailAutomationPreflight()
+        let ledgerURL = root.appendingPathComponent("ledger.json")
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: ledgerURL),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        do {
+            let tools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(tools.first(where: { $0.toolName == RemoteDesktopMailMCP.toolName }))
+            var arguments = mailArguments(sendNow: false)
+            arguments["attachment_paths"] = .array([.string(file.path)])
+            let call = try tool.makeCall(taskID: "mail-preflight-cancel", arguments: arguments)
+            let prepared = try await pool.prepareApproval(call)
+            let operation = Task {
+                try await pool.preflightApproved(call, fingerprint: prepared.fingerprint)
+            }
+            for _ in 0 ..< 1_000 {
+                if await preflight.hasStarted() { break }
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            let didStartPreflight = await preflight.hasStarted()
+            XCTAssertTrue(didStartPreflight)
+            operation.cancel()
+            await preflight.releaseAndAllowFutureCalls()
+            do {
+                try await operation.value
+                XCTFail("Canceled preflight must not be treated as successful")
+            } catch is CancellationError {
+                // Expected cancellation before any mutation claim.
+            } catch let error as MCPClientError {
+                XCTAssertEqual(error, .cancelled)
+            }
+            let canceledRunCount = await runner.invocationCount()
+            XCTAssertEqual(canceledRunCount, 0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: ledgerURL.path),
+                "Canceled preflight must not claim the mutation ledger")
+            let result = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
+            XCTAssertFalse(result.isError, "Canceled preflight must leave the same approval unclaimed")
+            let finalRunCount = await runner.invocationCount()
+            XCTAssertEqual(finalRunCount, 1)
+        } catch {
+            await pool.cancelAll()
+            throw error
+        }
+        await pool.cancelAll()
+    }
+
+    func testDeniedAndReplayedAttachmentApprovalsNeverRunTwice() async throws {
+        let runner = RecordingMailAutomationRunner()
+        let preflight = RecordingMailAutomationPreflight(isAllowed: false)
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentApproval-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("approved-only.txt")
+        try Data("approval fixture".utf8).write(to: file)
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: root.appendingPathComponent("ledger.json")),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            },
+            embeddedSessionFactory: { generation in
+                RemoteDesktopMailMCPClientSession(processGeneration: generation, runner: runner)
+            },
+            mailAutomationPreflight: preflight)
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        let availableTools = try await pool.allowedTools()
+        let tool = try XCTUnwrap(availableTools.first(where: {
+            $0.toolName == RemoteDesktopMailMCP.toolName
+        }))
+        var arguments = mailArguments(sendNow: false)
+        arguments["attachment_paths"] = .array([.string(file.path)])
+        let call = try tool.makeCall(taskID: "attachment-denial-replay", arguments: arguments)
+        let firstApproval = try await pool.prepareApproval(call)
+        do {
+            _ = try await pool.performApproved(call, fingerprint: firstApproval.fingerprint)
+            XCTFail("A denied Automation prompt must not reach Mail")
+        } catch let error as MCPClientError {
+            guard case .toolFailed = error else { return XCTFail("Unexpected denial: \(error)") }
+        }
+        let afterDenial = await runner.invocationCount()
+        XCTAssertEqual(afterDenial, 0)
+        await preflight.setAllowed(true)
+        let secondApproval = try await pool.prepareApproval(call)
+        let result = try await pool.performApproved(call, fingerprint: secondApproval.fingerprint)
+        XCTAssertFalse(result.isError)
+        guard case .object(let receipt)? = result.structuredContent else {
+            return XCTFail("Expected an attached Mail receipt")
+        }
+        XCTAssertEqual(receipt["attachment_digest"], .string(try XCTUnwrap(secondApproval.fingerprint.mailAttachmentDigest)))
+        do {
+            _ = try await pool.performApproved(call, fingerprint: secondApproval.fingerprint)
+            XCTFail("A consumed attachment approval must not be replayed")
+        } catch let error as MCPClientError {
+            XCTAssertEqual(error, .approvalMismatch)
+        }
+        let afterReplay = await runner.invocationCount()
+        XCTAssertEqual(afterReplay, 1)
+        await pool.cancelAll()
+    }
+
+    func testOptInNativeMailAttachmentDraftUsesExactApprovedPlannerProposal() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_NATIVE_MAIL_ATTACHMENT_SKILL_E2E"] == "1" else {
+            throw XCTSkip("Set RUN_NATIVE_MAIL_ATTACHMENT_SKILL_E2E=1 to create one unsent draft for review.")
+        }
+        let plannerTrace = MailPlannerDiagnosticTrace()
+        let planner = AppleFoundationMCPPlanner(inspectFailure: { plannerTrace.append($0) })
+        if case .unavailable(let reason) = planner.availability() {
+            throw XCTSkip("Apple's on-device planner is unavailable: \(reason)")
+        }
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentNativeE2E-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("Native Mail fixture \(UUID().uuidString).txt")
+        let fixture = Data("Approved local Mail attachment fixture: \(UUID().uuidString)".utf8)
+        try fixture.write(to: file)
+        let subject = "Remote Desktop Mail attachment draft \(UUID().uuidString)"
+        let body = "Please review the attached fixture."
+        let recipient = "draft-recipient@example.invalid"
+        let pool = MCPClientPool(
+            binaryValidator: MailTestBinaryValidator(),
+            mutationLedger: MCPFileMutationCallLedger(fileURL: root.appendingPathComponent("ledger.json")),
+            sessionFactory: { binary, generation in
+                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
+            })
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        do {
+            let availableTools = try await pool.allowedTools()
+            let tool = try XCTUnwrap(availableTools.first(where: {
+                $0.toolName == RemoteDesktopMailMCP.toolName
+            }))
+            let goal = "In Apple Mail, create a visible unsent draft to \(recipient) with subject \"\(subject)\" and body \"\(body)\". Attach the exact local file at \"\(file.path)\" and leave the draft open for review. Do not send it."
+            let evidence: [String: Any] = [
+                "subject": subject, "recipient": recipient, "body": body,
+                "original_path": file.path, "attachment_name": file.lastPathComponent,
+                "fixture_text": String(decoding: fixture, as: UTF8.self),
+                "fixture_sha256": MCPDigest.sha256(fixture),
+            ]
+            let attachment = XCTAttachment(data: try JSONSerialization.data(
+                withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]),
+                uniformTypeIdentifier: "public.json")
+            attachment.name = "owned-mail-draft-evidence.json"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            let proposal = try await ComputerUsePlanningWorker().perform(timeout: 30) {
+                try await planner.propose(MCPProposalPlanningRequest(
+                    taskID: "native-mail-attachment-e2e",
+                    prompt: goal,
+                    tools: [tool]))
+            }
+            guard case .proposedCall(let proposed) = proposal else {
+                throw AppleFoundationMCPPlannerError.noProposal
+            }
+            let exactArguments = proposed.arguments
+            let proposalAttachment = XCTAttachment(string: proposed.canonicalArguments)
+            proposalAttachment.name = "owned-mail-planner-proposal.json"
+            proposalAttachment.lifetime = .keepAlways
+            add(proposalAttachment)
+            guard proposed.toolName == RemoteDesktopMailMCP.toolName,
+                  proposed.serverID == RemoteDesktopMailMCP.serverID,
+                  exactArguments["to"] == .string(recipient),
+                  exactArguments["subject"] == .string(subject),
+                  exactArguments["body"] == .string(body),
+                  exactArguments["send_now"] == .bool(false),
+                  (exactArguments["cc"] == nil || exactArguments["cc"] == .string("")),
+                  (exactArguments["bcc"] == nil || exactArguments["bcc"] == .string("")),
+                  exactArguments["attachment_paths"] == .array([.string(file.path)]) else {
+                throw MCPClientError.approvalMismatch
+            }
+            let call = try tool.makeCall(taskID: "native-mail-attachment-e2e", arguments: exactArguments)
+            guard call.risk == .approvalRequired, call.toolName == RemoteDesktopMailMCP.toolName else {
+                throw MCPClientError.approvalMismatch
+            }
+            let prepared = try await pool.prepareApproval(call)
+            guard prepared.call == call,
+                  prepared.display.details.contains(file.lastPathComponent) else {
+                throw MCPClientError.approvalMismatch
+            }
+            let result = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
+            XCTAssertFalse(result.isError)
+            XCTAssertFalse(result.wasTruncated)
+            guard case .object(let receipt)? = result.structuredContent else {
+                throw MCPClientError.toolFailed("Mail returned no attachment receipt.")
+            }
+            XCTAssertEqual(receipt["status"], .string("draft_opened"))
+            XCTAssertEqual(receipt["attachment_count"], .integer(1))
+            XCTAssertEqual(receipt["attachment_names"], .array([.string(file.lastPathComponent)]))
+            XCTAssertEqual(receipt["attachment_digest"], .string(try XCTUnwrap(prepared.fingerprint.mailAttachmentDigest)))
+            await pool.cancelAll()
+        } catch {
+            let failure = XCTAttachment(string: plannerTrace.text + "\n" + String(reflecting: error))
+            failure.name = "owned-mail-planner-failure.txt"
+            failure.lifetime = .keepAlways
+            add(failure)
+            await pool.cancelAll()
+            throw error
+        }
     }
 
     func testPoolDoesNotRunMailBeforeExactApprovalAndRunsOnceAfter() async throws {
@@ -328,9 +1048,8 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
                 pause: { pauses += 1 })
         ) { error in
             XCTAssertEqual(
-                error as? MCPClientError,
-                .toolFailed(
-                    SystemRemoteDesktopMailAutomationPreflight.denialMessage))
+                error as? RemoteDesktopMailAutomationPreflightError,
+                .authorizationDenied)
         }
 
         XCTAssertEqual(requestCount, 1)
@@ -448,6 +1167,79 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
         XCTAssertFalse(process.isRunning)
     }
 
+    func testLargePayloadFeedDoesNotBlockCancellation() async throws {
+        let process = Process()
+        let input = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["10"]
+        process.standardInput = input
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let state = RemoteDesktopMailProcessLaunchState(process: process)
+        try state.launch()
+        defer {
+            if process.isRunning { process.terminate() }
+            try? input.fileHandleForWriting.close()
+        }
+        let feedFinished = expectation(description: "Blocked feed exits after cancellation")
+        DispatchQueue.global().async {
+            defer { feedFinished.fulfill() }
+            try? state.feed(Data(repeating: 65, count: 1_024 * 1_024),
+                            to: input.fileHandleForWriting)
+        }
+        // The child deliberately never reads stdin. Filling the pipe exposes
+        // the old lock contention without invoking Mail or a model.
+        try await Task.sleep(for: .milliseconds(100))
+        let cancellationReturned = expectation(description: "Cancellation returns promptly")
+        DispatchQueue.global().async {
+            state.cancel()
+            cancellationReturned.fulfill()
+        }
+        await fulfillment(of: [cancellationReturned, feedFinished], timeout: 2)
+        process.waitUntilExit()
+        XCTAssertFalse(process.isRunning)
+    }
+
+    func testAttachmentBoundsAndIdenticalBasenamesPreserveExactPaths() throws {
+        let root = canonicalTemporaryDirectory
+            .appendingPathComponent("MailAttachmentBounds-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var arguments = mailArguments(sendNow: false)
+        for paths in [["relative.txt"], ["/a.txt", "/a.txt"], Array(repeating: "/a.txt", count: 6)] {
+            arguments["attachment_paths"] = .array(paths.map(MCPJSONValue.string))
+            XCTAssertThrowsError(try RemoteDesktopMailRequest(arguments: arguments))
+        }
+        let name = "A long presentation name " + String(repeating: "x", count: 90) + ".txt"
+        let paths = try ["one", "two"].map { folder in
+            let directory = root.appendingPathComponent(folder, isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            let file = directory.appendingPathComponent(name)
+            try Data(folder.utf8).write(to: file)
+            return file.path
+        }
+        arguments["attachment_paths"] = .array(paths.map(MCPJSONValue.string))
+        let request = try RemoteDesktopMailRequest(arguments: arguments)
+        let snapshots = try RemoteDesktopMailAttachmentFileReader.snapshot(paths: request.attachmentPaths)
+        XCTAssertEqual(snapshots.map(\.path), paths)
+        XCTAssertEqual(snapshots.map(\.fileName), [name, name])
+        XCTAssertNotEqual(snapshots[0].data, snapshots[1].data)
+        let oversized = root.appendingPathComponent("oversized.txt")
+        XCTAssertTrue(FileManager.default.createFile(atPath: oversized.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: UInt64(RemoteDesktopMailRequest.maximumAttachmentBytes + 1))
+        try handle.close()
+        XCTAssertThrowsError(try RemoteDesktopMailAttachmentFileReader.snapshot(paths: [oversized.path]))
+    }
+
+    private var canonicalTemporaryDirectory: URL {
+        let canonical = FileManager.default.temporaryDirectory.withUnsafeFileSystemRepresentation {
+            $0.flatMap { Darwin.realpath($0, nil) }
+        }!
+        defer { free(canonical) }
+        return URL(fileURLWithPath: String(cString: canonical), isDirectory: true)
+    }
+
     private func mailArguments(sendNow: Bool) -> [String: MCPJSONValue] {
         [
             "to": .string("codex-acceptance@example.invalid"),
@@ -480,8 +1272,13 @@ private struct RecordedMailAutomationPayload: Codable, Equatable, Sendable {
 private actor RecordingMailAutomationRunner: RemoteDesktopMailAutomationRunning {
     private var values: [Data] = []
 
-    func run(payload: Data) async throws {
+    func run(payload: Data) async throws -> RemoteDesktopMailAutomationReceipt {
         values.append(payload)
+        let object = try JSONSerialization.jsonObject(with: payload) as? [String: Any]
+        let names = (object?["attachments"] as? [[String: Any]] ?? []).compactMap {
+            $0["file_name"] as? String
+        }
+        return RemoteDesktopMailAutomationReceipt(attachmentNames: names)
     }
 
     func invocations() -> [Data] { values }
@@ -510,6 +1307,25 @@ private actor RecordingMailAutomationPreflight:
         isAllowed = value
     }
 
+    func callCount() -> Int { calls }
+}
+
+private actor TypedMailAutomationPreflight: RemoteDesktopMailAutomationPreflighting {
+    private var isAllowed: Bool
+    private var calls = 0
+
+    init(isAllowed: Bool) {
+        self.isAllowed = isAllowed
+    }
+
+    func ensureAuthorized() async throws {
+        calls += 1
+        guard isAllowed else {
+            throw RemoteDesktopMailAutomationPreflightError.authorizationDenied
+        }
+    }
+
+    func setAllowed(_ value: Bool) { isAllowed = value }
     func callCount() -> Int { calls }
 }
 
@@ -590,4 +1406,11 @@ private actor MailTestSidecarSession: MCPClientSessioning {
     }
 
     func stop() async {}
+}
+
+final class MailPlannerDiagnosticTrace: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+    func append(_ value: String) { lock.withLock { values.append(String(value.prefix(8_192))) } }
+    var text: String { lock.withLock { values.joined(separator: "\n") } }
 }

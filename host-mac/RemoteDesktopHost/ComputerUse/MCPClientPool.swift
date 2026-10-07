@@ -23,7 +23,12 @@ actor MCPClientPool {
     private var embeddedIdentity: MCPProcessIdentity?
     private var processGeneration: UInt64 = 0
     private var lifecycleEpoch: UInt64 = 0
-    private var pendingApprovals: [String: (MCPApprovalFingerprint, Date)] = [:]
+    private struct PendingApproval {
+        let fingerprint: MCPApprovalFingerprint
+        let date: Date
+        let mailAttachments: [RemoteDesktopMailAttachmentSnapshot]?
+    }
+    private var pendingApprovals: [String: PendingApproval] = [:]
 
     init(
         definition: MCPServerDefinition = MCPServerRegistry.macControl,
@@ -180,12 +185,71 @@ actor MCPClientPool {
         }
 
         purgeExpiredApprovals()
-        let fingerprint = MCPApprovalFingerprint(call: validatedCall)
-        pendingApprovals[validatedCall.canonicalDigest] = (fingerprint, Date())
+        let mailAttachments: [RemoteDesktopMailAttachmentSnapshot]?
+        if validatedCall.toolName == RemoteDesktopMailMCP.toolName {
+            let mail = try RemoteDesktopMailRequest(arguments: validatedCall.arguments)
+            if !mail.attachmentPaths.isEmpty,
+               pendingApprovals.contains(where: {
+                   $0.key != validatedCall.canonicalDigest && $0.value.mailAttachments != nil
+               }) {
+                throw MCPClientError.toolFailed("Only one attachment approval can be pending at a time.")
+            }
+            mailAttachments = mail.attachmentPaths.isEmpty
+                ? nil
+                : try RemoteDesktopMailAttachmentFileReader.snapshot(paths: mail.attachmentPaths)
+        } else {
+            mailAttachments = nil
+        }
+        let fingerprint = MCPApprovalFingerprint(
+            call: validatedCall,
+            mailAttachmentDigest: try mailAttachments.map(RemoteDesktopMailAttachmentFileReader.approvalDigest))
+        pendingApprovals[validatedCall.canonicalDigest] = PendingApproval(
+            fingerprint: fingerprint, date: Date(), mailAttachments: mailAttachments)
         return MCPPreparedApproval(
             call: validatedCall,
             fingerprint: fingerprint,
             display: validatedCall.approvalDisplay)
+    }
+
+    /// Performs only setup checks needed before claiming an approved effect.
+    /// The approval remains pending, and no mutation ledger or tool runner is
+    /// touched here. The later `performApproved` call repeats every check.
+    func preflightApproved(
+        _ call: MCPToolCall,
+        fingerprint: MCPApprovalFingerprint
+    ) async throws {
+        try Task.checkCancellation()
+        let (validatedCall, _) = try await validate(call)
+        guard validatedCall.risk == .approvalRequired,
+              fingerprint.matches(call: validatedCall) else {
+            throw MCPClientError.approvalMismatch
+        }
+        let pending = try approvedPending(for: validatedCall, fingerprint: fingerprint)
+        guard validatedCall.toolName == RemoteDesktopMailMCP.toolName else { return }
+
+        let epoch = lifecycleEpoch
+        let generation = validatedCall.processGeneration
+        try await mailAutomationPreflight.ensureAuthorized()
+        try Task.checkCancellation()
+        guard lifecycleEpoch == epoch,
+              identity?.processGeneration == generation,
+              embeddedIdentity?.processGeneration == generation else {
+            throw MCPClientError.staleCall
+        }
+
+        let (revalidatedCall, _) = try await validate(call)
+        try Task.checkCancellation()
+        guard revalidatedCall == validatedCall,
+              lifecycleEpoch == epoch,
+              identity?.processGeneration == generation,
+              embeddedIdentity?.processGeneration == generation else {
+            throw MCPClientError.staleCall
+        }
+        let stillPending = try approvedPending(for: revalidatedCall, fingerprint: fingerprint)
+        guard stillPending.date == pending.date,
+              stillPending.mailAttachments == pending.mailAttachments else {
+            throw MCPClientError.approvalMismatch
+        }
     }
 
     func performApproved(
@@ -194,14 +258,31 @@ actor MCPClientPool {
     ) async throws -> MCPToolResult {
         let (validatedCall, session) = try await validate(call)
         guard validatedCall.risk == .approvalRequired,
-              fingerprint == MCPApprovalFingerprint(call: validatedCall) else {
+              fingerprint.matches(call: validatedCall) else {
             throw MCPClientError.approvalMismatch
         }
 
         purgeExpiredApprovals()
-        guard let pending = pendingApprovals.removeValue(
-            forKey: validatedCall.canonicalDigest),
-              pending.0 == fingerprint else {
+        guard let pending = pendingApprovals[validatedCall.canonicalDigest],
+              pending.fingerprint == fingerprint else {
+            throw MCPClientError.approvalMismatch
+        }
+        pendingApprovals.removeValue(forKey: validatedCall.canonicalDigest)
+        if let mailAttachments = pending.mailAttachments {
+            try RemoteDesktopMailAttachmentFileReader.verifyUnchanged(mailAttachments)
+            guard fingerprint.mailAttachmentDigest
+                    == (try RemoteDesktopMailAttachmentFileReader.approvalDigest(mailAttachments)) else {
+                throw MCPClientError.approvalMismatch
+            }
+            let result = try await performMutation(validatedCall, using: session,
+                approvedMailAttachments: mailAttachments)
+            guard case .object(let receipt)? = result.structuredContent,
+                  receipt["attachment_digest"] == .string(fingerprint.mailAttachmentDigest ?? "") else {
+                throw MCPClientError.approvalMismatch
+            }
+            return result
+        }
+        guard fingerprint.mailAttachmentDigest == nil else {
             throw MCPClientError.approvalMismatch
         }
         return try await performMutation(validatedCall, using: session)
@@ -319,10 +400,18 @@ actor MCPClientPool {
 
     private func performMutation(
         _ call: MCPToolCall,
-        using session: any MCPClientSessioning
+        using session: any MCPClientSessioning,
+        approvedMailAttachments: [RemoteDesktopMailAttachmentSnapshot]? = nil
     ) async throws -> MCPToolResult {
         guard let mutationLedger else {
             throw MCPClientError.mutationLedgerRequired
+        }
+
+        if let approvedMailAttachments, !approvedMailAttachments.isEmpty {
+            guard call.toolName == RemoteDesktopMailMCP.toolName,
+                  session is RemoteDesktopMailMCPClientSession else {
+                throw MCPClientError.approvalMismatch
+            }
         }
 
         // This boundary is reached only after the exact fingerprinted mobile
@@ -357,7 +446,13 @@ actor MCPClientPool {
         }
 
         do {
-            let result = try await session.execute(call)
+            let result: MCPToolResult
+            if let approvedMailAttachments, !approvedMailAttachments.isEmpty,
+               let mailSession = session as? RemoteDesktopMailMCPClientSession {
+                result = try await mailSession.executeApprovedMail(call, attachments: approvedMailAttachments)
+            } else {
+                result = try await session.execute(call)
+            }
             guard identity?.processGeneration == call.processGeneration,
                   !result.isError else {
                 await mutationLedger.markAmbiguous(call)
@@ -387,8 +482,44 @@ actor MCPClientPool {
     private func purgeExpiredApprovals(now: Date = Date()) {
         let maximumAge: TimeInterval = 5 * 60
         pendingApprovals = pendingApprovals.filter {
-            now.timeIntervalSince($0.value.1) <= maximumAge
+            now.timeIntervalSince($0.value.date) <= maximumAge
         }
+    }
+
+    private func approvedPending(
+        for call: MCPToolCall,
+        fingerprint: MCPApprovalFingerprint
+    ) throws -> PendingApproval {
+        purgeExpiredApprovals()
+        guard call.risk == .approvalRequired,
+              fingerprint.matches(call: call),
+              let pending = pendingApprovals[call.canonicalDigest],
+              pending.fingerprint == fingerprint else {
+            throw MCPClientError.approvalMismatch
+        }
+        if call.toolName == RemoteDesktopMailMCP.toolName {
+            let request = try RemoteDesktopMailRequest(arguments: call.arguments)
+            if request.attachmentPaths.isEmpty {
+                guard pending.mailAttachments == nil,
+                      fingerprint.mailAttachmentDigest == nil else {
+                    throw MCPClientError.approvalMismatch
+                }
+            } else {
+                guard let snapshots = pending.mailAttachments,
+                      snapshots.map(\.path) == request.attachmentPaths,
+                      fingerprint.mailAttachmentDigest
+                        == (try RemoteDesktopMailAttachmentFileReader.approvalDigest(snapshots)) else {
+                    throw MCPClientError.approvalMismatch
+                }
+                try RemoteDesktopMailAttachmentFileReader.verifyUnchanged(snapshots)
+            }
+        } else {
+            guard pending.mailAttachments == nil,
+                  fingerprint.mailAttachmentDigest == nil else {
+                throw MCPClientError.approvalMismatch
+            }
+        }
+        return pending
     }
 
     private static func boundedFailure(_ value: String) -> String {

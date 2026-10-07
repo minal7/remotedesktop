@@ -242,9 +242,19 @@ enum MCPToolSafetyPolicy {
             let recipient = safe(arguments.string("to"), fallback: "the selected recipients")
             let subject = safe(arguments.string("subject"), fallback: "(no subject)")
             let sendsNow = arguments.bool("send_now") ?? false
+            let attachmentNames: [String] = {
+                guard case .array(let values) = arguments["attachment_paths"] else { return [] }
+                return values.compactMap {
+                    guard case .string(let path) = $0 else { return nil }
+                    return URL(fileURLWithPath: path).lastPathComponent
+                }
+            }()
+            let attachmentDetail = attachmentNames.isEmpty
+                ? ""
+                : "\nAttachments: " + attachmentNames.joined(separator: ", ")
             return MCPApprovalDisplay(
                 summary: sendsNow ? "Send this email?" : "Create this email draft?",
-                details: "From: Your default account in Mail\nTo: \(recipient)\nSubject: \(subject)\nThe message body is hidden here for privacy. On first use, macOS may ask on your Mac; choose Allow so Remote Desktop Host can use Mail.",
+                details: "From: Your default account in Mail\nTo: \(recipient)\nSubject: \(subject)\nThe message body is hidden here for privacy.\(attachmentDetail)\nOn first use, macOS may ask on your Mac; choose Allow so Remote Desktop Host can use Mail.",
                 confirmLabel: sendsNow ? "Send email" : "Create draft")
 
         case "calendar_create_event":

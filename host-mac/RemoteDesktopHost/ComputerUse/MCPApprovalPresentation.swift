@@ -26,6 +26,11 @@ extension MCPPreparedApproval {
                     ("BCC", arguments["bcc"]?.displayValue),
                     ("Subject", arguments["subject"]?.displayValue),
                     ("Message", arguments["body"]?.displayValue),
+                    ("Attachment 1", arguments["attachment_paths"]?.attachmentPathsValue(at: 0)),
+                    ("Attachment 2", arguments["attachment_paths"]?.attachmentPathsValue(at: 1)),
+                    ("Attachment 3", arguments["attachment_paths"]?.attachmentPathsValue(at: 2)),
+                    ("Attachment 4", arguments["attachment_paths"]?.attachmentPathsValue(at: 3)),
+                    ("Attachment 5", arguments["attachment_paths"]?.attachmentPathsValue(at: 4)),
                     ("First use", "macOS may ask on your Mac. Choose Allow so Remote Desktop Host can use Mail."),
                 ]),
                 confirmLabel: sendsNow ? "Send email" : "Create draft")
@@ -96,6 +101,12 @@ private extension MCPJSONValue {
     var boolValue: Bool? {
         guard case .bool(let value) = self else { return nil }
         return value
+    }
+
+    func attachmentPathsValue(at index: Int) -> String? {
+        guard case .array(let paths) = self, paths.indices.contains(index),
+              case .string(let path) = paths[index] else { return nil }
+        return path
     }
 
     var displayValue: String {

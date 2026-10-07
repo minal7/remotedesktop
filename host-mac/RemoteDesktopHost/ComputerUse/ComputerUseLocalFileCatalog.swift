@@ -15,13 +15,18 @@ struct ComputerUseLocalFileCatalog: Sendable {
     }
 
     struct Query: Equatable, Sendable {
+        static let maximumNameContainsUTF8Bytes = 512
         let fileKind: FileKind
         let sort: Sort?
+        let nameContains: String
 
-        init(fileKind: FileKind = .any, sort: Sort? = nil) {
+        init(fileKind: FileKind = .any, sort: Sort? = nil, nameContains: String = "") {
             self.fileKind = fileKind
             self.sort = sort
+            self.nameContains = nameContains
         }
+
+        var isValid: Bool { nameContains.utf8.count <= Self.maximumNameContainsUTF8Bytes }
     }
 
     struct Candidate: Equatable, Sendable {
@@ -61,6 +66,7 @@ struct ComputerUseLocalFileCatalog: Sendable {
         case unknownCursor
         case unknownCandidate
         case staleCandidate
+        case invalidQuery
     }
 
     private struct Metadata: Equatable, Sendable {
@@ -142,6 +148,7 @@ struct ComputerUseLocalFileCatalog: Sendable {
         queryHasMissingSortValues = false
         currentQuery = nil
 
+        guard query.isValid else { throw Failure.invalidQuery }
         guard let rootIdentity = Self.lstat(approvedDirectory), rootIdentity.isDirectory else {
             throw Failure.invalidDirectory
         }
@@ -172,6 +179,7 @@ struct ComputerUseLocalFileCatalog: Sendable {
             guard identity.isRegularFile else { continue }
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
             guard Self.isContained(resolved, in: approvedDirectory) else { continue }
+            guard Self.matchesName(url.lastPathComponent, contains: query.nameContains) else { continue }
             let metadata = try Self.metadata(at: resolved, matching: identity)
             if records.count == maximumCandidates {
                 inventoryWasTruncated = true
@@ -264,6 +272,13 @@ struct ComputerUseLocalFileCatalog: Sendable {
         return Page(candidates: pageRecords.map(\.candidate), isComplete: !inventoryWasTruncated,
             nextCursor: cursor, hasTiedSortValues: queryHasTiedSortValues,
             hasMissingSortValues: queryHasMissingSortValues)
+    }
+
+    private static func matchesName(_ filename: String, contains fragment: String) -> Bool {
+        guard !fragment.isEmpty else { return true }
+        let locale = Locale(identifier: "en_US_POSIX")
+        return filename.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale)
+            .contains(fragment.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: locale))
     }
 
     private static func matches(_ candidate: Candidate, kind: FileKind) -> Bool {

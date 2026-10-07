@@ -3,6 +3,17 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseLocalFileCatalogTests: XCTestCase {
+    func testInvalidNameFilterFailsBeforeAccessingDirectory() throws {
+        let absentDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "invalid-name-filter", approvedDirectory: absentDirectory)
+        for fragment in [String(repeating: "x", count: 513), String(repeating: "é", count: 257)] {
+            XCTAssertThrowsError(try catalog.discover(query: .init(nameContains: fragment))) { error in
+                XCTAssertEqual(error as? ComputerUseLocalFileCatalog.Failure, .invalidQuery,
+                    "An invalid filter fails before the absent directory can be inspected")
+            }
+        }
+    }
+
     func testCatalogReportsNamesTypesSizesAndDatesWithoutCollapsingSimilarFiles() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

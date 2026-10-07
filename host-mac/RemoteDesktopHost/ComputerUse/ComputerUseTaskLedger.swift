@@ -656,7 +656,7 @@ final class ComputerUseTaskLedger {
         guard var record = records[taskID], record.promptClaimed, record.promptDigest != nil, record.executionStarted,
               record.senderID == senderID, record.sessionID == sessionID,
               prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
-              prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else {
+              prepared.fingerprint.matches(call: prepared.call) else {
             throw LedgerError.invalidIdentity
         }
         // A legacy claim seals this task's dispatch. Scoped calls must use the
@@ -677,7 +677,7 @@ final class ComputerUseTaskLedger {
               record.senderID == senderID, record.sessionID == sessionID,
               plan.isWellFormed, plan.taskID == taskID, plan.requestDigest == record.promptDigest,
               prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
-              prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call),
+              prepared.fingerprint.matches(call: prepared.call),
               let effectID = prepared.call.stepEffectID,
               let index = plan.steps.firstIndex(where: { $0.effectID == effectID }),
               plan.steps[index].callDigest == prepared.call.canonicalDigest else { throw LedgerError.invalidIdentity }

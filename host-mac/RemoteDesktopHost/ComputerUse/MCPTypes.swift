@@ -278,13 +278,25 @@ struct MCPApprovalFingerprint: Codable, Equatable, Hashable, Sendable {
     let toolName: String
     let canonicalDigest: String
     let schemaDigest: String
+    let mailAttachmentDigest: String?
 
-    init(call: MCPToolCall) {
+    init(call: MCPToolCall, mailAttachmentDigest: String? = nil) {
         serverID = call.serverID
         processGeneration = call.processGeneration
         toolName = call.toolName
         canonicalDigest = call.canonicalDigest
         schemaDigest = call.schemaDigest
+        self.mailAttachmentDigest = mailAttachmentDigest
+    }
+
+    /// Attachment bytes are host-prepared approval material, so they augment
+    /// the call identity without changing the canonical MCP call itself.
+    func matches(call: MCPToolCall) -> Bool {
+        serverID == call.serverID
+            && processGeneration == call.processGeneration
+            && toolName == call.toolName
+            && canonicalDigest == call.canonicalDigest
+            && schemaDigest == call.schemaDigest
     }
 }
 
@@ -340,10 +352,10 @@ struct MCPApprovedActionResult: Equatable, Sendable {
               call.toolName == RemoteDesktopMailMCP.toolName,
               !result.isError, !result.wasTruncated,
               case .object(let content)? = result.structuredContent,
-              Set(content.keys) == ["status"],
-              case .string(let status)? = content["status"],
               let mail = try? RemoteDesktopMailRequest(arguments: call.arguments),
-              status == (mail.sendNow ? "accepted_for_sending" : "draft_opened") else {
+              case .string(let status)? = content["status"],
+              status == (mail.sendNow ? "accepted_for_sending" : "draft_opened"),
+              Self.hasExpectedAttachmentReceipt(content, mail: mail) else {
             throw MCPClientError.toolFailed("The approved action returned no matching, complete confirmation. It will not be repeated.")
         }
         let response = mail.sendNow
@@ -354,12 +366,27 @@ struct MCPApprovedActionResult: Equatable, Sendable {
             completionPromptDigest: provesWholeTask ? try MCPDigest.sha256(of: .string(trustedUserPrompt)) : nil)
     }
 
+    private static func hasExpectedAttachmentReceipt(
+        _ content: [String: MCPJSONValue], mail: RemoteDesktopMailRequest
+    ) -> Bool {
+        let expectedNames = mail.attachmentPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        guard !expectedNames.isEmpty else { return Set(content.keys) == ["status"] }
+        guard Set(content.keys) == ["status", "attachment_count", "attachment_names", "attachment_digest"],
+              content["attachment_count"] == .integer(expectedNames.count),
+              case .array(let values)? = content["attachment_names"],
+              case .string(let digest)? = content["attachment_digest"],
+              digest.utf8.count == 64,
+              digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return false }
+        return values == expectedNames.map(MCPJSONValue.string)
+    }
+
     /// A complete literal command supplies a bounded whole-task proof. Other
     /// natural-language/compound requests retain action-only evidence until a
     /// task compiler verifies every requested outcome. Approval of the call
     /// alone cannot erase their remaining requirements.
     private static func exactSingleMailRequest(_ prompt: String, matches mail: RemoteDesktopMailRequest) -> Bool {
-        guard prompt.utf8.count <= 16_384, mail.cc.isEmpty, mail.bcc.isEmpty else { return false }
+        guard prompt.utf8.count <= 16_384, mail.cc.isEmpty, mail.bcc.isEmpty,
+              mail.attachmentPaths.isEmpty else { return false }
         let pattern = #"(?is)^\s*(?:please\s+)?(send|draft)\s+(?:an?\s+)?email\s+to\s+([^\s,;<>"]+@[^\s,;<>"]+)\s+with\s+subject\s+"([^"]*)"\s+and\s+body\s+"([^"]*)"\s*[.!]?\s*$"#
         guard let expression = try? NSRegularExpression(pattern: pattern),
               let match = expression.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)) else { return false }

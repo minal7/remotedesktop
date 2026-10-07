@@ -2,6 +2,20 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+enum RemoteDesktopMailAutomationPreflightError: Error, Equatable, Sendable, LocalizedError {
+    case authorizationDenied
+    case unavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .authorizationDenied:
+            "Mail Automation permission is not available. Check System Settings > Privacy & Security > Automation."
+        case .unavailable:
+            "Mail is not ready for Automation. Open Mail and try again."
+        }
+    }
+}
+
 protocol RemoteDesktopMailAutomationPreflighting: Sendable {
     func ensureAuthorized() async throws
 }
@@ -19,7 +33,7 @@ struct SystemRemoteDesktopMailAutomationPreflight:
     private static let maximumPermissionAttempts = 5
 
     static let denialMessage = """
-    Allow Remote Desktop Host in System Settings > Privacy & Security > Automation, then send a new request.
+    Mail Automation permission is not available. Check System Settings > Privacy & Security > Automation.
     """
 
     func ensureAuthorized() async throws {
@@ -54,8 +68,7 @@ struct SystemRemoteDesktopMailAutomationPreflight:
             }
             Thread.sleep(forTimeInterval: readinessCheckInterval)
         }
-        throw MCPClientError.toolFailed(
-            "Open Mail on this Mac, then send a new request.")
+        throw RemoteDesktopMailAutomationPreflightError.unavailable
     }
 
     private static func launchMail() throws {
@@ -74,12 +87,10 @@ struct SystemRemoteDesktopMailAutomationPreflight:
             try process.run()
             process.waitUntilExit()
         } catch {
-            throw MCPClientError.toolFailed(
-                "Open Mail on this Mac, then send a new request.")
+            throw RemoteDesktopMailAutomationPreflightError.unavailable
         }
         guard process.terminationStatus == 0 else {
-            throw MCPClientError.toolFailed(
-                "Open Mail on this Mac, then send a new request.")
+            throw RemoteDesktopMailAutomationPreflightError.unavailable
         }
     }
 
@@ -94,8 +105,7 @@ struct SystemRemoteDesktopMailAutomationPreflight:
                 &target)
         }
         guard createStatus == noErr else {
-            throw MCPClientError.toolFailed(
-                "macOS could not check Mail Automation permission. Send a new request after reopening the host app.")
+            throw RemoteDesktopMailAutomationPreflightError.unavailable
         }
         defer { AEDisposeDesc(&target) }
 
@@ -130,7 +140,7 @@ struct SystemRemoteDesktopMailAutomationPreflight:
             let permissionStatus = request()
             if permissionStatus == noErr { return }
             if permissionStatus == OSStatus(errAEEventNotPermitted) {
-                throw MCPClientError.toolFailed(denialMessage)
+                throw RemoteDesktopMailAutomationPreflightError.authorizationDenied
             }
             lastStatus = permissionStatus
             guard permissionStatus == applicationNotFoundStatus,
@@ -140,7 +150,10 @@ struct SystemRemoteDesktopMailAutomationPreflight:
             try waitUntilMailReady()
             pause()
         }
+        if lastStatus == applicationNotFoundStatus {
+            throw RemoteDesktopMailAutomationPreflightError.unavailable
+        }
         throw MCPClientError.toolFailed(
-            "macOS could not authorize Mail Automation (status \(lastStatus)). Send a new request after checking System Settings > Privacy & Security > Automation.")
+            "macOS could not check Mail Automation (status \(lastStatus)).")
     }
 }

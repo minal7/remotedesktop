@@ -57,12 +57,101 @@ final class MCPApprovalPresentationTests: XCTestCase {
         XCTAssertTrue(presentation.message.contains("draft"))
     }
 
+    func testMailAttachmentApprovalListsEveryExactPathWithoutTruncation() throws {
+        let paths = [
+            "/Users/test/Downloads/Quarterly \"update\".txt",
+            "/Users/test/Downloads/second;attachment.txt",
+        ]
+        let prepared = try makePrepared(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: [
+                "to": .string("codex-acceptance@example.invalid"),
+                "subject": .string("Draft with files"),
+                "body": .string("Review both files"),
+                "send_now": .bool(false),
+                "attachment_paths": .array(paths.map(MCPJSONValue.string)),
+            ])
+
+        let presentation = prepared.computerUsePresentation
+        XCTAssertEqual(presentation.details.filter { $0.label.hasPrefix("Attachment ") }
+            .map(\.value), paths)
+        XCTAssertEqual(presentation.details.last?.label, "First use")
+    }
+
+    func testMailAttachmentReceiptCannotProveWholeTaskCompletion() throws {
+        let path = "/Users/test/Downloads/approved.txt"
+        let prompt = "Draft an email to codex-acceptance@example.invalid with subject \"Review\" and body \"Please see attached\"."
+        let prepared = try makePrepared(
+            toolName: RemoteDesktopMailMCP.toolName,
+            arguments: [
+                "to": .string("codex-acceptance@example.invalid"),
+                "subject": .string("Review"),
+                "body": .string("Please see attached"),
+                "send_now": .bool(false),
+                "attachment_paths": .array([.string(path)]),
+            ])
+        let result = try MCPToolResult(
+            text: "Email draft opened visibly in Mail with 1 confirmed attachment.",
+            structuredContent: .object([
+                "status": .string("draft_opened"),
+                "attachment_count": .integer(1),
+                "attachment_names": .array([.string("approved.txt")]),
+                "attachment_digest": .string(String(repeating: "a", count: 64)),
+            ]),
+            isError: false,
+            wasTruncated: false)
+
+        let verified = try MCPApprovedActionResult.verified(
+            call: prepared.call,
+            result: result,
+            trustedUserPrompt: prompt)
+        XCTAssertNil(verified.completionPromptDigest)
+        XCTAssertThrowsError(try MCPApprovedActionResult.verified(
+            call: prepared.call,
+            result: try MCPToolResult(
+                text: "Email draft opened visibly in Mail with 1 confirmed attachment.",
+                structuredContent: .object([
+                    "status": .string("draft_opened"),
+                    "attachment_count": .integer(1),
+                    "attachment_names": .array([.string("wrong.txt")]),
+                    "attachment_digest": .string(String(repeating: "a", count: 64)),
+                ]),
+                isError: false,
+                wasTruncated: false),
+            trustedUserPrompt: prompt))
+        XCTAssertThrowsError(try MCPApprovedActionResult.verified(
+            call: prepared.call,
+            result: try MCPToolResult(
+                text: "Email draft opened visibly in Mail with 1 confirmed attachment.",
+                structuredContent: .object([
+                    "status": .string("draft_opened"),
+                    "attachment_count": .integer(1),
+                    "attachment_names": .array([.string("approved.txt")]),
+                ]),
+                isError: false,
+                wasTruncated: false),
+            trustedUserPrompt: prompt))
+        XCTAssertThrowsError(try MCPApprovedActionResult.verified(
+            call: prepared.call,
+            result: try MCPToolResult(
+                text: "Email draft opened visibly in Mail with 1 confirmed attachment.",
+                structuredContent: .object([
+                    "status": .string("draft_opened"),
+                    "attachment_count": .integer(1),
+                    "attachment_names": .array([.string("approved.txt")]),
+                    "attachment_digest": .string("invalid"),
+                ]),
+                isError: false,
+                wasTruncated: false),
+            trustedUserPrompt: prompt))
+    }
+
     private func makePrepared(
         toolName: String,
         arguments: [String: MCPJSONValue]
     ) throws -> MCPPreparedApproval {
         let tool = try MCPAllowedTool(
-            serverID: "mac-control",
+            serverID: toolName == RemoteDesktopMailMCP.toolName ? RemoteDesktopMailMCP.serverID : "mac-control",
             processGeneration: 7,
             toolName: toolName,
             description: "Pinned local tool",

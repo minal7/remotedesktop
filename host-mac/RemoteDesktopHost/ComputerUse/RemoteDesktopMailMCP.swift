@@ -15,8 +15,10 @@ enum RemoteDesktopMailMCP {
 
     static let reviewedDescription = """
     Create a visible plain-text email draft in Apple Mail, or send it after explicit user approval. \
-    This tool works only with Apple Mail; it cannot access webmail, discover the account's email address, \
-    or attach files. Recipients are comma, semicolon, or newline separated. Set send_now to false to open \
+    This tool works only with Apple Mail; it cannot access webmail or discover the account's email address. \
+    Supply optional attachment_paths only as exact absolute local file paths. \
+    Provide explicit mailbox addresses only, separated by commas, semicolons, or newlines; \
+    names, display-name forms, and aliases such as "me" are not resolved. Set send_now to false to open \
     a draft for review, or true only when the user explicitly asked to send now. Mail uses \
     the user's default sending account; this tool does not silently select another account.
     """
@@ -26,15 +28,15 @@ enum RemoteDesktopMailMCP {
         "properties": .object([
             "to": .object([
                 "type": .string("string"),
-                "description": .string("Required To recipients, separated by commas, semicolons, or newlines."),
+                "description": .string("Required explicit mailbox addresses only, separated by commas, semicolons, or newlines; no names or aliases."),
             ]),
             "cc": .object([
                 "type": .string("string"),
-                "description": .string("Optional CC recipients, separated by commas, semicolons, or newlines."),
+                "description": .string("Optional explicit mailbox addresses only, separated by commas, semicolons, or newlines; no names or aliases."),
             ]),
             "bcc": .object([
                 "type": .string("string"),
-                "description": .string("Optional BCC recipients, separated by commas, semicolons, or newlines."),
+                "description": .string("Optional explicit mailbox addresses only, separated by commas, semicolons, or newlines; no names or aliases."),
             ]),
             "subject": .object([
                 "type": .string("string"),
@@ -43,6 +45,17 @@ enum RemoteDesktopMailMCP {
             "body": .object([
                 "type": .string("string"),
                 "description": .string("The exact plain-text email body."),
+            ]),
+            "attachment_paths": .object([
+                "type": .string("array"),
+                "maxItems": .integer(5),
+                "uniqueItems": .bool(true),
+                "items": .object([
+                    "type": .string("string"),
+                    "minLength": .integer(1),
+                    "maxLength": .integer(1_024),
+                ]),
+                "description": .string("Optional exact absolute local file paths to attach."),
             ]),
             "send_now": .object([
                 "type": .string("boolean"),
@@ -59,12 +72,33 @@ enum RemoteDesktopMailMCP {
     ])
 }
 
+struct RemoteDesktopMailRecipientFailure: Error, Equatable, Sendable {
+    enum Field: Equatable, Sendable {
+        case to
+        case cc
+        case bcc
+    }
+
+    let field: Field
+
+    static func safeQuestion(for field: Field) -> String {
+        switch field {
+        case .to: return "What email address should I use for the To recipient?"
+        case .cc: return "What email address should I use for the CC recipient?"
+        case .bcc: return "What email address should I use for the BCC recipient?"
+        }
+    }
+}
+
 struct RemoteDesktopMailRequest: Equatable, Sendable {
     static let maximumRecipientsPerField = 100
     static let maximumRecipientBytes = 512
     static let maximumApprovalValueBytes = 8_000
     static let maximumSubjectBytes = 4 * 1_024
     static let maximumBodyBytes = maximumApprovalValueBytes
+    static let maximumAttachments = 5
+    static let maximumAttachmentPathBytes = 1_024
+    static let maximumAttachmentBytes = 25 * 1_024 * 1_024
 
     let to: String
     let cc: String
@@ -72,9 +106,10 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
     let subject: String
     let body: String
     let sendNow: Bool
+    let attachmentPaths: [String]
 
     init(arguments: [String: MCPJSONValue]) throws {
-        let allowed = Set(["to", "cc", "bcc", "subject", "body", "send_now"])
+        let allowed = Set(["to", "cc", "bcc", "subject", "body", "send_now", "attachment_paths"])
         let unknown = Set(arguments.keys).subtracting(allowed)
         guard unknown.isEmpty else {
             throw MCPClientError.invalidArguments(
@@ -89,10 +124,11 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
         }
         let cc = try Self.optionalString(arguments["cc"], name: "cc")
         let bcc = try Self.optionalString(arguments["bcc"], name: "bcc")
+        let attachmentPaths = try Self.attachmentPaths(arguments["attachment_paths"])
 
-        _ = try Self.recipients(in: to, required: true, field: "to")
-        _ = try Self.recipients(in: cc, required: false, field: "cc")
-        _ = try Self.recipients(in: bcc, required: false, field: "bcc")
+        _ = try Self.recipients(in: to, field: .to)
+        _ = try Self.recipients(in: cc, field: .cc)
+        _ = try Self.recipients(in: bcc, field: .bcc)
         guard subject.utf8.count <= Self.maximumSubjectBytes,
               !subject.contains("\0"),
               !subject.contains("\r"),
@@ -112,19 +148,26 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
         self.subject = subject
         self.body = body
         self.sendNow = sendNow
+        self.attachmentPaths = attachmentPaths
     }
 
     /// The fixed JXA program receives one bounded JSON value over stdin.
-    /// Message content therefore never appears in source, argv, environment,
-    /// or a temporary file where another same-user process could inspect it.
-    func automationPayload() throws -> Data {
-        try JSONEncoder().encode(AutomationPayload(
-            to: try Self.recipients(in: to, required: true, field: "to"),
-            cc: try Self.recipients(in: cc, required: false, field: "cc"),
-            bcc: try Self.recipients(in: bcc, required: false, field: "bcc"),
+    /// Message fields never appear in source, argv, or environment. Only approved
+    /// attachment bytes are staged privately while Mail copies them.
+    func automationPayload(attachments: [RemoteDesktopMailAttachmentSnapshot] = []) throws -> Data {
+        guard attachments.map(\.path) == attachmentPaths else {
+            throw MCPClientError.approvalMismatch
+        }
+        return try JSONEncoder().encode(AutomationPayload(
+            to: try Self.recipients(in: to, field: .to),
+            cc: try Self.recipients(in: cc, field: .cc),
+            bcc: try Self.recipients(in: bcc, field: .bcc),
             subject: subject,
             body: body,
-            sendNow: sendNow))
+            sendNow: sendNow,
+            attachments: attachments.map {
+                .init(fileName: $0.fileName, base64Data: $0.data.base64EncodedString())
+            }))
     }
 
     private struct AutomationPayload: Codable {
@@ -134,11 +177,52 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
         let subject: String
         let body: String
         let sendNow: Bool
+        let attachments: [PayloadAttachment]
 
         enum CodingKeys: String, CodingKey {
             case to, cc, bcc, subject, body
             case sendNow = "send_now"
+            case attachments
         }
+    }
+
+    private struct PayloadAttachment: Codable {
+        let fileName: String
+        let base64Data: String
+
+        enum CodingKeys: String, CodingKey {
+            case fileName = "file_name"
+            case base64Data = "base64_data"
+        }
+    }
+
+    private static func attachmentPaths(_ value: MCPJSONValue?) throws -> [String] {
+        guard let value else { return [] }
+        guard case .array(let entries) = value, entries.count <= maximumAttachments else {
+            throw MCPClientError.invalidArguments("Mail attachment_paths must contain at most five exact file paths.")
+        }
+        var seenPaths = Set<String>()
+        var result: [String] = []
+        for entry in entries {
+            guard case .string(let path) = entry, !path.isEmpty,
+                  path.utf8.count <= maximumAttachmentPathBytes,
+                  !path.contains("\0"),
+                  !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw MCPClientError.invalidArguments("Mail attachment_paths contains an invalid file path.")
+            }
+            let url = URL(fileURLWithPath: path)
+            let components = path.split(separator: "/", omittingEmptySubsequences: false)
+            guard path.hasPrefix("/"),
+                  components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+                  url.lastPathComponent != ".", url.lastPathComponent != "/" else {
+                throw MCPClientError.invalidArguments("Mail attachments require exact absolute normalized file paths.")
+            }
+            guard seenPaths.insert(path).inserted else {
+                throw MCPClientError.invalidArguments("Mail attachment paths must be unique.")
+            }
+            result.append(path)
+        }
+        return result
     }
 
     private static func optionalString(
@@ -154,9 +238,9 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
 
     private static func recipients(
         in value: String,
-        required: Bool,
-        field: String
+        field: RemoteDesktopMailRecipientFailure.Field
     ) throws -> [String] {
+        let fieldName = String(describing: field)
         guard value.utf8.count <= maximumApprovalValueBytes else {
             throw MCPClientError.invalidArguments(
                 "Mail field \(field) exceeds the exact mobile approval limit.")
@@ -166,9 +250,8 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
             .components(separatedBy: separators)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !required || !recipients.isEmpty else {
-            throw MCPClientError.invalidArguments(
-                "Mail requires at least one To recipient.")
+        guard field != .to || !recipients.isEmpty else {
+            throw RemoteDesktopMailRecipientFailure(field: field)
         }
         guard recipients.count <= maximumRecipientsPerField else {
             throw MCPClientError.invalidArguments(
@@ -181,15 +264,201 @@ struct RemoteDesktopMailRequest: Equatable, Sendable {
                       CharacterSet.controlCharacters.contains($0)
                   }) else {
                 throw MCPClientError.invalidArguments(
-                    "Mail field \(field) contains an invalid recipient.")
+                    "Mail field \(fieldName) contains an invalid recipient.")
+            }
+            guard isMailboxAddress(recipient) else {
+                throw RemoteDesktopMailRecipientFailure(field: field)
             }
         }
         return recipients
     }
+
+    private static func isMailboxAddress(_ value: String) -> Bool {
+        var quoted = false
+        var escaped = false
+        var atIndex: String.Index?
+        for index in value.indices {
+            let character = value[index]
+            if quoted {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    quoted = false
+                }
+            } else if character == "\"" {
+                guard index == value.startIndex else { return false }
+                quoted = true
+            } else if character == "@" {
+                guard atIndex == nil else { return false }
+                atIndex = index
+            }
+        }
+        guard !quoted, !escaped, let atIndex else { return false }
+        let local = String(value[..<atIndex])
+        let domain = String(value[value.index(after: atIndex)...])
+        guard !local.isEmpty, !domain.isEmpty else { return false }
+
+        if local.first == "\"" {
+            guard local.count >= 2, local.last == "\"" else { return false }
+            let content = local.dropFirst().dropLast()
+            var contentEscaped = false
+            for scalar in content.unicodeScalars {
+                if contentEscaped {
+                    contentEscaped = false
+                } else if scalar == "\\" {
+                    contentEscaped = true
+                } else if scalar == "\"" {
+                    return false
+                } else if CharacterSet.controlCharacters.contains(scalar) {
+                    return false
+                }
+            }
+            guard !contentEscaped else { return false }
+        } else {
+            let atoms = local.split(separator: ".", omittingEmptySubsequences: false)
+            guard atoms.allSatisfy({ !$0.isEmpty }) else { return false }
+            let allowed = CharacterSet(charactersIn: "!#$%&'*+-/=?^_`{|}~")
+            guard local.unicodeScalars.allSatisfy({
+                $0 == "." || CharacterSet.alphanumerics.contains($0) || allowed.contains($0)
+            }) else { return false }
+        }
+
+        let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty else { return false }
+        return labels.allSatisfy { label in
+            guard !label.isEmpty, label.first != "-", label.last != "-" else { return false }
+            return label.unicodeScalars.allSatisfy {
+                CharacterSet.alphanumerics.contains($0) || $0 == "-"
+            }
+        }
+    }
+}
+
+struct RemoteDesktopMailAttachmentSnapshot: Equatable, Sendable {
+    let path: String
+    let fileName: String
+    let data: Data
+}
+
+/// Reads the exact selected local files through no-follow descriptors. The
+/// approved bytes stay in host memory; the later Mail payload never reopens a
+/// model-supplied path after approval.
+enum RemoteDesktopMailAttachmentFileReader {
+    static func snapshot(paths: [String]) throws -> [RemoteDesktopMailAttachmentSnapshot] {
+        try Task.checkCancellation()
+        guard paths.count <= RemoteDesktopMailRequest.maximumAttachments else {
+            throw MCPClientError.invalidArguments("Mail attachments exceed the five-file limit.")
+        }
+        var total = 0
+        return try paths.map { path in
+            let data = try read(path: path, remainingLimit: RemoteDesktopMailRequest.maximumAttachmentBytes - total)
+            total += data.count
+            guard total <= RemoteDesktopMailRequest.maximumAttachmentBytes else {
+                throw MCPClientError.invalidArguments("Mail attachments exceed the 25 MiB total limit.")
+            }
+            return .init(path: path, fileName: URL(fileURLWithPath: path).lastPathComponent, data: data)
+        }
+    }
+
+    static func approvalDigest(_ snapshots: [RemoteDesktopMailAttachmentSnapshot]) throws -> String {
+        try MCPDigest.sha256(of: .array(snapshots.map { snapshot in
+            .object([
+                "path": .string(snapshot.path),
+                "file_name": .string(snapshot.fileName),
+                "byte_count": .integer(snapshot.data.count),
+                "content_sha256": .string(MCPDigest.sha256(snapshot.data)),
+            ])
+        }))
+    }
+
+    static func verifyUnchanged(_ snapshots: [RemoteDesktopMailAttachmentSnapshot]) throws {
+        let current: [RemoteDesktopMailAttachmentSnapshot]
+        do {
+            current = try snapshot(paths: snapshots.map(\.path))
+        } catch {
+            throw MCPClientError.approvalMismatch
+        }
+        guard current == snapshots else {
+            throw MCPClientError.approvalMismatch
+        }
+    }
+
+    private static func read(path: String, remainingLimit: Int) throws -> Data {
+        #if canImport(Darwin)
+        let url = URL(fileURLWithPath: path)
+        let resourceValues = try url.resourceValues(forKeys: [
+            .isAliasFileKey, .isUbiquitousItemKey, .ubiquitousItemDownloadingStatusKey,
+        ])
+        guard resourceValues.isAliasFile != true,
+              resourceValues.isUbiquitousItem != true
+                || resourceValues.ubiquitousItemDownloadingStatus == .current else {
+            throw MCPClientError.invalidArguments("Mail attachments must be available local files, not aliases or download placeholders.")
+        }
+        guard remainingLimit >= 0 else {
+            throw MCPClientError.invalidArguments("Mail attachments exceed the 25 MiB total limit.")
+        }
+        var components = URL(fileURLWithPath: path).pathComponents.dropFirst().filter { !$0.isEmpty }
+        guard let last = components.popLast(), !components.isEmpty else {
+            throw MCPClientError.invalidArguments("A Mail attachment must be a regular file.")
+        }
+        var directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard directory >= 0 else { throw MCPClientError.invalidArguments("The Mail attachment path is unavailable.") }
+        defer { close(directory) }
+        for component in components {
+            let next = component.withCString { openat(directory, $0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) }
+            guard next >= 0 else { throw MCPClientError.invalidArguments("Mail attachment paths cannot contain symbolic links.") }
+            close(directory)
+            directory = next
+        }
+        let descriptor = last.withCString { openat(directory, $0, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC) }
+        guard descriptor >= 0 else { throw MCPClientError.invalidArguments("The Mail attachment is unavailable or is a symbolic link.") }
+        defer { close(descriptor) }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
+              (before.st_flags & UInt32(SF_DATALESS)) == 0,
+              before.st_size >= 0, before.st_size <= remainingLimit else {
+            throw MCPClientError.invalidArguments("Mail attachments must be regular files within the 25 MiB total limit.")
+        }
+        var data = Data()
+        data.reserveCapacity(Int(before.st_size))
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+        while true {
+            try Task.checkCancellation()
+            let count = buffer.withUnsafeMutableBufferPointer { bytes in
+                Darwin.read(descriptor, bytes.baseAddress!, bytes.count)
+            }
+            guard count >= 0 else { throw MCPClientError.invalidArguments("The Mail attachment could not be read.") }
+            if count == 0 { break }
+            guard data.count + count <= remainingLimit else {
+                throw MCPClientError.invalidArguments("Mail attachments exceed the 25 MiB total limit.")
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        var after = stat()
+        guard fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size, data.count == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
+            throw MCPClientError.approvalMismatch
+        }
+        return data
+        #else
+        throw MCPClientError.invalidArguments("Local Mail attachments are supported only on macOS.")
+        #endif
+    }
+}
+
+struct RemoteDesktopMailAutomationReceipt: Equatable, Sendable {
+    let attachmentNames: [String]
 }
 
 protocol RemoteDesktopMailAutomationRunning: Sendable {
-    func run(payload: Data) async throws
+    func run(payload: Data) async throws -> RemoteDesktopMailAutomationReceipt
 }
 
 /// Only this fixed JXA source is executable. User/model values arrive as a
@@ -233,20 +502,68 @@ enum RemoteDesktopMailJXA {
         );
         outgoingMessage.visible = true;
 
-        if (request.send_now) {
-            // Keep the app whose approved action is executing in front. Mail's
-            // activation is asynchronous; without a short yield, a fast send
-            // can create and close the compose window before macOS switches
-            // away from an unrelated previously focused app.
-            mail.activate();
-            $.NSThread.sleepForTimeInterval(0.2);
-            const sentSuccessfully = outgoingMessage.send();
-            if (sentSuccessfully !== true) {
-                throw new Error('Mail rejected the send command');
+        const stagedPaths = [];
+        const expectedNames = (request.attachments || []).map(item => item.file_name);
+        const temporaryDirectory = ObjC.unwrap($.NSTemporaryDirectory());
+        const fileManager = $.NSFileManager.defaultManager;
+        const privateDirectory = temporaryDirectory + "/RemoteDesktopMail-" + ObjC.unwrap($.NSUUID.UUID.UUIDString);
+        const privateAttributes = $.NSDictionary.dictionaryWithObjectForKey($(448), $('NSFilePosixPermissions'));
+        if (!fileManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+            $(privateDirectory), false, privateAttributes, null)) {
+            throw new Error("Mail could not create a private attachment staging directory");
+        }
+        try {
+            (request.attachments || []).forEach((item, index) => {
+                const itemDirectory = privateDirectory + "/" + index;
+                if (!fileManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+                    $(itemDirectory), false, privateAttributes, null)) {
+                    throw new Error("Mail could not create an attachment staging directory");
+                }
+                const path = itemDirectory + "/" + item.file_name;
+                const bytes = $.NSData.alloc.initWithBase64EncodedStringOptions($(item.base64_data), 0);
+                if (!bytes || !bytes.writeToFileAtomically($(path), true)) {
+                    throw new Error("Mail could not stage an approved attachment");
+                }
+                const fileAttributes = $.NSDictionary.dictionaryWithObjectForKey($(256), $('NSFilePosixPermissions'));
+                if (!fileManager.setAttributesOfItemAtPathError(fileAttributes, $(path), null)) {
+                    throw new Error("Mail could not protect an approved attachment staging file");
+                }
+                stagedPaths.push(path);
+                outgoingMessage.content.attachments.push(mail.Attachment({fileName: Path(path)}));
+            });
+
+            const deadline = Date.now() + 8_000;
+            let observedNames = [];
+            while (Date.now() < deadline) {
+                observedNames = outgoingMessage.content.attachments().map(item => {
+                    const path = item.fileName();
+                    return ObjC.unwrap($.NSURL.fileURLWithPath($(path)).lastPathComponent);
+                });
+                if (observedNames.length === expectedNames.length
+                    && observedNames.every((name, index) => name === expectedNames[index])) break;
+                delay(0.05);
             }
-            mail.activate();
-        } else {
-            mail.activate();
+            if (observedNames.length !== expectedNames.length
+                || !observedNames.every((name, index) => name === expectedNames[index])) {
+                throw new Error("Mail did not confirm the exact approved attachments");
+            }
+
+            if (request.send_now) {
+                // Keep Mail in front while the approved send runs.
+                mail.activate();
+                $.NSThread.sleepForTimeInterval(0.2);
+                const sentSuccessfully = outgoingMessage.send();
+                if (sentSuccessfully !== true) {
+                    throw new Error('Mail rejected the send command');
+                }
+                mail.activate();
+            } else {
+                mail.activate();
+            }
+            return JSON.stringify({attachment_names: observedNames});
+        } finally {
+            stagedPaths.forEach(path => fileManager.removeItemAtPathError($(path), null));
+            fileManager.removeItemAtPathError($(privateDirectory), null);
         }
     }
     """#
@@ -254,10 +571,15 @@ enum RemoteDesktopMailJXA {
     static let processArguments = ["-l", "JavaScript", "-e", source]
 }
 
+private struct RemoteDesktopMailAutomationReceiptPayload: Decodable {
+    let attachmentNames: [String]
+    enum CodingKeys: String, CodingKey { case attachmentNames = "attachment_names" }
+}
+
 actor SystemRemoteDesktopMailAutomationRunner: RemoteDesktopMailAutomationRunning {
     private var activeProcess: Process?
 
-    func run(payload: Data) async throws {
+    func run(payload: Data) async throws -> RemoteDesktopMailAutomationReceipt {
         guard activeProcess == nil else {
             throw MCPClientError.toolFailed("Another local Mail action is already running.")
         }
@@ -274,9 +596,9 @@ actor SystemRemoteDesktopMailAutomationRunner: RemoteDesktopMailAutomationRunnin
         ]
         let standardInput = Pipe()
         process.standardInput = standardInput
-        // The fixed script emits no useful content. Avoid retaining addresses,
-        // subject text, body text, or Mail diagnostics in host logs.
-        process.standardOutput = FileHandle.nullDevice
+        // The fixed script returns only attachment names for a typed receipt.
+        let standardOutput = Pipe()
+        process.standardOutput = standardOutput
         process.standardError = FileHandle.nullDevice
         activeProcess = process
         let termination = RemoteDesktopMailProcessTermination()
@@ -316,14 +638,21 @@ actor SystemRemoteDesktopMailAutomationRunner: RemoteDesktopMailAutomationRunnin
             throw MCPClientError.toolFailed(
                 "Mail did not accept the local automation action (status \(status)).")
         }
+        let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
+        guard output.count <= 4_096,
+              let receipt = try? JSONDecoder().decode(RemoteDesktopMailAutomationReceiptPayload.self, from: output),
+              receipt.attachmentNames.count <= RemoteDesktopMailRequest.maximumAttachments else {
+            throw MCPClientError.toolFailed("Mail returned no bounded attachment confirmation.")
+        }
+        return RemoteDesktopMailAutomationReceipt(attachmentNames: receipt.attachmentNames)
     }
 
 }
 
 /// Synchronizes cancellation with the two consequential process phases.
 /// Holding the lock across `Process.run()` prevents the classic check/launch
-/// race; holding it across the small bounded stdin write defines feed as the
-/// mutation's commit point.
+/// race. Feeding claims its phase under the lock, then writes cancellable
+/// chunks without holding it so cancellation can terminate a blocked child.
 final class RemoteDesktopMailProcessLaunchState: @unchecked Sendable {
     private let lock = NSLock()
     private let process: Process
@@ -345,13 +674,36 @@ final class RemoteDesktopMailProcessLaunchState: @unchecked Sendable {
 
     func feed(_ payload: Data, to input: FileHandle) throws {
         lock.lock()
-        defer { lock.unlock() }
         guard !isCancelled, didLaunch, !didFeed else {
+            lock.unlock()
             throw CancellationError()
         }
-        try input.write(contentsOf: payload)
-        try input.close()
+        // A canceled child closes its pipe. Suppress SIGPIPE for this one
+        // descriptor so the writer throws instead of crashing the host.
+        #if canImport(Darwin)
+        guard fcntl(input.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            lock.unlock()
+            throw MCPClientError.toolFailed("Mail's input pipe could not be protected.")
+        }
+        #endif
         didFeed = true
+        lock.unlock()
+        var offset = 0
+        while offset < payload.count {
+            lock.lock()
+            let cancelled = isCancelled
+            lock.unlock()
+            guard !cancelled else { throw CancellationError() }
+            let end = min(offset + 64 * 1_024, payload.count)
+            try input.write(contentsOf: payload.subdata(in: offset..<end))
+            offset = end
+        }
+        // EOF lets the fixed script parse and act. This small final phase is
+        // linearized with cancellation; the potentially blocking write is not.
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isCancelled else { throw CancellationError() }
+        try input.close()
     }
 
     func cancel() {
@@ -396,9 +748,28 @@ private final class RemoteDesktopMailProcessTermination: @unchecked Sendable {
 
 private actor RemoteDesktopMailMCPHandler {
     let runner: any RemoteDesktopMailAutomationRunning
+    private var approvedAttachments: [String: [RemoteDesktopMailAttachmentSnapshot]] = [:]
 
     init(runner: any RemoteDesktopMailAutomationRunning) {
         self.runner = runner
+    }
+
+    func registerApprovedAttachments(call: MCPToolCall,
+                                    snapshots: [RemoteDesktopMailAttachmentSnapshot]) throws -> String {
+        let mail = try RemoteDesktopMailRequest(arguments: call.arguments)
+        guard call.toolName == RemoteDesktopMailMCP.toolName,
+              call.serverID == RemoteDesktopMailMCP.serverID,
+              !snapshots.isEmpty, mail.attachmentPaths == snapshots.map(\.path) else {
+            throw MCPClientError.approvalMismatch
+        }
+        let key = try Self.argumentKey(call.arguments)
+        guard approvedAttachments[key] == nil else { throw MCPClientError.approvalMismatch }
+        approvedAttachments[key] = snapshots
+        return key
+    }
+
+    func discardApprovedAttachments(key: String) {
+        approvedAttachments.removeValue(forKey: key)
     }
 
     func call(_ request: CallTool.Parameters) async -> CallTool.Result {
@@ -411,24 +782,53 @@ private actor RemoteDesktopMailMCPHandler {
                 try MCPJSONValue(remoteDesktopMailValue: $0)
             }
             let mail = try RemoteDesktopMailRequest(arguments: arguments)
-            try await runner.run(payload: try mail.automationPayload())
-            let message = mail.sendNow
-                ? "Mail accepted the approved email for sending."
-                : "Email draft opened visibly in Mail for review."
-            return CallTool.Result(
+            let snapshots: [RemoteDesktopMailAttachmentSnapshot]
+            if mail.attachmentPaths.isEmpty {
+                snapshots = []
+            } else {
+                let key = try Self.argumentKey(arguments)
+                guard let approved = approvedAttachments.removeValue(forKey: key),
+                      approved.map(\.path) == mail.attachmentPaths else {
+                    throw MCPClientError.approvalMismatch
+                }
+                snapshots = approved
+            }
+            let receipt = try await runner.run(payload: mail.automationPayload(attachments: snapshots))
+            let expectedNames = snapshots.map(\.fileName)
+            guard receipt.attachmentNames == expectedNames else {
+                throw MCPClientError.toolFailed("Mail did not confirm the exact approved attachment names.")
+            }
+            let message: String
+            if mail.sendNow {
+                message = "Mail accepted the approved email for sending."
+            } else if expectedNames.isEmpty {
+                message = "Email draft opened visibly in Mail for review."
+            } else {
+                message = "Email draft opened visibly in Mail with \(expectedNames.count) confirmed attachment(s)."
+            }
+            var structured: [String: MCPJSONValue] = [
+                "status": .string(mail.sendNow ? "accepted_for_sending" : "draft_opened"),
+            ]
+            if !expectedNames.isEmpty {
+                structured["attachment_count"] = .integer(expectedNames.count)
+                structured["attachment_names"] = .array(expectedNames.map(MCPJSONValue.string))
+                structured["attachment_digest"] = .string(
+                    try RemoteDesktopMailAttachmentFileReader.approvalDigest(snapshots))
+            }
+            return try CallTool.Result(
                 content: [.text(text: message, annotations: nil, _meta: nil)],
-                structuredContent: .object([
-                    "status": .string(
-                        mail.sendNow ? "accepted_for_sending" : "draft_opened"),
-                ]),
+                structuredContent: MCPJSONValue.object(structured).remoteDesktopMailMCPValue,
                 isError: false)
         } catch is CancellationError {
             return Self.failure("The local Mail action was canceled.")
         } catch {
-            // Never return arguments or AppleScript diagnostics because they
-            // may contain private message content.
+            // Never return paths, content, or AppleScript diagnostics.
             return Self.failure("Mail could not complete the approved local action.")
         }
+    }
+
+    private static func argumentKey(_ arguments: [String: MCPJSONValue]) throws -> String {
+        try MCPDigest.sha256(MCPDigest.canonicalData(for: .object(arguments)))
     }
 
     private static func failure(_ message: String) -> CallTool.Result {
@@ -447,6 +847,7 @@ actor RemoteDesktopMailMCPClientSession: MCPClientSessioning {
 
     private var server: Server?
     private var client: Client?
+    private var handler: RemoteDesktopMailMCPHandler?
     private var clientTransport: InMemoryTransport?
     private var serverTransport: InMemoryTransport?
     private var identity: MCPProcessIdentity?
@@ -469,6 +870,7 @@ actor RemoteDesktopMailMCPClientSession: MCPClientSessioning {
 
         let transports = await InMemoryTransport.createConnectedPair()
         let handler = RemoteDesktopMailMCPHandler(runner: runner)
+        self.handler = handler
         let server = Server(
             name: RemoteDesktopMailMCP.serverName,
             version: RemoteDesktopMailMCP.serverVersion,
@@ -605,11 +1007,31 @@ actor RemoteDesktopMailMCPClientSession: MCPClientSessioning {
         }
     }
 
+    /// Binds approved bytes to the exact unchanged MCP call. The wire request
+    /// still uses its original fingerprinted arguments and schema; the typed
+    /// snapshot is an in-process, one-use host context consumed by the handler.
+    func executeApprovedMail(_ call: MCPToolCall,
+                             attachments: [RemoteDesktopMailAttachmentSnapshot]) async throws -> MCPToolResult {
+        guard let handler, call.toolName == RemoteDesktopMailMCP.toolName,
+              call.serverID == RemoteDesktopMailMCP.serverID,
+              call.processGeneration == processGeneration else { throw MCPClientError.staleCall }
+        let key = try await handler.registerApprovedAttachments(call: call, snapshots: attachments)
+        do {
+            let result = try await execute(call)
+            await handler.discardApprovedAttachments(key: key)
+            return result
+        } catch {
+            await handler.discardApprovedAttachments(key: key)
+            throw error
+        }
+    }
+
     func stop() async {
         let client = self.client
         let server = self.server
         self.client = nil
         self.server = nil
+        handler = nil
         identity = nil
         clientTransport = nil
         serverTransport = nil
