@@ -14,6 +14,8 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+# Disposable computer-use verification cache
+.build/repair-verification/
 Packages/
 Package.resolved
 !/Package.resolved
