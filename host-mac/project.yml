@@ -52,8 +52,13 @@ targets:
     platform: macOS
     sources:
       - path: RemoteDesktopHost
+        excludes:
+          - Resources/ComputerUseSkills
       - path: RemoteDesktopHost/WebRTCAliases.swift
       - path: ../protocol/Swift
+      - path: RemoteDesktopHost/Resources/ComputerUseSkills
+        type: folder
+        buildPhase: resources
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC

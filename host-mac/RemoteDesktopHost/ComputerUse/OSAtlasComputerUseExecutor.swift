@@ -1918,7 +1918,7 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
                     Self.screenCaptureConsentGuidance)
             }
             let consentObservation = observation
-            if try await ComputerUseObservationWorker.perform({
+            if try await ComputerUseObservationWorker.performConsentRecognition({
                 try ComputerUseScreenCaptureConsentDetector
                     .requiresUserIntervention(from: consentObservation.image)
             }) {
@@ -7435,6 +7435,32 @@ final class OSAtlasComputerUseExecutor: ComputerUseExecuting,
 /// screen/audio clauses is sufficient so one missed OCR line cannot expose the
 /// secure sheet to model inference.
 enum ComputerUseScreenCaptureConsentDetector {
+    static func materializedRecognitionImage(_ image: CIImage) throws -> CIImage {
+        let extent = image.extent
+        guard extent.origin.x.isFinite, extent.origin.y.isFinite,
+              extent.width.isFinite, extent.height.isFinite,
+              extent.origin.x.rounded() == extent.origin.x,
+              extent.origin.y.rounded() == extent.origin.y,
+              extent.width.rounded() == extent.width,
+              extent.height.rounded() == extent.height,
+              extent.width > 0, extent.height > 0,
+              extent.width < CGFloat(Int.max), extent.height < CGFloat(Int.max) else {
+            throw NSError(domain: "ComputerUseScreenCaptureConsentDetector", code: 1)
+        }
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else {
+            throw NSError(domain: "ComputerUseScreenCaptureConsentDetector", code: 2)
+        }
+        // Use a standard full-size bitmap backing for Vision's direct
+        // Core Graphics image input; preserve all captured pixels.
+        let context = CIContext(options: [.cacheIntermediates: false])
+        guard let bitmap = context.createCGImage(image, from: extent,
+            format: .RGBA8, colorSpace: colorSpace),
+              bitmap.width == Int(extent.width), bitmap.height == Int(extent.height) else {
+            throw NSError(domain: "ComputerUseScreenCaptureConsentDetector", code: 3)
+        }
+        return CIImage(cgImage: bitmap)
+    }
+
     static func requiresUserIntervention(
         _ snapshot: ComputerUseAuthenticationContextSnapshot
     ) -> Bool {
@@ -7445,11 +7471,15 @@ enum ComputerUseScreenCaptureConsentDetector {
     }
 
     static func requiresUserIntervention(from image: CIImage) throws -> Bool {
+        let recognitionImage = try materializedRecognitionImage(image)
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
         request.recognitionLanguages = ["en-US"]
-        let handler = VNImageRequestHandler(ciImage: image, options: [:])
+        guard let bitmap = recognitionImage.cgImage else {
+            throw NSError(domain: "ComputerUseScreenCaptureConsentDetector", code: 4)
+        }
+        let handler = VNImageRequestHandler(cgImage: bitmap, options: [:])
         try handler.perform([request])
 
         let visibleText = (request.results ?? []).compactMap {

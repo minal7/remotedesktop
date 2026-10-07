@@ -86,7 +86,7 @@ struct HostSettingsView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(modelStatusColor)
                     }
-                    Text("Reads browser screenshots and performs browser tasks locally. Requires a Mac with at least 12 GB of memory.")
+                    Text("Reads browser screenshots and performs browser tasks locally. Requires a Mac with at least 16 GB of memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

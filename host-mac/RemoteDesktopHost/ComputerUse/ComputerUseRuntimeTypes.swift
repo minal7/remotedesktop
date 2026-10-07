@@ -130,7 +130,7 @@ struct ComputerUseNativeTextState: Equatable, Sendable {
 /// Read-only hints for the current screenshot. They do not identify an input
 /// recipient or authorize effects, and the list need not cover every control.
 struct ComputerUseNativeControls: Equatable, Sendable {
-    static let maximumItems = 16
+    static let maximumItems = 32
     /// AX metadata describes only this focused window. A false modal flag
     /// does not rule out a sheet, web dialog or overlay elsewhere in the UI.
     struct Window: Equatable, Sendable {
@@ -194,7 +194,27 @@ struct ComputerUseNativeControls: Equatable, Sendable {
                 && frame.size.width > 0 && frame.size.height > 0
         }
         var jsonObject: [String: Any] {
-            ["description": description, "bounds_1000": bounds1000, "enabled": enabled as Any? ?? NSNull()]
+            let exactCenter = [bounds1000[0] + bounds1000[2] / 2, bounds1000[1] + bounds1000[3] / 2]
+            func compact(_ values: [Double]) -> [NSDecimalNumber] {
+                values.map { NSDecimalNumber(string: String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), $0)) }
+            }
+            let compactBounds = compact(bounds1000)
+            let compactCenter = compact(exactCenter)
+            // Model hints need subpixel precision, not binary floating-point noise.
+            // Keep exact geometry when rounding could collapse or move a tiny target.
+            let preservesTarget = (0..<2).allSatisfy { axis in
+                compactBounds[axis + 2].doubleValue > 0
+                    && compactCenter[axis].doubleValue >= bounds1000[axis]
+                    && compactCenter[axis].doubleValue < bounds1000[axis] + bounds1000[axis + 2]
+                    && compactCenter[axis].doubleValue >= compactBounds[axis].doubleValue
+                    && compactCenter[axis].doubleValue < compactBounds[axis].doubleValue + compactBounds[axis + 2].doubleValue
+            }
+            if preservesTarget {
+                return ["description": description, "bounds_1000": compactBounds,
+                        "center_1000": compactCenter, "enabled": enabled as Any? ?? NSNull()]
+            }
+            return ["description": description, "bounds_1000": bounds1000,
+                    "center_1000": exactCenter, "enabled": enabled as Any? ?? NSNull()]
         }
         static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.description.utf8.elementsEqual(rhs.description.utf8) && lhs.bounds1000 == rhs.bounds1000 && lhs.enabled == rhs.enabled
@@ -293,10 +313,9 @@ struct ComputerUseDesktopImage: Sendable {
         // must not import another application's pixels or partial edge cells.
         let context = target.insetBy(dx: -40, dy: -40).intersection(window)
         if try matchesPixels(of: other, in: context, wholePixelsOnly: true) { return true }
-        // Focused-editor proof may cover an adjacent field when its complete
-        // bounds are already inside this pointer's padded local context. The
-        // full-window matcher still permits only the proven caret footprint.
-        guard let unchangedFocusedField, context.contains(unchangedFocusedField) else { return false }
+        // A nearby target may overlap only part of a large focused editor.
+        // The full-window matcher still permits only the proven caret footprint.
+        guard let unchangedFocusedField, context.intersects(unchangedFocusedField) else { return false }
         return try matchesInsertionPointPixels(of: other, window: window, field: unchangedFocusedField,
             onDifference: onInsertionPointDifference)
     }

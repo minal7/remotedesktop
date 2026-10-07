@@ -1,5 +1,14 @@
 import Foundation
 
+/// Starts a routed task with host-validated clarification context. Questions
+/// remain context rather than being merged into the current user request.
+@MainActor
+protocol ComputerUseClarifiedGoalExecuting {
+    func execute(taskID: String, goal: ComputerUseUnresolvedTextGoal,
+                 tools: ComputerUseHostTools,
+                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
+}
+
 @MainActor
 protocol ComputerUseTextClarificationContinuing {
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification?
@@ -37,7 +46,7 @@ protocol ComputerUseNativeOnlyExecuting {
 @MainActor
 final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
-    ComputerUseBrowserResearchContinuing, ComputerUseNativeOnlyExecuting {
+    ComputerUseBrowserResearchContinuing, ComputerUseNativeOnlyExecuting, ComputerUseClarifiedGoalExecuting {
     typealias NativeExecution = @MainActor (String, String, @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
     typealias DesktopFactory = @MainActor (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
 
@@ -58,6 +67,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private var promptDigest: String?
     private var route: Route = .native
     private var desktop: (any ComputerUseExecuting)?
+    private var routedClarifiedGoal: ComputerUseUnresolvedTextGoal?
     private var isExecuting = false
     private var nativeOnlyTask = false
 
@@ -120,6 +130,59 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         return result
     }
 
+    /// The structured planner has already selected the desktop route. Preserve
+    /// accepted turns as typed context and skip native admission/research routing.
+    func execute(taskID: String, goal: ComputerUseUnresolvedTextGoal,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws
+        -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard let originalGoal = goal.userTurns.first,
+              !originalGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              originalGoal.utf8.count <= 8_192 else { throw RoutingError.taskChanged }
+        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        if self.taskID == taskID {
+            guard route == .desktop, promptDigest == digest, routedClarifiedGoal == goal else {
+                throw RoutingError.taskChanged
+            }
+        } else {
+            researchState?.owner.retire()
+            researchState = nil
+            researchAdmissionStarted = false
+            nativeClarification?.invalidateClarification()
+            (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
+            desktop = nil
+            self.taskID = taskID
+            promptDigest = digest
+            route = .desktop
+            nativeOnlyTask = false
+            routedClarifiedGoal = goal
+        }
+        guard let desktopFactory else {
+            return .unableToComplete("This accepted task needs desktop tools that are not set up yet.")
+        }
+        if desktop == nil {
+            try Task.checkCancellation()
+            let loaded = try await desktopFactory(progress)
+            do { try Task.checkCancellation() }
+            catch {
+                (loaded as? any MCPApprovalContinuing)?.cancelMCPWork()
+                throw error
+            }
+            desktop = loaded
+        }
+        guard let desktop else { throw RoutingError.missingContinuation }
+        guard let clarified = desktop as? any ComputerUseClarifiedGoalExecuting else {
+            return .userInterventionRequired("I can't continue this task in the selected app. Start a new task using a supported app.")
+        }
+        let result = try await clarified.execute(taskID: taskID, goal: goal, tools: tools, progress: progress)
+        try Task.checkCancellation()
+        try rejectUnroutedResearchQuestion(result)
+        return result
+    }
+
     func executeNativeOnly(taskID: String, modelPrompt: String, currentUserPrompt: String,
         conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
@@ -155,6 +218,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             promptDigest = digest
             route = .native
             nativeOnlyTask = nativeOnly
+            routedClarifiedGoal = nil
         }
         if route == .native {
             if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
@@ -329,6 +393,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     func invalidateClarification(taskID: String?) {
+        if taskID == nil || taskID == self.taskID { routedClarifiedGoal = nil }
         nativeClarification?.invalidateClarification(taskID: taskID)
         (desktop as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
     }
@@ -357,6 +422,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         } else if let continuing = desktop as? any ComputerUseTextClarificationContinuing {
             result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
         } else { throw RoutingError.missingContinuation }
+        if route == .desktop { routedClarifiedGoal = goal }
         try rejectUnroutedResearchQuestion(result)
         return result
     }
@@ -390,6 +456,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         try Task.checkCancellation()
         let result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
             goal: goal, selectedChoice: selectedChoice, progress: progress)
+        routedClarifiedGoal = goal
         try rejectUnroutedResearchQuestion(result)
         return result
     }
@@ -407,6 +474,19 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         // A successful approved effect remains a fact after concurrent Stop.
         // The manager records it separately from task cancellation/state.
         return result
+    }
+
+    func preflightApprovedAction(_ prepared: MCPPreparedApproval) async throws {
+        guard !isExecuting else { throw RoutingError.alreadyExecuting }
+        isExecuting = true
+        defer { isExecuting = false }
+        try Task.checkCancellation()
+        guard route == .desktop, prepared.call.taskID == taskID,
+              let continuing = desktop as? any MCPApprovalContinuing else {
+            throw RoutingError.missingContinuation
+        }
+        try await continuing.preflightApprovedAction(prepared)
+        try Task.checkCancellation()
     }
 
     func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {

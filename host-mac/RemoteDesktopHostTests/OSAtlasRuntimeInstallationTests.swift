@@ -150,7 +150,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
     func testHoloManifestRetainsDataPinsAndBundledAttributionWithoutChangingDefault() throws {
         let manifest = ComputerUseArtifactManifest.holo31
         XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
-        XCTAssertEqual(manifest.minimumMemoryBytes, 12 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.minimumMemoryBytes, 16 * 1_024 * 1_024 * 1_024)
         XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [3_066_386_464, 672_424_256])
         XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), ["cfdd26e8e9ee34de0c052ea68fb5c61dd8f34986fa3e1b631e2bab6ab1b44ac9", "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f"])
         XCTAssertTrue(manifest.modelArtifacts.allSatisfy { $0.downloadURL.path.contains("/resolve/" + manifest.modelRevision + "/") })

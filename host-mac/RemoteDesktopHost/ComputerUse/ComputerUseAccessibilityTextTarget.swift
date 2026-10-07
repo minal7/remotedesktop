@@ -69,7 +69,11 @@ enum ComputerUseNativeControlReader {
             }
             return true
         }
-        func scan(_ start: [(AXUIElement, Bool)], depthFirst: Bool) throws {
+        func scan(
+            _ start: [(AXUIElement, Bool)],
+            depthFirst: Bool,
+            prioritizing focusedPath: [AXUIElement]? = nil
+        ) throws {
             var pending = start
             while !pending.isEmpty {
                 if seenForBudget.count >= 96 || items.count >= ComputerUseNativeControls.maximumItems {
@@ -111,7 +115,16 @@ enum ComputerUseNativeControlReader {
                 if let children = try read(kAXChildrenAttribute, node) as? [AXUIElement] {
                     let remaining = max(0, 96 - seenForBudget.count - pending.count)
                     if children.count > remaining { truncated = true }
-                    let additions = children.prefix(remaining).map { ($0, enabled == false) }
+                    var orderedChildren = children
+                    if depthFirst, let focusedPath,
+                       let pathIndex = focusedPath.firstIndex(where: { CFEqual($0, node) }), pathIndex > 0 {
+                        let focusedChild = focusedPath[pathIndex - 1]
+                        if let childIndex = orderedChildren.firstIndex(where: { CFEqual($0, focusedChild) }) {
+                            orderedChildren.remove(at: childIndex)
+                            orderedChildren.insert(focusedChild, at: 0)
+                        }
+                    }
+                    let additions = orderedChildren.prefix(remaining).map { ($0, enabled == false) }
                     if depthFirst { pending.append(contentsOf: additions.reversed()) }
                     else { pending.append(contentsOf: additions) }
                 }
@@ -153,7 +166,8 @@ enum ComputerUseNativeControlReader {
         let initialPath = try initialFocus.flatMap { try focusPath(from: $0, countForBudget: true) }
         let usedPriorityPath = initialPath?.isSafe == true && initialPath?.webArea != nil
         if let initialPath, initialPath.isSafe, let priorityWebArea = initialPath.webArea, !expired {
-            try scan([(priorityWebArea, initialPath.disabledAboveWebArea)], depthFirst: true)
+            try scan([(priorityWebArea, initialPath.disabledAboveWebArea)],
+                     depthFirst: true, prioritizing: initialPath.elements)
         }
         if expired { return nil }
         try scan([(window, false)], depthFirst: false)
@@ -247,6 +261,95 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                makeLifecycleMonitor: { ComputerUseAXLifecycleMonitor(application: $0.root) })
         }
     }
+
+    /// Resolves a suggestion or other focused descendant to its active text
+    /// combo box. This never searches arbitrary siblings: the AX parent chain
+    /// must reach the caller's exact focused window within the fixed budget.
+    static func focusedComboBox(from focusedElement: AXUIElement,
+                                application: Application,
+                                window: AXUIElement,
+                                access: Access) -> AXUIElement? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+
+        func read(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+            guard ContinuousClock.now < deadline else { return nil }
+            access.timeout(element, 0.15)
+            return access.read(name, element)
+        }
+        func string(_ name: String, _ element: AXUIElement) -> String? {
+            read(name, element) as? String
+        }
+        func boolean(_ name: String, _ element: AXUIElement) -> Bool? {
+            guard let value = read(name, element), CFGetTypeID(value) == CFBooleanGetTypeID() else { return nil }
+            return CFBooleanGetValue(value as! CFBoolean)
+        }
+        func optionalBoolean(_ name: String, _ element: AXUIElement, equals expected: Bool) -> Bool {
+            guard let value = read(name, element) else { return true }
+            guard CFGetTypeID(value) == CFBooleanGetTypeID() else { return false }
+            return CFBooleanGetValue(value as! CFBoolean) == expected
+        }
+        func currentScopeIsValid() -> Bool {
+            guard ContinuousClock.now < deadline,
+                  let current = access.frontmost(),
+                  current.identity.utf8.elementsEqual(application.identity.utf8),
+                  CFEqual(current.root, application.root),
+                  let currentWindow = read(kAXFocusedWindowAttribute as String, current.root),
+                  CFGetTypeID(currentWindow) == AXUIElementGetTypeID(),
+                  CFEqual(currentWindow as! AXUIElement, window),
+                  let currentFocus = read(kAXFocusedUIElementAttribute as String, current.root),
+                  CFGetTypeID(currentFocus) == AXUIElementGetTypeID(),
+                  CFEqual(currentFocus as! AXUIElement, focusedElement) else { return false }
+            return true
+        }
+        func resolvePath() -> (candidate: AXUIElement, path: [AXUIElement])? {
+            var path: [AXUIElement] = []
+            var node: AXUIElement? = focusedElement
+            var candidate: AXUIElement?
+            for _ in 0 ..< 32 {
+                guard ContinuousClock.now < deadline, let current = node,
+                      !path.contains(where: { CFEqual($0, current) }),
+                      let role = string(kAXRoleAttribute as String, current) else { return nil }
+                path.append(current)
+                let subrole = string(kAXSubroleAttribute as String, current) ?? ""
+                guard role != "AXSecureTextField",
+                      subrole != (kAXSecureTextFieldSubrole as String),
+                      optionalBoolean("AXProtectedContent", current, equals: false),
+                      optionalBoolean("AXHidden", current, equals: false),
+                      optionalBoolean(kAXEnabledAttribute as String, current, equals: true) else { return nil }
+                if role == (kAXComboBoxRole as String) {
+                    // The nearest combo box is authoritative; an invalid one
+                    // must not cause fallback to a more distant ancestor.
+                    if candidate == nil {
+                        guard boolean(kAXFocusedAttribute as String, current) == true,
+                              boolean("AXExpanded", current) == true,
+                              optionalBoolean(kAXEnabledAttribute as String, current, equals: true),
+                              access.canSet(kAXValueAttribute as String, current)
+                                || access.canSet(kAXSelectedTextAttribute as String, current)
+                                || boolean("AXEditable", current) == true else { return nil }
+                        candidate = current
+                    }
+                }
+                if candidate == nil, path.count > 1,
+                   [kAXTextFieldRole as String, kAXTextAreaRole as String].contains(role) {
+                    return nil
+                }
+                if CFEqual(current, window) { break }
+                guard let parent = read(kAXParentAttribute as String, current),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+                node = parent as! AXUIElement
+            }
+            guard let candidate, path.contains(where: { CFEqual($0, window) }) else { return nil }
+            return (candidate, path)
+        }
+
+        guard currentScopeIsValid(), let first = resolvePath(), currentScopeIsValid(),
+              let second = resolvePath(), CFEqual(first.candidate, second.candidate),
+              first.path.count == second.path.count,
+              zip(first.path, second.path).allSatisfy({ CFEqual($0.0, $0.1) }),
+              currentScopeIsValid(), ContinuousClock.now < deadline else { return nil }
+        return first.candidate
+    }
+
     private struct Label {
         let text: String
         let element: AXUIElement?
@@ -287,6 +390,34 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                 || shape.label.element.map { CFEqual($0, other) } == true
         }
     }
+    /// Confirms an AX element belongs to the exact observed window when the
+    /// element itself omits AXWindow. This is evidence for reading only.
+    static func parentPathReachesWindow(
+        from start: AXUIElement,
+        window: AXUIElement,
+        access: Access,
+        maximumDepth: Int = 32,
+        mayAct: () -> Bool = { true }
+    ) -> Bool {
+        guard maximumDepth > 0 else { return false }
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        var visited: [AXUIElement] = []
+        var current: AXUIElement? = start
+        while let element = current, visited.count < maximumDepth {
+            guard !Task.isCancelled, mayAct(), ContinuousClock.now < deadline,
+                  !visited.contains(where: { CFEqual($0, element) }) else { return false }
+            if CFEqual(element, window) { return true }
+            visited.append(element)
+            access.timeout(element, 0.1)
+            guard !Task.isCancelled, mayAct(), ContinuousClock.now < deadline,
+                  let rawParent = access.read(kAXParentAttribute as String, element),
+                  CFGetTypeID(rawParent) == AXUIElementGetTypeID(),
+                  !Task.isCancelled, mayAct(), ContinuousClock.now < deadline else { return false }
+            current = unsafeBitCast(rawParent, to: AXUIElement.self)
+        }
+        return false
+    }
+
     private final class SnapshotLifecycleCapture {
         // Attribute helpers drain lifecycle notifications throughout AX IPC;
         // retain them until the read scope is known, then compare handles locally.
@@ -328,8 +459,24 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
         return withSnapshotLifecycleCapture { _ in
             let root = app.root
             setTimeout(root, 0.15)
-            guard let element = elementAttribute(kAXFocusedUIElementAttribute, on: root),
-                  let window = elementAttribute(kAXFocusedWindowAttribute, on: root) else { return nil }
+            guard let focused = elementAttribute(kAXFocusedUIElementAttribute, on: root),
+                  let window = elementAttribute(kAXFocusedWindowAttribute, on: root),
+                  let role = stringAttribute(kAXRoleAttribute as String, on: focused) else { return nil }
+            let element: AXUIElement
+            if [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String].contains(role) {
+                element = focused
+            } else {
+                let guardedAccess = Access(
+                    frontmost: { self.access.frontmost() },
+                    read: { self.attribute($0, on: $1) },
+                    canSet: { self.isSettable($0, on: $1) },
+                    write: self.access.write,
+                    timeout: { self.setTimeout($0, $1) },
+                    makeLifecycleMonitor: self.access.makeLifecycleMonitor)
+                guard let combo = Self.focusedComboBox(from: focused, application: app,
+                                                       window: window, access: guardedAccess) else { return nil }
+                element = combo
+            }
             return snapshot(element: element, window: window, app: app)
         }
     }
@@ -386,6 +533,36 @@ final class ComputerUseAccessibilityTextTarget: ComputerUseNativeTextTarget {
                   value.targetID == targetID else { return nil }
             return value
         }
+    }
+
+    /// Read-only metadata from an already observed binding. Callers must
+    /// still revalidate the exact text, focused element and window before input.
+    /// Draining lifecycle events prevents a retired binding from supplying proof.
+    func isWebContent(targetID: String, matching element: AXUIElement) -> Bool {
+        synchronizeLifecycle()
+        guard !lifecycleUnavailable,
+              let binding = bindings.first(where: { $0.id == targetID }),
+              CFEqual(binding.element, element) else { return false }
+        return binding.isWebContent
+    }
+
+    /// Read-only description metadata from the exact retained text binding.
+    func editorDescription(targetID: String) -> String? {
+        guard !targetID.isEmpty,
+              let app = applicationForObservation(),
+              let binding = bindings.first(where: { $0.id == targetID }),
+              binding.application.utf8.elementsEqual(app.identity.utf8),
+              binding.shape.role.utf8.count <= 128,
+              binding.shape.label.text.utf8.count <= 256,
+              isUsable(binding.element), isUsable(binding.window) else { return nil }
+        let revision = lifecycleRevision
+        synchronizeLifecycle()
+        guard revision == lifecycleRevision, !lifecycleUnavailable,
+              bindings.contains(where: { $0.id == targetID }),
+              isUsable(binding.element), isUsable(binding.window) else { return nil }
+        let label = binding.shape.label.text
+        let description = label.isEmpty ? binding.shape.role : "\(binding.shape.role) • \(label)"
+        return description.utf8.count <= 512 ? description : nil
     }
 
     func focus(expected: ComputerUseTextSnapshot) throws -> Bool {

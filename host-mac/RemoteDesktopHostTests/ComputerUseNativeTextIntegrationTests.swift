@@ -2,13 +2,456 @@ import AppKit
 import ApplicationServices
 import CryptoKit
 import CoreImage
+import CoreML
 import ScreenCaptureKit
 import XCTest
 import Vision
 @testable import RemoteDesktopHost
 
+private final class ConsentDiagnosticCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+    func incrementAndRead() -> Int { lock.withLock { storage += 1; return storage } }
+    var value: Int { lock.withLock { storage } }
+}
+
 @MainActor
 final class ComputerUseNativeTextIntegrationTests: XCTestCase {
+    /// Opt-in, read-only comparison of the exact production consent OCR call
+    /// and Vision's public CPU compute-stage assignment on one captured frame.
+    /// The artifact intentionally contains geometry and errors only, never OCR text.
+    func testOptInLiveSafariConsentVisionCPUComparisonOnSingleCapture() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_LIVE_SAFARI_CONSENT_VISION_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_LIVE_SAFARI_CONSENT_VISION_DIAGNOSTIC=1 to inspect one foreground Safari frame.")
+        }
+        guard let safari = NSWorkspace.shared.frontmostApplication,
+              safari.bundleIdentifier == "com.apple.Safari" else {
+            throw XCTSkip("Bring the intended Safari window to the foreground before running this diagnostic.")
+        }
+        let pid = safari.processIdentifier
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        })
+        try tools.requireActive()
+        let before = tools.frontmostApplicationSnapshot()
+        guard before.identity?.bundleIdentifier == "com.apple.Safari",
+              before.identity?.processIdentifier == pid else {
+            throw XCTSkip("The foreground application changed before capture.")
+        }
+        let observation = try tools.currentScreen()
+        try tools.requireActive()
+        let after = tools.frontmostApplicationSnapshot()
+        guard after.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during capture.")
+        }
+
+        var record: [String: Any] = [
+            "captureSource": "ComputerUseHostTools.currentScreen",
+            "bundleIdentifier": "com.apple.Safari",
+            "productionDetector": ["stage": "ComputerUseDesktopExecutor.observe -> ComputerUseObservationWorker.performConsentRecognition -> ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from:)"] as [String: Any],
+            "imageExtent": ["x": Double(observation.image.extent.origin.x),
+                "y": Double(observation.image.extent.origin.y),
+                "width": Double(observation.image.extent.width),
+                "height": Double(observation.image.extent.height)],
+            "displayBounds": Self.rectDiagnostic(observation.displayBounds),
+            "frontmostWindowBounds": observation.frontmostWindowBounds.map { Self.rectDiagnostic($0) as Any } ?? NSNull(),
+        ]
+
+        let productionStarted = DispatchTime.now().uptimeNanoseconds
+        do {
+            try Task.checkCancellation()
+            let requiresIntervention = try await ComputerUseObservationWorker.performConsentRecognition(
+                timeout: 10, coldStartTimeout: 60) {
+                    try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: observation.image)
+                }
+            try Task.checkCancellation()
+            record["productionDetector"] = [
+                "stage": "ComputerUseDesktopExecutor.observe -> ComputerUseObservationWorker.performConsentRecognition -> ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from:)",
+                "result": requiresIntervention,
+                "elapsedMilliseconds": Int((DispatchTime.now().uptimeNanoseconds - productionStarted) / 1_000_000),
+            ]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            var diagnostic = Self.errorDiagnostic(
+                stage: "ComputerUseDesktopExecutor.observe -> ComputerUseObservationWorker.performConsentRecognition -> ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from:)", error: error)
+            diagnostic["elapsedMilliseconds"] = Int(
+                (DispatchTime.now().uptimeNanoseconds - productionStarted) / 1_000_000)
+            record["productionDetector"] = diagnostic
+        }
+        try Task.checkCancellation()
+
+        // A timed-out/busy blocking worker may still be executing Vision. Do not
+        // start a second heavy request unless the production call returned.
+        let productionWorkerFailure = (record["productionDetector"] as? [String: Any])?["workerFailure"] as? String
+        let productionTimedOut = productionWorkerFailure == "timedOut" || productionWorkerFailure == "busy"
+        if productionTimedOut {
+            record["cpuComparison"] = ["stage": "skipped", "reason": "production-worker-not-idle"]
+        } else {
+            try Task.checkCancellation()
+            let cpuStarted = DispatchTime.now().uptimeNanoseconds
+            do {
+                let cpuResult = try await ComputerUseObservationWorker.performConsentRecognition(
+                    timeout: 10, coldStartTimeout: 60) {
+                        let request = VNRecognizeTextRequest()
+                        request.recognitionLevel = .accurate
+                        request.recognitionLanguages = ["en-US"]
+                        request.usesLanguageCorrection = true
+                        let supported = try request.supportedComputeStageDevices
+                        let cpuStages = supported.compactMap { stage, devices -> (VNComputeStage, MLComputeDevice)? in
+                            guard let cpu = devices.first(where: { if case .cpu = $0 { return true }; return false }) else { return nil }
+                            return (stage, cpu)
+                        }
+                        guard !cpuStages.isEmpty else { return ([], nil, nil) as ([String], Int?, Bool?) }
+                        for (stage, device) in cpuStages { request.setComputeDevice(device, for: stage) }
+                        try VNImageRequestHandler(ciImage: observation.image, options: [:]).perform([request])
+                        let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                            .joined(separator: " ")
+                        return (cpuStages.map { String(describing: $0.0) }.sorted(), request.results?.count,
+                            Optional(ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(inRecognizedText: text)))
+                    }
+                try Task.checkCancellation()
+                record["cpuComparison"] = [
+                    "stage": cpuResult.0.isEmpty ? "unsupported" : "VNRecognizeTextRequest with supported CPU compute stages",
+                    "assignedComputeStages": cpuResult.0,
+                    "resultCount": cpuResult.1.map { $0 as Any } ?? NSNull(),
+                    "requiresIntervention": cpuResult.2.map { $0 as Any } ?? NSNull(),
+                    "elapsedMilliseconds": Int((DispatchTime.now().uptimeNanoseconds - cpuStarted) / 1_000_000),
+                    "settings": ["recognitionLevel": "accurate", "recognitionLanguages": ["en-US"],
+                        "usesLanguageCorrection": true],
+                ]
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                var diagnostic = Self.errorDiagnostic(
+                    stage: "VNRecognizeTextRequest with supported CPU compute stages", error: error)
+                diagnostic["elapsedMilliseconds"] = Int(
+                    (DispatchTime.now().uptimeNanoseconds - cpuStarted) / 1_000_000)
+                record["cpuComparison"] = diagnostic
+            }
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "live-safari-consent-vision-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Runs exactly the production consent detector once on a single foreground
+    /// Safari capture. The retained attachment contains geometry and error codes,
+    /// never recognized text or image pixels.
+    func testOptInLiveSafariProductionConsentDetectorOnSingleCapture() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_LIVE_SAFARI_PRODUCTION_CONSENT_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_LIVE_SAFARI_PRODUCTION_CONSENT_DIAGNOSTIC=1 to inspect one foreground Safari frame.")
+        }
+        guard let safari = NSWorkspace.shared.frontmostApplication,
+              safari.bundleIdentifier == "com.apple.Safari" else {
+            throw XCTSkip("Bring the intended Safari window to the foreground before running this diagnostic.")
+        }
+        let pid = safari.processIdentifier
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        })
+        try tools.requireActive()
+        let before = tools.frontmostApplicationSnapshot()
+        guard before.identity?.bundleIdentifier == "com.apple.Safari",
+              before.identity?.processIdentifier == pid else {
+            throw XCTSkip("The foreground application changed before capture.")
+        }
+        let observation = try tools.currentScreen()
+        try tools.requireActive()
+        let afterCapture = tools.frontmostApplicationSnapshot()
+        guard afterCapture.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during capture.")
+        }
+
+        var record: [String: Any] = [
+            "captureSource": "ComputerUseHostTools.currentScreen",
+            "captureCount": 1,
+            "bundleIdentifier": "com.apple.Safari",
+            "imageExtent": ["x": Double(observation.image.extent.origin.x),
+                "y": Double(observation.image.extent.origin.y),
+                "width": Double(observation.image.extent.width),
+                "height": Double(observation.image.extent.height)],
+            "displayBounds": Self.rectDiagnostic(observation.displayBounds),
+            "frontmostWindowBounds": observation.frontmostWindowBounds.map { Self.rectDiagnostic($0) as Any } ?? NSNull(),
+        ]
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            try Task.checkCancellation()
+            let requiresIntervention = try await ComputerUseObservationWorker.performConsentRecognition(
+                timeout: 10, coldStartTimeout: 60) {
+                    try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: observation.image)
+                }
+            try Task.checkCancellation()
+            record["productionDetector"] = [
+                "result": requiresIntervention,
+                "elapsedMs": Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000),
+            ]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            var diagnostic = Self.errorDiagnostic(stage: "production consent detector", error: error)
+            diagnostic["elapsedMs"] = Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            record["productionDetector"] = diagnostic
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        let afterRecognition = tools.frontmostApplicationSnapshot()
+        guard afterRecognition.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during recognition.")
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "live-safari-production-consent-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Tests the production-normalized CGImage through Vision's CGImage handler
+    /// while retaining only geometry and matcher/error metadata.
+    func testOptInLiveSafariConsentCGImageHandlerOnSingleCapture() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_LIVE_SAFARI_CONSENT_CGIMAGE_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_LIVE_SAFARI_CONSENT_CGIMAGE_DIAGNOSTIC=1 to inspect one foreground Safari frame.")
+        }
+        guard let safari = NSWorkspace.shared.frontmostApplication,
+              safari.bundleIdentifier == "com.apple.Safari" else {
+            throw XCTSkip("Bring the intended Safari window to the foreground before running this diagnostic.")
+        }
+        let pid = safari.processIdentifier
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        })
+        try tools.requireActive()
+        let before = tools.frontmostApplicationSnapshot()
+        guard before.identity?.bundleIdentifier == "com.apple.Safari",
+              before.identity?.processIdentifier == pid else {
+            throw XCTSkip("The foreground application changed before capture.")
+        }
+        let observation = try tools.currentScreen()
+        try tools.requireActive()
+        let afterCapture = tools.frontmostApplicationSnapshot()
+        guard afterCapture.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during capture.")
+        }
+
+        var record: [String: Any] = [
+            "captureSource": "ComputerUseHostTools.currentScreen",
+            "captureCount": 1,
+            "bundleIdentifier": "com.apple.Safari",
+            "imageExtent": ["x": Double(observation.image.extent.origin.x),
+                "y": Double(observation.image.extent.origin.y),
+                "width": Double(observation.image.extent.width),
+                "height": Double(observation.image.extent.height)],
+            "displayBounds": Self.rectDiagnostic(observation.displayBounds),
+            "frontmostWindowBounds": observation.frontmostWindowBounds.map { Self.rectDiagnostic($0) as Any } ?? NSNull(),
+        ]
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            try Task.checkCancellation()
+            let result = try await ComputerUseObservationWorker.perform(timeout: 60) {
+                let normalizationStarted = DispatchTime.now().uptimeNanoseconds
+                let normalized = try ComputerUseScreenCaptureConsentDetector
+                    .materializedRecognitionImage(observation.image)
+                guard let cgImage = normalized.cgImage else {
+                    throw NSError(domain: "ComputerUseConsentCGImageDiagnostic", code: 1)
+                }
+                let normalizationMilliseconds = Int(
+                    (DispatchTime.now().uptimeNanoseconds - normalizationStarted) / 1_000_000)
+                let requestStarted = DispatchTime.now().uptimeNanoseconds
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.recognitionLanguages = ["en-US"]
+                request.usesLanguageCorrection = true
+                try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+                let visibleText = (request.results ?? []).compactMap {
+                    $0.topCandidates(1).first?.string
+                }.joined(separator: " ")
+                let requiresIntervention = ComputerUseScreenCaptureConsentDetector
+                    .requiresUserIntervention(inRecognizedText: visibleText)
+                let requestMilliseconds = Int(
+                    (DispatchTime.now().uptimeNanoseconds - requestStarted) / 1_000_000)
+                return (Self.CGImageMetadata(cgImage), requiresIntervention,
+                    normalizationMilliseconds, requestMilliseconds)
+            }
+            try Task.checkCancellation()
+            record["cgImageHandler"] = [
+                "stage": "production materializedRecognitionImage then VNImageRequestHandler(cgImage:)",
+                "image": result.0.dictionary,
+                "requiresIntervention": result.1,
+                "normalizationElapsedMs": result.2,
+                "recognitionElapsedMs": result.3,
+                "elapsedMs": Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000),
+            ]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            var diagnostic = Self.errorDiagnostic(stage: "materialized CGImage Vision handler", error: error)
+            diagnostic["elapsedMs"] = Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            record["cgImageHandler"] = diagnostic
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        let afterRecognition = tools.frontmostApplicationSnapshot()
+        guard afterRecognition.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during recognition.")
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "live-safari-consent-cgimage-handler-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    /// Checks whether normalizing the captured pixel backing changes the exact
+    /// production consent-recognition failure. This captures once and records
+    /// geometry/bitmap metadata only; no screen text or image is attached.
+    func testOptInLiveSafariConsentStandardRGBA8MaterializationOnSingleCapture() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_LIVE_SAFARI_CONSENT_RGBA8_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_LIVE_SAFARI_CONSENT_RGBA8_DIAGNOSTIC=1 to inspect one foreground Safari frame.")
+        }
+        guard let safari = NSWorkspace.shared.frontmostApplication,
+              safari.bundleIdentifier == "com.apple.Safari" else {
+            throw XCTSkip("Bring the intended Safari window to the foreground before running this diagnostic.")
+        }
+        let pid = safari.processIdentifier
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: {
+            NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        })
+        try tools.requireActive()
+        let before = tools.frontmostApplicationSnapshot()
+        guard before.identity?.bundleIdentifier == "com.apple.Safari",
+              before.identity?.processIdentifier == pid else {
+            throw XCTSkip("The foreground application changed before capture.")
+        }
+        let observation = try tools.currentScreen()
+        try tools.requireActive()
+        let after = tools.frontmostApplicationSnapshot()
+        guard after.identity == before.identity else {
+            throw XCTSkip("The foreground Safari identity changed during capture.")
+        }
+
+        var record: [String: Any] = [
+            "captureSource": "ComputerUseHostTools.currentScreen",
+            "bundleIdentifier": "com.apple.Safari",
+            "captureCount": 1,
+            "imageExtent": ["x": Double(observation.image.extent.origin.x),
+                "y": Double(observation.image.extent.origin.y),
+                "width": Double(observation.image.extent.width),
+                "height": Double(observation.image.extent.height)],
+            "displayBounds": Self.rectDiagnostic(observation.displayBounds),
+            "frontmostWindowBounds": observation.frontmostWindowBounds.map { Self.rectDiagnostic($0) as Any } ?? NSNull(),
+            "originalBackingCGImage": observation.image.cgImage.map { Self.cgImageDiagnostic($0) as Any } ?? NSNull(),
+        ]
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            try Task.checkCancellation()
+            let result = try await ComputerUseObservationWorker.perform(timeout: 60) {
+                let materializationStarted = DispatchTime.now().uptimeNanoseconds
+                let extent = observation.image.extent
+                guard extent.origin.x.isFinite, extent.origin.y.isFinite,
+                      extent.width.isFinite, extent.height.isFinite,
+                      extent.width > 0, extent.height > 0,
+                      extent.width.rounded() == extent.width,
+                      extent.height.rounded() == extent.height else {
+                    throw NSError(domain: "ComputerUseConsentRGBA8Diagnostic", code: 1)
+                }
+                let context = CIContext()
+                guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                      let rendered = context.createCGImage(observation.image, from: extent,
+                          format: .RGBA8, colorSpace: colorSpace),
+                      rendered.width == Int(extent.width), rendered.height == Int(extent.height) else {
+                    throw NSError(domain: "ComputerUseConsentRGBA8Diagnostic", code: 2)
+                }
+                let materialized = CIImage(cgImage: rendered)
+                let materializationMilliseconds = Int((DispatchTime.now().uptimeNanoseconds - materializationStarted) / 1_000_000)
+                let recognitionStarted = DispatchTime.now().uptimeNanoseconds
+                let requiresIntervention = try ComputerUseScreenCaptureConsentDetector
+                    .requiresUserIntervention(from: materialized)
+                let recognitionMilliseconds = Int((DispatchTime.now().uptimeNanoseconds - recognitionStarted) / 1_000_000)
+                return (Self.CGImageMetadata(rendered), requiresIntervention,
+                    materializationMilliseconds, recognitionMilliseconds)
+            }
+            try Task.checkCancellation()
+            record["standardRGBA8"] = [
+                "stage": "CIContext.createCGImage(format: .RGBA8, colorSpace: sRGB) then production consent detector",
+                "image": result.0.dictionary,
+                "requiresIntervention": result.1,
+                "materializationElapsedMilliseconds": result.2,
+                "recognitionElapsedMilliseconds": result.3,
+                "elapsedMilliseconds": Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000),
+            ]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            var diagnostic = Self.errorDiagnostic(
+                stage: "CIContext.createCGImage(format: .RGBA8, colorSpace: sRGB) then production consent detector",
+                error: error)
+            diagnostic["elapsedMilliseconds"] = Int((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000)
+            record["standardRGBA8"] = diagnostic
+        }
+        try Task.checkCancellation()
+
+        let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "live-safari-consent-rgba8-materialization-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private struct CGImageMetadata: Sendable {
+        let width: Int
+        let height: Int
+        let bitsPerComponent: Int
+        let bitsPerPixel: Int
+        let bitmapInfo: UInt32
+        let bytesPerRow: Int
+        let colorSpaceName: String?
+
+        init(_ image: CGImage) {
+            width = image.width
+            height = image.height
+            bitsPerComponent = image.bitsPerComponent
+            bitsPerPixel = image.bitsPerPixel
+            bitmapInfo = image.bitmapInfo.rawValue
+            bytesPerRow = image.bytesPerRow
+            colorSpaceName = image.colorSpace?.name.map { String(describing: $0) }
+        }
+
+        var dictionary: [String: Any] {
+            ["width": width, "height": height,
+             "bitsPerComponent": bitsPerComponent, "bitsPerPixel": bitsPerPixel,
+             "bitmapInfo": bitmapInfo, "bytesPerRow": bytesPerRow,
+             "colorSpaceName": colorSpaceName.map { $0 as Any } ?? NSNull()]
+        }
+    }
+
+    private static func cgImageDiagnostic(_ image: CGImage) -> [String: Any] {
+        CGImageMetadata(image).dictionary
+    }
+
+    private static func rectDiagnostic(_ rect: CGRect) -> [String: Double] {
+        ["x": Double(rect.origin.x), "y": Double(rect.origin.y),
+         "width": Double(rect.width), "height": Double(rect.height)]
+    }
+
+    private static func errorDiagnostic(stage: String, error: Error) -> [String: Any] {
+        let native = error as NSError
+        let workerFailure: String?
+        switch error as? ComputerUseObservationWorker.Failure {
+        case .some(.busy): workerFailure = "busy"
+        case .some(.timedOut): workerFailure = "timedOut"
+        default: workerFailure = nil
+        }
+        var result: [String: Any] = ["stage": stage, "errorDomain": native.domain, "errorCode": native.code]
+        if let workerFailure { result["workerFailure"] = workerFailure }
+        return result
+    }
+
     @MainActor private final class DefaultBrowserFixtureState {
         let app: ComputerUseApplicationIdentity
         var windows: [ComputerUseDefaultBrowserSession.Window]
@@ -1869,6 +2312,888 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(executor.diagnosticHistory.first?.response, "click")
     }
 
+    func testVisualNativeTypeTextPostsUnicodeWithoutAXSettersWhenProjectionContainsHelperText() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let helperText = "Press / to write using your Gmail & Drive"
+        let payload = "Review café 🧪"
+        var current = ComputerUseTextSnapshot(targetID: "binding-0", value: helperText,
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        let physicalTarget = AXUIElementCreateApplication(42_401)
+        var replaceValueCalls = 0
+        var replaceSelectedTextCalls = 0
+        var unicodeStrokes: [String] = []
+        let scopeValid = true
+        var contextChecks = 0
+        var effects = 0
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in
+                replaceSelectedTextCalls += 1
+                return nil
+            }, postUnicode: { text, expected in
+                XCTAssertEqual(text.count, 1, "Visual typing must post one complete grapheme at a time")
+                guard scopeValid, current == expected,
+                      let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                unicodeStrokes.append(text)
+                let value = unicodeStrokes.count == 1
+                    ? text : expected.value.replacingCharacters(in: range, with: text)
+                current = ComputerUseTextSnapshot(targetID: "binding-\(unicodeStrokes.count)", value: value,
+                    selection: NSRange(location: expected.selection.location + text.utf16.count, length: 0),
+                    isEditable: true, isSecure: false)
+            }, mayAct: { scopeValid }, replaceValue: { _, _ in
+                replaceValueCalls += 1
+                return nil
+            }, validateContext: {
+                contextChecks += 1
+                guard scopeValid else { throw ComputerUseTextEditError.interrupted }
+            })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { scopeValid },
+            approvalTargetProvider: { _ in
+                .init(context: "AXTextField Message Body", applicationID: "fixture",
+                    accessibilityIdentity: "message-body", frame: CGRect(x: 20, y: 20, width: 300, height: 40))
+            }, textEditor: editor,
+            screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 400))
+            }, transientSystemOverlayProvider: { _ in false },
+            accessibilityContextProvider: { _ in "AXTextField Message Body" },
+            mcpFocusedTextSnapshotProvider: {
+                try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+            },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "message-body" }, frontmostApplicationProvider: { "fixture" })
+        let action = ComputerUsePredictedAction.typeText(payload)
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+        try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(contextChecks > 0, true)
+        XCTAssertTrue(scopeValid)
+        XCTAssertEqual(replaceValueCalls, 0, "Visual typing must not call the whole-value AX setter")
+        XCTAssertEqual(replaceSelectedTextCalls, 0, "Visual typing must not call the selected-text AX setter")
+        XCTAssertEqual(unicodeStrokes, payload.map { String($0) }, "Each posted event must contain one complete grapheme")
+        XCTAssertEqual(current.value, payload, "The helper projection disappears when the first character is entered")
+    }
+
+    func testVisualNativeTypeTextReplacesSelectedAutocompleteSuffixWithoutAXSetters() async throws {
+        let helper = "history.example/"
+        let payload = "https://example.com/"
+        var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        let physicalTarget = AXUIElementCreateApplication(42_402)
+        var strokes: [String] = []
+        var setterCalls = 0
+        var effects = 0
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in setterCalls += 1; return nil },
+            postUnicode: { text, expected in
+                XCTAssertEqual(text.count, 1, "Post each complete grapheme exactly once")
+                guard current == expected,
+                      let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                strokes.append(text)
+                let typedPrefix = expected.value.replacingCharacters(in: range, with: text)
+                let prefixLength = typedPrefix.utf16.count
+                current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)",
+                    value: typedPrefix + helper,
+                    selection: NSRange(location: prefixLength, length: helper.utf16.count),
+                    isEditable: true, isSecure: false)
+            }, mayAct: { true }, replaceValue: { _, _ in setterCalls += 1; return nil })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in
+                .init(context: "AXTextField Address", applicationID: "fixture",
+                    accessibilityIdentity: "address-field", frame: CGRect(x: 20, y: 20, width: 300, height: 40))
+            }, textEditor: editor,
+            screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
+                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400),
+                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 400))
+            }, transientSystemOverlayProvider: { _ in false },
+            accessibilityContextProvider: { _ in "AXTextField Address" },
+            mcpFocusedTextSnapshotProvider: {
+                try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+            },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "address-field" }, frontmostApplicationProvider: { "fixture" })
+        let action = ComputerUsePredictedAction.typeText(payload)
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+        try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(strokes, payload.map { String($0) })
+        XCTAssertEqual(strokes.joined(), payload, "Only the requested text is sent; autocomplete text is never dispatched")
+        XCTAssertEqual(setterCalls, 0, "Visual typing must not use AX value or selected-text setters")
+        XCTAssertTrue(current.value.hasPrefix(payload))
+        XCTAssertEqual(current.selection.location, payload.utf16.count)
+        XCTAssertEqual(current.selection.length, helper.utf16.count,
+            "The editor may retain a selected autocomplete suffix after the final typed character")
+    }
+
+    func testVisualTypingAcceptsSelectedAutocompleteSuffixRefreshAtBothReadBoundaries() async throws {
+        for phase in [AutocompleteSnapshotChange.beforeNextPreKey, .beforeFinalCheck,
+                      .collapsedToSelectedSuffix, .removedBeforeNextPreKey, .removedBeforeFinalCheck] {
+            let result = try await runAutocompleteSnapshotChange(phase: phase)
+            XCTAssertNil(result.error, "A changed selected suffix at \(phase) should not resend or stop the typed prefix")
+            XCTAssertEqual(result.strokes, ["A", "B"])
+            XCTAssertEqual(result.strokes.joined(), "AB")
+            XCTAssertEqual(result.setterCalls, 0)
+            XCTAssertEqual(result.effects, 1)
+            XCTAssertTrue(result.finalValue.hasPrefix("AB"))
+            XCTAssertEqual(result.finalSelection.location, 2)
+            XCTAssertEqual(result.finalSelection.length, "suggestion-new/".utf16.count)
+            XCTAssertEqual(result.finalValue, "ABsuggestion-new/")
+        }
+    }
+
+    func testVisualTypingAcceptsUnselectedAutocompleteSuffixAtBothReadBoundaries() async throws {
+        for phase in [AutocompleteSnapshotChange.unselectedSuffixBeforeNextPreKey,
+                      .unselectedSuffixBeforeFinalCheck] {
+            let result = try await runAutocompleteSnapshotChange(phase: phase)
+            XCTAssertNil(result.error, "A changing unselected read-projection suffix at \(phase) must not duplicate or stop typing")
+            XCTAssertEqual(result.strokes, ["A", "B"])
+            XCTAssertEqual(result.strokes.joined(), "AB")
+            XCTAssertEqual(result.setterCalls, 0)
+            XCTAssertEqual(result.effects, 1)
+            XCTAssertEqual(result.finalValue, "ABsuggestion-new/")
+            XCTAssertEqual(result.finalSelection, NSRange(location: 2, length: 0))
+        }
+    }
+
+    func testVerifiedWebTextAreaAcceptsProvisionalNBSPWhenFollowingGraphemeRestoresExactPrefix() async throws {
+        for payload in ["a b", "🧪 b", "a b c"] {
+        var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        let physicalTarget = AXUIElementCreateApplication(42_408)
+        var strokes: [String] = []
+        var effects = 0
+        var setterCalls = 0
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in setterCalls += 1; return nil },
+            postUnicode: { text, expected in
+                XCTAssertEqual(text.count, 1)
+                guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                strokes.append(text)
+                let value: String
+                if text == " " {
+                    value = expected.value.replacingCharacters(in: range, with: "\u{00A0}")
+                } else if !text.first!.isWhitespace, expected.value.hasSuffix("\u{00A0}") {
+                    let withoutNBSP = String(expected.value.dropLast())
+                    value = withoutNBSP + " " + text
+                } else {
+                    value = expected.value.replacingCharacters(in: range, with: text)
+                }
+                current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)", value: value,
+                    selection: NSRange(location: expected.selection.location + text.utf16.count, length: 0),
+                    isEditable: true, isSecure: false)
+            }, mayAct: { true }, replaceValue: { _, _ in setterCalls += 1; return nil })
+        let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+            try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget,
+                role: "AXTextArea", isWebContent: true)
+        })
+        let action = ComputerUsePredictedAction.typeText(payload)
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+        try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(strokes, payload.map { String($0) })
+        XCTAssertEqual(current.value.utf8.elementsEqual(payload.utf8), true)
+        XCTAssertEqual(current.selection, NSRange(location: payload.utf16.count, length: 0))
+        XCTAssertEqual(setterCalls, 0)
+        }
+    }
+
+    func testProvisionalNBSPTypingRejectsUnqualifiedSpaceAndChangedTargetEvidence() async throws {
+        enum Case: String, CaseIterable {
+            case leadingSpace, trailingSpace, adjacentSpace, nonWebContent, textFieldRole, untypedTail
+            case unchangedNBSP, changedPrefix, changedCaret, changedDocument, changedPhysicalTarget, webProofLost
+        }
+
+        for scenario in Case.allCases {
+            var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+            var physicalTarget = AXUIElementCreateApplication(42_409)
+            var documentIdentity = "fixture-document"
+            var strokes: [String] = []
+            var effects = 0
+            let payload: String
+            switch scenario {
+            case .leadingSpace: payload = " a"
+            case .trailingSpace: payload = "a "
+            case .adjacentSpace: payload = "a  b"
+            case .untypedTail:
+                payload = " b"
+                current = ComputerUseTextSnapshot(targetID: "binding-0", value: "aX",
+                    selection: NSRange(location: 1, length: 0), isEditable: true, isSecure: false)
+            case .unchangedNBSP: payload = "a bc"
+            default: payload = "a b"
+            }
+            var isWebContent = scenario != .nonWebContent
+            let role = scenario == .textFieldRole ? "AXTextField" : "AXTextArea"
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in nil }, postUnicode: { text, expected in
+                    XCTAssertEqual(text.count, 1)
+                    guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                        throw ComputerUseTextEditError.preconditionChanged
+                    }
+                    strokes.append(text)
+                    var value = expected.value.replacingCharacters(in: range,
+                        with: text == " " ? "\u{00A0}" : text)
+                    var caret = expected.selection.location + text.utf16.count
+                    if scenario == .unchangedNBSP && text == "b" {
+                        // Model the page keeping the compatibility NBSP after the next key.
+                        value = "a\u{00A0}b"
+                        caret = value.utf16.count
+                    }
+                    if text == " " {
+                        switch scenario {
+                        case .changedPrefix: value = "x\u{00A0}"
+                        case .changedCaret: caret = 1
+                        case .changedDocument: documentIdentity = "different-document"
+                        case .changedPhysicalTarget: physicalTarget = AXUIElementCreateSystemWide()
+                        case .webProofLost: isWebContent = false
+                        default: break
+                        }
+                    }
+                    current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)", value: value,
+                        selection: NSRange(location: caret, length: 0), isEditable: true, isSecure: false)
+                }, mayAct: { true }, replaceValue: { _, _ in nil })
+            let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+                try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget,
+                    role: role, documentIdentity: documentIdentity, isWebContent: isWebContent)
+            })
+            let action = ComputerUsePredictedAction.typeText(payload)
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                XCTFail("\(scenario) must reject the provisional NBSP sequence")
+            } catch let error as ComputerUseTextEditError {
+                XCTAssertEqual(error, .deliveryUncertain, "Unexpected failure for \(scenario)")
+            }
+            XCTAssertEqual(effects, 1, "\(scenario) must begin one reviewed native effect")
+            let expectedStrokes: [String]
+            switch scenario {
+            case .leadingSpace, .untypedTail: expectedStrokes = [" "]
+            case .unchangedNBSP: expectedStrokes = ["a", " ", "b"]
+            default: expectedStrokes = ["a", " "]
+            }
+            XCTAssertEqual(strokes, expectedStrokes,
+                "\(scenario) must stop at the first unverified boundary and never retry")
+        }
+    }
+
+    func testVisualTypingRejectsAutocompleteChangesOutsideSelectedSuffix() async throws {
+        for phase in [AutocompleteSnapshotChange.unselectedPrefix, .caret, .unselectedTail, .physicalTarget] {
+            let result = try await runAutocompleteSnapshotChange(phase: phase)
+            XCTAssertEqual(result.error, .deliveryUncertain, "Out-of-suffix change \(phase) must stop typing")
+            XCTAssertEqual(result.strokes, ["A"], "No second key may follow a changed prefix, caret, tail, or target")
+            XCTAssertEqual(result.setterCalls, 0)
+            XCTAssertEqual(result.effects, 1)
+        }
+    }
+
+    func testVisualTypingRejectsSuffixDriftBeforeFirstStroke() async throws {
+        for changeAtRead in [2, 3] {
+            var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+            let physicalTarget = AXUIElementCreateApplication(42_406)
+            var strokes: [String] = []
+            var effects = 0
+            var typingReads = 0
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in nil }, postUnicode: { text, _ in strokes.append(text) },
+                mayAct: { true }, replaceValue: { _, _ in nil })
+            let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+                if effects > 0 {
+                    typingReads += 1
+                    if typingReads == changeAtRead {
+                        current = ComputerUseTextSnapshot(targetID: "binding-refreshed", value: "suggestion/",
+                            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+                    }
+                }
+                return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+            })
+            let action = ComputerUsePredictedAction.typeText("A")
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+            // Change the projection after the typing baseline, at either the
+            // pre-key read or final pre-post read, before any key is dispatched.
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                XCTFail("Suffix drift before the first stroke must reject the typing baseline")
+            } catch let error as ComputerUseTextEditError {
+                XCTAssertEqual(error, .preconditionChanged)
+            }
+            XCTAssertEqual(typingReads, changeAtRead)
+            XCTAssertTrue(strokes.isEmpty)
+            XCTAssertEqual(effects, 1)
+        }
+    }
+
+    private enum AutocompleteSnapshotChange: Equatable {
+        case beforeNextPreKey, beforeFinalCheck, collapsedToSelectedSuffix, removedBeforeNextPreKey,
+             removedBeforeFinalCheck, unselectedSuffixBeforeNextPreKey, unselectedSuffixBeforeFinalCheck,
+             unselectedPrefix, caret, unselectedTail, physicalTarget
+    }
+
+    private func runAutocompleteSnapshotChange(phase: AutocompleteSnapshotChange) async throws
+        -> (error: ComputerUseTextEditError?, strokes: [String], setterCalls: Int, effects: Int,
+            finalValue: String, finalSelection: NSRange) {
+        let originalSuggestion = "suggestion-old/"
+        let refreshedSuggestion = "suggestion-new/"
+        var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        var physicalTarget = AXUIElementCreateApplication(42_404)
+        var strokes: [String] = []
+        var setterCalls = 0
+        var effects = 0
+        var readsAfterFirstStroke = 0
+        var changed = false
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in setterCalls += 1; return nil },
+            postUnicode: { text, expected in
+                XCTAssertEqual(text.count, 1)
+                guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                strokes.append(text)
+                let isUnselectedSuffix = phase == .unselectedSuffixBeforeNextPreKey
+                    || phase == .unselectedSuffixBeforeFinalCheck
+                let typedPrefix = isUnselectedSuffix
+                    ? String(expected.value.prefix(expected.selection.location)) + text
+                    : expected.value.replacingCharacters(in: range, with: text)
+                let suggestion = phase == .collapsedToSelectedSuffix && strokes.count == 1
+                    ? "" : (strokes.count == 1 ? originalSuggestion : refreshedSuggestion)
+                current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)",
+                    value: typedPrefix + suggestion,
+                    selection: NSRange(location: typedPrefix.utf16.count,
+                        length: isUnselectedSuffix ? 0 : suggestion.utf16.count),
+                    isEditable: true, isSecure: false)
+                readsAfterFirstStroke = 0
+            }, mayAct: { true }, replaceValue: { _, _ in setterCalls += 1; return nil })
+        let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+            guard strokes.count == 1 else {
+                return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+            }
+            readsAfterFirstStroke += 1
+            let shouldChange: Bool
+            switch phase {
+            case .beforeNextPreKey, .collapsedToSelectedSuffix, .removedBeforeNextPreKey,
+                 .unselectedSuffixBeforeNextPreKey:
+                shouldChange = readsAfterFirstStroke == 2
+            case .beforeFinalCheck, .removedBeforeFinalCheck, .unselectedSuffixBeforeFinalCheck:
+                shouldChange = readsAfterFirstStroke == 3
+            case .unselectedPrefix, .caret, .unselectedTail, .physicalTarget:
+                shouldChange = readsAfterFirstStroke == 2
+            }
+            if shouldChange && !changed {
+                changed = true
+                switch phase {
+                case .beforeNextPreKey, .beforeFinalCheck:
+                    let prefix = String(current.value.prefix(current.selection.location))
+                    current = ComputerUseTextSnapshot(targetID: "binding-refreshed", value: prefix + refreshedSuggestion,
+                        selection: NSRange(location: prefix.utf16.count, length: refreshedSuggestion.utf16.count),
+                        isEditable: true, isSecure: false)
+                case .removedBeforeNextPreKey, .removedBeforeFinalCheck:
+                    let prefix = String(current.value.prefix(current.selection.location))
+                    current = ComputerUseTextSnapshot(targetID: "binding-refreshed", value: prefix,
+                        selection: NSRange(location: prefix.utf16.count, length: 0),
+                        isEditable: true, isSecure: false)
+                case .unselectedSuffixBeforeNextPreKey, .unselectedSuffixBeforeFinalCheck:
+                    let prefix = String(current.value.prefix(current.selection.location))
+                    current = ComputerUseTextSnapshot(targetID: "binding-refreshed",
+                        value: prefix + refreshedSuggestion,
+                        selection: NSRange(location: prefix.utf16.count, length: 0),
+                        isEditable: true, isSecure: false)
+                case .collapsedToSelectedSuffix:
+                    let prefix = current.value
+                    current = ComputerUseTextSnapshot(targetID: "binding-refreshed", value: prefix + refreshedSuggestion,
+                        selection: NSRange(location: prefix.utf16.count, length: refreshedSuggestion.utf16.count),
+                        isEditable: true, isSecure: false)
+                case .unselectedPrefix:
+                    current = ComputerUseTextSnapshot(targetID: current.targetID,
+                        value: "Z" + String(current.value.dropFirst()),
+                        selection: current.selection, isEditable: true, isSecure: false)
+                case .caret:
+                    current = ComputerUseTextSnapshot(targetID: current.targetID, value: current.value,
+                        selection: NSRange(location: current.selection.location + 1,
+                            length: max(0, current.value.utf16.count - current.selection.location - 1)),
+                        isEditable: true, isSecure: false)
+                case .unselectedTail:
+                    current = ComputerUseTextSnapshot(targetID: current.targetID, value: current.value,
+                        selection: NSRange(location: current.selection.location,
+                            length: max(0, current.selection.length - 1)), isEditable: true, isSecure: false)
+                case .physicalTarget:
+                    physicalTarget = AXUIElementCreateSystemWide()
+                }
+            }
+            return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+        })
+        let action = ComputerUsePredictedAction.typeText("AB")
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        var caught: ComputerUseTextEditError?
+        do {
+            try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+        } catch let error as ComputerUseTextEditError {
+            caught = error
+        }
+        XCTAssertTrue(changed, "The scenario must change the autocomplete snapshot at the intended boundary")
+        return (caught, strokes, setterCalls, effects, current.value, current.selection)
+    }
+
+    func testVisualTypingRetriesTransientNilPostStrokeAndPreKeySnapshots() async throws {
+        for phase in [NativeVisualSnapshotRetryPhase.postStroke, .preKey] {
+            let result = try await runNativeVisualSnapshotRetryProbe(phase: phase)
+            XCTAssertNil(result.error, "A temporarily unavailable \(phase) snapshot should recover within the bounded wait")
+            XCTAssertEqual(result.strokes, ["A", "B"])
+            XCTAssertEqual(result.strokes.joined(), "AB")
+            XCTAssertEqual(result.effects, 1)
+            XCTAssertEqual(result.finalValue, "AB")
+        }
+    }
+
+    func testVisualTypingSettlesReadablePreStrokeSnapshotWithoutReposting() async throws {
+        let delayed = try await runPostStrokeReadbackLagProbe(phase: .delayed)
+        XCTAssertNil(delayed.error)
+        XCTAssertEqual(delayed.strokes, ["A", "B"], "Each grapheme must be sent once after its prior readback settles")
+        XCTAssertEqual(delayed.value, "AB")
+        XCTAssertEqual(delayed.selection, NSRange(location: 2, length: 0))
+        XCTAssertEqual(delayed.effects, 1)
+
+        let stuck = try await runPostStrokeReadbackLagProbe(phase: .stuck)
+        XCTAssertEqual(stuck.error, .deliveryUncertain)
+        XCTAssertEqual(stuck.strokes, ["A"], "A permanently stale readback must stop before another key")
+        XCTAssertEqual(stuck.value, "A", "The simulated input may have landed even when readback did not settle")
+        XCTAssertEqual(stuck.effects, 1)
+        XCTAssertLessThan(stuck.elapsed, 1.5, "Post-stroke settling must remain bounded")
+
+        for phase in [PostStrokeReadbackPhase.wrongText, .targetDrift, .gateCloses, .taskCancelled] {
+            let result = try await runPostStrokeReadbackLagProbe(phase: phase)
+            XCTAssertEqual(result.error, (phase == .gateCloses || phase == .taskCancelled) ? .interrupted : .deliveryUncertain)
+            XCTAssertEqual(result.strokes, ["A"], "A changed readback or closed gate must never trigger another key")
+            XCTAssertEqual(result.effects, 1)
+        }
+    }
+
+    private enum PostStrokeReadbackPhase: Equatable { case delayed, stuck, wrongText, targetDrift, gateCloses, taskCancelled }
+
+    private func runPostStrokeReadbackLagProbe(phase: PostStrokeReadbackPhase) async throws
+        -> (error: ComputerUseTextEditError?, strokes: [String], value: String,
+            selection: NSRange, effects: Int, elapsed: TimeInterval) {
+        let started = ProcessInfo.processInfo.systemUptime
+        let initial = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        var current = initial
+        var visible = initial
+        var physicalTarget = AXUIElementCreateApplication(42_408)
+        var scopeValid = true
+        var strokes: [String] = []
+        var effects = 0
+        var closedGate = false
+        var runTask: Task<ComputerUseTextEditError?, Never>?
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in XCTFail("Visual typing must not use AX setters"); return nil },
+            postUnicode: { text, expected in
+                guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                strokes.append(text)
+                let value = expected.value.replacingCharacters(in: range, with: text)
+                current = ComputerUseTextSnapshot(targetID: "binding-0", value: value,
+                    selection: NSRange(location: expected.selection.location + text.utf16.count, length: 0),
+                    isEditable: true, isSecure: false)
+                switch phase {
+                case .delayed:
+                    Task {
+                        try? await Task.sleep(for: .milliseconds(75))
+                        visible = current
+                    }
+                case .stuck:
+                    break
+                case .wrongText:
+                    visible = ComputerUseTextSnapshot(targetID: "binding-0", value: "X",
+                        selection: NSRange(location: 1, length: 0), isEditable: true, isSecure: false)
+                case .targetDrift:
+                    physicalTarget = AXUIElementCreateSystemWide()
+                case .gateCloses, .taskCancelled:
+                    break
+                }
+            }, mayAct: { scopeValid })
+        let tools = desktopTestTools(textEditor: editor, mayAct: { scopeValid }, mcpFocusedTextSnapshotProvider: {
+            if phase == .gateCloses, !strokes.isEmpty, !closedGate {
+                closedGate = true
+                scopeValid = false
+            }
+            if phase == .taskCancelled, !strokes.isEmpty, !closedGate {
+                closedGate = true
+                runTask?.cancel()
+            }
+            return try self.syntheticMCPFocusedTextSnapshot(visible, physicalElement: physicalTarget)
+        })
+        let action = ComputerUsePredictedAction.typeText("AB")
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        runTask = Task {
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                return nil
+            } catch let error as ComputerUseTextEditError {
+                return error
+            } catch {
+                return .deliveryUncertain
+            }
+        }
+        let caught = await runTask?.value
+        return (caught, strokes, current.value, current.selection, effects,
+            ProcessInfo.processInfo.systemUptime - started)
+    }
+
+    func testVisualTypingDoesNotRetryPermanentOrChangedSnapshot() async throws {
+        for phase in [NativeVisualSnapshotRetryPhase.permanentNil, .changedPhysicalTarget, .changedValue] {
+            let result = try await runNativeVisualSnapshotRetryProbe(phase: phase)
+            XCTAssertEqual(result.error, .deliveryUncertain,
+                "Only nil may be retried; a changed or permanently missing target must stop")
+            XCTAssertEqual(result.strokes, ["A"], "No second grapheme may follow an unresolved or changed snapshot")
+            XCTAssertEqual(result.effects, 1)
+            if phase == .permanentNil {
+                XCTAssertLessThan(result.elapsed, 1.5, "A permanently unavailable snapshot must stop within the retry bound")
+            }
+        }
+    }
+
+    func testVisualTypingStopsWhenScopeClosesDuringNilSnapshotRetry() async throws {
+        let result = try await runNativeVisualSnapshotRetryProbe(phase: .gateCloses)
+        XCTAssertEqual(result.error, .interrupted)
+        XCTAssertEqual(result.strokes, ["A"])
+        XCTAssertEqual(result.effects, 1)
+    }
+
+    func testNativeVisualTypingRetriesTransientNilAtFinalPrePostCheckWithoutDuplicateStroke() async throws {
+        for nilCall in [3, 6] { // final pre-post check before the first key, then after one completed grapheme
+            let started = ProcessInfo.processInfo.systemUptime
+            let payload = Array("AB").map(String.init)
+            let target = NativeVisualTypingTextTarget(.init(targetID: "binding-0", value: "",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
+            let physicalTarget = AXUIElementCreateApplication(42_405)
+            let posted = NativeTextPostedEvents()
+            var appliedKeyDowns = 0
+            var snapshotCalls = 0
+            var nilCalls: [Int] = []
+            var downsAtNil: [Int] = []
+            let injector = InputInjector(eventPoster: { posted.record($0) })
+            let tools = desktopTestTools(injector: injector, nativeTextTarget: target,
+                mcpFocusedTextSnapshotProvider: {
+                    let downs = posted.counts[0]
+                    while appliedKeyDowns < downs {
+                        target.apply(payload[appliedKeyDowns])
+                        appliedKeyDowns += 1
+                    }
+                    snapshotCalls += 1
+                    if snapshotCalls == nilCall {
+                        nilCalls.append(snapshotCalls)
+                        downsAtNil.append(posted.counts[0])
+                        return nil
+                    }
+                    return try self.syntheticMCPFocusedTextSnapshot(target.current, physicalElement: physicalTarget)
+                })
+            let action = ComputerUsePredictedAction.typeText("AB")
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+            var effects = 0
+            var caught: ComputerUseTextEditError?
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+            } catch let error as ComputerUseTextEditError { caught = error }
+
+            XCTAssertNil(caught, "One transient nil at final pre-post call \(nilCall) should recover")
+            XCTAssertEqual(nilCalls, [nilCall])
+            XCTAssertEqual(downsAtNil, [nilCall == 3 ? 0 : 1], "Nil must occur before this grapheme's key-down")
+            XCTAssertGreaterThan(snapshotCalls, nilCall, "Recovery must obtain a fresh focused snapshot")
+            XCTAssertLessThanOrEqual(snapshotCalls, 20, "Snapshot retries must stay bounded")
+            XCTAssertEqual(posted.counts, [2, 2], "Each grapheme must be posted exactly once with one key-up")
+            XCTAssertEqual(appliedKeyDowns, 2)
+            XCTAssertEqual(target.current.value, "AB")
+            XCTAssertEqual(target.setterCalls, 0, "The real visual path must not use AX setters")
+            XCTAssertEqual(effects, 1)
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+        }
+    }
+
+    func testNativeVisualTypingRejectsPermanentNilAndChangedFinalSnapshotWithoutReplay() async throws {
+        for phase in [NativeFinalPrePostFailure.permanentNilFirst,
+                      .changedSelectionAfterSecondNil, .changedPhysicalTargetAfterSecondNil] {
+            let result = try await runNativeFinalPrePostFailure(phase: phase)
+            XCTAssertNotNil(result.error, "An unresolved or changed final state must fail: \(phase)")
+            XCTAssertEqual(result.setterCalls, 0)
+            XCTAssertEqual(result.effects, 1)
+            if phase == .permanentNilFirst {
+                XCTAssertEqual(result.posted, [0, 0])
+                XCTAssertEqual(result.value, "")
+                XCTAssertLessThan(result.elapsed, 1.5, "Permanent absence must remain bounded")
+            } else {
+                XCTAssertEqual(result.posted, [1, 1], "A second grapheme must not follow a changed target")
+                XCTAssertEqual(result.value, "A")
+            }
+        }
+    }
+
+    func testNativeVisualTypingStopsOnGateLossAndNeverRetriesPostedStroke() async throws {
+        for phase in [NativeFinalPrePostFailure.gateClosesDuringRetry, .closesAfterKeyDown] {
+            let result = try await runNativeFinalPrePostFailure(phase: phase)
+            XCTAssertNotNil(result.error)
+            XCTAssertEqual(result.effects, 1)
+            XCTAssertEqual(result.setterCalls, 0)
+            if phase == .gateClosesDuringRetry {
+                XCTAssertEqual(result.nilCalls, [3])
+                XCTAssertEqual(result.posted, [0, 0], "Scope loss before key-down must send nothing")
+                XCTAssertEqual(result.value, "")
+            } else {
+                XCTAssertEqual(result.posted, [1, 1], "Key-up must release the one possibly delivered stroke")
+                XCTAssertEqual(result.nilCalls, [])
+                XCTAssertEqual(result.snapshotCalls, 3, "A post-down false result must not retry the grapheme")
+            }
+        }
+    }
+
+    private enum NativeFinalPrePostFailure: Equatable {
+        case permanentNilFirst, changedSelectionAfterSecondNil, changedPhysicalTargetAfterSecondNil
+        case gateClosesDuringRetry, closesAfterKeyDown
+    }
+
+    private func runNativeFinalPrePostFailure(phase: NativeFinalPrePostFailure) async throws
+        -> (error: Error?, posted: [Int], value: String, setterCalls: Int, effects: Int,
+            nilCalls: [Int], snapshotCalls: Int, elapsed: TimeInterval) {
+        let started = ProcessInfo.processInfo.systemUptime
+        let target = NativeVisualTypingTextTarget(.init(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
+        var physicalTarget = AXUIElementCreateApplication(42_406)
+        let gate = NativeVisualTypingGate()
+        let posted = NativeTextPostedEvents()
+        var appliedKeyDowns = 0
+        var snapshotCalls = 0
+        var nilCalls: [Int] = []
+        let payload = ["A", "B"]
+        let injector = InputInjector(eventPoster: { event in
+            posted.record(event)
+            if phase == .closesAfterKeyDown && event.type == .keyDown { gate.close() }
+        })
+        let tools = desktopTestTools(injector: injector, mayAct: { gate.isOpen }, nativeTextTarget: target,
+            mcpFocusedTextSnapshotProvider: {
+                let downs = posted.counts[0]
+                while appliedKeyDowns < downs {
+                    target.apply(payload[appliedKeyDowns])
+                    appliedKeyDowns += 1
+                }
+                snapshotCalls += 1
+                if phase == .permanentNilFirst && snapshotCalls >= 3 {
+                    nilCalls.append(snapshotCalls)
+                    return nil
+                }
+                let nilCall: Int?
+                switch phase {
+                case .changedSelectionAfterSecondNil, .changedPhysicalTargetAfterSecondNil: nilCall = 6
+                case .gateClosesDuringRetry: nilCall = 3
+                case .permanentNilFirst, .closesAfterKeyDown: nilCall = nil
+                }
+                if let nilCall, snapshotCalls == nilCall {
+                    nilCalls.append(snapshotCalls)
+                    if phase == .gateClosesDuringRetry { gate.close() }
+                    if phase == .changedSelectionAfterSecondNil {
+                        target.replaceCurrent(.init(targetID: target.current.targetID, value: target.current.value,
+                            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))
+                    }
+                    if phase == .changedPhysicalTargetAfterSecondNil {
+                        physicalTarget = AXUIElementCreateSystemWide()
+                    }
+                    return nil
+                }
+                return try self.syntheticMCPFocusedTextSnapshot(target.current, physicalElement: physicalTarget)
+            })
+        let action = ComputerUsePredictedAction.typeText("AB")
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        var effects = 0
+        var caught: Error?
+        do {
+            try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+        } catch { caught = error }
+        return (caught, posted.counts, target.current.value, target.setterCalls, effects,
+            nilCalls, snapshotCalls, ProcessInfo.processInfo.systemUptime - started)
+    }
+
+    private enum NativeVisualSnapshotRetryPhase: Equatable {
+        case postStroke, preKey, permanentNil, changedPhysicalTarget, changedValue, gateCloses
+    }
+
+    private func runNativeVisualSnapshotRetryProbe(phase: NativeVisualSnapshotRetryPhase) async throws
+        -> (error: ComputerUseTextEditError?, strokes: [String], effects: Int, finalValue: String, elapsed: TimeInterval) {
+        let started = Date()
+        var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+        var physicalTarget = AXUIElementCreateApplication(42_403)
+        var scopeValid = true
+        var strokes: [String] = []
+        var effects = 0
+        var readsAfterStroke = 0
+        var nilWasInjected = false
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in XCTFail("Visual typing must not use AX setters"); return nil },
+            postUnicode: { text, expected in
+                XCTAssertEqual(text.count, 1)
+                guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                    throw ComputerUseTextEditError.preconditionChanged
+                }
+                strokes.append(text)
+                readsAfterStroke = 0
+                let value = expected.value.replacingCharacters(in: range, with: text)
+                current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)", value: value,
+                    selection: NSRange(location: expected.selection.location + text.utf16.count, length: 0),
+                    isEditable: true, isSecure: false)
+            }, mayAct: { scopeValid }, replaceValue: { _, _ in XCTFail("Visual typing must not use AX setters"); return nil })
+        let tools = desktopTestTools(textEditor: editor, mayAct: { scopeValid },
+            mcpFocusedTextSnapshotProvider: {
+                guard !strokes.isEmpty else {
+                    return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+                }
+                guard strokes.count == 1 else {
+                    return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+                }
+                readsAfterStroke += 1
+                switch phase {
+                case .postStroke where readsAfterStroke == 1:
+                    nilWasInjected = true
+                    return nil
+                case .preKey where readsAfterStroke == 2:
+                    nilWasInjected = true
+                    return nil
+                case .permanentNil:
+                    nilWasInjected = true
+                    return nil
+                case .changedPhysicalTarget where readsAfterStroke == 2:
+                    nilWasInjected = true
+                    return nil
+                case .changedPhysicalTarget where nilWasInjected:
+                    physicalTarget = AXUIElementCreateSystemWide()
+                case .changedValue where readsAfterStroke == 2:
+                    nilWasInjected = true
+                    return nil
+                case .changedValue where nilWasInjected:
+                    current = ComputerUseTextSnapshot(targetID: current.targetID, value: current.value + "!",
+                        selection: NSRange(location: current.value.utf16.count + 1, length: 0),
+                        isEditable: true, isSecure: false)
+                case .gateCloses where readsAfterStroke == 2:
+                    nilWasInjected = true
+                    scopeValid = false
+                    return nil
+                default:
+                    break
+                }
+                return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalTarget)
+            })
+        let action = ComputerUsePredictedAction.typeText("AB")
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+        var caught: ComputerUseTextEditError?
+        do {
+            try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+        } catch let error as ComputerUseTextEditError {
+            caught = error
+        }
+        XCTAssertTrue(nilWasInjected, "The chosen scenario must reach the snapshot retry boundary")
+        return (caught, strokes, effects, current.value, Date().timeIntervalSince(started))
+    }
+
+    func testVisualNativeTypeTextRejectsC0AndDELWithoutDispatch() async throws {
+        let invalidPayloads = ["\u{0000}", "\u{007F}", "\t", "\n", "\r", "\r\n", "prefix\u{0000}suffix"]
+        for payload in invalidPayloads {
+            let initial = ComputerUseTextSnapshot(targetID: "field", value: "", selection: .init(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            var current = initial
+            var setterCalls = 0
+            var postedStrokes = 0
+            var effects = 0
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in setterCalls += 1; return nil },
+                postUnicode: { text, expected in
+                    postedStrokes += 1
+                    guard current == expected, let range = Range(expected.selection, in: expected.value) else {
+                        throw ComputerUseTextEditError.preconditionChanged
+                    }
+                    let value = expected.value.replacingCharacters(in: range, with: text)
+                    current = ComputerUseTextSnapshot(targetID: expected.targetID, value: value,
+                        selection: NSRange(location: expected.selection.location + text.utf16.count, length: 0),
+                        isEditable: true, isSecure: false)
+                }, mayAct: { true }, replaceValue: { _, _ in setterCalls += 1; return nil })
+            let tools = desktopTestTools(textEditor: editor)
+            let action = ComputerUsePredictedAction.typeText(payload)
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                XCTFail("Control payload (scalar count \(payload.unicodeScalars.count)) must be rejected")
+            } catch let error as ComputerUseTextEditError {
+                XCTAssertEqual(error, .valueNotRepresentable)
+            } catch {
+                XCTFail("Unexpected rejection error: \(error)")
+            }
+
+            XCTAssertEqual(effects, 0, "The invalid complete payload must fail before the durable effect boundary")
+            XCTAssertEqual(postedStrokes, 0, "Rejected control input must not dispatch a Unicode stroke")
+            XCTAssertEqual(setterCalls, 0, "Rejected control input must not invoke an AX setter")
+            XCTAssertEqual(current, initial)
+        }
+    }
+
+    func testVisualNativeTypeTextStopsAfterPhysicalFocusOrScopeChanges() async throws {
+        for change in ["focused-element", "application", "window", "scope"] {
+            var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "helper",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+            var physicalElement = AXUIElementCreateApplication(42_401)
+            var windowHash: CFHashCode = 42
+            var bundleIdentifier = "com.apple.Safari"
+            var scopeValid = true
+            var strokes: [String] = []
+            var effects = 0
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in XCTFail("No AX setter"); return nil },
+                postUnicode: { text, expected in
+                    XCTAssertEqual(text.count, 1)
+                    guard current == expected else { throw ComputerUseTextEditError.preconditionChanged }
+                    strokes.append(text)
+                    current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)", value: text,
+                        selection: NSRange(location: text.utf16.count, length: 0), isEditable: true, isSecure: false)
+                    switch change {
+                    case "focused-element": physicalElement = AXUIElementCreateSystemWide()
+                    case "application": bundleIdentifier = "com.apple.TextEdit"
+                    case "window": windowHash += 1
+                    case "scope": scopeValid = false
+                    default: XCTFail("Unexpected test case")
+                    }
+                }, mayAct: { scopeValid }, replaceValue: { _, _ in XCTFail("No AX setter"); return nil })
+            let tools = desktopTestTools(textEditor: editor, mayAct: { scopeValid },
+                mcpFocusedTextSnapshotProvider: {
+                    try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalElement,
+                        windowHash: windowHash, bundleIdentifier: bundleIdentifier)
+                })
+            let action = ComputerUsePredictedAction.typeText("AB")
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+
+            do {
+                try await tools.performNativeAction(action, fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                XCTFail("A changed physical target or scope must stop the remaining text")
+            } catch { }
+
+            XCTAssertEqual(effects, 1, change)
+            XCTAssertEqual(strokes, ["A"], "No second grapheme may target a replacement field or revoked scope")
+            XCTAssertEqual(current.value, "A", "The first dispatched grapheme is observed; no later grapheme is replayed")
+        }
+    }
+
     func testScopedDesktopWaitsForDelayedFocusedEditorRetirementBeforeReplanning() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2497,6 +3822,187 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(checks, 1)
     }
 
+    func testContextualOutcomeCheckReceivesCurrentProposalEvidenceAndCanRejectCompletion() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let goal = "Create an unsent draft and verify it remains open."
+        let initialText = ComputerUseTextSnapshot(targetID: "subject-field", value: "Draft 🧪 text",
+            selection: NSRange(location: 6, length: 2), isEditable: true, isSecure: false)
+        let target = NativeVisualTypingTextTarget(initialText)
+        let editor = ComputerUseTextEditor(read: { target.current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in nil }, postUnicode: { _, _ in }, mayAct: { true })
+        let expectedTextState = try XCTUnwrap(ComputerUseNativeTextState(snapshot: initialText))
+        var proposalInput: ComputerUseFaraModel.Input?
+        var proposalCount = 0, checks = 0
+        let tools = desktopTestTools(textEditor: editor, nativeTextTarget: target)
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposalCount += 1
+            proposalInput = input
+            if proposalCount == 1 { return .init(response: "Draft created", action: .reportCompletion("Draft is ready.")) }
+            return .init(response: "Need review", decision: .handoff("Please inspect the current draft."))
+        }, surfaceScopeCheck: { _ in }, outcomeCheck: { input, answer in
+            checks += 1
+            let proposed = try XCTUnwrap(proposalInput)
+            XCTAssertEqual(input.goal, goal)
+            XCTAssertEqual(input.goal, proposed.goal)
+            XCTAssertEqual(input.screenshotPNG, proposed.screenshotPNG)
+            XCTAssertEqual(input.focusedEditor, proposed.focusedEditor)
+            XCTAssertEqual(input.focusedTextState, expectedTextState)
+            XCTAssertEqual(input.focusedTextState, proposed.focusedTextState)
+            XCTAssertEqual(input.nativeControls, proposed.nativeControls)
+            XCTAssertEqual(answer, "Draft is ready.")
+            return false
+        })
+        let result = try await executor.execute(taskID: "contextual-outcome-reject", prompt: goal,
+            trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Please inspect the current draft."))
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(proposalCount, 2)
+        XCTAssertEqual(target.setterCalls, 0)
+    }
+
+    func testContextualOutcomeCheckAlsoGuardsCompletionStatus() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let goal = "Open the requested page and verify the result."
+        var proposalCount = 0, checks = 0
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposalCount += 1
+            if proposalCount == 1 { return .init(response: "Complete", decision: .completionStatus(success: true)) }
+            return .init(response: "Need review", decision: .handoff("Please verify the current page."))
+        }, surfaceScopeCheck: { _ in }, outcomeCheck: { input, answer in
+            checks += 1
+            XCTAssertEqual(input.goal, goal)
+            XCTAssertEqual(answer, "The model reported completion.")
+            return false
+        })
+        let result = try await executor.execute(taskID: "contextual-status-reject", prompt: goal,
+            trustedUserPrompt: goal, tools: desktopTestTools(), progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Please verify the current page."))
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(proposalCount, 2)
+    }
+
+    func testContextualOutcomeRejectionCannotBeOverriddenByLegacyCompletionCheck() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, outcomeChecks = 0, legacyChecks = 0
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals == 1 { return .init(response: "Candidate", action: .reportCompletion("Done")) }
+            return .init(response: "Need review", decision: .handoff("Please inspect the page."))
+        }, completeCheck: { _ in
+            legacyChecks += 1
+            return true
+        }, outcomeCheck: { _, _ in
+            outcomeChecks += 1
+            return false
+        })
+        let result = try await executor.execute(taskID: "contextual-outcome-no-bypass", prompt: "Finish",
+            trustedUserPrompt: "Finish", tools: desktopTestTools(), progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Please inspect the page."))
+        XCTAssertEqual(outcomeChecks, 1)
+        XCTAssertEqual(legacyChecks, 0, "A rejected contextual outcome cannot be bypassed by the legacy callback")
+        XCTAssertEqual(proposals, 2)
+    }
+
+    func testContextualOutcomeAcceptanceRevalidatesScreenshotAfterReview() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+        var screenChanged = false, proposals = 0, checks = 0
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            screenProvider: {
+                .init(image: CIImage(color: screenChanged ? .blue : .black).cropped(to: display),
+                    displayBounds: display, frontmostWindowBounds: window)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "window" }, frontmostApplicationProvider: { "Fixture" })
+        let goal = "Verify the requested page result."
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            if proposals == 1 { return .init(response: "Complete", action: .reportCompletion("Verified.")) }
+            return .init(response: "Need review", decision: .handoff("Please inspect the refreshed page."))
+        }, surfaceScopeCheck: { _ in }, outcomeCheck: { _, _ in
+            checks += 1
+            screenChanged = true
+            return true
+        })
+        let result = try await executor.execute(taskID: "contextual-screen-revalidation", prompt: goal,
+            trustedUserPrompt: goal, tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Please inspect the refreshed page."))
+        XCTAssertEqual(checks, 1)
+        XCTAssertEqual(proposals, 2)
+    }
+
+    func testContextualOutcomeCancellationPropagatesWithoutCompleting() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let reviewStarted = expectation(description: "The contextual review has started")
+        var checks = 0
+        var run: Task<ComputerUseExecutionResult, Error>?
+        defer { run?.cancel() }
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            .init(response: "Complete", action: .reportCompletion("Verified."))
+        }, outcomeCheck: { _, _ in
+            checks += 1
+            reviewStarted.fulfill()
+            try await Task.sleep(for: .seconds(30))
+            return true
+        })
+        run = Task { try await executor.execute(taskID: "contextual-outcome-cancel", prompt: "Finish",
+            trustedUserPrompt: "Finish", tools: desktopTestTools(), progress: { _ in }) }
+        await fulfillment(of: [reviewStarted], timeout: 2)
+        run?.cancel()
+        do {
+            let result = try await run?.value
+            XCTFail("Cancelled outcome review must not complete: \(result)")
+        } catch is CancellationError {
+            XCTAssertEqual(checks, 1)
+        }
+    }
+
+    func testContextualOutcomeRuntimeErrorsStayResumableForBothCompletionForms() async throws {
+        let goal = "Create the requested unsent draft and verify it is still open."
+        for useCompletionStatus in [false, true] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var reviewFails = true
+            var proposals = 0, reviews = 0, effects = 0
+            let tools = desktopTestTools(perform: { _ in effects += 1 })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+                proposals += 1
+                XCTAssertEqual(input.goal, goal)
+                XCTAssertEqual(input.history.count, min(proposals - 1, 3), "Each retry or Resume must build a new observation with retained progress")
+                if useCompletionStatus {
+                    return .init(response: "Candidate", decision: .completionStatus(success: true))
+                }
+                return .init(response: "Candidate", action: .reportCompletion("Draft appears ready."))
+            }, outcomeCheck: { input, _ in
+                reviews += 1
+                XCTAssertEqual(input.goal, goal)
+                if reviewFails { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                return true
+            })
+
+            let first = try await executor.execute(taskID: "outcome-error-\(useCompletionStatus)", prompt: goal,
+                trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(first, .userInterventionRequired("I couldn't verify the next desktop action. Complete this step, then choose Resume."))
+            XCTAssertEqual(proposals, 3, "Review errors should use the existing bounded completion retries")
+            XCTAssertEqual(reviews, 3)
+            XCTAssertEqual(effects, 0)
+
+            reviewFails = false
+            let resumed = try await executor.execute(taskID: "outcome-error-\(useCompletionStatus)", prompt: goal,
+                trustedUserPrompt: goal, tools: tools, progress: { _ in })
+            XCTAssertEqual(resumed, .completed(useCompletionStatus ? "The model reported completion." : "Draft appears ready."))
+            XCTAssertEqual(proposals, 4)
+            XCTAssertEqual(reviews, 4)
+            XCTAssertEqual(effects, 0)
+        }
+    }
+
     func testFaraDesktopRequestAdvertisesOnlyImplementedNativeCapabilities() throws {
         let image = try ComputerUseDesktopImage(observation: .init(
             image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
@@ -2586,15 +4092,133 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         textEditor: ComputerUseTextEditor? = nil,
         injector: InputInjector = InputInjector(), mayAct: @escaping () -> Bool = { true },
         window: @escaping () -> CGRect = { CGRect(x: 0, y: 0, width: 640, height: 400) },
-        perform: ((ComputerUsePredictedAction) throws -> Void)? = nil) -> ComputerUseHostTools {
+        perform: ((ComputerUsePredictedAction) throws -> Void)? = nil,
+        nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
+        mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)? = nil) -> ComputerUseHostTools {
         ComputerUseHostTools(injector: injector, mayAct: mayAct,
             approvalTargetProvider: approvalTarget ?? { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: focus()) },
-            actionPerformer: perform, textEditor: textEditor,
+            actionPerformer: perform, textEditor: textEditor, nativeTextTarget: nativeTextTarget,
             screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
                 displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: window()) },
             transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            mcpFocusedTextSnapshotProvider: mcpFocusedTextSnapshotProvider,
             authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
             planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })
+    }
+
+    private func syntheticMCPFocusedTextSnapshot(_ text: ComputerUseTextSnapshot,
+        physicalElement: AXUIElement, windowHash: CFHashCode = 42,
+        bundleIdentifier: String = "com.apple.Safari", role: String = "AXTextArea",
+        documentIdentity: String = "fixture-document", isWebContent: Bool = false) throws -> ComputerUseMCPFocusedTextSnapshot {
+        let processIdentifier: pid_t = 42_401
+        let codeIdentity = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+            bundleIdentifier: bundleIdentifier, canonicalBundlePath: "/Applications/\(bundleIdentifier).app",
+            canonicalExecutablePath: "/Applications/\(bundleIdentifier).app/Contents/MacOS/\(bundleIdentifier)",
+            designatedRequirement: "fixture", teamIdentifier: nil, platformIdentifier: nil)
+        let identity = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: bundleIdentifier,
+            processIdentifier: processIdentifier, launchGeneration: 1, codeIdentity: codeIdentity))
+        let application = ComputerUseFrontmostApplicationSnapshot(localizedName: "Safari",
+            identity: identity, identityIsAuthoritative: true)
+        let bounds = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: processIdentifier,
+            accessibilityWindowHash: windowHash, bounds: bounds)
+        return ComputerUseMCPFocusedTextSnapshot(application: application, window: window, text: text,
+            frame: CGRect(x: 20, y: 20, width: 300, height: 40), role: role,
+            focusedElement: physicalElement, documentIdentity: documentIdentity, isWebContent: isWebContent)
+    }
+
+    func testDesktopScreenConsentRecognitionFailureReturnsRecoverableHandoffBeforePlanning() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "unexpected", decision: .handoff("Unexpected proposal."))
+        }, screenConsentRecognizer: { _ in
+            throw NSError(domain: "TextRecognition.CRImageReaderError", code: 1)
+        })
+
+        let result = try await executor.execute(taskID: "consent-recognition-failure",
+            prompt: "Review the page.", trustedUserPrompt: "Review the page.",
+            tools: tools, progress: { _ in })
+
+        XCTAssertEqual(result, .userInterventionRequired(
+            "The current screen could not be verified for a system permission dialog. Computer use is paused before the next action. Review any dialog, then choose Resume. If this repeats, restart the app."))
+        XCTAssertEqual(executor.lastRevalidationDiagnostic, [
+            "blockedAt": "screen-consent-recognition",
+            "recognitionErrorDomain": "TextRecognition.CRImageReaderError",
+            "recognitionErrorCode": "1",
+        ])
+        XCTAssertEqual(proposals, 0)
+        XCTAssertEqual(effects, 0)
+    }
+
+    func testDesktopConsentRecognitionFailureDuringRevalidationStopsBeforeInput() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recognitionCalls = ConsentDiagnosticCounter()
+        var proposals = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 500)))
+        }, screenConsentRecognizer: { _ in
+            let call = recognitionCalls.incrementAndRead()
+            if call == 2 {
+                throw NSError(domain: "TextRecognition.CRImageReaderError", code: 1)
+            }
+            return false
+        })
+
+        let result = try await executor.execute(taskID: "consent-revalidation-failure",
+            prompt: "Review the page.", trustedUserPrompt: "Review the page.",
+            tools: tools, progress: { _ in })
+
+        XCTAssertEqual(result, .userInterventionRequired(
+            "The current screen could not be verified for a system permission dialog. Computer use is paused before the next action. Review any dialog, then choose Resume. If this repeats, restart the app."))
+        XCTAssertEqual(executor.lastRevalidationDiagnostic, [
+            "blockedAt": "screen-consent-recognition",
+            "recognitionErrorDomain": "TextRecognition.CRImageReaderError",
+            "recognitionErrorCode": "1",
+        ])
+        XCTAssertEqual(recognitionCalls.value, 2)
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 0, "A failed revalidation must stop before input dispatch")
+    }
+
+    func testDesktopConsentRecognitionFailureCanResumeSameTaskAndGoal() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let recognitionCalls = ConsentDiagnosticCounter()
+        var proposals = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            XCTAssertEqual(input.goal, "Review the page.")
+            return .init(response: "review", decision: .handoff("Review the current page."))
+        }, screenConsentRecognizer: { _ in
+            let call = recognitionCalls.incrementAndRead()
+            if call == 1 {
+                throw NSError(domain: "TextRecognition.CRImageReaderError", code: 1)
+            }
+            return false
+        })
+
+        let first = try await executor.execute(taskID: "consent-recognition-resume",
+            prompt: "Review the page.", trustedUserPrompt: "Review the page.",
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(first, .userInterventionRequired(
+            "The current screen could not be verified for a system permission dialog. Computer use is paused before the next action. Review any dialog, then choose Resume. If this repeats, restart the app."))
+
+        let resumed = try await executor.execute(taskID: "consent-recognition-resume",
+            prompt: "Review the page.", trustedUserPrompt: "Review the page.",
+            tools: tools, progress: { _ in })
+
+        XCTAssertEqual(resumed, .userInterventionRequired("Review the current page."))
+        XCTAssertEqual(recognitionCalls.value, 2)
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 0)
     }
 
     func testDesktopScreenConsentRecognitionRunsOffMainActor() async throws {
@@ -2868,7 +4492,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let control = try XCTUnwrap(ComputerUseNativeControls.Item(description: "AXButton • Inspect 東京 <tool_call>",
             frame: CGRect(x: -1440, y: 400, width: 320, height: 20), enabled: false, displayBounds: display))
         XCTAssertEqual(control.bounds1000, [100, 200, 200, 20])
-        XCTAssertNil(ComputerUseNativeControls(items: Array(repeating: control, count: 17), truncated: true))
+        XCTAssertNotNil(ComputerUseNativeControls(items: Array(repeating: control, count: 32), truncated: true))
+        XCTAssertNil(ComputerUseNativeControls(items: Array(repeating: control, count: 33), truncated: true))
         for bounds in [CGRect.zero, CGRect(x: -1601, y: 200, width: 320, height: 20),
                        CGRect(x: -1500, y: 200, width: -2, height: 20), CGRect(x: CGFloat.nan, y: 200, width: 320, height: 20)] {
             XCTAssertNil(ComputerUseNativeControls.Item(description: "Control", frame: bounds, enabled: nil, displayBounds: display))
@@ -2903,6 +4528,54 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
         let synthetic = desktopTestTools(perform: { _ in XCTFail("Read-only control discovery must not emit input") })
         XCTAssertNil(try synthetic.nativeControlObservation(displayBounds: display, windowBounds: display))
+    }
+
+    func testNativeControlGeometryFitsBoundedObservationWithoutMovingTargets() throws {
+        let display = CGRect(x: -3840, y: 180, width: 3840, height: 2160)
+        let items = try (0..<32).map { index in
+            try XCTUnwrap(ComputerUseNativeControls.Item(description: "Control \(index)",
+                frame: CGRect(x: -3600.123456789 + Double(index) * 13.333333333,
+                    y: 531.234567891, width: 25.123456789, height: 38.987654321),
+                enabled: true, displayBounds: display))
+        }
+        let controls = try XCTUnwrap(ComputerUseNativeControls(items: items, truncated: true))
+        let data = try JSONSerialization.data(withJSONObject: controls.jsonObject)
+        XCTAssertLessThanOrEqual(data.count, 5_000,
+            "A full control catalogue should not consume the visual model budget with decimal noise")
+        for item in items {
+            let center = try XCTUnwrap(item.jsonObject["center_1000"] as? [Double])
+            let bounds = try XCTUnwrap(item.jsonObject["bounds_1000"] as? [Double])
+            XCTAssertEqual(center.count, 2); XCTAssertEqual(bounds.count, 4)
+            for axis in 0..<2 {
+                XCTAssertGreaterThanOrEqual(center[axis], item.bounds1000[axis])
+                XCTAssertLessThan(center[axis], item.bounds1000[axis] + item.bounds1000[axis + 2])
+                XCTAssertGreaterThanOrEqual(center[axis], bounds[axis])
+                XCTAssertLessThan(center[axis], bounds[axis] + bounds[axis + 2])
+                XCTAssertEqual(center[axis], item.bounds1000[axis] + item.bounds1000[axis + 2] / 2,
+                    accuracy: 0.001)
+            }
+        }
+    }
+
+    func testNativeControlGeometryRetainsTinyAndDisplayEdgeTargets() throws {
+        let display = CGRect(x: -1600, y: 300, width: 1600, height: 1000)
+        for frame in [CGRect(x: -1599.999999, y: 300.000001, width: 0.000001, height: 0.000001),
+                      CGRect(x: -0.000002, y: 1299.999998, width: 0.000001, height: 0.000001),
+                      CGRect(x: -1600, y: 300, width: 1600, height: 1000)] {
+            let item = try XCTUnwrap(ComputerUseNativeControls.Item(description: "Target",
+                frame: frame, enabled: nil, displayBounds: display))
+            let decoded = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: JSONSerialization.data(withJSONObject: item.jsonObject)) as? [String: Any])
+            let center = try XCTUnwrap(decoded["center_1000"] as? [Double])
+            let bounds = try XCTUnwrap(decoded["bounds_1000"] as? [Double])
+            for axis in 0..<2 {
+                XCTAssertGreaterThan(bounds[axis + 2], 0)
+                XCTAssertGreaterThanOrEqual(center[axis], item.bounds1000[axis])
+                XCTAssertLessThan(center[axis], item.bounds1000[axis] + item.bounds1000[axis + 2])
+                XCTAssertGreaterThanOrEqual(center[axis], bounds[axis])
+                XCTAssertLessThan(center[axis], bounds[axis] + bounds[axis + 2])
+            }
+        }
     }
 
     func testNativeTextStateBoundsUnicodeAndRejectsInvalidOrProtectedSnapshots() throws {
@@ -3152,20 +4825,31 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             selection: NSRange(location: 9, length: 0), isEditable: true, isSecure: false)
         let changed = ComputerUseTextSnapshot(targetID: "address-field", value: "fresh value",
             selection: NSRange(location: 11, length: 0), isEditable: true, isSecure: false)
-        var current = initial, setterPreconditions = 0, postedText = 0, proposals = 0
+        let physicalElement = AXUIElementCreateApplication(42_401)
+        var current = initial, preKeyChecks = 0, setterCalls = 0, postedText = 0, proposals = 0
         let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in
             XCTFail("Insert mode must not change the selection before typing")
             return false
         }, replaceSelectedText: { _, expected in
-            XCTAssertEqual(current, expected)
-            setterPreconditions += 1
-            current = changed // Simulate the target changing before its AX write.
-            throw ComputerUseTextEditError.preconditionChanged
+            setterCalls += 1
+            XCTFail("The visual typing route must not invoke the selected-text setter")
+            return nil
         }, postUnicode: { _, _ in
             postedText += 1
             XCTFail("A precondition rejection must not post Unicode input")
-        }, mayAct: { true })
-        let tools = desktopTestTools(textEditor: editor)
+        }, mayAct: { true }, replaceValue: { _, _ in
+            setterCalls += 1
+            XCTFail("The visual typing route must not invoke the whole-value setter")
+            return nil
+        }, validateContext: {
+            preKeyChecks += 1
+            if preKeyChecks == 2 {
+                current = changed // Simulate an intervening value/selection change at the pre-key boundary.
+            }
+        })
+        let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+            try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: physicalElement)
+        })
         let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
             proposals += 1
             XCTAssertEqual(input.goal, "Type the requested text")
@@ -3188,7 +4872,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             trustedUserPrompt: "Type the requested text", tools: tools, progress: { _ in })
         XCTAssertEqual(result, .userInterventionRequired("Review the current field."))
         XCTAssertEqual(proposals, 2)
-        XCTAssertEqual(setterPreconditions, 1)
+        XCTAssertEqual(preKeyChecks, 2)
+        XCTAssertEqual(setterCalls, 0)
         XCTAssertEqual(postedText, 0)
 
         let journals = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
@@ -3709,20 +5394,61 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let caret = try image(changing: CGRect(x: 510, y: 106, width: 1, height: 18))
         XCTAssertFalse(target.contains(field), "The browser control can be adjacent to its focused editor")
         XCTAssertTrue(target.insetBy(dx: -40, dy: -40).intersection(window).contains(field),
-            "The focused editor must remain inside the bounded local comparison context")
+            "This fixture starts with a contained focused editor")
         XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: target,
             unchangedFocusedField: field))
         let crossesContext = CGRect(x: 505, y: 100, width: 21, height: 30)
         XCTAssertTrue(crossesContext.contains(CGPoint(x: 510, y: 110)))
         XCTAssertFalse(target.insetBy(dx: -40, dy: -40).intersection(window).contains(crossesContext))
-        XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: target,
-            unchangedFocusedField: crossesContext), "The focused field itself must fit within the local context")
+        XCTAssertTrue(try before.matchesPointerPixels(of: caret, window: window, target: target,
+            unchangedFocusedField: crossesContext), "The editor may extend outside the local context when the only changed pixels are its proven caret")
         XCTAssertFalse(try before.matchesPointerPixels(of: caret, window: window, target: target),
             "An adjacent caret is not exempt without fresh focused-editor proof")
         let secondChange = try image(changing: CGRect(x: 510, y: 106, width: 1, height: 18),
             also: CGRect(x: 530, y: 110, width: 1, height: 1))
         XCTAssertFalse(try before.matchesPointerPixels(of: secondChange, window: window, target: target,
             unchangedFocusedField: field), "A second in-window change cannot ride along with the caret exception")
+    }
+
+    func testAdjacentLargeFocusedEditorCaretMayOverlapPointerContext() throws {
+        let display = CGRect(x: 0, y: 0, width: 1_200, height: 400)
+        let window = CGRect(x: 50, y: 40, width: 1_100, height: 320)
+        let target = CGRect(x: 546, y: 96, width: 80, height: 38)
+        let field = CGRect(x: 650, y: 100, width: 350, height: 36)
+        let context = target.insetBy(dx: -40, dy: -40).intersection(window)
+        XCTAssertTrue(context.intersects(field))
+        XCTAssertFalse(context.contains(field), "The recipient editor can extend well beyond a nearby pointer target's padded context")
+        func image(changes: [CGRect] = []) throws -> ComputerUseDesktopImage {
+            var result = CIImage(color: .white).cropped(to: display)
+            for change in changes {
+                let local = CGRect(x: change.minX, y: display.maxY - change.maxY,
+                    width: change.width, height: change.height)
+                result = CIImage(color: .blue).cropped(to: local).composited(over: result)
+            }
+            return try .init(observation: .init(image: result, displayBounds: display))
+        }
+
+        let before = try image()
+        let adjacentCaret = try image(changes: [CGRect(x: 652, y: 106, width: 1, height: 18)])
+        XCTAssertTrue(try before.matchesPointerPixels(of: adjacentCaret, window: window, target: target,
+            unchangedFocusedField: field), "A proven caret repaint in the adjacent overlapping editor should not invalidate an unchanged target context")
+
+        let changedTarget = try image(changes: [CGRect(x: 580, y: 110, width: 8, height: 12),
+            CGRect(x: 652, y: 106, width: 1, height: 18)])
+        XCTAssertFalse(try before.matchesPointerPixels(of: changedTarget, window: window, target: target,
+            unchangedFocusedField: field), "A target-context change cannot ride along with the caret exception")
+
+        let unrelatedField = CGRect(x: 250, y: 100, width: 100, height: 36)
+        XCTAssertFalse(context.intersects(unrelatedField))
+        let unrelatedCaretAndTargetChange = try image(changes: [CGRect(x: 252, y: 106, width: 1, height: 18),
+            CGRect(x: 580, y: 110, width: 8, height: 12)])
+        XCTAssertFalse(try before.matchesPointerPixels(of: unrelatedCaretAndTargetChange, window: window,
+            target: target, unchangedFocusedField: unrelatedField), "A nonintersecting editor cannot make changed target context acceptable")
+
+        let changedContextOutsideField = try image(changes: [CGRect(x: 610, y: 120, width: 2, height: 2),
+            CGRect(x: 652, y: 106, width: 1, height: 18)])
+        XCTAssertFalse(try before.matchesPointerPixels(of: changedContextOutsideField, window: window,
+            target: target, unchangedFocusedField: field), "Another change in the local context, outside the editor, cannot ride along with the caret")
     }
 
     func testFinalDispatchCaretEvidenceMatchesOnlyWhenItsPixelsAndSnapshotPermitIt() throws {
@@ -3760,6 +5486,85 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                     isEditable: true, isSecure: false), frame: field, image: base))
         XCTAssertFalse(before.matchesForFinalDispatch(sameLegacyFieldsDifferentEvidence),
             "Evidence-bearing fingerprints must compare the editor snapshot even when the legacy fields match")
+    }
+
+    func testFinalDispatchCaretScopePreservesCheckpointAndFieldWhileIgnoringWindowCorner() throws {
+        let action = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 50, y: 40, width: 500, height: 320)
+        let field = CGRect(x: 100, y: 100, width: 300, height: 30)
+        let checkpoint = CGPoint(x: field.midX, y: field.midY)
+        let scope = try XCTUnwrap(ComputerUseApprovalFingerprint.keyboardCaretComparisonScope(
+            focusedFrame: field, windowBounds: window, displayBounds: display, checkpoint: checkpoint,
+            sourcePixelWidth: 640, sourcePixelHeight: 400))
+        let checkpointBounds = CGRect(x: checkpoint.x - 48, y: checkpoint.y - 48, width: 96, height: 96)
+            .intersection(window)
+        XCTAssertTrue(scope.contains(field))
+        XCTAssertTrue(scope.contains(checkpointBounds))
+        XCTAssertTrue(window.contains(scope))
+
+        let base = try finalDispatchImage()
+        let cornerAndCaret = try finalDispatchImage(changes: [
+            (60, 50, 0, 0, 0, 255),
+            (130, 110, 0, 0, 0, 255), (130, 111, 0, 0, 0, 255), (130, 112, 0, 0, 0, 255),
+            (130, 113, 0, 0, 0, 255), (130, 114, 0, 0, 0, 255), (130, 115, 0, 0, 0, 255),
+            (130, 116, 0, 0, 0, 255), (130, 117, 0, 0, 0, 255), (130, 118, 0, 0, 0, 255),
+            (130, 119, 0, 0, 0, 255), (130, 120, 0, 0, 0, 255), (130, 121, 0, 0, 0, 255),
+        ])
+        let checkpointChange = try finalDispatchImage(changes: [
+            (230, 80, 160, 128, 128, 255),
+            (130, 110, 0, 0, 0, 255), (130, 111, 0, 0, 0, 255), (130, 112, 0, 0, 0, 255),
+            (130, 113, 0, 0, 0, 255), (130, 114, 0, 0, 0, 255), (130, 115, 0, 0, 0, 255),
+            (130, 116, 0, 0, 0, 255), (130, 117, 0, 0, 0, 255), (130, 118, 0, 0, 0, 255),
+            (130, 119, 0, 0, 0, 255), (130, 120, 0, 0, 0, 255), (130, 121, 0, 0, 0, 255),
+        ])
+        let signedApp = try finalDispatchApplicationIdentity()
+        let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: 7,
+            accessibilityWindowHash: 9, bounds: window)
+        let text = ComputerUseTextSnapshot(targetID: "field", value: "unchanged",
+            selection: NSRange(location: 9, length: 0), isEditable: true, isSecure: false)
+        func fingerprint(image: ComputerUseDesktopImage, scope: CGRect?, checkpointBounds: CGRect?) -> ComputerUseApprovalFingerprint {
+            let evidence = ComputerUseKeyboardCaretEvidence(applicationIdentity: signedApp, window: identity,
+                text: text, frame: field, image: image, comparisonScope: scope,
+                checkpointBounds: checkpointBounds)
+            return .init(action: action, applicationID: signedApp.bundleIdentifier,
+                accessibilityIdentity: "focused-field", visualDigest: image.png == base.png ? "before" : "after",
+                keyboardCaretEvidence: evidence)
+        }
+        let before = fingerprint(image: base, scope: scope, checkpointBounds: checkpointBounds)
+        XCTAssertTrue(before.matchesForFinalDispatch(fingerprint(image: cornerAndCaret,
+            scope: scope, checkpointBounds: checkpointBounds)),
+            "Caret repaint plus unrelated window-corner paint should pass within the host-computed scope")
+        XCTAssertFalse(before.matchesForFinalDispatch(fingerprint(image: checkpointChange,
+            scope: scope, checkpointBounds: checkpointBounds)),
+            "Changes inside the existing checkpoint neighborhood remain significant")
+        XCTAssertFalse(before.matchesForFinalDispatch(fingerprint(image: cornerAndCaret,
+            scope: scope.insetBy(dx: 1, dy: 1), checkpointBounds: checkpointBounds)),
+            "A scope that no longer exactly covers its required regions is invalid")
+        XCTAssertFalse(before.matchesForFinalDispatch(fingerprint(image: cornerAndCaret,
+            scope: nil, checkpointBounds: nil)), "A comparison cannot lose its retained scope")
+        let legacyBefore = fingerprint(image: base, scope: nil, checkpointBounds: nil)
+        XCTAssertFalse(legacyBefore.matchesForFinalDispatch(fingerprint(image: cornerAndCaret,
+            scope: nil, checkpointBounds: nil)),
+            "Legacy evidence without an explicit scope keeps strict whole-window comparison")
+    }
+
+    func testFinalDispatchCaretScopeUsesRawCaptureScaleAndNonzeroDisplayOrigin() throws {
+        let display = CGRect(x: -400, y: 100, width: 1728, height: 1117)
+        let window = CGRect(x: -180, y: 625, width: 640, height: 332)
+        let field = CGRect(x: -150, y: 700, width: 280, height: 32)
+        let checkpoint = CGPoint(x: -10, y: 716)
+        let scope = try XCTUnwrap(ComputerUseApprovalFingerprint.keyboardCaretComparisonScope(
+            focusedFrame: field, windowBounds: window, displayBounds: display, checkpoint: checkpoint,
+            sourcePixelWidth: 3456, sourcePixelHeight: 2234))
+        let rawCrop = CGRect(x: checkpoint.x - 24, y: checkpoint.y - 24, width: 48, height: 48)
+            .intersection(window)
+        XCTAssertTrue(scope.contains(field))
+        XCTAssertTrue(scope.contains(rawCrop), "A 48 raw-pixel radius at 2x capture scale maps to 24 logical points")
+        XCTAssertTrue(window.contains(scope))
+        XCTAssertNil(ComputerUseApprovalFingerprint.keyboardCaretComparisonScope(
+            focusedFrame: field, windowBounds: window, displayBounds: display, checkpoint: .init(x: 900, y: 900),
+            sourcePixelWidth: 3456, sourcePixelHeight: 2234), "An out-of-window checkpoint cannot authorize a scope")
     }
 
     func testFinalDispatchCaretComparisonAllowsOnlyOneLevelRGBNoiseOutsideTheCaret() throws {
@@ -4875,6 +6680,46 @@ private final class NativeTextPostedEvents: @unchecked Sendable {
             if event.type == .keyUp { up += 1 }
         }
     }
+}
+
+@MainActor
+private final class NativeVisualTypingTextTarget: ComputerUseNativeTextTarget {
+    private(set) var current: ComputerUseTextSnapshot
+    private(set) var setterCalls = 0
+
+    init(_ initial: ComputerUseTextSnapshot) { current = initial }
+    func fields() -> [ComputerUseTextField] { [] }
+    func snapshot() -> ComputerUseTextSnapshot? { current }
+    func snapshot(targetID: String) -> ComputerUseTextSnapshot? {
+        current.targetID == targetID ? current : nil
+    }
+    func focus(expected: ComputerUseTextSnapshot) throws -> Bool { false }
+    func select(_ range: NSRange, expected: ComputerUseTextSnapshot) throws -> Bool { false }
+    func replaceSelectedText(_ text: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+        setterCalls += 1
+        return nil
+    }
+    func replaceWebValue(_ value: String, expected: ComputerUseTextSnapshot) throws -> Bool? {
+        setterCalls += 1
+        return nil
+    }
+
+    func replaceCurrent(_ snapshot: ComputerUseTextSnapshot) { current = snapshot }
+
+    func apply(_ grapheme: String) {
+        guard let range = Range(current.selection, in: current.value) else { return }
+        let value = current.value.replacingCharacters(in: range, with: grapheme)
+        current = ComputerUseTextSnapshot(targetID: "binding-\(current.selection.location + grapheme.utf16.count)",
+            value: value, selection: NSRange(location: current.selection.location + grapheme.utf16.count, length: 0),
+            isEditable: true, isSecure: false)
+    }
+}
+
+private final class NativeVisualTypingGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var open = true
+    var isOpen: Bool { lock.withLock { open } }
+    func close() { lock.withLock { open = false } }
 }
 
 private actor ObservedNativeTextTransport: ComputerUseTextModelTransport {

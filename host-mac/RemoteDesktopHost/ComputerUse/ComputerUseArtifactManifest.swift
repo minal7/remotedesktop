@@ -98,7 +98,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
             .init(kind: .visionProjector, fileName: "mmproj-Fara1.5-4B-f16.gguf", byteCount: 672_423_584,
                 sha256: "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d",
                 downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-4B-GGUF/resolve/b97f335231e01efbbad37bb89b5310340fc10735/mmproj-Fara1.5-4B-f16.gguf")!)],
-        minimumMemoryBytes: 12 * 1_024 * 1_024 * 1_024)
+        minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
     static let current = fara15
 
     /// Native desktop candidate. Selection remains explicit until whole-task
@@ -113,7 +113,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
             .init(kind: .visionProjector, fileName: "Holo-3.1-4B.mmproj-f16.gguf", byteCount: 672_424_256,
                 sha256: "4eca6e6633c5384c4f6e220e1076fd6b96c53bc75baf421c553a8d8ba9649f5f",
                 downloadURL: URL(string: "https://huggingface.co/mradermacher/Holo-3.1-4B-GGUF/resolve/6d76eab0233f62783ddec95a7a2e2b057c6d7e66/Holo-3.1-4B.mmproj-f16.gguf")!)],
-        minimumMemoryBytes: 12 * 1_024 * 1_024 * 1_024)
+        minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
 
     /// Separate installation/receipt from the visual package. The native form
     /// planner does not require its projector, helper or Apple Intelligence.

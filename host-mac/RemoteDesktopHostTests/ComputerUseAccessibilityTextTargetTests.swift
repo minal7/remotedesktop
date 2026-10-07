@@ -4,8 +4,605 @@ import XCTest
 import AppKit
 @testable import RemoteDesktopHost
 
+private final class DefaultBrowserNavigationExchangeCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var exchanges: [(Data, Data)] = []
+
+    func record(request: Data, response: Data) {
+        lock.lock(); defer { lock.unlock() }
+        guard exchanges.count < 20 else { return }
+        exchanges.append((request, response))
+    }
+
+    func snapshot() -> [(Data, Data)] {
+        lock.lock(); defer { lock.unlock() }
+        return exchanges
+    }
+}
+
 @MainActor
 final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
+    func testOptInFocusedDisplayCaptureUsesCompleteActiveWindow() throws {
+        guard ProcessInfo.processInfo.environment["RUN_FOCUSED_DISPLAY_CAPTURE_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_FOCUSED_DISPLAY_CAPTURE_PROBE=1 for read-only active-display capture verification.")
+        }
+        let started = ContinuousClock.now
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let application = tools.frontmostApplicationSnapshot()
+        let processID = application.identity?.processIdentifier
+        func focusedWindow() -> (element: AXUIElement, bounds: CGRect, hash: CFHashCode)? {
+            guard let processID else { return nil }
+            let app = AXUIElementCreateApplication(processID)
+            _ = AXUIElementSetMessagingTimeout(app, 0.1)
+            var rawWindow: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &rawWindow) == .success,
+                  let rawWindow else { return nil }
+            let window = rawWindow as! AXUIElement
+            _ = AXUIElementSetMessagingTimeout(window, 0.1)
+            var position: CFTypeRef?
+            var size: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &position) == .success,
+                  AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &size) == .success,
+                  let position, let size, CFGetTypeID(position) == AXValueGetTypeID(),
+                  CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+            var point = CGPoint.zero
+            var dimensions = CGSize.zero
+            guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+                  AXValueGetValue(size as! AXValue, .cgSize, &dimensions) else { return nil }
+            let bounds = CGRect(origin: point, size: dimensions)
+            guard bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+                  bounds.width.isFinite, bounds.height.isFinite, !bounds.isEmpty else { return nil }
+            return (window, bounds, CFHash(window))
+        }
+        func activeDisplays() -> [ComputerUseActiveDisplay]? {
+            var count: UInt32 = 0
+            guard CGGetActiveDisplayList(0, nil, &count) == .success, (1...16).contains(count) else { return nil }
+            let expectedCount = count
+            var identifiers = [CGDirectDisplayID](repeating: 0, count: Int(count))
+            guard CGGetActiveDisplayList(expectedCount, &identifiers, &count) == .success,
+                  count == expectedCount else { return nil }
+            let ids = Array(identifiers.prefix(Int(count)))
+            guard !ids.contains(0), Set(ids).count == ids.count else { return nil }
+            let displays = ids.map { ComputerUseActiveDisplay(identifier: $0, bounds: CGDisplayBounds($0)) }
+            guard displays.allSatisfy({ display in
+                let bounds = display.bounds
+                return bounds.origin.x.isFinite && bounds.origin.y.isFinite
+                    && bounds.width.isFinite && bounds.height.isFinite
+                    && bounds.width > 0 && bounds.height > 0
+            }) else { return nil }
+            return displays
+        }
+        func secondsElapsed() -> Double {
+            let components = (ContinuousClock.now - started).components
+            return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        }
+        func overlapOracle(for focused: (element: AXUIElement, bounds: CGRect, hash: CFHashCode)?) -> [String: Any] {
+            let raw = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+            let entries: [(pid: Int, layer: Int, alpha: Double, bounds: CGRect?)] = raw.prefix(32).map { row in
+                var bounds = CGRect.zero
+                let dict = row[kCGWindowBounds as String] as? [String: Any]
+                let rect = dict.flatMap { CGRectMakeWithDictionaryRepresentation($0 as CFDictionary, &bounds) ? bounds : nil }
+                return ((row[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? -1,
+                    (row[kCGWindowLayer as String] as? NSNumber)?.intValue ?? Int.min,
+                    (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0, rect)
+            }
+            let layers = [0, Int(CGWindowLevelForKey(.floatingWindow)), Int(CGWindowLevelForKey(.modalPanelWindow))]
+            func close(_ a: CGRect, _ b: CGRect) -> Bool {
+                abs(a.minX - b.minX) <= 1 && abs(a.minY - b.minY) <= 1
+                    && abs(a.width - b.width) <= 1 && abs(a.height - b.height) <= 1
+            }
+            let activeIndex = entries.firstIndex {
+                $0.pid == processID.map(Int.init) && layers.contains($0.layer)
+                    && $0.bounds.map { close($0, focused?.bounds ?? .zero) } == true
+            }
+            let foreignOverlapIndices = activeIndex.map { index in
+                entries.prefix(index).enumerated().compactMap { item -> Int? in
+                    let (offset, entry) = item
+                    guard entry.pid != processID.map(Int.init), layers.contains(entry.layer), entry.alpha > 0,
+                          let a = entry.bounds, let b = focused?.bounds else { return nil }
+                    let overlap = a.intersection(b)
+                    return !overlap.isNull && overlap.width > 0 && overlap.height > 0 ? offset : nil
+                }
+            } ?? []
+            return ["windowCount": entries.count, "truncated": raw.count > 32,
+                "matchedFocusedAppWindowIndex": activeIndex as Any? ?? NSNull(),
+                "foreignOverlappingWindowIndices": foreignOverlapIndices]
+        }
+
+        let beforeDisplays = activeDisplays()
+        let beforeWindow = focusedWindow()
+        let beforeOverlap = overlapOracle(for: beforeWindow)
+        var capture: ComputerUseScreenObservation?
+        var captureError: String?
+        var obscured = false
+        var focusedDisplayUnavailable = false
+        do { capture = try tools.currentScreen() }
+        catch ComputerUseHostTools.ToolError.visualSurfaceObscured {
+            obscured = true
+            captureError = "visualSurfaceObscured"
+        } catch ComputerUseHostTools.ToolError.focusedDisplayUnavailable {
+            focusedDisplayUnavailable = true
+            captureError = "focusedDisplayUnavailable"
+        } catch { captureError = String(describing: error) }
+        let afterApplication = tools.frontmostApplicationSnapshot()
+        let afterWindow = focusedWindow()
+        let afterDisplays = activeDisplays()
+        let afterOverlap = overlapOracle(for: afterWindow)
+        let axStable = beforeWindow.map { before in
+            afterWindow.map { after in
+                CFEqual(before.element, after.element) && before.hash == after.hash && before.bounds == after.bounds
+            } ?? false
+        } ?? false
+        let displaysStable = beforeDisplays != nil && beforeDisplays == afterDisplays
+        let applicationStable = application.identity != nil && application.identity == afterApplication.identity
+        func fullyContains(_ outer: CGRect, _ inner: CGRect) -> Bool {
+            !outer.isEmpty && !inner.isEmpty && outer.minX <= inner.minX && outer.minY <= inner.minY
+                && outer.maxX >= inner.maxX && outer.maxY >= inner.maxY
+        }
+        let containingBefore = beforeWindow.flatMap { window in beforeDisplays?.filter { fullyContains($0.bounds, window.bounds) } }
+        let containingAfter = afterWindow.flatMap { window in afterDisplays?.filter { fullyContains($0.bounds, window.bounds) } }
+        let outcome: [String: Any] = [
+            "sourceReads": ["CGGetActiveDisplayList-before", "AXFocusedWindowPositionSize-before",
+                "CGWindowListCopyWindowInfo-before", "ComputerUseHostTools.currentScreen",
+                "frontmostApplicationSnapshot-after",
+                "AXFocusedWindowPositionSize-after", "CGGetActiveDisplayList-after", "CGWindowListCopyWindowInfo-after"],
+            "processID": processID as Any? ?? NSNull(),
+            "applicationStable": applicationStable,
+            "focusedWindowAXHashBefore": beforeWindow.map { String($0.hash) } as Any? ?? NSNull(),
+            "focusedWindowAXHashAfter": afterWindow.map { String($0.hash) } as Any? ?? NSNull(),
+            "focusedWindowBoundsBefore": beforeWindow.map { NSStringFromRect($0.bounds) } as Any? ?? NSNull(),
+            "focusedWindowBoundsAfter": afterWindow.map { NSStringFromRect($0.bounds) } as Any? ?? NSNull(),
+            "axIdentityStable": axStable, "activeDisplaysBefore": beforeDisplays?.map { ["id": $0.identifier, "bounds": NSStringFromRect($0.bounds)] } ?? [],
+            "activeDisplaysAfter": afterDisplays?.map { ["id": $0.identifier, "bounds": NSStringFromRect($0.bounds)] } ?? [],
+            "containingDisplayCountBefore": containingBefore?.count as Any? ?? NSNull(),
+            "containingDisplayCountAfter": containingAfter?.count as Any? ?? NSNull(),
+            "independentOverlapOracleBefore": beforeOverlap, "independentOverlapOracleAfter": afterOverlap,
+            "captureSucceeded": capture != nil, "captureError": captureError as Any? ?? NSNull(),
+            "focusedDisplayUnavailable": focusedDisplayUnavailable,
+            "captureDisplayBounds": capture.map { NSStringFromRect($0.displayBounds) } as Any? ?? NSNull(),
+            "captureWindowBounds": capture?.frontmostWindowBounds.map(NSStringFromRect) as Any? ?? NSNull(),
+            "elapsedSeconds": secondsElapsed()]
+        let data = try JSONSerialization.data(withJSONObject: outcome, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "focused-display-capture-probe.json"
+        attachment.lifetime = .keepAlways; add(attachment)
+
+        XCTAssertLessThanOrEqual(secondsElapsed(), 10)
+        if obscured {
+            let beforeHasCause = (beforeOverlap["foreignOverlappingWindowIndices"] as? [Int])?.isEmpty == false
+            let afterHasCause = (afterOverlap["foreignOverlappingWindowIndices"] as? [Int])?.isEmpty == false
+            guard beforeHasCause || afterHasCause else {
+                XCTFail("Production capture reported an obscured surface without independent overlapping-window evidence.")
+                return
+            }
+            throw XCTSkip("Production capture declined the surface; independent overlapping-window evidence is attached.")
+        }
+        if focusedDisplayUnavailable {
+            let beforeCount = containingBefore?.count
+            let afterCount = containingAfter?.count
+            let stableGeometry = applicationStable && axStable && displaysStable
+                && beforeWindow != nil && afterWindow != nil && beforeCount != nil && afterCount != nil
+                && beforeCount == afterCount
+            guard stableGeometry, beforeCount != 1 else {
+                XCTFail("Production capture reported unavailable display geometry despite a unique stable full-display match.")
+                return
+            }
+            throw XCTSkip("Production capture declined a stable focused window without exactly one containing display; diagnostics are attached.")
+        }
+        guard captureError == nil, let capture, let beforeWindow, let afterWindow,
+              let beforeDisplays, let afterDisplays, let containingBefore, let containingAfter else {
+            XCTFail("The screen or independent geometry evidence was unavailable: \(String(describing: captureError))")
+            return
+        }
+        XCTAssertTrue(applicationStable, "The frontmost application identity must remain stable across capture")
+        XCTAssertTrue(axStable, "The focused AX window must remain identical across capture")
+        XCTAssertTrue(displaysStable, "Active displays must remain stable across capture")
+        XCTAssertEqual(containingBefore.count, 1, "The complete focused window must fit exactly one active display")
+        XCTAssertEqual(containingAfter.count, 1, "The complete focused window must fit exactly one active display after capture")
+        if let selected = containingBefore.first {
+            XCTAssertEqual(capture.displayBounds, selected.bounds)
+        }
+        XCTAssertEqual(capture.frontmostWindowBounds, beforeWindow.bounds)
+        XCTAssertEqual(afterWindow.bounds, beforeWindow.bounds)
+        let exactSuccessfulCapture = applicationStable && axStable && displaysStable
+            && containingBefore.count == 1 && containingAfter.count == 1
+            && capture.frontmostWindowBounds == beforeWindow.bounds
+            && capture.displayBounds == containingBefore[0].bounds
+        if exactSuccessfulCapture {
+            do {
+                let png = try ComputerUseDesktopImage(observation: capture).png
+                let screenshot = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+                screenshot.name = "focused-display-capture-success.png"
+                screenshot.lifetime = .keepAlways; add(screenshot)
+            } catch {
+                XCTFail("Could not attach the bounded captured screen image: \(error)")
+            }
+        }
+    }
+
+    func testOptInCoveredDesktopSurfaceHandsOffBeforePlanning() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_COVERED_DESKTOP_SURFACE_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_COVERED_DESKTOP_SURFACE_PROBE=1 for the read-only covered-desktop handoff probe.")
+        }
+        let started = ContinuousClock.now
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let activeApp = tools.frontmostApplicationSnapshot()
+        let activePID = activeApp.identity.map { Int($0.processIdentifier) }
+        func focusedWindowSample() -> (element: AXUIElement, bounds: CGRect, hash: CFHashCode)? {
+            guard let activePID else { return nil }
+            let application = AXUIElementCreateApplication(pid_t(activePID))
+            _ = AXUIElementSetMessagingTimeout(application, 0.1)
+            var rawWindow: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString,
+                &rawWindow) == .success, let rawWindow else { return nil }
+            let window = rawWindow as! AXUIElement
+            _ = AXUIElementSetMessagingTimeout(window, 0.1)
+            var rawPosition: CFTypeRef?
+            var rawSize: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &rawPosition) == .success,
+                  AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &rawSize) == .success,
+                  let rawPosition, let rawSize,
+                  CFGetTypeID(rawPosition) == AXValueGetTypeID(), CFGetTypeID(rawSize) == AXValueGetTypeID() else {
+                return nil
+            }
+            var origin = CGPoint.zero
+            var size = CGSize.zero
+            guard AXValueGetValue(rawPosition as! AXValue, .cgPoint, &origin),
+                  AXValueGetValue(rawSize as! AXValue, .cgSize, &size) else { return nil }
+            let bounds = CGRect(origin: origin, size: size)
+            guard bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+                  bounds.width.isFinite, bounds.height.isFinite, !bounds.isEmpty else { return nil }
+            return (window, bounds, CFHash(window))
+        }
+        func elapsedSeconds() -> Double {
+            let components = (ContinuousClock.now - started).components
+            return Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        }
+        let focusedBefore = focusedWindowSample()
+        let rawWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let focusedAfter = focusedWindowSample()
+        let windows: [(pid: Int, layer: Int, alpha: Double, bounds: CGRect?, metadata: [String: Any])] = rawWindows.prefix(32).map { row in
+            let pid = (row[kCGWindowOwnerPID as String] as? NSNumber)?.intValue ?? -1
+            let layer = (row[kCGWindowLayer as String] as? NSNumber)?.intValue ?? Int.min
+            let alpha = (row[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 0
+            let owner = row[kCGWindowOwnerName as String] as? String ?? ""
+            let ownerName = String(decoding: Data(owner.utf8.prefix(256)), as: UTF8.self)
+            var bounds = CGRect.zero
+            let boundsObject = row[kCGWindowBounds as String] as? [String: Any]
+            let rect = boundsObject.flatMap {
+                CGRectMakeWithDictionaryRepresentation($0 as CFDictionary, &bounds) ? bounds : nil
+            }
+            return (pid, layer, alpha, rect, ["ownerPID": pid, "ownerName": ownerName, "layer": layer, "alpha": alpha,
+                "bounds": rect.map(NSStringFromRect) as Any? ?? NSNull()])
+        }
+        let focusedAXStable = focusedBefore.map { before in
+            focusedAfter.map { after in
+                CFEqual(before.element, after.element) && before.hash == after.hash
+                    && before.bounds == after.bounds
+            } ?? false
+        } ?? false
+        let floatingLevel = Int(CGWindowLevelForKey(.floatingWindow))
+        let modalLevel = Int(CGWindowLevelForKey(.modalPanelWindow))
+        let eligibleActiveLayers: Set<Int> = [0, floatingLevel, modalLevel]
+        func boundsMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.minX - rhs.minX) <= 1 && abs(lhs.minY - rhs.minY) <= 1
+                && abs(lhs.width - rhs.width) <= 1 && abs(lhs.height - rhs.height) <= 1
+        }
+        let activeWindowIndex = windows.firstIndex {
+            $0.pid == activePID && eligibleActiveLayers.contains($0.layer)
+                && $0.bounds.map { boundsMatch($0, focusedBefore?.bounds ?? .zero) } == true
+        }
+        let activeBounds = focusedBefore?.bounds
+        let coverageCanBeEvaluated = rawWindows.count <= 32 && focusedAXStable
+            && activeWindowIndex != nil && activeBounds != nil
+        let coveringForeignWindowIndices = activeWindowIndex.map { index in
+            guard let activeBounds else { return [] as [Int] }
+            return windows.prefix(index).enumerated().compactMap { item -> Int? in
+                let (offset, row) = item
+                let relevantLayer = row.layer == 0 || row.layer == floatingLevel || row.layer == modalLevel
+                let overlaps = row.bounds.map { candidate in
+                    let overlap = candidate.intersection(activeBounds)
+                    return !overlap.isNull && overlap.width > 0 && overlap.height > 0
+                } == true
+                return row.pid != activePID && relevantLayer && row.alpha > 0 && overlaps ? offset : nil
+            }
+        } ?? []
+        let coveredSurfaceObserved = coverageCanBeEvaluated && !coveringForeignWindowIndices.isEmpty
+        let diagnostic: [String: Any] = [
+            "probe": "covered desktop surface handoff before planning",
+            "activeApplication": ["localizedName": activeApp.localizedName as Any? ?? NSNull(),
+                "bundleIdentifier": activeApp.identity?.bundleIdentifier as Any? ?? NSNull(),
+                "processIdentifier": activePID as Any? ?? NSNull()],
+            "focusedWindowAXHashBefore": focusedBefore.map { String($0.hash) } as Any? ?? NSNull(),
+            "focusedWindowAXHashAfter": focusedAfter.map { String($0.hash) } as Any? ?? NSNull(),
+            "focusedWindowAXPID": activePID as Any? ?? NSNull(),
+            "focusedWindowAXBounds": activeBounds.map(NSStringFromRect) as Any? ?? NSNull(),
+            "focusedWindowAXIdentityStable": focusedAXStable,
+            "matchedOwnedCGWindowIndex": activeWindowIndex as Any? ?? NSNull(),
+            "onScreenWindows": windows.map { $0.metadata }, "onScreenWindowsTruncated": rawWindows.count > 32,
+            "coveringForeignWindowIndices": coveringForeignWindowIndices,
+            "coveredSurfaceObserved": coveredSurfaceObserved,
+            "coverageCanBeEvaluated": coverageCanBeEvaluated,
+            "elapsedSecondsBeforeExecution": elapsedSeconds()]
+        let diagnosticData = try JSONSerialization.data(withJSONObject: diagnostic, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: diagnosticData, uniformTypeIdentifier: "public.json")
+        attachment.name = "covered-desktop-surface-probe.json"
+        attachment.lifetime = .keepAlways; add(attachment)
+        guard coveredSurfaceObserved else {
+            throw XCTSkip("Coverage could not be established: missing active-app window bounds, a truncated list, or no overlapping foreign normal/modal window above the active window.")
+        }
+
+        let journal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CoveredDesktopSurface-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journal) }
+        enum UnexpectedPlanning: Error { case proposalRequested }
+        var proposalCount = 0
+        var dispatchCount = 0
+        var finishRunCalled = false
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: journal, propose: { _ in
+            proposalCount += 1
+            throw UnexpectedPlanning.proposalRequested
+        }, onSuccessfulDispatch: { _ in dispatchCount += 1 }, finishRun: { finishRunCalled = true })
+        let operation = Task { @MainActor in
+            try await executor.execute(taskID: UUID().uuidString, prompt: "Read the current screen.",
+                trustedUserPrompt: "Read the current screen.", tools: tools, progress: { _ in })
+        }
+        let remaining = max(Int64(1), 10 - Int64(elapsedSeconds()))
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(remaining))
+            operation.cancel()
+        }
+        var result: ComputerUseExecutionResult?
+        var executionError: String?
+        do { result = try await operation.value }
+        catch { executionError = String(describing: error) }
+        deadline.cancel()
+        let totalElapsed = elapsedSeconds()
+        let outcome: [String: Any] = ["result": String(describing: result),
+            "error": executionError as Any? ?? NSNull(), "proposalCount": proposalCount,
+            "dispatchCount": dispatchCount, "finishRunCalled": finishRunCalled,
+            "coveredSurfaceObserved": coveredSurfaceObserved, "elapsedSeconds": totalElapsed]
+        let outcomeData = try JSONSerialization.data(withJSONObject: outcome, options: [.prettyPrinted, .sortedKeys])
+        let outcomeAttachment = XCTAttachment(data: outcomeData, uniformTypeIdentifier: "public.json")
+        outcomeAttachment.name = "covered-desktop-surface-outcome.json"
+        outcomeAttachment.lifetime = .keepAlways; add(outcomeAttachment)
+        if case .userInterventionRequired = result { } else {
+            XCTFail("Expected handoff before planning; result=\(String(describing: result)), error=\(String(describing: executionError))")
+        }
+        XCTAssertEqual(proposalCount, 0)
+        XCTAssertEqual(dispatchCount, 0)
+        XCTAssertTrue(finishRunCalled)
+        XCTAssertLessThanOrEqual(totalElapsed, 10)
+    }
+
+    func testOptInCurrentPermissionContextMatchesCapturedScreen() throws {
+        guard ProcessInfo.processInfo.environment["RUN_CURRENT_PERMISSION_CONTEXT_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_CURRENT_PERMISSION_CONTEXT_PROBE=1 for one read-only permission-context and screen sample.")
+        }
+        let started = ContinuousClock.now
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let beforeApp = tools.frontmostApplicationSnapshot()
+        var beforeAuthentication: ComputerUseAuthenticationContextSnapshot?
+        var beforeConsent: ComputerUseAuthenticationContextSnapshot?
+        var screen: ComputerUseScreenObservation?
+        var afterAuthentication: ComputerUseAuthenticationContextSnapshot?
+        var afterConsent: ComputerUseAuthenticationContextSnapshot?
+        var readErrors: [String: String] = [:]
+
+        do { beforeAuthentication = try tools.currentAuthenticationContext() }
+        catch { readErrors["currentAuthenticationContext-before"] = String(describing: error) }
+        do { beforeConsent = try tools.currentScreenCaptureConsentContext() }
+        catch { readErrors["currentScreenCaptureConsentContext-before"] = String(describing: error) }
+        do { screen = try tools.currentScreen() }
+        catch { readErrors["currentScreen"] = String(describing: error) }
+        let rawWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let onScreenWindows = rawWindows.prefix(32).map { window -> [String: Any] in
+            let rawName = window[kCGWindowOwnerName as String] as? String ?? ""
+            let ownerName = String(decoding: Data(rawName.utf8.prefix(256)), as: UTF8.self)
+            var bounds = CGRect.zero
+            let boundsObject = window[kCGWindowBounds as String] as? [String: Any]
+            let boundsString = boundsObject.flatMap {
+                CGRectMakeWithDictionaryRepresentation($0 as CFDictionary, &bounds) ? NSStringFromRect(bounds) : nil
+            }
+            return ["ownerPID": window[kCGWindowOwnerPID as String] as Any? ?? NSNull(),
+                "ownerName": ownerName, "layer": window[kCGWindowLayer as String] as Any? ?? NSNull(),
+                "bounds": boundsString as Any? ?? NSNull()]
+        }
+        do { afterAuthentication = try tools.currentAuthenticationContext() }
+        catch { readErrors["currentAuthenticationContext-after"] = String(describing: error) }
+        do { afterConsent = try tools.currentScreenCaptureConsentContext() }
+        catch { readErrors["currentScreenCaptureConsentContext-after"] = String(describing: error) }
+        let afterApp = tools.frontmostApplicationSnapshot()
+        let captureElapsed = (ContinuousClock.now - started).components.seconds
+        var png: Data?
+        if let screen {
+            do { png = try ComputerUseDesktopImage(observation: screen).png }
+            catch { readErrors["screenPNG"] = String(describing: error) }
+        }
+        let totalElapsed = (ContinuousClock.now - started).components.seconds
+        func appMetadata(_ snapshot: ComputerUseFrontmostApplicationSnapshot) -> [String: Any] {
+            ["localizedName": snapshot.localizedName as Any? ?? NSNull(),
+             "bundleIdentifier": snapshot.identity?.bundleIdentifier as Any? ?? NSNull(),
+             "processIdentifier": snapshot.identity?.processIdentifier as Any? ?? NSNull(),
+             "launchGeneration": snapshot.identity?.launchGeneration as Any? ?? NSNull(),
+             "identityIsAuthoritative": snapshot.identityIsAuthoritative]
+        }
+        func contextMetadata(_ context: ComputerUseAuthenticationContextSnapshot?) -> Any {
+            guard let context else { return NSNull() }
+            return ["focusedElement": context.focusedElement as Any? ?? NSNull(),
+                "boundedWindowContext": context.boundedWindowContext]
+        }
+        let report: [String: Any] = [
+            "probe": "current permission contexts around one production screen capture",
+            "sourceReads": ["currentAuthenticationContext-before", "currentScreenCaptureConsentContext-before",
+                "currentScreen", "currentAuthenticationContext-after", "currentScreenCaptureConsentContext-after"],
+            "beforeApp": appMetadata(beforeApp), "afterApp": appMetadata(afterApp),
+            "sameAppIdentity": beforeApp.identity == afterApp.identity,
+            "beforeAuthenticationContext": contextMetadata(beforeAuthentication),
+            "afterAuthenticationContext": contextMetadata(afterAuthentication),
+            "authenticationContextUnchanged": beforeAuthentication == afterAuthentication,
+            "beforeScreenCaptureConsentContext": contextMetadata(beforeConsent),
+            "afterScreenCaptureConsentContext": contextMetadata(afterConsent),
+            "screenCaptureConsentContextUnchanged": beforeConsent == afterConsent,
+            "screenDisplayBounds": screen.map { NSStringFromRect($0.displayBounds) } as Any? ?? NSNull(),
+            "frontmostWindowBoundsAtCapture": screen?.frontmostWindowBounds.map(NSStringFromRect) as Any? ?? NSNull(),
+            "onScreenWindowMetadata": onScreenWindows, "onScreenWindowsTruncated": rawWindows.count > 32,
+            "screenCaptured": screen != nil, "pngByteCount": png?.count as Any? ?? NSNull(),
+            "readErrors": readErrors, "captureElapsedSeconds": captureElapsed, "totalElapsedSeconds": totalElapsed]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "current-permission-context-probe.json"
+        attachment.lifetime = .keepAlways; add(attachment)
+        if let png {
+            let screenshot = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
+            screenshot.name = "current-permission-context-screen.png"
+            screenshot.lifetime = .keepAlways; add(screenshot)
+        }
+        XCTAssertTrue(readErrors.isEmpty, "All production context and screen readers must complete: \(readErrors)")
+        XCTAssertNotNil(screen, "The production screen capture must run")
+        XCTAssertNotNil(png, "The captured screen must be attached as PNG")
+        XCTAssertLessThanOrEqual(totalElapsed, 10, "The read-only context sample must remain bounded.")
+    }
+
+    func testOptInDefaultBrowserNavigationSkillReachesRealPage() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_DEFAULT_BROWSER_NAVIGATION_SKILL_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_NAVIGATION_SKILL_PROBE=1 for one real, read-only default-browser navigation.")
+        }
+
+        let began = ContinuousClock.now
+        let taskID = UUID().uuidString
+        let goal = "Open https://example.com/ in the default browser, verify the displayed Example Domain page, then stop. Do not run scripts or fill forms."
+        let faraInputs = try await FaraTestAssets.inputs(environment: environment)
+        let journal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DefaultBrowserNavigationSkill-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journal) }
+
+        let exchangeCapture = DefaultBrowserNavigationExchangeCapture()
+        let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: { request, response in
+            exchangeCapture.record(request: request, response: response)
+        })
+        let session = try ComputerUseDefaultBrowserSession(journalDirectory: journal)
+        let reader = ComputerUseDefaultBrowserPageReader()
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        var proposals: [String] = []
+        var finalEvidence: [String: Any] = [:]
+        var firstRejectedPair: (expected: Data, fresh: Data, action: String, diagnostic: [String: String])?
+        let revalidationObserver: ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver = {
+            expected, fresh, action, diagnostic in
+            guard firstRejectedPair == nil else { return }
+            firstRejectedPair = (expected.png, fresh.png, String(describing: action), diagnostic)
+        }
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: journal, session: session,
+            propose: { input in
+                proposals.append("defaultBrowserTask=\(input.defaultBrowserTask)")
+                let endpoint = try await runtime.activateFara(faraInputs)
+                let proposal = try await runtime.proposeFara(endpoint: endpoint, input: input)
+                proposals.append("\(proposal.action): \(String(proposal.response.prefix(512)))")
+                return .init(proposal)
+            }, finishRun: { await runtime.shutdown() }, completionCheck: { _ in
+                guard let retained = session.currentWindow,
+                      let titleBefore = Self.axString(kAXTitleAttribute as String, of: retained.accessibilityElement),
+                      titleBefore == "Example Domain",
+                      let page = try reader.read(window: retained.accessibilityElement,
+                          application: retained.application, mayAct: { true }),
+                      let url = URL(string: page.url), url.scheme?.lowercased() == "https",
+                      url.host?.lowercased() == "example.com",
+                      !page.renderedAXText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let titleAfter = Self.axString(kAXTitleAttribute as String, of: retained.accessibilityElement),
+                      titleAfter == "Example Domain",
+                      let current = session.currentWindow, current.id == retained.id,
+                      CFEqual(current.accessibilityElement, retained.accessibilityElement) else { return false }
+                finalEvidence = ["url": page.url, "windowTitleBeforePageRead": titleBefore,
+                    "windowTitleAfterPageRead": titleAfter,
+                    "renderedText": String(page.renderedAXText.prefix(2_048)),
+                    "sameRetainedWindow": true, "host": url.host ?? ""]
+                return true
+            }, revalidationFailureObserver: revalidationObserver)
+        let operation = Task { @MainActor in
+            try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+        }
+        let remaining = max(Int64(1), 75 - (ContinuousClock.now - began).components.seconds)
+        let deadline = Task {
+            try? await Task.sleep(for: .seconds(remaining))
+            operation.cancel()
+        }
+        var result: ComputerUseExecutionResult?
+        var executionError: String?
+        do { result = try await operation.value }
+        catch { executionError = String(describing: error) }
+        deadline.cancel()
+        await runtime.shutdown()
+        let workerStop = await runtime.lastWorkerStop
+        let retainedWindow = executor.retainedWindowForDiagnostics
+        let windowID = retainedWindow?.id
+        var finalPage: [String: Any] = finalEvidence
+        if finalPage.isEmpty, let retainedWindow {
+            let titleBefore = Self.axString(kAXTitleAttribute as String, of: retainedWindow.accessibilityElement)
+            if let page = try? reader.read(window: retainedWindow.accessibilityElement,
+                application: retainedWindow.application, mayAct: { true }) {
+                let titleAfter = Self.axString(kAXTitleAttribute as String, of: retainedWindow.accessibilityElement)
+                let current = session.currentWindow
+                finalPage = ["url": page.url, "windowTitleBeforePageRead": titleBefore as Any? ?? NSNull(),
+                    "windowTitleAfterPageRead": titleAfter as Any? ?? NSNull(),
+                    "renderedText": String(page.renderedAXText.prefix(2_048)),
+                    "sameRetainedWindow": current?.id == retainedWindow.id
+                        && current.map { CFEqual($0.accessibilityElement, retainedWindow.accessibilityElement) } == true]
+            }
+        }
+
+        var outcome: [String: Any] = ["taskID": taskID, "goal": goal,
+            "result": String(describing: result), "error": executionError as Any? ?? NSNull(),
+            "proposals": proposals, "finalPageEvidence": finalPage,
+            "windowIDForParentCleanup": windowID as Any? ?? NSNull(),
+            "workerStop": String(describing: workerStop),
+            "lastSessionFailure": String(describing: executor.lastSessionFailureForDiagnostics),
+            "lastActionDiagnostic": executor.lastActionDiagnosticForTests,
+            "elapsedSeconds": (ContinuousClock.now - began).components.seconds]
+        if let firstRejectedPair {
+            outcome["firstRejectedAction"] = firstRejectedPair.action
+            outcome["firstRevalidationDiagnostic"] = firstRejectedPair.diagnostic
+            for (label, image) in [("expected", firstRejectedPair.expected), ("fresh", firstRejectedPair.fresh)] {
+                let screenshot = XCTAttachment(data: image, uniformTypeIdentifier: "public.png")
+                screenshot.name = "default-browser-navigation-revalidation-\(label).png"
+                screenshot.lifetime = .keepAlways; add(screenshot)
+            }
+        }
+        let exchanges = exchangeCapture.snapshot()
+        outcome["exchangeCount"] = exchanges.count
+        for (index, exchange) in exchanges.enumerated() {
+            let request = XCTAttachment(data: exchange.0, uniformTypeIdentifier: "public.json")
+            request.name = "default-browser-navigation-request-body-\(index + 1).json"
+            request.lifetime = .keepAlways; add(request)
+            let response = XCTAttachment(data: exchange.1, uniformTypeIdentifier: "public.json")
+            response.name = "default-browser-navigation-response-body-\(index + 1).json"
+            response.lifetime = .keepAlways; add(response)
+        }
+        let diagnostic = try JSONSerialization.data(withJSONObject: outcome, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: diagnostic, uniformTypeIdentifier: "public.json")
+        attachment.name = "default-browser-navigation-skill-outcome.json"
+        attachment.lifetime = .keepAlways; add(attachment)
+
+        XCTAssertTrue(exchanges.contains { $0.0.range(of: Data("Skill: browser-navigation".utf8)) != nil },
+            "The actual Fara request must include the loaded navigation skill")
+        XCTAssertTrue(proposals.first == "defaultBrowserTask=true", "The production executor must mark this as a default-browser task")
+        XCTAssertGreaterThan(proposals.count, 1, "Record at least one real model action proposal")
+        if case .completed = result { } else {
+            XCTFail("Expected evidence-backed completion; result=\(String(describing: result)), error=\(String(describing: executionError)), windowID=\(String(describing: windowID)), workerStop=\(String(describing: workerStop))")
+        }
+        XCTAssertEqual(URL(string: finalPage["url"] as? String ?? "")?.host?.lowercased(), "example.com")
+        XCTAssertEqual(finalPage["windowTitleBeforePageRead"] as? String, "Example Domain")
+        XCTAssertEqual(finalPage["windowTitleAfterPageRead"] as? String, "Example Domain")
+        XCTAssertFalse((finalPage["renderedText"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertEqual(finalPage["sameRetainedWindow"] as? Bool, true)
+        XCTAssertLessThanOrEqual((ContinuousClock.now - began).components.seconds, 80)
+    }
+
     func testOptInGmailFocusedRecipientEditorMetadataProbe() throws {
         guard ProcessInfo.processInfo.environment["RUN_GMAIL_FOCUSED_EDITOR_METADATA_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_GMAIL_FOCUSED_EDITOR_METADATA_PROBE=1 with the Gmail recipient control already focused.")
@@ -140,6 +737,647 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         add(attachment)
         XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 2.0, "AX metadata probe exceeded its bound")
         XCTAssertTrue(snapshotAvailable, "The observed focused recipient combo has valid editable AX state")
+    }
+
+    func testOptInFocusedNativeTextProjectionDiagnostic() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_FOCUSED_NATIVE_TEXT_PROJECTION_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_FOCUSED_NATIVE_TEXT_PROJECTION_DIAGNOSTIC=1 for a read-only focused-field probe.")
+        }
+        guard let expectedWindowID = environment["FOCUSED_NATIVE_TEXT_PROJECTION_WINDOW_ID"] else {
+            XCTFail("The opted-in diagnostic requires the exact task-owned Safari window UUID.")
+            return
+        }
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let app = workspace.frontmostApplication, app.bundleIdentifier == "com.apple.Safari",
+              app.isFinishedLaunching,
+              let application = ComputerUseApplicationIdentity(runningApplication: app) else {
+            XCTFail("Default Safari must already be frontmost; this diagnostic never activates or navigates it.")
+            return
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        _ = AXUIElementSetMessagingTimeout(root, 0.1)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute as String, of: root),
+              let retainedWindow = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(application)
+                .windows.first(where: { CFEqual($0.accessibilityElement, window) }),
+              let axWindowID = Self.axString("AXIdentifier", of: window),
+              axWindowID == expectedWindowID || axWindowID.components(separatedBy: "UUID=").last == expectedWindowID,
+              let focus = Self.axElement(kAXFocusedUIElementAttribute as String, of: root),
+              let role = Self.axString(kAXRoleAttribute as String, of: focus),
+              role == "AXTextField" || role == "AXComboBox" else {
+            XCTFail("The exact retained Safari window and a focused native text control are required.")
+            return
+        }
+        _ = AXUIElementSetMessagingTimeout(window, 0.1)
+        _ = AXUIElementSetMessagingTimeout(focus, 0.1)
+        guard Self.axString(kAXSubroleAttribute as String, of: focus) != (kAXSecureTextFieldSubrole as String),
+              Self.axBool("AXProtectedContent", of: focus) != true else {
+            XCTFail("Protected or secure focused fields are outside this diagnostic.")
+            return
+        }
+
+        func raw(_ name: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(focus, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        let rawValue = raw(kAXValueAttribute as String)
+        let value = rawValue as? String
+        let rawSelection = raw(kAXSelectedTextRangeAttribute as String)
+        var selectionLocation: Int?
+        var selectionLength: Int?
+        if let rawSelection, CFGetTypeID(rawSelection) == AXValueGetTypeID() {
+            var range = CFRange()
+            if AXValueGetValue(rawSelection as! AXValue, .cfRange, &range) {
+                selectionLocation = range.location
+                selectionLength = range.length
+            }
+        }
+        let characterCount = (raw("AXNumberOfCharacters") as? NSNumber)?.intValue
+        var rangeByteLength: Int?
+        var rangeMatchesValue: Bool?
+        if let characterCount, (0...4_096).contains(characterCount) {
+            var range = CFRange(location: 0, length: characterCount)
+            if let rangeValue = AXValueCreate(.cfRange, &range) {
+                var returned: CFTypeRef?
+                if AXUIElementCopyParameterizedAttributeValue(focus,
+                    kAXStringForRangeParameterizedAttribute as CFString, rangeValue, &returned) == .success,
+                   let rangeText = returned as? String {
+                    rangeByteLength = rangeText.utf8.count
+                    rangeMatchesValue = value.map { rangeText.utf8.elementsEqual($0.utf8) }
+                }
+            }
+        }
+        func settable(_ name: String) -> Bool? {
+            var result = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(focus, name as CFString, &result) == .success else { return nil }
+            return result.boolValue
+        }
+
+        func sameScope() -> Bool {
+            guard workspace.frontmostApplication?.processIdentifier == app.processIdentifier,
+                  let activeWindow = Self.axElement(kAXFocusedWindowAttribute as String, of: root),
+                  CFEqual(activeWindow, window),
+                  let activeFocus = Self.axElement(kAXFocusedUIElementAttribute as String, of: root) else { return false }
+            return CFEqual(activeFocus, focus)
+        }
+        let scopeBeforeNativeReads = sameScope()
+        let nativeTarget = ComputerUseAccessibilityTextTarget()
+        let nativeBefore = scopeBeforeNativeReads ? nativeTarget.snapshot() : nil
+        let scopeBetweenNativeReads = sameScope()
+        let nativeAfter = scopeBetweenNativeReads ? nativeTarget.snapshot() : nil
+        let scopeAfterNativeReads = sameScope()
+        let nativeTargetIDStable = nativeBefore.flatMap { before in nativeAfter.map { before.targetID == $0.targetID } }
+        let finalApplication = workspace.frontmostApplication.flatMap {
+            ComputerUseApplicationIdentity(runningApplication: $0)
+        }
+        let finalWindows = finalApplication == application
+            ? try ComputerUseDefaultBrowserSession.captureWindowsForApplication(application) : nil
+        let finalWindow = finalWindows?.windows.first(where: { $0.id == retainedWindow.id })
+        let finalFocus = Self.axElement(kAXFocusedUIElementAttribute as String, of: root)
+        let scopeStable = finalApplication == application
+            && finalWindow.map { CFEqual($0.accessibilityElement, window) } == true
+            && finalWindows?.focusedWindowID == retainedWindow.id
+            && finalFocus.map { CFEqual($0, focus) } == true
+        let report: [String: Any] = [
+            "probe": "read-only focused native text projection",
+            "windowUUID": expectedWindowID,
+            "retainedSessionWindowID": retainedWindow.id,
+            "role": role,
+            "subrole": Self.axString(kAXSubroleAttribute as String, of: focus) as Any? ?? NSNull(),
+            "editable": Self.axBool("AXEditable", of: focus) as Any? ?? NSNull(),
+            "enabled": Self.axBool(kAXEnabledAttribute as String, of: focus) as Any? ?? NSNull(),
+            "valueUTF8Bytes": value?.utf8.count as Any? ?? NSNull(),
+            "valueUTF16Units": value?.utf16.count as Any? ?? NSNull(),
+            "valueSettable": settable(kAXValueAttribute as String) as Any? ?? NSNull(),
+            "selectedTextSettable": settable(kAXSelectedTextAttribute as String) as Any? ?? NSNull(),
+            "selectionLocation": selectionLocation as Any? ?? NSNull(),
+            "selectionLength": selectionLength as Any? ?? NSNull(),
+            "numberOfCharacters": characterCount as Any? ?? NSNull(),
+            "stringForRangeUTF8Bytes": rangeByteLength as Any? ?? NSNull(),
+            "stringForRangeMatchesValue": rangeMatchesValue as Any? ?? NSNull(),
+            "nativeSnapshotBeforeAvailable": nativeBefore != nil,
+            "nativeSnapshotAfterAvailable": nativeAfter != nil,
+            "nativeSnapshotTargetIDStable": nativeTargetIDStable as Any? ?? NSNull(),
+            "nativeSnapshotValueByteLength": nativeAfter?.value.utf8.count as Any? ?? NSNull(),
+            "scopeBeforeNativeReads": scopeBeforeNativeReads,
+            "scopeBetweenNativeReads": scopeBetweenNativeReads,
+            "scopeAfterNativeReads": scopeAfterNativeReads,
+            "sameApplicationWindowAndPhysicalFocusAfterReads": scopeStable,
+            "elapsedMilliseconds": Int(Date().timeIntervalSince(started) * 1_000),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "focused-native-text-projection-diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertTrue(scopeStable, "Read-only inspection must retain the same Safari app, window, and focus")
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 5)
+    }
+
+    func testOptInGmailKeyboardFocusComparisonDiagnostic() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_KEYBOARD_FOCUS_COMPARISON_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_KEYBOARD_FOCUS_COMPARISON_DIAGNOSTIC=1 for a read-only focus comparison.")
+        }
+        guard let expectedWindowUUID = environment["GMAIL_KEYBOARD_FOCUS_WINDOW_UUID"] else {
+            XCTFail("The opted-in diagnostic requires the exact task-owned Safari window UUID.")
+            return
+        }
+        let started = Date()
+        let workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication, safari.bundleIdentifier == "com.apple.Safari",
+              safari.isFinishedLaunching,
+              let application = ComputerUseApplicationIdentity(runningApplication: safari) else {
+            XCTFail("Safari must already be frontmost; this diagnostic performs no input or activation.")
+            return
+        }
+        let appRoot = AXUIElementCreateApplication(safari.processIdentifier)
+        let systemRoot = AXUIElementCreateSystemWide()
+        for element in [appRoot, systemRoot] { _ = AXUIElementSetMessagingTimeout(element, 0.1) }
+        guard let window = Self.axElement(kAXFocusedWindowAttribute as String, of: appRoot),
+              let retained = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(application)
+                .windows.first(where: { CFEqual($0.accessibilityElement, window) }),
+              let windowIdentifier = Self.axString("AXIdentifier", of: window),
+              windowIdentifier == expectedWindowUUID
+                || windowIdentifier.components(separatedBy: "UUID=").last == expectedWindowUUID else {
+            XCTFail("The exact retained Safari window UUID was not frontmost.")
+            return
+        }
+        _ = AXUIElementSetMessagingTimeout(window, 0.1)
+
+        func focused(_ root: AXUIElement) -> AXUIElement? {
+            Self.axElement(kAXFocusedUIElementAttribute as String, of: root)
+        }
+        func read(_ name: String, from element: AXUIElement) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func boolean(_ name: String, on element: AXUIElement, requireCFBoolean: Bool = false) -> Bool? {
+            guard let value = read(name, from: element) else { return nil }
+            if requireCFBoolean, CFGetTypeID(value) != CFBooleanGetTypeID() { return nil }
+            return value as? Bool
+        }
+        func selection(_ element: AXUIElement) -> (Int?, Int?) {
+            guard let raw = read(kAXSelectedTextRangeAttribute as String, from: element),
+                  CFGetTypeID(raw) == AXValueGetTypeID() else { return (nil, nil) }
+            var range = CFRange()
+            guard AXValueGetValue(raw as! AXValue, .cfRange, &range) else { return (nil, nil) }
+            return (range.location, range.length)
+        }
+        func targetReport(_ focusedElement: AXUIElement?) -> [String: Any] {
+            let deadline = Date().addingTimeInterval(1.0)
+            var current = focusedElement
+            var seen: [AXUIElement] = []
+            var roles: [String] = []
+            var combo: AXUIElement?
+            var reachedWindow = false
+            var pathComplete = false
+            var protectedPath = false
+            for _ in 0..<32 {
+                guard Date() < deadline, let element = current,
+                      !seen.contains(where: { CFEqual($0, element) }) else { break }
+                seen.append(element)
+                _ = AXUIElementSetMessagingTimeout(element, 0.1)
+                let role = Self.axString(kAXRoleAttribute as String, of: element) ?? "unknown"
+                roles.append(role)
+                if role == "AXComboBox", combo == nil { combo = element }
+                if Self.axBool("AXProtectedContent", of: element) == true
+                    || Self.axBool("AXHidden", of: element) == true
+                    || role == "AXSecureTextField"
+                    || Self.axString(kAXSubroleAttribute as String, of: element) == (kAXSecureTextFieldSubrole as String) {
+                    protectedPath = true
+                    break
+                }
+                if CFEqual(element, window) {
+                    reachedWindow = true
+                    pathComplete = true
+                    break
+                }
+                current = Self.axElement(kAXParentAttribute as String, of: element)
+            }
+            let pidMatches = focusedElement.map { element -> Bool in
+                var pid: pid_t = 0
+                return AXUIElementGetPid(element, &pid) == .success && pid == safari.processIdentifier
+            } ?? false
+            if !pidMatches { combo = nil }
+            var comboMetadata: [String: Any] = [:]
+            if let combo {
+                let secure = Self.axString(kAXRoleAttribute as String, of: combo) == "AXSecureTextField"
+                    || Self.axString(kAXSubroleAttribute as String, of: combo) == (kAXSecureTextFieldSubrole as String)
+                let protected = Self.axBool("AXProtectedContent", of: combo) == true || secure
+                comboMetadata = [
+                    "present": true,
+                    "focused": boolean(kAXFocusedAttribute as String, on: combo) as Any? ?? NSNull(),
+                    "expanded": boolean("AXExpanded", on: combo, requireCFBoolean: true) as Any? ?? NSNull(),
+                    "editable": boolean("AXEditable", on: combo) as Any? ?? NSNull(),
+                    "enabled": boolean(kAXEnabledAttribute as String, on: combo) as Any? ?? NSNull(),
+                    "protectedOrSecure": protected,
+                ]
+                if !protected && !protectedPath && pathComplete && reachedWindow && pidMatches {
+                    let value = read(kAXValueAttribute as String, from: combo) as? String
+                    let (location, length) = selection(combo)
+                    var valueSettable = DarwinBoolean(false)
+                    var selectedTextSettable = DarwinBoolean(false)
+                    let canSetValue = AXUIElementIsAttributeSettable(combo, kAXValueAttribute as CFString, &valueSettable) == .success
+                        ? valueSettable.boolValue : nil
+                    let canSetSelected = AXUIElementIsAttributeSettable(combo, kAXSelectedTextAttribute as CFString, &selectedTextSettable) == .success
+                        ? selectedTextSettable.boolValue : nil
+                    comboMetadata["valueUTF16Length"] = value?.utf16.count as Any? ?? NSNull()
+                    comboMetadata["selectionLocation"] = location as Any? ?? NSNull()
+                    comboMetadata["selectionLength"] = length as Any? ?? NSNull()
+                    comboMetadata["valueSettable"] = canSetValue as Any? ?? NSNull()
+                    comboMetadata["selectedTextSettable"] = canSetSelected as Any? ?? NSNull()
+                }
+            } else {
+                comboMetadata["present"] = false
+            }
+            return ["rolePath": roles, "reachedRetainedWindow": reachedWindow,
+                    "pathComplete": pathComplete, "protectedPath": protectedPath,
+                    "focusedElementPIDMatchesSafari": pidMatches, "nearestComboBox": comboMetadata]
+        }
+
+        let appFocus = focused(appRoot)
+        let systemFocus = focused(systemRoot)
+        let appFocusReport = targetReport(appFocus)
+        let systemFocusReport = targetReport(systemFocus)
+        let nativeTarget = ComputerUseAccessibilityTextTarget()
+        let nativeSnapshot = nativeTarget.snapshot()
+        let compareEditableContext = environment["EXPECT_MATCHED_GMAIL_EDITABLE_CONTEXT"] == "1"
+        let expectedEditorDescription = compareEditableContext
+            ? nativeSnapshot.flatMap { nativeTarget.editorDescription(targetID: $0.targetID) } : nil
+        let hostObservation = compareEditableContext
+            ? try ComputerUseHostTools(injector: InputInjector(), mayAct: { true }).nativeFocusedEditorObservation() : nil
+        let hostMatchesBoundValue = nativeSnapshot.flatMap { snapshot in
+            hostObservation?.textState.map { state in
+                !state.truncated && state.valuePrefix.utf8.elementsEqual(snapshot.value.utf8)
+                    && state.selection == snapshot.selection
+            }
+        }
+        let finalAppFocus = focused(appRoot)
+        let finalSystemFocus = focused(systemRoot)
+        let finalWindows = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application)
+        let scopeStable = workspace.frontmostApplication?.processIdentifier == safari.processIdentifier
+            && finalWindows?.focusedWindowID == retained.id
+            && finalWindows?.windows.first(where: { $0.id == retained.id }).map { CFEqual($0.accessibilityElement, window) } == true
+            && appFocus.map { original in finalAppFocus.map { CFEqual($0, original) } == true } == true
+            && systemFocus.map { original in finalSystemFocus.map { CFEqual($0, original) } == true } == true
+        let report: [String: Any] = [
+            "probe": "read-only Gmail keyboard focus comparison",
+            "windowUUID": expectedWindowUUID,
+            "retainedSessionWindowID": retained.id,
+            "appRootFocusRole": appFocus.flatMap { Self.axString(kAXRoleAttribute as String, of: $0) } as Any? ?? NSNull(),
+            "systemWideFocusRole": systemFocus.flatMap { Self.axString(kAXRoleAttribute as String, of: $0) } as Any? ?? NSNull(),
+            "sameFocusedElement": appFocus.flatMap { first in systemFocus.map { CFEqual(first, $0) } } as Any? ?? NSNull(),
+            "appRootFocus": appFocusReport,
+            "systemWideFocus": systemFocusReport,
+            "nativeTargetSnapshotAvailable": nativeSnapshot != nil,
+            "expectedEditableDescription": expectedEditorDescription as Any? ?? NSNull(),
+            "hostEditableDescription": hostObservation?.description as Any? ?? NSNull(),
+            "hostTextMatchesRetainedEditableValueAndCaret": hostMatchesBoundValue as Any? ?? NSNull(),
+            "sameApplicationWindowAndFocusAfterReads": scopeStable,
+            "elapsedMilliseconds": Int(Date().timeIntervalSince(started) * 1_000),
+        ]
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "Gmail keyboard focus comparison diagnostic.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        if environment["EXPECT_NATIVE_KEYBOARD_FOCUS_SNAPSHOT"] == "1" {
+            XCTAssertNotNil(nativeSnapshot, "The default text target should resolve the observed keyboard focus")
+        }
+        if compareEditableContext {
+            XCTAssertNotNil(expectedEditorDescription)
+            XCTAssertEqual(hostObservation?.description, expectedEditorDescription)
+            XCTAssertTrue(hostObservation?.description.contains("AXComboBox") == true)
+            XCTAssertTrue(hostObservation?.description.contains("To recipients") == true)
+            XCTAssertEqual(hostMatchesBoundValue, true)
+        }
+        XCTAssertTrue(scopeStable, "Read-only focus sampling must preserve the same Safari window and focused references")
+        XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 5)
+    }
+
+    func testOptInGmailNativeSubjectFieldFocusDiagnostic() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_NATIVE_FIELD_FOCUS_DIAGNOSTIC"] == "1" else {
+            throw XCTSkip("Set RUN_GMAIL_NATIVE_FIELD_FOCUS_DIAGNOSTIC=1 for one scoped Subject-field click.")
+        }
+        guard let expectedWindowUUID = environment["GMAIL_NATIVE_FIELD_FOCUS_WINDOW_UUID"] else {
+            XCTFail("The diagnostic requires the exact task-owned Safari window UUID."); return
+        }
+        let started = Date(), workspace = NSWorkspace.shared
+        guard let safari = workspace.frontmostApplication, safari.bundleIdentifier == "com.apple.Safari",
+              let app = ComputerUseApplicationIdentity(runningApplication: safari) else {
+            XCTFail("Safari must already be frontmost."); return
+        }
+        let root = AXUIElementCreateApplication(safari.processIdentifier)
+        guard let window = Self.axElement(kAXFocusedWindowAttribute as String, of: root),
+              let retained = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(app)
+                .windows.first(where: { CFEqual($0.accessibilityElement, window) }),
+              let windowID = Self.axString("AXIdentifier", of: window),
+              windowID == expectedWindowUUID || windowID.components(separatedBy: "UUID=").last == expectedWindowUUID else {
+            XCTFail("The exact retained Safari window UUID must be frontmost."); return
+        }
+        _ = AXUIElementSetMessagingTimeout(root, 0.1); _ = AXUIElementSetMessagingTimeout(window, 0.1)
+        let ownsWindow = { workspace.frontmostApplication?.processIdentifier == safari.processIdentifier
+            && Self.axElement(kAXFocusedWindowAttribute as String, of: root).map { CFEqual($0, window) } == true
+            && Date().timeIntervalSince(started) <= 10 }
+        let reader = ComputerUseDefaultBrowserPageReader()
+        let windowBounds = retained.identity.bounds, displayBounds = CGDisplayBounds(CGMainDisplayID())
+        guard displayBounds.contains(windowBounds), ownsWindow(),
+              let beforePage = try reader.read(window: window, application: app, mayAct: ownsWindow),
+              URL(string: beforePage.url)?.host == "mail.google.com" else {
+            XCTFail("The owned Gmail page and display bounds must be readable within the diagnostic scope."); return
+        }
+        let toControls = beforePage.controls.filter {
+            $0.role == "AXComboBox" && $0.label.localizedCaseInsensitiveContains("To recipients")
+        }
+        let expectExpanded = environment["GMAIL_NATIVE_FIELD_FOCUS_EXPECT_EXPANDED"] != "0"
+        let nativeTarget = ComputerUseAccessibilityTextTarget()
+        guard toControls.count == 1, let toControl = toControls.first,
+              toControl.enabled == true, toControl.expanded == expectExpanded,
+              let toText = nativeTarget.snapshot(), toText.isEditable,
+              nativeTarget.editorDescription(targetID: toText.targetID) == "AXComboBox • To recipients" else {
+            XCTFail("The current editable To combo must match the requested expanded-state precondition."); return
+        }
+        let ownRecipientValue = toText.value
+        let subjects = beforePage.controls.filter {
+            $0.role == "AXTextField" && $0.label.localizedCaseInsensitiveCompare("Subject") == .orderedSame
+                && $0.enabled == true
+        }
+        let subject = subjects.first
+        let subjectFrame = subject?.frame
+        let ownedBeforeCenter = ownsWindow()
+        let rawCenter = subjectFrame.map { CGPoint(x: $0.midX, y: $0.midY) }
+        var rawHitRoles: [String] = []
+        var rawHitReachedWindow = false
+        var rawHitHasExactSubjectTextField = false
+        if let rawCenter, Date().timeIntervalSince(started) <= 10 {
+            let systemRoot = AXUIElementCreateSystemWide()
+            _ = AXUIElementSetMessagingTimeout(systemRoot, 0.1)
+            var rawHit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(systemRoot, Float(rawCenter.x), Float(rawCenter.y), &rawHit) == .success {
+                var current = rawHit
+                var visited: [AXUIElement] = []
+                for _ in 0..<16 {
+                    guard Date().timeIntervalSince(started) <= 10,
+                          let element = current, !visited.contains(where: { CFEqual($0, element) }) else { break }
+                    visited.append(element); _ = AXUIElementSetMessagingTimeout(element, 0.1)
+                    let role = Self.axString(kAXRoleAttribute as String, of: element) ?? "unknown"
+                    if rawHitRoles.count < 16 { rawHitRoles.append(role) }
+                    if role == "AXTextField" {
+                        rawHitHasExactSubjectTextField = [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+                            kAXPlaceholderValueAttribute as String, kAXHelpAttribute as String, "AXIdentifier"]
+                            .compactMap { Self.axString($0, of: element) }
+                            .contains { $0.localizedCaseInsensitiveCompare("Subject") == .orderedSame }
+                    }
+                    if CFEqual(element, window) { rawHitReachedWindow = true; break }
+                    current = Self.axElement(kAXParentAttribute as String, of: element)
+                }
+            }
+        }
+        let subjectUnique = subjects.count == 1
+        let subjectEnabled = subject?.enabled == true
+        let center: CGPoint?
+        if subjectUnique, let subject, subjectFrame != nil, subjectEnabled, ownedBeforeCenter {
+            center = try? reader.validatedControlCenter(observation: beforePage, controlID: subject.id,
+                window: window, windowBounds: windowBounds, mayAct: ownsWindow)
+        } else { center = nil }
+        let preflight: [String: Any] = [
+            "probe": "Gmail Subject center pre-dispatch evidence",
+            "windowUUID": expectedWindowUUID, "expectedToExpanded": expectExpanded,
+            "preToExpanded": toControl.expanded as Any? ?? NSNull(),
+            "subjectCount": subjects.count, "subjectHasFrame": subjectFrame != nil,
+            "subjectEnabled": subjectEnabled, "ownedWindowBeforeCenterValidation": ownedBeforeCenter,
+            "validatedCenterAvailable": center != nil, "rawCenterHitRolePath": rawHitRoles,
+            "rawCenterHitReachedOwnedWindow": rawHitReachedWindow,
+            "rawCenterHitHasExactSubjectTextField": rawHitHasExactSubjectTextField,
+            "elapsedMilliseconds": Int(Date().timeIntervalSince(started) * 1_000),
+        ]
+        let preflightAttachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: preflight,
+            options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        preflightAttachment.name = "Gmail Subject pre-dispatch evidence.json"
+        preflightAttachment.lifetime = .keepAlways; add(preflightAttachment)
+        guard subjectUnique, let subject, subjectFrame != nil, subjectEnabled,
+              ownedBeforeCenter, let center, ownsWindow() else {
+            XCTFail("A unique enabled Subject control must have a fresh validated click center."); return
+        }
+
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: ownsWindow)
+        try tools.perform(.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()), button: 1, count: 1))
+        let focusDeadline = Date().addingTimeInterval(1)
+        var focused: AXUIElement?
+        var focusRole: String?
+        var focusLabel: String?
+        var focusSettlingSampleCount = 0
+        while Date() < focusDeadline, ownsWindow() {
+            focusSettlingSampleCount += 1
+            focused = Self.axElement(kAXFocusedUIElementAttribute as String, of: root)
+            focusRole = focused.flatMap { Self.axString(kAXRoleAttribute as String, of: $0) }
+            focusLabel = focused.flatMap { element in
+                [kAXTitleAttribute as String, kAXDescriptionAttribute as String, kAXPlaceholderValueAttribute as String,
+                 kAXHelpAttribute as String, "AXIdentifier"].compactMap { Self.axString($0, of: element) }
+                    .first { $0.localizedCaseInsensitiveCompare("Subject") == .orderedSame }
+            }
+            if focusRole == "AXTextField", focusLabel == "Subject" { break }
+            guard Date() < focusDeadline, ownsWindow() else { break }
+            try await Task.sleep(for: .milliseconds(20))
+            guard Date() < focusDeadline, ownsWindow() else { break }
+        }
+        let subjectValue = focused.flatMap { Self.axString(kAXValueAttribute as String, of: $0) }
+        let postText = nativeTarget.snapshot(), postDescription = postText.flatMap {
+            nativeTarget.editorDescription(targetID: $0.targetID)
+        }
+        let afterPage = try reader.read(window: window, application: app, mayAct: ownsWindow)
+        let toAfter = afterPage?.controls.first {
+            $0.role == "AXComboBox" && $0.label.localizedCaseInsensitiveContains("To recipients")
+        }
+        let recipientTextAppears = ownRecipientValue.isEmpty ? nil
+            : afterPage.map { $0.renderedAXText.localizedCaseInsensitiveContains(ownRecipientValue) }
+        let report: [String: Any] = [
+            "probe": "one-click Gmail Subject field focus component diagnostic",
+            "dispatchPath": "ComputerUseHostTools.perform(.click); component dispatch, not full executor orchestration",
+            "windowUUID": expectedWindowUUID, "clickCount": 1,
+            "preToComboEnabled": toControl.enabled as Any? ?? NSNull(),
+            "preToComboExpanded": toControl.expanded as Any? ?? NSNull(),
+            "preToValueUTF16Length": ownRecipientValue.utf16.count,
+            "subjectControlUnique": subjects.count == 1,
+            "subjectFocusExact": focusRole == "AXTextField" && focusLabel != nil,
+            "focusSettlingSampleCount": focusSettlingSampleCount,
+            "subjectDescription": postDescription as Any? ?? NSNull(),
+            "subjectValueEmpty": subjectValue?.isEmpty as Any? ?? NSNull(),
+            "subjectSelection": postText.map { ["location": $0.selection.location, "length": $0.selection.length] as [String: Int] } as Any? ?? NSNull(),
+            "toComboStillPresent": toAfter != nil,
+            "toComboExpandedAfter": toAfter?.expanded as Any? ?? NSNull(),
+            "recipientTextAppearsInRenderedAXText": recipientTextAppears as Any? ?? NSNull(),
+            "sameOwnedWindowAfterClick": ownsWindow(), "elapsedMilliseconds": Int(Date().timeIntervalSince(started) * 1_000),
+        ]
+        let attachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: report,
+            options: [.prettyPrinted, .sortedKeys]), uniformTypeIdentifier: "public.json")
+        attachment.name = "Gmail native Subject field focus diagnostic.json"; attachment.lifetime = .keepAlways; add(attachment)
+        XCTAssertEqual(focusRole, "AXTextField"); XCTAssertEqual(focusLabel, "Subject")
+        XCTAssertEqual(postDescription, "AXTextField • Subject")
+        XCTAssertEqual(subjectValue, ""); XCTAssertEqual(postText?.selection, NSRange(location: 0, length: 0))
+        XCTAssertTrue(ownsWindow()); XCTAssertLessThanOrEqual(Date().timeIntervalSince(started), 10)
+    }
+
+    func testFocusedSuggestionChildResolvesToNearestExpandedWritableCombo() throws {
+        for isWebContent in [false, true] {
+            let graph = focusedSuggestionComboGraph(isWebContent: isWebContent)
+            let snapshot = try XCTUnwrap(ComputerUseAccessibilityTextTarget(access: graph.access).snapshot())
+            XCTAssertEqual(snapshot.value, "s")
+            XCTAssertEqual(snapshot.selection, NSRange(location: 1, length: 0))
+            XCTAssertTrue(snapshot.isEditable)
+            XCTAssertFalse(snapshot.isSecure)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testNativeFocusedEditorObservationUsesSameBindingForDescriptionAndTextState() throws {
+        let graph = focusedSuggestionComboGraph()
+        let monitor = AXFixtureLifecycleMonitor()
+        graph.lifecycleFactory = { _ in monitor }
+        let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+        let initial = try XCTUnwrap(target.snapshot())
+        XCTAssertEqual(target.editorDescription(targetID: initial.targetID), "AXComboBox • Suggestion editor",
+            "Description metadata must come from the retained editable combo, not its focused suggestion child")
+
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, nativeTextTarget: target)
+        let observation = try tools.nativeFocusedEditorObservation()
+        XCTAssertEqual(observation?.description, "AXComboBox • Suggestion editor")
+        XCTAssertEqual(observation?.textState?.valuePrefix, "s",
+            "The description and text prefix must identify the same retained combo binding")
+        XCTAssertTrue(graph.writes.isEmpty)
+
+        monitor.record(.init(kind: .scopeChanged, element: nil))
+        XCTAssertNil(target.editorDescription(targetID: initial.targetID),
+            "A retired binding cannot continue supplying editor planning metadata")
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testWebContentProofRequiresCurrentRetainedElementAndAncestry() throws {
+        for web in [false, true] {
+            let graph = focusedSuggestionComboGraph(isWebContent: web)
+            let monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            let snapshot = try XCTUnwrap(target.snapshot())
+            XCTAssertEqual(target.isWebContent(targetID: snapshot.targetID,
+                matching: graph.element("destination")), web)
+            XCTAssertFalse(target.isWebContent(targetID: "unobserved", matching: graph.element("destination")))
+            XCTAssertFalse(target.isWebContent(targetID: snapshot.targetID, matching: graph.element("window")))
+            monitor.record(.init(kind: .scopeChanged, element: nil))
+            XCTAssertFalse(target.isWebContent(targetID: snapshot.targetID,
+                matching: graph.element("destination")), "Retired ancestry must not authorize a typing exception")
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testFocusedSuggestionChildRejectsUndisclosedOrUnsafeComboPath() throws {
+        let expansionStates: [(String, CFTypeRef?)] = [
+            ("collapsed", kCFBooleanFalse), ("unknown", nil), ("malformed", NSNumber(value: 2)),
+        ]
+        for attribute in ["AXExpanded", kAXFocusedAttribute as String] {
+            for (name, flag) in expansionStates {
+                let graph = focusedSuggestionComboGraph()
+                graph.set("destination", attribute, flag)
+                XCTAssertNil(ComputerUseAccessibilityTextTarget(access: graph.access).snapshot(), "\(attribute)-\(name)")
+                XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0,
+                    "Combo disclosure and focus must be verified before its value is read")
+                XCTAssertTrue(graph.writes.isEmpty)
+            }
+        }
+
+        for change in ["disabled", "hidden", "protected", "secure", "cycle", "detached", "foreign-window"] {
+            let graph = focusedSuggestionComboGraph()
+            switch change {
+            case "disabled": graph.set("destination", kAXEnabledAttribute, kCFBooleanFalse)
+            case "hidden": graph.set("group", "AXHidden", kCFBooleanTrue)
+            case "protected": graph.set("group", "AXProtectedContent", kCFBooleanTrue)
+            case "secure": graph.set("destination", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
+            case "cycle": graph.set("group", kAXParentAttribute, graph.element("focus-list"))
+            case "detached": graph.set("group", kAXParentAttribute, nil)
+            default:
+                graph.set("other-window", kAXRoleAttribute, kAXWindowRole as NSString)
+                graph.set("group", kAXParentAttribute, graph.element("other-window"))
+            }
+            XCTAssertNil(ComputerUseAccessibilityTextTarget(access: graph.access).snapshot(), change)
+            if ["hidden", "protected", "secure"].contains(change) {
+                XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0,
+                    "Protected or hidden ancestry must fail before reading the combo value")
+            }
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    func testFocusedSuggestionChildDoesNotCrossAnotherEditableControl() throws {
+        let graph = focusedSuggestionComboGraph()
+        _ = graph.addNode("intervening-editor")
+        graph.set("intervening-editor", kAXRoleAttribute, kAXTextFieldRole as NSString)
+        graph.set("intervening-editor", "AXEditable", kCFBooleanTrue)
+        graph.set("intervening-editor", kAXValueAttribute, "different editor" as NSString)
+        graph.set("intervening-editor", kAXParentAttribute, graph.element("destination"))
+        graph.set("focus-list", kAXParentAttribute, graph.element("intervening-editor"))
+
+        XCTAssertNil(ComputerUseAccessibilityTextTarget(access: graph.access).snapshot())
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testFocusedSuggestionResolverStopsQueryingImmediatelyAfterDestruction() throws {
+        for destroyedName in ["focused-suggestion", "focus-list"] {
+            let graph = focusedSuggestionComboGraph()
+            let monitor = AXFixtureLifecycleMonitor()
+            graph.lifecycleFactory = { _ in monitor }
+            let target = ComputerUseAccessibilityTextTarget(access: graph.access)
+            var delivered = false
+            var callsAtDelivery = 0
+            graph.afterRead = { element, attribute in
+                guard !delivered, element == destroyedName, attribute == kAXRoleAttribute else { return }
+                delivered = true
+                callsAtDelivery = graph.calls.count
+                monitor.notify(kAXUIElementDestroyedNotification as String, element: graph.element(destroyedName))
+            }
+
+            XCTAssertNil(target.snapshot())
+            XCTAssertTrue(delivered, "The resolver must read the focused suggestion/parent before its destruction event")
+            XCTAssertFalse(graph.calls.dropFirst(callsAtDelivery).contains { $0.element == destroyedName },
+                "No AX read, capability query, timeout, or write may follow the destroyed-reference event")
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+    }
+
+    private func focusedSuggestionComboGraph(isWebContent: Bool = false) -> AXTextGraph {
+        let graph = AXTextGraph()
+        _ = graph.addNode("focus-list")
+        _ = graph.addNode("focused-suggestion")
+        graph.set("destination", kAXRoleAttribute, kAXComboBoxRole as NSString)
+        graph.set("destination", kAXTitleAttribute, "Suggestion editor" as NSString)
+        graph.set("destination", "AXFocused", kCFBooleanTrue)
+        graph.set("destination", "AXExpanded", kCFBooleanTrue)
+        graph.set("destination", "AXEditable", kCFBooleanTrue)
+        graph.set("destination", kAXEnabledAttribute, kCFBooleanTrue)
+        graph.set("destination", kAXValueAttribute, "s" as NSString)
+        graph.setSelection("destination", NSRange(location: 1, length: 0))
+        graph.set("destination", kAXParentAttribute, graph.element("group"))
+        graph.set("destination", kAXChildrenAttribute, [graph.element("focus-list")] as CFArray)
+        graph.set("focus-list", kAXRoleAttribute, "AXList" as NSString)
+        graph.set("focus-list", kAXParentAttribute, graph.element("destination"))
+        graph.set("focus-list", kAXChildrenAttribute, [graph.element("focused-suggestion")] as CFArray)
+        graph.set("focused-suggestion", kAXRoleAttribute, kAXStaticTextRole as NSString)
+        graph.set("focused-suggestion", kAXFocusedAttribute, kCFBooleanTrue)
+        graph.set("focused-suggestion", kAXValueAttribute, "selected suggestion" as NSString)
+        graph.set("focused-suggestion", kAXParentAttribute, graph.element("focus-list"))
+        graph.focused = "focused-suggestion"
+        if isWebContent {
+            _ = graph.addNode("web-area")
+            graph.set("web-area", kAXRoleAttribute, "AXWebArea" as NSString)
+            graph.set("web-area", kAXDocumentAttribute, "https://example.test/" as NSString)
+            graph.set("web-area", kAXParentAttribute, graph.element("window"))
+            graph.set("destination", kAXParentAttribute, graph.element("web-area"))
+        }
+        return graph
     }
 
     func testOptInSafariAddressFieldFingerprintAndLifecycleStability() async throws {
@@ -434,6 +1672,8 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             throw XCTSkip("Set RUN_GMAIL_BODY_NATIVE_TEXT_DIAGNOSTIC=1 with an unsent Gmail compose body focused.")
         }
         let strategy = environment["GMAIL_BODY_NATIVE_TEXT_STRATEGY"] ?? "production"
+        let observeEachUnicodeStroke = strategy == "unicode"
+            && environment["GMAIL_BODY_NATIVE_TEXT_OBSERVE_EACH_STROKE"] == "1"
         guard strategy == "production" || strategy == "selectedText" || strategy == "unicode" else {
             XCTFail("GMAIL_BODY_NATIVE_TEXT_STRATEGY must be production, selectedText, or unicode.")
             return
@@ -569,6 +1809,9 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         var unicodeCompletedGraphemes = 0
         var unicodeFirstScopeMatched: Bool?
         var unicodeLastScopeMatched: Bool?
+        var passiveObservationCount = 0
+        var passiveNilObservationCount = 0
+        var passiveStabilityTokens: Set<String> = []
         var initialProjection: [String: Any] = [:]
         var initialInput: [String: Any] = [:]
         var finalProjection: [String: Any] = [:]
@@ -617,6 +1860,20 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
                   let activeContext = Self.focusedAXContext(activeFocus, window: window) else { return false }
             return !Task.isCancelled && Date().timeIntervalSince(started) < 60 && activeContext.isMailWebArea
         }
+        func observeUnicodeStatePassively() {
+            guard observeEachUnicodeStroke else { return }
+            passiveObservationCount += 1
+            do {
+                guard let observation = try tools.nativeFocusedEditorObservation(),
+                      let token = observation.stabilityToken else {
+                    passiveNilObservationCount += 1
+                    return
+                }
+                passiveStabilityTokens.insert(token)
+            } catch {
+                passiveNilObservationCount += 1
+            }
+        }
         if let selectedTextTarget, currentOriginalScopeMatches(),
            let before = selectedTextTarget.snapshot(), before.isEditable, !before.isSecure {
             selectedTextInitialTargetID = before.targetID
@@ -650,6 +1907,9 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             initialProjection = metadata(focus)
             if currentOriginalScopeMatches() {
                 let injector = InputInjector()
+                // These reads only count returned stability tokens. They never grant or
+                // relax the independent app/window/focused-element scope checks below.
+                observeUnicodeStatePassively()
                 for character in expectedBody {
                     guard !Task.isCancelled else {
                         resultSummary = "unicodeCancelled"
@@ -662,6 +1922,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
                         resultSummary = "scopeChangedBeforeUnicodeStroke"
                         break
                     }
+                    observeUnicodeStatePassively()
                     unicodeAttemptedGraphemes += 1
                     let delivered = await injector.applyTextStroke(String(character), ifAllowed: {
                         !Task.isCancelled && currentOriginalScopeMatches()
@@ -670,6 +1931,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
                     })
                     let scopeAfter = currentOriginalScopeMatches()
                     unicodeLastScopeMatched = scopeAfter
+                    observeUnicodeStatePassively()
                     guard delivered, scopeAfter else {
                         resultSummary = delivered ? "scopeChangedAfterUnicodeStroke" : "unicodeStrokeRejected"
                         break
@@ -776,6 +2038,10 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             "unicodeCompletedGraphemes": unicodeCompletedGraphemes,
             "unicodeFirstScopeMatched": unicodeFirstScopeMatched as Any? ?? NSNull(),
             "unicodeLastScopeMatched": unicodeLastScopeMatched as Any? ?? NSNull(),
+            "passiveObservationEnabled": observeEachUnicodeStroke,
+            "passiveObservationCount": passiveObservationCount,
+            "passiveNilObservationCount": passiveNilObservationCount,
+            "distinctPassiveStabilityTokenCount": passiveStabilityTokens.count,
             "initialFocusedField": initialProjection,
             "initialDesktopProjection": initialInput,
             "finalFocusedField": finalProjection,
@@ -783,6 +2049,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             "lifecycleEvents": try JSONSerialization.jsonObject(with: JSONEncoder().encode(lifecycleEvents)),
             "droppedLifecycleEvents": droppedLifecycleEvents,
             "lastDesktopDiagnostic": executor.lastRevalidationDiagnostic,
+            "nativeVisualTypingDiagnostic": tools.nativeVisualTypingDiagnostic,
             "elapsedSeconds": Date().timeIntervalSince(started),
             "sendActionProposed": false,
         ]
@@ -810,6 +2077,13 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             XCTAssertEqual(typedDispatches, 1, "The probe sends exactly one diagnostic body edit and never retries it.")
             XCTAssertEqual(finalEditor["matchesExpected"] as? Bool, true)
             XCTAssertEqual(finalProjection["valueMatchesExpected"] as? Bool, true)
+            let typing = tools.nativeVisualTypingDiagnostic
+            XCTAssertEqual(typing["stage"], "completed")
+            XCTAssertEqual(typing["isWebContent"], "true")
+            let provisional = Int(typing["provisionalSpaceTransitions"] ?? "") ?? 0
+            XCTAssertGreaterThan(provisional, 0, "The real editor must exercise the temporary-space repair")
+            XCTAssertEqual(Int(typing["restoredSpaceTransitions"] ?? ""), provisional)
+            XCTAssertEqual(typing["pendingSpace"], "false", "No unresolved encoding may report success")
         }
     }
 
@@ -1253,7 +2527,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             }
             graph.set("window", kAXChildrenAttribute, children as CFArray)
             let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window, windowBounds: window, access: graph.access, mayAct: { true }))
-            XCTAssertTrue(catalog.truncated); XCTAssertEqual(catalog.items.count, buttons ? 16 : 0)
+            XCTAssertTrue(catalog.truncated); XCTAssertEqual(catalog.items.count, buttons ? 32 : 0)
             XCTAssertTrue(catalog.items.allSatisfy { $0.description.utf8.count <= 512 })
             XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 98)
             XCTAssertTrue(graph.writes.isEmpty)
@@ -1346,6 +2620,32 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         return (graph, window)
     }
 
+    func testNativeControlsKeepLaterFocusedDocumentControlWithinThirtyTwoItemBudget() throws {
+        let (graph, window) = nativeControlsPriorityFixture()
+        var prioritizedChildren: [AXUIElement] = [graph.element("destination")]
+        for index in 0..<20 {
+            let name = "page-control-\(index)"
+            let control = graph.element(name)
+            graph.set(name, kAXParentAttribute, graph.element("header-inner"))
+            prioritizedChildren.append(control)
+        }
+        prioritizedChildren.append(graph.element("useful-page-control"))
+        graph.set("header-inner", kAXChildrenAttribute, prioritizedChildren as CFArray)
+        graph.set("page-toolbar", kAXChildrenAttribute, [] as CFArray)
+
+        let catalog = try XCTUnwrap(ComputerUseNativeControlReader.observe(
+            displayBounds: window, windowBounds: window, access: graph.access, mayAct: { true }))
+        XCTAssertLessThanOrEqual(catalog.items.count, 32)
+        let usefulIndex = try XCTUnwrap(catalog.items.firstIndex { $0.description == "AXButton • Continue" })
+        XCTAssertGreaterThan(usefulIndex, 16, "The useful control should survive after earlier controls fill the former budget")
+        XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 96)
+        XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0)
+        for index in 0..<20 {
+            XCTAssertEqual(graph.readCount("page-control-\(index)", kAXValueAttribute), 0)
+        }
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
     func testNativeControlsPrioritizeFocusedDocumentAndKeepFocusedChromeEditor() throws {
         let (graph, window) = nativeControlsPriorityFixture()
         let pageFocused = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
@@ -1354,7 +2654,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         if let chromeIndex = pageFocused.items.firstIndex(where: { $0.description == "AXButton • Browser control 0" }) {
             XCTAssertLessThan(pageIndex, chromeIndex)
         }
-        XCTAssertLessThanOrEqual(pageFocused.items.count, 16)
+        XCTAssertLessThanOrEqual(pageFocused.items.count, 32)
         XCTAssertTrue(pageFocused.truncated)
         XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 96)
         XCTAssertTrue(graph.writes.isEmpty)
@@ -1369,7 +2669,30 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         let addressIndex = try XCTUnwrap(chromeFocused.items.firstIndex { $0.description == "AXTextField • Browser address" })
         let firstChromeIndex = try XCTUnwrap(chromeFocused.items.firstIndex { $0.description == "AXButton • Browser control 0" })
         XCTAssertLessThan(addressIndex, firstChromeIndex)
-        XCTAssertLessThanOrEqual(chromeFocused.items.count, 16)
+        XCTAssertLessThanOrEqual(chromeFocused.items.count, 32)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testNativeControlsPrioritizeFocusedEditorBranchBeforeEarlierPageControls() throws {
+        let (graph, window) = nativeControlsPriorityFixture()
+        // The focused editor and its useful sibling are in a later page group;
+        // ordinary page-order traversal spends the 16-item budget on toolbar controls first.
+        graph.set("web-area", kAXChildrenAttribute,
+            [graph.element("page-toolbar"), graph.element("header-shell")] as CFArray)
+
+        let observation = try XCTUnwrap(ComputerUseNativeControlReader.observe(displayBounds: window,
+            windowBounds: window, access: graph.access, mayAct: { true }))
+        let usefulIndex = try XCTUnwrap(observation.items.firstIndex { $0.description == "AXButton • Continue" },
+            "A useful sibling in the focused editor's branch should survive the bounded catalogue")
+        let firstToolbarIndex = try XCTUnwrap(observation.items.firstIndex { $0.description == "AXButton • Page control 0" })
+
+        XCTAssertLessThan(usefulIndex, firstToolbarIndex,
+            "The path toward the focused editor should be visited before unrelated page branches")
+        XCTAssertLessThanOrEqual(observation.items.count, 32)
+        XCTAssertTrue(observation.truncated)
+        XCTAssertLessThanOrEqual(graph.calls.filter { $0.operation == "timeout" }.count, 96)
+        XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0,
+            "Focused-path prioritization must not read editor text")
         XCTAssertTrue(graph.writes.isEmpty)
     }
 
@@ -1394,7 +2717,7 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
             } else {
                 XCTAssertNotNil(useful, "Controls nested under a web area remain in the outer document traversal")
             }
-            XCTAssertLessThanOrEqual(catalog.items.count, 16)
+            XCTAssertLessThanOrEqual(catalog.items.count, 32)
             XCTAssertTrue(graph.writes.isEmpty)
         }
     }
@@ -1577,6 +2900,79 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
         foreign.set(foreignGroups.last!, kAXParentAttribute, foreign.element("foreign-window"))
         XCTAssertNil(ComputerUseAccessibilityTextTarget(access: foreign.access).snapshot(), "A field that reaches a different window must fail closed")
         for graph in [tooDeep, cyclic, detached, foreign] { XCTAssertTrue(graph.writes.isEmpty) }
+    }
+
+    func testParentPathReachesWindowAcceptsCompleteNestedSheetAncestry() {
+        let graph = AXTextGraph()
+        let sheet = graph.addNode("native-sheet")
+        let wrapper = graph.addNode("native-wrapper")
+        graph.set("native-sheet", kAXRoleAttribute, "AXSheet" as NSString)
+        graph.set("native-wrapper", kAXRoleAttribute, kAXGroupRole as NSString)
+        graph.set("destination", kAXParentAttribute, wrapper)
+        graph.set("native-wrapper", kAXParentAttribute, sheet)
+        graph.set("native-sheet", kAXParentAttribute, graph.element("window"))
+
+        XCTAssertTrue(ComputerUseAccessibilityTextTarget.parentPathReachesWindow(
+            from: graph.element("destination"), window: graph.element("window"), access: graph.access))
+        XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0)
+        XCTAssertTrue(graph.writes.isEmpty)
+    }
+
+    func testParentPathReachesWindowRejectsMalformedForeignCyclicAndOverLimitPaths() {
+        func graphWithPath(_ shape: String) -> AXTextGraph {
+            let graph = AXTextGraph()
+            let first = graph.addNode("path-first")
+            let second = graph.addNode("path-second")
+            graph.set("destination", kAXParentAttribute, first)
+            graph.set("path-first", kAXRoleAttribute, kAXGroupRole as NSString)
+            graph.set("path-second", kAXRoleAttribute, kAXGroupRole as NSString)
+            switch shape {
+            case "foreign":
+                graph.set("path-first", kAXParentAttribute, graph.element("other-window"))
+            case "broken":
+                graph.set("path-first", kAXParentAttribute, nil)
+            case "malformed":
+                graph.set("path-first", kAXParentAttribute, "not-an-AX-element" as NSString)
+            case "cycle":
+                graph.set("path-first", kAXParentAttribute, second)
+                graph.set("path-second", kAXParentAttribute, first)
+            default:
+                graph.set("path-first", kAXParentAttribute, second)
+                graph.set("path-second", kAXParentAttribute, graph.element("window"))
+            }
+            return graph
+        }
+
+        for shape in ["foreign", "broken", "malformed", "cycle"] {
+            let graph = graphWithPath(shape)
+            XCTAssertFalse(ComputerUseAccessibilityTextTarget.parentPathReachesWindow(
+                from: graph.element("destination"), window: graph.element("window"), access: graph.access), shape)
+            XCTAssertEqual(graph.readCount("destination", kAXValueAttribute), 0)
+            XCTAssertTrue(graph.writes.isEmpty)
+        }
+
+        let deep = graphWithPath("deep")
+        var parent = deep.element("window")
+        for index in 0..<10 {
+            let node = deep.addNode("deep-\(index)")
+            deep.set("deep-\(index)", kAXRoleAttribute, kAXGroupRole as NSString)
+            deep.set("deep-\(index)", kAXParentAttribute, parent)
+            parent = node
+        }
+        deep.set("destination", kAXParentAttribute, parent)
+        XCTAssertFalse(ComputerUseAccessibilityTextTarget.parentPathReachesWindow(
+            from: deep.element("destination"), window: deep.element("window"), access: deep.access,
+            maximumDepth: 8))
+        XCTAssertEqual(deep.readCount("destination", kAXValueAttribute), 0)
+        XCTAssertTrue(deep.writes.isEmpty)
+
+        let withdrawn = graphWithPath("deep")
+        var checks = 0
+        XCTAssertFalse(ComputerUseAccessibilityTextTarget.parentPathReachesWindow(
+            from: withdrawn.element("destination"), window: withdrawn.element("window"), access: withdrawn.access,
+            mayAct: { checks += 1; return checks < 3 }))
+        XCTAssertEqual(withdrawn.readCount("destination", kAXValueAttribute), 0)
+        XCTAssertTrue(withdrawn.writes.isEmpty)
     }
 
     func testEditableTextSnapshotRejectsAncestryReadThatExceedsDeadline() throws {

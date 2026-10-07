@@ -107,12 +107,15 @@ enum ComputerUseDefaultBrowserActionScope {
 
 @MainActor
 final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
-    ComputerUseTextClarificationContinuing {
+    ComputerUseTextClarificationContinuing, ComputerUseClarifiedGoalExecuting {
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
+    typealias OutcomeCheck = ComputerUseDesktopExecutor.OutcomeCheck
     typealias RevalidationFailureObserver = ComputerUseDesktopExecutor.RevalidationFailureObserver
     typealias NativeFilePlanner = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseMCPBrowserStepPlanner.Plan?
     typealias NativeControlPlanner = @MainActor @Sendable (ComputerUseFaraModel.Input,
         ComputerUseDefaultBrowserPageReader.Observation) async throws -> ComputerUseDefaultBrowserControlPlan
+    typealias NativeBootstrapPlanner = @MainActor @Sendable
+        (ComputerUseFaraModel.Input) async throws -> ComputerUseDefaultBrowserControlPlan
     typealias NativeControlInputs = @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs?
     typealias LocalFileCatalogFactory = ComputerUseDefaultBrowserFileCatalogFactory
     enum Failure: Error { case taskAlreadyBound, noRetainedWindow, invalidFileChoice, selectedFileStale, selectedFileChangeNeedsConfirmation }
@@ -136,6 +139,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var executionTaskID: String?
         var selectedChoice: ComputerUseClarificationChoice?
         var clarifiedGoal: ComputerUseUnresolvedTextGoal?
+        var routedClarifiedGoal: ComputerUseUnresolvedTextGoal?
         var answerOriginTaskID: String?
         var clarificationNonce: UUID?
         var clarificationRetired = false
@@ -219,6 +223,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             try check(nil, tools)
             if selectedCandidate != nil { _ = try selectedFileURL() }
             var enriched = input
+            enriched.defaultBrowserTask = true
+            enriched.clarifiedGoal = clarifiedGoal ?? routedClarifiedGoal
             if includeUnselectedCatalog {
                 enriched.localFileCatalog = fileContext ?? Self.notQueriedFileContext
             } else if let selectedCandidate, let fileContext {
@@ -274,6 +280,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     checkedOperation = .askFile(question: "The top files tie on the requested date ranking. Which file should be used?",
                         candidateIDs: bestIDs)
+                case .ids(let bestIDs) where !bestIDs.contains(candidateID):
+                    return .userInterventionRequired("The proposed file does not match the verified date ranking. Review the available files, then choose Resume.")
                 case .ids:
                     break
                 }
@@ -331,6 +339,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                       Set(candidateIDs).count == candidateIDs.count,
                       !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       question.utf8.count <= 512 else { throw Failure.invalidFileChoice }
+                if userSelectedCandidateID == nil, context.query.sort != nil {
+                    let visibleIDs = Set(context.page.candidates.map(\.id))
+                    guard let fileCatalog,
+                          case .ids(let bestIDs) = fileCatalog.rankedBestCandidates(for: context.query),
+                          bestIDs.count > 1, bestIDs.count <= 8,
+                          Set(bestIDs).isSubset(of: visibleIDs),
+                          Set(candidateIDs) == Set(bestIDs) else {
+                        return .userInterventionRequired("The proposed file choices do not match the verified date ranking. Review the available files, then choose Resume.")
+                    }
+                }
                 var candidates: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
                 var choices: [ComputerUseClarificationChoice] = []
                 let formatter = ISO8601DateFormatter()
@@ -345,7 +363,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     if let created = candidate.createdAt { detail += " · Created \(formatter.string(from: created))" }
                     choices.append(try .init(id: candidate.id, label: candidate.displayName, detail: detail))
                 }
-                let unresolved = try ComputerUseUnresolvedTextGoal(userRequest: goal)
+                let unresolved = try clarifiedGoal ?? routedClarifiedGoal
+                    ?? ComputerUseUnresolvedTextGoal(userRequest: goal)
                 let clarificationTaskID = executionTaskID ?? taskID
                 let nonce = UUID()
                 let scopeDigest = ComputerUseTaskContract.digest(["default-browser-file-choice-v1", taskID,
@@ -418,10 +437,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
          propose: @escaping ComputerUseDesktopExecutor.Propose,
          nativeFilePlanner: NativeFilePlanner? = nil,
          nativeControlPlanner: NativeControlPlanner? = nil,
+         nativeBootstrapPlanner: NativeBootstrapPlanner? = nil,
          pageReader: ComputerUseDefaultBrowserPageReader? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {},
          completionCheck: CompletionCheck? = nil,
+         outcomeCheck: OutcomeCheck? = nil,
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
+         screenConsentRecognizer: ComputerUseDesktopExecutor.ScreenConsentRecognizer? = nil,
          localFileCatalogFactory: @escaping LocalFileCatalogFactory = { taskID in
              let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
                  ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
@@ -433,6 +455,40 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         let scope = Scope(session: session, pageReader: pageReader ?? ComputerUseDefaultBrowserPageReader(),
             localFileCatalogFactory: localFileCatalogFactory)
         self.scope = scope
+        let scopedOutcomeCheck: ComputerUseDesktopExecutor.OutcomeCheck?
+        if let outcomeCheck {
+            scopedOutcomeCheck = { rawInput, answer in
+                var enriched = try scope.modelInput(rawInput)
+                // Never credit a destination observation supplied by an earlier
+                // planning pass or carried on an input value. Completion review
+                // gets only a fresh read after this candidate's picker dispatch.
+                enriched.defaultBrowserDestinationObservation = nil
+                if let candidate = scope.selectedCandidate,
+                   scope.dispatchedPickerConfirmationCandidateID == candidate.id,
+                   scope.session.currentFileOpenPanel == nil,
+                   let tools = scope.tools {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try scope.check(nil, tools)
+                    if let window = scope.session.currentWindow {
+                        let page = try scope.pageReader.read(window: window.accessibilityElement,
+                            application: window.application, mayAct: { (try? tools.requireActive()) != nil })
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        try scope.check(nil, tools)
+                        if let page, page.application == window.application,
+                           let sourceURL = URL(string: page.url),
+                           sourceURL.scheme?.lowercased() == "https", sourceURL.host != nil {
+                            enriched.defaultBrowserDestinationObservation = .init(sourceURL: sourceURL,
+                                exactTextValues: page.exactTextValues, truncated: page.truncated)
+                        }
+                    }
+                }
+                return try await outcomeCheck(enriched, answer)
+            }
+        } else {
+            scopedOutcomeCheck = nil
+        }
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
             scope.nativeControlErrorDomainForDiagnostics = nil
             scope.nativeControlErrorCodeForDiagnostics = nil
@@ -482,26 +538,88 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
             if scope.visualFallbackPending {
                 let directive = scope.pendingVisualDirective
-                // An explicit directive gives the visual specialist a bounded
-                // assignment: keep the advice through its action loop. An implicit fallback
-                // (nil directive) is only a one-observation visual turn.
-                if directive == nil { scope.visualFallbackPending = false }
                 var visualInput = enriched
                 visualInput.browserWorkerDirective = directive
+                // A directive advises one visual proposal. Keep the action and
+                // approval continuation already produced by that proposal, then
+                // use the next fresh observation to ask native controls again.
+                // If they still cannot support the next step, they may delegate
+                // another bounded visual proposal.
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
                 return try await propose(visualInput)
             }
-            guard let nativeControlPlanner, let tools = scope.tools,
-                  let window = scope.session.currentWindow else { return try await propose(enriched) }
+            if nativeControlPlanner == nil && nativeBootstrapPlanner == nil {
+                return try await propose(enriched)
+            }
+            guard let tools = scope.tools, let window = scope.session.currentWindow else {
+                return try await propose(enriched)
+            }
             try scope.check(nil, tools)
             guard let page = try scope.pageReader.read(window: window.accessibilityElement,
                 application: window.application, mayAct: { (try? tools.requireActive()) != nil }) else {
                 try scope.check(nil, tools)
-                scope.visualFallbackPending = true
-                scope.pendingVisualDirective = nil
-                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                guard let nativeBootstrapPlanner else {
+                    scope.visualFallbackPending = true
+                    scope.pendingVisualDirective = nil
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                }
+                let bootstrapInput = try scope.modelInput(input, includeUnselectedCatalog: true)
+                let plan: ComputerUseDefaultBrowserControlPlan
+                do { plan = try await nativeBootstrapPlanner(bootstrapInput) }
+                catch is CancellationError { throw CancellationError() }
+                catch {
+                    try scope.check(nil, tools)
+                    let diagnosticError = error as NSError
+                    scope.nativeControlErrorDomainForDiagnostics = diagnosticError.domain
+                    scope.nativeControlErrorCodeForDiagnostics = diagnosticError.code
+                    return .init(response: "", decision: .handoff(
+                        "The browser page is not readable yet. Review the browser window, then choose Resume."),
+                        includeInModelHistory: false)
+                }
+                try scope.check(nil, tools)
+                switch plan {
+                case .visualFallback(let reason, let directive):
+                    _ = reason
+                    guard let directive else {
+                        scope.visualFallbackPending = false
+                        scope.pendingVisualDirective = nil
+                        return .init(response: "", decision: .handoff(
+                            "The browser needs a user decision before continuing. Review the window, then choose Resume."),
+                            includeInModelHistory: false)
+                    }
+                    do { try directive.validate() }
+                    catch {
+                        scope.visualFallbackPending = false
+                        scope.pendingVisualDirective = nil
+                        return .init(response: "", decision: .handoff(
+                            "The browser next step could not be verified. Review the window, then choose Resume."),
+                            includeInModelHistory: false)
+                    }
+                    scope.visualFallbackPending = true
+                    scope.pendingVisualDirective = directive
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                case .askUser(let question):
+                    scope.visualFallbackPending = false
+                    scope.pendingVisualDirective = nil
+                    let message = question.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !message.isEmpty, message.utf8.count <= 1_024 else {
+                        return .init(response: "", decision: .handoff(
+                            "The browser needs a user decision before continuing. Review the window, then choose Resume."),
+                            includeInModelHistory: false)
+                    }
+                    return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
+                case .pressControl:
+                    scope.visualFallbackPending = false
+                    scope.pendingVisualDirective = nil
+                    return .init(response: "", decision: .handoff(
+                        "The browser next step could not be verified. Review the window, then choose Resume."),
+                        includeInModelHistory: false)
+                }
             }
+            guard let nativeControlPlanner else { return try await propose(enriched) }
             try scope.check(nil, tools)
-            if page.focusedExpandedMenuHasNoActionableChildren {
+            if page.controls.isEmpty || page.focusedExpandedMenuHasNoActionableChildren {
                 scope.visualFallbackPending = true
                 scope.pendingVisualDirective = nil
                 return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
@@ -579,14 +697,38 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch is CancellationError { throw CancellationError() }
                 catch ComputerUseDesktopExecutor.Failure.unsupportedAction { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            }, completeCheck: completionCheck, revalidationFailureObserver: revalidationFailureObserver,
+            }, completeCheck: completionCheck, outcomeCheck: scopedOutcomeCheck,
+            completionAnswerTransform: { answer in
+                guard let candidate = scope.selectedCandidate,
+                      scope.dispatchedPickerConfirmationCandidateID == candidate.id else {
+                    return answer
+                }
+                guard let tools = scope.tools else {
+                    throw ComputerUseDesktopExecutor.Failure.completionUnverified
+                }
+                try scope.check(nil, tools)
+                guard scope.session.currentFileOpenPanel == nil else {
+                    throw ComputerUseDesktopExecutor.Failure.completionUnverified
+                }
+                do {
+                    guard let selectedURL = try scope.selectedFileURL(),
+                          selectedURL.lastPathComponent.utf8.elementsEqual(candidate.displayName.utf8) else {
+                        throw ComputerUseDesktopExecutor.Failure.completionUnverified
+                    }
+                } catch {
+                    throw ComputerUseDesktopExecutor.Failure.completionUnverified
+                }
+                return "Completed your request using “\(candidate.displayName)”."
+            },
+            revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
             onSuccessfulDispatch: { scope.successfulDispatch($0) },
-            approvalTaskIDProvider: { scope.executionTaskID }, finishRun: {
-                // Desktop finishRun also runs when it returns an approval
-                // continuation. Keep explicit task advice for that bounded
-                // continuation; prepare, picker priority, and cancellation
-                // clear it at their task/surface lifecycle boundaries.
+            approvalTaskIDProvider: { scope.executionTaskID },
+            screenConsentRecognizer: screenConsentRecognizer, finishRun: {
+                // An approval continuation retains its exact proposed action.
+                // Visual advice is already consumed by that proposal; the next
+                // observation returns to native planning. Task preparation and
+                // cancellation clear any advice not yet consumed.
                 if scope.pendingVisualDirective == nil { scope.visualFallbackPending = false }
                 await finishRun()
             })
@@ -646,6 +788,48 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         catch { throw error }
     }
 
+    func execute(taskID: String, goal: ComputerUseUnresolvedTextGoal,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws
+        -> ComputerUseExecutionResult {
+        guard let originalGoal = goal.userTurns.first,
+              !originalGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              originalGoal.utf8.count <= 8_192 else { throw Failure.taskAlreadyBound }
+        if let existingTaskID = scope.taskID {
+            guard existingTaskID == taskID,
+                  scope.goal?.utf8.elementsEqual(originalGoal.utf8) == true,
+                  scope.routedClarifiedGoal == goal else {
+                throw Failure.taskAlreadyBound
+            }
+        } else {
+            // Bind before prepare may suspend for browser acquisition or sign-in,
+            // so a same-task Resume retains the exact accepted turns.
+            scope.routedClarifiedGoal = goal
+        }
+        lastSessionFailureForDiagnostics = nil
+        do {
+            try await scope.prepare(taskID, originalGoal, tools)
+            return try await desktop.execute(taskID: taskID, goal: goal, tools: tools, progress: progress)
+        } catch is CancellationError { throw CancellationError() }
+        catch let failure as ComputerUseDefaultBrowserSession.Failure {
+            lastSessionFailureForDiagnostics = failure
+            if failure == .authenticationHandoff {
+                return .userInterventionRequired("Complete sign-in or macOS permission in the intended browser window, then choose Resume.")
+            }
+            return .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume.")
+        } catch Failure.taskAlreadyBound {
+            return .userInterventionRequired("This browser task is bound to its original goal. Resume that task to continue.")
+        } catch Failure.noRetainedWindow {
+            return .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume.")
+        } catch Failure.selectedFileStale {
+            return .userInterventionRequired("The selected local file changed. Choose it again before continuing.")
+        } catch Failure.selectedFileChangeNeedsConfirmation {
+            return .userInterventionRequired("A different file was requested after your choice. Choose the new file explicitly before continuing.")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {
+            lastSessionFailureForDiagnostics = scope.lastSessionFailureForDiagnostics
+            return .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume.")
+        } catch { throw error }
+    }
+
     func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation, action: ComputerUsePredictedAction,
         fingerprint: ComputerUseApprovalFingerprint, tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
         do {
@@ -693,9 +877,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     }
 
     func invalidateClarification(taskID: String?) {
-        guard taskID == nil || scope.executionTaskID == taskID else { return }
+        guard taskID == nil || scope.executionTaskID == taskID || scope.taskID == taskID else { return }
         scope.pendingClarification = nil
         scope.pendingChoiceCandidates.removeAll()
+        scope.clarifiedGoal = nil
+        scope.routedClarifiedGoal = nil
         scope.clarificationRetired = true
     }
 

@@ -82,11 +82,25 @@ final class ComputerUseBlockingOperationWorker: @unchecked Sendable {
     }
 }
 
+/// Process-scoped readiness for the expensive first successful consent OCR.
+/// A timed-out or failed operation leaves the cold-start allowance available.
+final class ComputerUseConsentRecognitionWarmup: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completedSuccessfully = false
+
+    func timeout(warm: TimeInterval, coldStart: TimeInterval) -> TimeInterval {
+        lock.withLock { completedSuccessfully ? warm : coldStart }
+    }
+
+    func markSuccessful() { lock.withLock { completedSuccessfully = true } }
+}
+
 /// Vision performs synchronous native work and can wait internally. Keep its
 /// API and error semantics separate from other bounded blocking operations.
 enum ComputerUseObservationWorker {
     private static let worker = ComputerUseBlockingOperationWorker(
         label: "com.threadmark.remotedesktop.computer-use.observation")
+    private static let processConsentWarmup = ComputerUseConsentRecognitionWarmup()
 
     enum Failure: Error, Equatable, LocalizedError {
         case busy, timedOut
@@ -108,5 +122,20 @@ enum ComputerUseObservationWorker {
         do { return try await worker.perform(timeout: timeout, operation) }
         catch ComputerUseBlockingOperationWorker.Failure.busy { throw Failure.busy }
         catch ComputerUseBlockingOperationWorker.Failure.timedOut { throw Failure.timedOut }
+    }
+
+    static func performConsentRecognition<Value: Sendable>(
+        timeout: TimeInterval = 10,
+        coldStartTimeout: TimeInterval = 60,
+        warmup: ComputerUseConsentRecognitionWarmup? = nil,
+        _ operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+        let state = warmup ?? processConsentWarmup
+        let selectedTimeout = state.timeout(warm: timeout, coldStart: coldStartTimeout)
+        return try await perform(timeout: selectedTimeout) {
+            let value = try operation()
+            state.markSuccessful()
+            return value
+        }
     }
 }

@@ -285,6 +285,8 @@
 		FDB9561CB17517FEC85E058A /* LocalComputerUseTLS.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6F470F2621B745E5A6A8BC1 /* LocalComputerUseTLS.swift */; };
 		FE02F0CBEA9E03A40729E248 /* ComputerUseLocalFileCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F24333B6EE9553F281A420 /* ComputerUseLocalFileCatalog.swift */; };
 		3A2D806C0079BF032A565ECD /* ComputerUseLocalFileCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */; };
+		9DF6AD72F10F8FEE7F5BA4B3 /* ComputerUseSkillCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36969F0DE1F6A96906659CB6 /* ComputerUseSkillCatalog.swift */; };
+		A5C947D58155D734355C1166 /* ComputerUseSkills in Resources */ = {isa = PBXBuildFile; fileRef = DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -587,6 +589,8 @@
 		FD9246779A5FFF58A130076A /* ComputerUseClarificationCompositionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseClarificationCompositionTests.swift; sourceTree = "<group>"; };
 		47F24333B6EE9553F281A420 /* ComputerUseLocalFileCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalFileCatalog.swift; sourceTree = "<group>"; };
 		535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalFileCatalogTests.swift; sourceTree = "<group>"; };
+		36969F0DE1F6A96906659CB6 /* ComputerUseSkillCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSkillCatalog.swift; sourceTree = "<group>"; };
+		DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ComputerUseSkills; path = RemoteDesktopHost/Resources/ComputerUseSkills; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -809,6 +813,7 @@
 		B29901137009531DE2AB2EA4 /* ComputerUse */ = {
 			isa = PBXGroup;
 			children = (
+				36969F0DE1F6A96906659CB6 /* ComputerUseSkillCatalog.swift */,
 				01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */,
 				CF84E4931D4FCF81B0D04411 /* ComputerUseAccessibilityTextTarget.swift */,
 				7A2EB85DDD4C4859A790004F /* ComputerUseAXLifecycle.swift */,
@@ -929,6 +934,7 @@
 		B400D9D1DB22687D5CC6C610 /* RemoteDesktopHost */ = {
 			isa = PBXGroup;
 			children = (
+				DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */,
 				75EE7C6868D1A93B054508AE /* App.swift */,
 				4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */,
 				F5991731ED21FDC001946561 /* Assets.xcassets */,
@@ -1092,6 +1098,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A5C947D58155D734355C1166 /* ComputerUseSkills in Resources */,
 				630D66E302FADD1EC9C7608B /* Assets.xcassets in Resources */,
 				C15C5EDE7DBC24A7B612B196 /* GRANITE-APACHE-2.0-LICENSE.txt in Resources */,
 				8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */,
@@ -1271,6 +1278,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9DF6AD72F10F8FEE7F5BA4B3 /* ComputerUseSkillCatalog.swift in Sources */,
 				6D6AC21CC6C01821F4B30731 /* App.swift in Sources */,
 				011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */,
 				DFE68A099F0C07CA6598E619 /* AppleFoundationMCPPlanner.swift in Sources */,

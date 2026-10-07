@@ -297,6 +297,22 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         }
     }
 
+    func testValidatedControlCenterReturnsSafeTextEntryControlCenters() throws {
+        for role in ["AXTextField", "AXTextArea", "AXComboBox"] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.set("button", kAXRoleAttribute, role as NSString)
+            graph.set("button", kAXTitleAttribute, "Current editor" as NSString)
+            graph.set("button", kAXEnabledAttribute, NSNumber(value: true))
+            graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }), role)
+            let control = try XCTUnwrap(observation.controls.first(where: { $0.role == role && $0.label == "Current editor" }), role)
+            XCTAssertEqual(try reader.validatedControlCenter(observation: observation, controlID: control.id,
+                window: graph.window, windowBounds: CGRect(x: 0, y: 0, width: 640, height: 480), mayAct: { true }),
+                CGPoint(x: 100, y: 80), role)
+        }
+    }
+
     func testValidatedControlCenterReturnsFreshEnabledControlCenter() throws {
         let graph = PageAXGraph(); graph.makePage()
         graph.setFrame("button", CGRect(x: 50, y: 60, width: 100, height: 40))
@@ -585,6 +601,148 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertTrue(graph.writes.isEmpty)
     }
 
+    func testObservationCarriesExactStaticTextAndControlLabelsFromOuterPage() throws {
+        let graph = PageAXGraph()
+        graph.makePage(text: "Current destination entry")
+        graph.set("button", kAXTitleAttribute, "Open selected file" as NSString)
+        let hidden = graph.element("hidden-static")
+        graph.set("hidden-static", kAXParentAttribute, graph.element("web"))
+        graph.set("hidden-static", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("hidden-static", kAXValueAttribute, "hidden destination text" as NSString)
+        graph.set("hidden-static", "AXHidden" as CFString, kCFBooleanTrue)
+        let protected = graph.element("protected-static")
+        graph.set("protected-static", kAXParentAttribute, graph.element("web"))
+        graph.set("protected-static", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("protected-static", kAXValueAttribute, "protected destination text" as NSString)
+        graph.set("protected-static", "AXProtectedContent" as CFString, kCFBooleanTrue)
+        let editable = graph.element("editable-field")
+        graph.set("editable-field", kAXParentAttribute, graph.element("web"))
+        graph.set("editable-field", kAXRoleAttribute, "AXTextField" as NSString)
+        graph.set("editable-field", kAXTitleAttribute, "Attachment name" as NSString)
+        graph.set("editable-field", kAXValueAttribute, "Missing Target.pptx" as NSString)
+        graph.set("editable-field", kAXEnabledAttribute, kCFBooleanTrue)
+        graph.set("web", kAXChildrenAttribute, [graph.element("text"), graph.element("button"),
+            graph.element("secure"), graph.element("iframe"), hidden, protected, editable] as CFArray)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+
+        XCTAssertTrue(observation.exactTextValues.contains("Current destination entry"))
+        XCTAssertTrue(observation.exactTextValues.contains("Open selected file"))
+        XCTAssertFalse(observation.exactTextValues.contains("password-secret"))
+        XCTAssertFalse(observation.exactTextValues.contains("iframe-only secret"))
+        XCTAssertFalse(observation.exactTextValues.contains("hidden destination text"))
+        XCTAssertFalse(observation.exactTextValues.contains("protected destination text"))
+        XCTAssertFalse(observation.exactTextValues.contains("Missing Target.pptx"),
+            "Editable field values are not page text or control labels")
+        XCTAssertFalse(graph.reads.contains(where: { $0 == ("secure", kAXValueAttribute as String) }))
+    }
+
+    func testExactTextValuesOmitOversizedValueWithoutDiscardingCompleteValues() throws {
+        let graph = PageAXGraph()
+        let oversizedPrefix = "Oversized destination value that must not become exact evidence"
+        graph.makePage(text: oversizedPrefix + String(repeating: "x", count: 5_000))
+        let intact = graph.element("intact-static")
+        graph.set("intact-static", kAXParentAttribute, graph.element("web"))
+        graph.set("intact-static", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("intact-static", kAXValueAttribute, "A complete destination value" as NSString)
+        graph.set("web", kAXChildrenAttribute, [graph.element("text"), graph.element("button"),
+            graph.element("secure"), graph.element("iframe"), intact] as CFArray)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+
+        XCTAssertTrue(observation.truncated)
+        XCTAssertTrue(observation.exactTextValues.contains("A complete destination value"))
+        XCTAssertFalse(observation.exactTextValues.contains(where: { $0.hasPrefix(oversizedPrefix) }),
+            "A rendered or otherwise truncated prefix cannot be promoted to exact evidence")
+        XCTAssertFalse(observation.exactTextValues.contains(where: { $0.utf8.count > 4_096 }))
+    }
+
+    func testExactTextValuesOmitExcessValuesAtThirtyTwo() throws {
+        let graph = PageAXGraph()
+        graph.makePage(text: "Exact text zero")
+        var children: [AXUIElement] = [graph.element("text"), graph.element("button"),
+            graph.element("secure"), graph.element("iframe")]
+        for index in 1..<40 {
+            let name = "bounded-exact-text-\(index)"
+            let node = graph.element(name)
+            graph.set(name, kAXParentAttribute, graph.element("web"))
+            graph.set(name, kAXRoleAttribute, "AXStaticText" as NSString)
+            graph.set(name, kAXValueAttribute, "Exact text \(index)" as NSString)
+            children.append(node)
+        }
+        graph.set("web", kAXChildrenAttribute, children as CFArray)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+
+        XCTAssertEqual(observation.exactTextValues.count, 32)
+        XCTAssertTrue(observation.truncated)
+        XCTAssertTrue(observation.exactTextValues.contains("Exact text zero"))
+        XCTAssertLessThanOrEqual(observation.exactTextValues.reduce(0) { $0 + $1.utf8.count }, 4_096)
+    }
+
+    func testExactTextValuesOmitWholeValuesWhenCombinedByteBoundIsReached() throws {
+        let graph = PageAXGraph()
+        let firstValue = "v00" + String(repeating: "a", count: 247)
+        graph.makePage(text: firstValue)
+        graph.set("button", kAXTitleAttribute, "" as NSString)
+        var children: [AXUIElement] = [graph.element("text"), graph.element("button"),
+            graph.element("secure"), graph.element("iframe")]
+        for index in 1..<20 {
+            let name = "long-exact-text-\(index)"
+            let node = graph.element(name)
+            graph.set(name, kAXParentAttribute, graph.element("web"))
+            graph.set(name, kAXRoleAttribute, "AXStaticText" as NSString)
+            let value = "v\(String(format: "%02d", index))" + String(repeating: "b", count: 247)
+            graph.set(name, kAXValueAttribute, value as NSString)
+            children.append(node)
+        }
+        graph.set("web", kAXChildrenAttribute, children as CFArray)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
+
+        XCTAssertTrue(observation.truncated)
+        XCTAssertFalse(observation.exactTextValues.isEmpty, "The bounds check cannot pass with no exact values")
+        XCTAssertTrue(observation.exactTextValues.contains(firstValue))
+        XCTAssertLessThan(observation.exactTextValues.count, 20)
+        XCTAssertLessThanOrEqual(observation.exactTextValues.reduce(0) { $0 + $1.utf8.count }, 4_096)
+        XCTAssertTrue(observation.exactTextValues.allSatisfy { $0.utf8.count == 250 },
+            "The array contains complete values, never a prefix from the final oversized field")
+    }
+
+    func testCancelledOrUnavailablePageCannotYieldQualifiedExactText() async throws {
+        let graph = PageAXGraph()
+        graph.makePage()
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        do {
+            _ = try reader.read(window: graph.window, application: graph.identity, mayAct: { false })
+            XCTFail("An inactive surface must not return an exact-text observation")
+        } catch ComputerUseHostTools.ToolError.paused { }
+
+        let cancelled = Task {
+            try reader.read(window: graph.window, application: graph.identity, mayAct: {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return true
+            })
+        }
+        do {
+            _ = try await cancelled.value
+            XCTFail("A cancelled read must not return an exact-text observation")
+        } catch is CancellationError { }
+
+        graph.frontmostIdentity = graph.otherIdentity
+        XCTAssertNil(try reader.read(window: graph.window, application: graph.identity, mayAct: { true }),
+            "A foreign app cannot qualify text for this page observation")
+        graph.frontmostIdentity = graph.identity
+        graph.focusedWindow = graph.otherWindow
+        XCTAssertNil(try reader.read(window: graph.window, application: graph.identity, mayAct: { true }),
+            "A different focused window cannot qualify text for this page observation")
+    }
+
     func testRejectsForeignApplicationAndForeignFocusedWindow() throws {
         for mode in ["app", "window"] {
             let graph = PageAXGraph(); graph.makePage()
@@ -655,7 +813,7 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             .read(window: staticTextFocus.window, application: staticTextFocus.identity, mayAct: { true }),
             "A focused non-control page element does not need a pressable control reference")
 
-        for scenario in ["control-cap", "node-cap", "hidden", "protected", "iframe", "foreign"] {
+        for scenario in ["control-cap", "node-cap", "hidden", "protected", "iframe", "foreign", "cycle", "secure", "disabled"] {
             let graph = PageAXGraph(); graph.makePage()
             switch scenario {
             case "control-cap", "node-cap":
@@ -675,6 +833,25 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
                 addFocusedCombo(graph)
                 children.append(graph.element("focused-combo"))
                 graph.set("web", kAXChildrenAttribute, children as CFArray)
+            case "cycle":
+                let first = graph.element("focus-cycle-a")
+                let second = graph.element("focus-cycle-b")
+                graph.set("focus-cycle-a", kAXParentAttribute, second)
+                graph.set("focus-cycle-a", kAXRoleAttribute, "AXGroup" as NSString)
+                graph.set("focus-cycle-b", kAXParentAttribute, first)
+                graph.set("focus-cycle-b", kAXRoleAttribute, "AXGroup" as NSString)
+                addFocusedCombo(graph, parent: "focus-cycle-a")
+            case "secure":
+                graph.set("root", kAXFocusedUIElementAttribute as CFString, graph.element("secure"))
+            case "disabled":
+                let branch = graph.element("disabled-focus-branch")
+                graph.set("disabled-focus-branch", kAXParentAttribute, graph.element("web"))
+                graph.set("disabled-focus-branch", kAXRoleAttribute, "AXGroup" as NSString)
+                graph.set("disabled-focus-branch", kAXEnabledAttribute, kCFBooleanFalse)
+                graph.set("disabled-focus-branch", kAXChildrenAttribute, [graph.element("focused-combo")] as CFArray)
+                graph.set("web", kAXChildrenAttribute, [graph.element("text"), graph.element("button"),
+                    graph.element("secure"), graph.element("iframe"), branch] as CFArray)
+                addFocusedCombo(graph, parent: "disabled-focus-branch")
             case "hidden", "protected":
                 let branch = graph.element("focus-branch")
                 graph.set("focus-branch", kAXParentAttribute, graph.element("web"))
@@ -695,8 +872,21 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
                 graph.set("foreign-focused-combo", kAXTitleAttribute, "To recipients" as NSString)
                 graph.set("root", kAXFocusedUIElementAttribute as CFString, foreign)
             }
-            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
-                .read(window: graph.window, application: graph.identity, mayAct: { true }), scenario)
+            var reason: String?
+            let result = try ComputerUseDefaultBrowserPageReader(access: graph.access).read(
+                window: graph.window, application: graph.identity, mayAct: { true }, diagnostic: { reason = $0; _ = $1 })
+            if scenario == "control-cap" || scenario == "node-cap" {
+                let page = try XCTUnwrap(result, "A verified focus branch must survive catalogue and node overflow")
+                XCTAssertTrue(page.truncated)
+                XCTAssertTrue(page.controls.contains { $0.label == "To recipients" })
+            } else if scenario == "disabled" {
+                let page = try XCTUnwrap(result)
+                XCTAssertEqual(page.controls.first(where: { $0.label == "To recipients" })?.enabled, false,
+                    "A disabled ancestor must remain reflected in a prioritized child control")
+            } else {
+                XCTAssertNil(result, scenario)
+                if scenario == "iframe" { XCTAssertEqual(reason, "focused_nested_webarea_boundary") }
+            }
         }
 
         let appeared = PageAXGraph(); appeared.makePage()
@@ -732,7 +922,7 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         } catch ComputerUseHostTools.ToolError.paused { }
     }
 
-    func testOmittedFocusedNoncontrolPageNodeInvalidatesBoundedObservation() throws {
+    func testFocusedNoncontrolPageNodeIsPrioritizedWithinBoundedObservation() throws {
         for role in ["AXStaticText", "AXGroup"] {
             let graph = PageAXGraph(); graph.makePage()
             let focusedName = "late-focused-node"
@@ -754,9 +944,11 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             graph.set("web", kAXChildrenAttribute, children as CFArray)
             graph.set("root", kAXFocusedUIElementAttribute as CFString, focused)
 
-            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let observation = try XCTUnwrap(ComputerUseDefaultBrowserPageReader(access: graph.access)
                 .read(window: graph.window, application: graph.identity, mayAct: { true }),
-                "An in-page \(role) focus omitted by the 256-node traversal cannot be paired with the generic page context")
+                "A verified in-page focus should be visited before unrelated overflow siblings")
+            XCTAssertTrue(observation.truncated)
+            if role == "AXStaticText" { XCTAssertTrue(observation.renderedAXText.contains("Recipient")) }
         }
     }
 
@@ -788,14 +980,80 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
 
             let observation = try ComputerUseDefaultBrowserPageReader(access: graph.access)
                 .read(window: graph.window, application: graph.identity, mayAct: { true })
-            if fillerCount == 0 {
-                let page = try XCTUnwrap(observation)
-                XCTAssertTrue(page.controls.contains { $0.role == "AXTextArea" && $0.label == "Message Body" })
-            } else {
-                XCTAssertNil(observation,
-                    "A visited focused leaf cannot stand in for its editable ancestor omitted by the 32-control cap")
+            let page = try XCTUnwrap(observation)
+            XCTAssertTrue(page.controls.contains { $0.role == "AXTextArea" && $0.label == "Message Body" },
+                "The focused editor must be catalogued before unrelated controls consume the 32-control cap")
+            if fillerCount == 31 { XCTAssertTrue(page.truncated) }
+        }
+    }
+
+    func testFocusedBranchKeepsEditorAndNearbySiblingWithinBoundedPageWalk() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        let bodyGroup = graph.element("body-group")
+        let attach = graph.element("attach-button")
+        let editor = graph.element("focused-editor")
+        graph.set("body-group", kAXParentAttribute, graph.element("web"))
+        graph.set("body-group", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("body-group", kAXChildrenAttribute, [attach, editor] as CFArray)
+        graph.set("attach-button", kAXParentAttribute, bodyGroup)
+        graph.set("attach-button", kAXRoleAttribute, "AXButton" as NSString)
+        graph.set("attach-button", kAXTitleAttribute, "Attach files" as NSString)
+        graph.set("attach-button", kAXEnabledAttribute, kCFBooleanTrue)
+        graph.set("focused-editor", kAXParentAttribute, bodyGroup)
+        graph.set("focused-editor", kAXRoleAttribute, "AXTextArea" as NSString)
+        graph.set("focused-editor", kAXTitleAttribute, "Message Body" as NSString)
+        graph.set("focused-editor", kAXEnabledAttribute, kCFBooleanTrue)
+        var children: [AXUIElement] = [graph.element("text"), graph.element("button"), graph.element("secure"), graph.element("iframe")]
+        for index in 0..<270 {
+            let name = "priority-overflow-\(index)"
+            let filler = graph.element(name)
+            graph.set(name, kAXParentAttribute, graph.element("web"))
+            graph.set(name, kAXRoleAttribute, "AXGroup" as NSString)
+            graph.set(name, kAXChildrenAttribute, [] as CFArray)
+            children.append(filler)
+        }
+        children.append(bodyGroup)
+        graph.set("web", kAXChildrenAttribute, children as CFArray)
+        graph.set("root", kAXFocusedUIElementAttribute as CFString, editor)
+
+        let page = try XCTUnwrap(ComputerUseDefaultBrowserPageReader(access: graph.access)
+            .read(window: graph.window, application: graph.identity, mayAct: { true }))
+        XCTAssertTrue(page.truncated)
+        XCTAssertTrue(page.controls.contains { $0.role == "AXTextArea" && $0.label == "Message Body" })
+        XCTAssertTrue(page.controls.contains { $0.role == "AXButton" && $0.label == "Attach files" },
+            "Nearby siblings on the focused branch should precede distant overflow controls")
+    }
+
+    func testFocusedPriorityPathMustRemainStableDuringRead() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        let group = graph.element("focus-group")
+        let replacementGroup = graph.element("replacement-group")
+        let editor = graph.element("focus-editor")
+        graph.set("focus-group", kAXParentAttribute, graph.element("web"))
+        graph.set("focus-group", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("focus-group", kAXChildrenAttribute, [editor] as CFArray)
+        graph.set("replacement-group", kAXParentAttribute, graph.element("web"))
+        graph.set("replacement-group", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("replacement-group", kAXChildrenAttribute, [] as CFArray)
+        graph.set("focus-editor", kAXParentAttribute, group)
+        graph.set("focus-editor", kAXRoleAttribute, "AXTextArea" as NSString)
+        graph.set("focus-editor", kAXTitleAttribute, "Message Body" as NSString)
+        graph.set("focus-editor", kAXEnabledAttribute, kCFBooleanTrue)
+        graph.set("web", kAXChildrenAttribute, [graph.element("text"), graph.element("button"),
+            graph.element("secure"), graph.element("iframe"), group, replacementGroup] as CFArray)
+        graph.set("root", kAXFocusedUIElementAttribute as CFString, editor)
+        var changed = false
+        graph.afterRead = { node, attribute in
+            if node == "web", attribute == (kAXChildrenAttribute as String), !changed {
+                changed = true
+                graph.set("focus-editor", kAXParentAttribute, replacementGroup)
             }
         }
+        var reason: String?
+        let result = try ComputerUseDefaultBrowserPageReader(access: graph.access).read(
+            window: graph.window, application: graph.identity, mayAct: { true }, diagnostic: { reason = $0; _ = $1 })
+        XCTAssertNil(result)
+        XCTAssertEqual(reason, "focused_path_changed_during_read")
     }
 
     func testRetainedControlCannotCrossWindowOrApplication() throws {

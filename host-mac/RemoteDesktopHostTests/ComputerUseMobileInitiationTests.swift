@@ -2689,6 +2689,106 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             "The model can start a fresh query by omitting the optional continuation cursor")
     }
 
+    func testNativeFileNameFilterFindsLateTargetBeforeMatchingCandidateCap() async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = parent.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        for index in 0..<8 {
+            try Data([UInt8(index)]).write(to: directory.appendingPathComponent(String(format: "Unrelated-%02d.xlsx", index)))
+        }
+        let target = "ZZZ Requested Portfolio.pptx"
+        try Data([99]).write(to: directory.appendingPathComponent(target))
+
+        var fullCatalog = try ComputerUseLocalFileCatalog(taskID: "named-filter-task", approvedDirectory: directory, pageSize: 1)
+        var fullPage = try fullCatalog.discover()
+        var fullNames = fullPage.candidates.map(\.displayName)
+        while let cursor = fullPage.nextCursor {
+            fullPage = try fullCatalog.nextPage(after: cursor)
+            fullNames.append(contentsOf: fullPage.candidates.map(\.displayName))
+        }
+        let lateTarget = try XCTUnwrap(fullNames.last)
+        XCTAssertGreaterThan(fullNames.firstIndex(of: lateTarget) ?? 0, 2,
+            "Use a target beyond both the raw first page and the matching candidate cap")
+
+        let query = try await parsedNativeFileQuery(nameContains: lateTarget)
+        var boundedCatalog = try ComputerUseLocalFileCatalog(taskID: "named-filter-task", approvedDirectory: directory,
+            pageSize: 1, maximumCandidates: 2, maximumEntriesScanned: 64)
+        let page = try boundedCatalog.discover(query: query)
+        XCTAssertEqual(page.candidates.map(\.displayName), [lateTarget])
+        XCTAssertTrue(page.isComplete)
+        XCTAssertNil(page.nextCursor)
+    }
+
+    func testNativeFileNameFilterFoldsCaseAndDiacriticsAndKeepsAmbiguousMatches() async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let directory = parent.appendingPathComponent("Downloads", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        for name in ["Résumé deck.pptx", "resume copy.xlsx", "Other notes.txt"] {
+            try Data([1]).write(to: directory.appendingPathComponent(name))
+        }
+        let query = try await parsedNativeFileQuery(nameContains: "RESUME")
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "name-fold-task", approvedDirectory: directory, pageSize: 8)
+        let page = try catalog.discover(query: query)
+        XCTAssertEqual(Set(page.candidates.map(\.displayName)), Set(["Résumé deck.pptx", "resume copy.xlsx"]))
+        XCTAssertEqual(page.candidates.count, 2, "Filtering must preserve multiple matches for explicit ambiguity handling")
+    }
+
+    func testNativeFileNameFilterIsPartOfCursorQueryAndLegacyCallsDefaultEmpty() async throws {
+        let legacyQuery = try await parsedNativeFileQuery(nameContains: nil)
+        XCTAssertEqual(legacyQuery, .init(fileKind: .any, sort: nil))
+
+        let originalQuery = try await parsedNativeFileQuery(nameContains: "alpha")
+        let current = try nativeLocalFileContext(query: originalQuery,
+            page: .init(candidates: [], isComplete: true, nextCursor: "cursor-current",
+                hasTiedSortValues: false, hasMissingSortValues: false))
+        let sameFilterResponse = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "any", "sortField": "", "sortDirection": "", "nameContains": "alpha", "cursor": "cursor-current"
+        ])
+        var samePlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [sameFilterResponse]))
+        samePlanner.usesDirectActionPlanning = true
+        let samePlan = try await samePlanner.propose(current)
+        guard case .listFiles(let continuedQuery, let continuedCursor)? = samePlan.localFileOperation else {
+            return XCTFail("A current cursor with its identical filename filter must remain usable")
+        }
+        XCTAssertEqual(continuedQuery, originalQuery)
+        XCTAssertEqual(continuedCursor, "cursor-current")
+        let changedFilterResponse = try nativeBrowserFunctionEnvelope("listFiles", arguments: [
+            "fileKind": "any", "sortField": "", "sortDirection": "", "nameContains": "beta", "cursor": "cursor-current"
+        ])
+        var changedPlanner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [changedFilterResponse]))
+        changedPlanner.usesDirectActionPlanning = true
+        do {
+            _ = try await changedPlanner.propose(current)
+            XCTFail("A cursor must be rejected when its filename filter changes")
+        } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+    }
+
+    func testNativeFileNameFilterRejectsMoreThan512UTF8Bytes() async throws {
+        _ = try await parsedNativeFileQuery(nameContains: String(repeating: "é", count: 256))
+        do {
+            _ = try await parsedNativeFileQuery(nameContains: String(repeating: "é", count: 257))
+            XCTFail("Oversized filename filters must be rejected before any catalogue discovery")
+        } catch ComputerUseBrowserGoalPlanError.invalidResponse { }
+    }
+
+    private func parsedNativeFileQuery(nameContains: String?) async throws -> ComputerUseLocalFileCatalog.Query {
+        var arguments: [String: Any] = ["fileKind": "any", "sortField": "", "sortDirection": ""]
+        if let nameContains { arguments["nameContains"] = nameContains }
+        let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: arguments)
+        let context = try nativeLocalFileContext(query: .init(),
+            page: .init(candidates: [], isComplete: false, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
+        var planner = try nativeStepPlanner(transport: NativeStepQueueFixtureTransport(responses: [response]))
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .listFiles(let query, nil)? = plan.localFileOperation else {
+            throw ComputerUseBrowserGoalPlanError.invalidResponse
+        }
+        return query
+    }
+
     func testNativeDirectFilePlannerRejectsSuppliedEmptyAndStaleCursors() async throws {
         let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
             sort: .init(field: .modifiedAt, direction: .descending))
@@ -2863,6 +2963,153 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             return XCTFail("The host-retained selection should survive catalog cursor paging")
         }
         XCTAssertNil(retainedPlan.directCompletion)
+    }
+
+    func testNativeFileChooserRoleKeepsOriginalTaskAndLimitsAskUserToFileIdentity() async throws {
+        let goal = "Create an unsent Gmail draft and attach Quarterly Plan.xlsx; do not send it."
+        let first = localFileCandidate(id: "quarterly-plan", name: "Quarterly Plan.xlsx", ext: "xlsx")
+        let second = localFileCandidate(id: "older-plan", name: "Older Plan.xlsx", ext: "xlsx")
+        var input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: Data())
+        input.clarifiedGoal = try ComputerUseUnresolvedTextGoal(userRequest: goal)
+            .answering("Which file should be attached?", with: "Use the requested Quarterly Plan.xlsx.")
+        input.localFileCatalog = .init(query: .init(), page: .init(candidates: [first, second], isComplete: true,
+            nextCursor: nil, hasTiedSortValues: false, hasMissingSortValues: false))
+        var context = try ComputerUseMCPBrowserStepPlanner().context(input, page: nil)
+        context.isInitialObservation = true
+        context.isNativeFileSelection = true
+
+        let response = try nativeBrowserFunctionEnvelope("listFiles", arguments: ["request": [
+            "fileKind": "spreadsheet", "sortField": "", "sortDirection": "", "nameContains": "Quarterly Plan"
+        ]])
+        let transport = NativeStepQueueFixtureTransport(responses: [response])
+        var planner = try nativeStepPlanner(transport: transport)
+        planner.usesDirectActionPlanning = true
+        let plan = try await planner.propose(context)
+        guard case .listFiles? = plan.localFileOperation else {
+            return XCTFail("The file specialist should keep using the bounded file operation")
+        }
+
+        let snapshot = await transport.snapshot()
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(snapshot.requests.first)) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let system = try XCTUnwrap(messages.first { $0["role"] as? String == "system" }?["content"] as? String)
+        let user = try XCTUnwrap(messages.first { $0["role"] as? String == "user" }?["content"] as? String)
+        XCTAssertTrue(user.contains(goal), "The unchanged original task remains available to identify the requested file")
+        XCTAssertTrue(user.contains("Use the requested Quarterly Plan.xlsx."), "Accepted user answers remain available")
+        XCTAssertTrue(system.contains("only to identify a local file"))
+        XCTAssertTrue(system.contains("Skill: file-identification"), "The actual file specialist request must load the bundled skill")
+        XCTAssertTrue(system.contains("browser executor"))
+        XCTAssertTrue(system.contains("nextCursor"))
+        XCTAssertTrue(system.contains("askFile"))
+        XCTAssertTrue(system.localizedCaseInsensitiveContains("askuser"))
+        XCTAssertTrue(system.contains("An accepted user choice resolves ambiguity."))
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let names = Set(try tools.map { try XCTUnwrap(($0["function"] as? [String: Any])?["name"] as? String) })
+        XCTAssertEqual(names, ["askUser", "listFiles", "selectFile", "askFile", "incomplete"])
+        let askUser = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "askUser" })
+        let description = try XCTUnwrap((askUser["function"] as? [String: Any])?["description"] as? String)
+        XCTAssertTrue(description.localizedCaseInsensitiveContains("missing user information needed to identify the requested local file"))
+        XCTAssertFalse(description.localizedCaseInsensitiveContains("approval"),
+            "File identification must not ask for permission to continue the original browser task")
+    }
+
+    func testOptInManagedLive47FileSelectionReplaySelectsOnlyCurrentOfferedCandidate() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_MANAGED_LIVE47_FILE_SELECTION_REPLAY"] == "1",
+              let requestPath = environment["LIVE47_FILE_SELECTION_REQUEST"] else {
+            throw XCTSkip("Opt-in: saved live47 file-identification request; planner only, no browser or file effects")
+        }
+        let requestRoot = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: requestPath))) as? [String: Any])
+        let messages = try XCTUnwrap(requestRoot["messages"] as? [[String: Any]])
+        let userMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "user" }?["content"] as? String)
+        let userObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(userMessage.utf8)) as? [String: Any])
+        let goal = try XCTUnwrap(userObject["goal"] as? String)
+        let toolMessage = try XCTUnwrap(messages.first { $0["role"] as? String == "tool" }?["content"] as? String)
+        let toolObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(toolMessage.utf8)) as? [String: Any])
+        let files = try XCTUnwrap(toolObject["localFiles"] as? [String: Any])
+        let queryObject = try XCTUnwrap(files["query"] as? [String: Any])
+        let fileKind = try XCTUnwrap((queryObject["fileKind"] as? String).flatMap(ComputerUseLocalFileCatalog.FileKind.init(rawValue:)))
+        let sortField = queryObject["sortField"] as? String ?? ""
+        let sortDirection = queryObject["sortDirection"] as? String ?? ""
+        let sort: ComputerUseLocalFileCatalog.Sort?
+        if sortField.isEmpty && sortDirection.isEmpty { sort = nil }
+        else {
+            sort = .init(field: try XCTUnwrap(ComputerUseLocalFileCatalog.SortField(rawValue: sortField)),
+                direction: try XCTUnwrap(ComputerUseLocalFileCatalog.SortDirection(rawValue: sortDirection)))
+        }
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: fileKind, sort: sort,
+            nameContains: queryObject["nameContains"] as? String ?? "")
+        let candidateObjects = try XCTUnwrap(files["candidates"] as? [[String: Any]])
+        let candidates = try candidateObjects.map { item -> ComputerUseLocalFileCatalog.Candidate in
+            let date: (String) -> Date? = { key in
+                guard let value = item[key] as? String else { return nil }
+                return ISO8601DateFormatter().date(from: value)
+            }
+            return .init(id: try XCTUnwrap(item["id"] as? String), displayName: try XCTUnwrap(item["displayName"] as? String),
+                contentTypeIdentifier: item["contentTypeIdentifier"] as? String,
+                fileExtension: item["fileExtension"] as? String ?? "", byteCount: (item["byteCount"] as? NSNumber)?.int64Value ?? 0,
+                modifiedAt: date("modifiedAt"), createdAt: date("createdAt"), addedToDirectoryAt: date("addedToDirectoryAt"))
+        }
+        XCTAssertEqual(candidates.count, 1)
+        let candidate = try XCTUnwrap(candidates.first)
+        let page = ComputerUseLocalFileCatalog.Page(candidates: candidates, isComplete: files["isComplete"] as? Bool ?? false,
+            nextCursor: files["nextCursor"] as? String, hasTiedSortValues: files["hasTiedSortValues"] as? Bool ?? false,
+            hasMissingSortValues: files["hasMissingSortValues"] as? Bool ?? false)
+        var input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: Data())
+        input.localFileCatalog = .init(query: query, page: page, inventoryState: .available)
+        var context = try ComputerUseMCPBrowserStepPlanner().context(input, page: nil)
+        context.isInitialObservation = true
+        context.isNativeFileSelection = true
+
+        let preparedContext = context
+        let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
+        let receipt = try XCTUnwrap(installedReceipt)
+        let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
+            runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
+        let runtime = OSAtlasLlamaRuntime()
+        let inspector = DarwinOSAtlasProcessInspector()
+        guard try inspector.matchingProcesses(for: inputs.llamaServerURL).isEmpty else {
+            return XCTFail("Another local model worker is already active")
+        }
+        let sampler = Task.detached { () -> Int in
+            var maximum = 0
+            while !Task.isCancelled {
+                if let active = try? inspector.matchingProcesses(for: inputs.llamaServerURL) { maximum = max(maximum, active.count) }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+            }
+            return maximum
+        }
+        let exchangeTrace = MCPBrowserLoopTrace()
+        let planner = ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, runtime: runtime, usesDirectActionPlanning: true, inspectExchange: { request, response, tokens in
+            let record: [String: Any] = ["requestBase64": request.base64EncodedString(),
+                "responseBase64": response.base64EncodedString(), "inputTokens": tokens]
+            if let data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]) {
+                exchangeTrace.append(String(decoding: data, as: UTF8.self))
+            }
+        })
+        let plan: ComputerUseMCPBrowserStepPlanner.Plan
+        do {
+            plan = try await ComputerUsePlanningWorker().perform(timeout: 45) { try await planner.propose(preparedContext) }
+        } catch {
+            await runtime.shutdown(); sampler.cancel(); _ = await sampler.value
+            throw error
+        }
+        await runtime.shutdown(); sampler.cancel()
+        let workerCount = await sampler.value
+        let exchange = try XCTUnwrap(exchangeTrace.items.first).data(using: .utf8)
+        let record = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(exchange)) as? [String: Any])
+        for (key, label) in [("requestBase64", "Live47 generated model request"), ("responseBase64", "Live47 generated model response")] {
+            let data = try XCTUnwrap((record[key] as? String).flatMap { Data(base64Encoded: $0) })
+            let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+            attachment.name = label; attachment.lifetime = .keepAlways; add(attachment)
+        }
+        guard case .selectFile(let selectedID)? = plan.localFileOperation else {
+            XCTFail("For the recorded fully specified request and unique current candidate, the file-only planner must select that candidate")
+            return
+        }
+        XCTAssertEqual(selectedID, candidate.id)
+        XCTAssertEqual(workerCount, 1, "The managed replay must use one local worker")
     }
 
     func testNativeDirectInitialFileCatalogUsesToolRouteWithoutAnswerOrSyntheticPageProof() async throws {
@@ -6425,7 +6672,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt, tools: [selectionTool])
                 let proposal = try await ComputerUsePlanningWorker().perform(timeout: 20) { try await planner.propose(request) }
                 switch proposal {
-                case .browserTools:
+                case .browserTools, .localFileOperation:
                     throw AppleFoundationMCPPlannerError.unknownProposal
                 case .message(let message):
                     report["plannerMessage"] = message
@@ -7110,7 +7357,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                         visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
                 }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
             manager.start(pairingCode: "123456")
-            await waitUntil { manager.capability.state == .ready }
+            await waitForCapabilityReady(manager)
             XCTAssertEqual(preparations, 1)
             XCTAssertEqual(runtimeLoads, 0, "Passive startup only prepares a capability")
             let passiveActivations = await native.recordedSuccessfulActivations()
@@ -7159,7 +7406,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-preparation-failed"), channel: channel))
             }
             releasePreparation = true
-            await waitUntil { manager.capability.state == .ready }
+            await waitForCapabilityReady(manager)
             if requestDuringPreparation {
                 let progress = await waitForSetupProgress(channel: channel)
                 XCTAssertTrue(progress.contains { $0.phase == .failed })
@@ -7196,7 +7443,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                         visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
                 }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
             manager.start(pairingCode: "123456")
-            await waitUntil { manager.capability.state == .ready }
+            await waitForCapabilityReady(manager)
             XCTAssertTrue(manager.needsAdditionalSetup, "The missing native package still needs explicit setup")
             XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
             await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
@@ -7227,7 +7474,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                             visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
                     }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
                 manager.start(pairingCode: "123456")
-                await waitUntil { manager.capability.state == .ready }
+                await waitForCapabilityReady(manager)
                 if explicitSetup {
                     XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "mcp-first-setup"), channel: channel))
                     let progress = await waitForSetupProgress(channel: channel, terminalPhase: .ready)
@@ -7262,7 +7509,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
             }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
         manager.start(pairingCode: "123456")
-        await waitUntil { manager.capability.state == .ready }
+        await waitForCapabilityReady(manager)
         XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-download-fails"), channel: channel))
         let progress = await waitForSetupProgress(channel: channel)
         XCTAssertFalse(progress.contains { $0.phase == .ready })
@@ -7347,7 +7594,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
             body: "Draft an email to codex-acceptance@example.invalid with subject \"Status\" saying Everything is on schedule.")
         XCTAssertTrue(manager.handle(prompt, channel: channel))
-        await waitUntil { if case .awaitingApproval = manager.activity { return true }; return false }
+        for _ in 0 ..< 200 {
+            if case .awaitingApproval = manager.activity { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .awaitingApproval = manager.activity else {
+            XCTFail("Timed out waiting for the structured Mail approval; modelState=\(String(reflecting: manager.modelState)), capability=\(manager.capability.state) (\(manager.capability.detail)), activity=\(String(reflecting: manager.activity)), needsAdditionalSetup=\(manager.needsAdditionalSetup)")
+            return
+        }
         let calls = await pool.preparedCalls()
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls.first?.taskID, prompt.id)
@@ -7357,6 +7611,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(calls.first?.arguments["send_now"], .bool(false))
         let effects = await pool.effectCount()
         XCTAssertEqual(effects, 0, "No controlled or real Mail effect is authorized by preparing the proposal")
+    }
+
+    private func waitForCapabilityReady(_ manager: HostComputerUseManager, timeoutIterations: Int = 200) async {
+        for _ in 0 ..< timeoutIterations {
+            if manager.capability.state == .ready { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for the structured capability; modelState=\(String(reflecting: manager.modelState)), capability=\(manager.capability.state) (\(manager.capability.detail)), activity=\(String(reflecting: manager.activity)), needsAdditionalSetup=\(manager.needsAdditionalSetup)")
     }
 
     func testInstalledNativeCapabilityResumesOnlyPreviouslyStartedDesktopSetup() async throws {

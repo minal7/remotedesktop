@@ -17,20 +17,24 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
     let decision: Decision
     let includeInModelHistory: Bool
     let observedControl: ComputerUseFaraModel.ObservedControl?
+    let scrollUnits: ComputerUseFaraAction.ScrollUnits
     init(response: String, decision: Decision, includeInModelHistory: Bool = true,
-         observedControl: ComputerUseFaraModel.ObservedControl? = nil) {
+         observedControl: ComputerUseFaraModel.ObservedControl? = nil,
+         scrollUnits: ComputerUseFaraAction.ScrollUnits = .nativeLogicalPoints) {
         self.response = response; self.decision = decision; self.includeInModelHistory = includeInModelHistory
-        self.observedControl = observedControl
+        self.observedControl = observedControl; self.scrollUnits = scrollUnits
     }
     init(response: String, action: ComputerUseFaraAction, includeInModelHistory: Bool = true,
-         observedControl: ComputerUseFaraModel.ObservedControl? = nil) {
+         observedControl: ComputerUseFaraModel.ObservedControl? = nil,
+         scrollUnits: ComputerUseFaraAction.ScrollUnits = .nativeLogicalPoints) {
         self.init(response: response, decision: .action(action), includeInModelHistory: includeInModelHistory,
-            observedControl: observedControl)
+            observedControl: observedControl, scrollUnits: scrollUnits)
     }
     init(_ proposal: ComputerUseFaraModel.Proposal) {
         response = proposal.response
         observedControl = proposal.observedControl
         includeInModelHistory = true
+        scrollUnits = proposal.scrollUnits
         if case .askUser(let question) = proposal.action { decision = .handoff(question) }
         else { decision = .action(proposal.action) }
     }
@@ -41,13 +45,19 @@ struct ComputerUseDesktopProposal: Equatable, Sendable {
 /// request profiles remain separate; this adapter admits shared native effects.
 /// The default-browser wrapper supplies task-window scope for browser work.
 @MainActor
-final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing {
+final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
+    ComputerUseClarifiedGoalExecuting {
     typealias Propose = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseDesktopProposal
     /// Optional task-owned window guard. Nil checks bracket observations/effects;
     /// action checks run immediately before approval or dispatch.
     typealias SurfaceScopeCheck = @MainActor @Sendable (ComputerUsePredictedAction?) throws -> Void
     /// Optional task-specific verifier, run after the model sees a fresh screenshot.
     typealias CompleteCheck = @MainActor @Sendable (String) async throws -> Bool
+    /// Contextual task-outcome verifier. The input is the exact model input for
+    /// the completion candidate; callers may enrich it with current host context.
+    typealias OutcomeCheck = @MainActor @Sendable (ComputerUseFaraModel.Input, String) async throws -> Bool
+    /// Optional host-owned final response projection after completion verification.
+    typealias CompletionAnswerTransform = @MainActor @Sendable (String) throws -> String
     /// Passive observer for an already-captured failed revalidation pair.
     typealias RevalidationFailureObserver = @MainActor
         (ComputerUseDesktopImage, ComputerUseDesktopImage, ComputerUsePredictedAction?, [String: String]) -> Void
@@ -89,6 +99,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private final class Session {
         let taskID: String
         let goal: String
+        var clarifiedGoal: ComputerUseUnresolvedTextGoal?
         var journal: ComputerUseTaskJournal
         var history: [ComputerUseFaraModel.Step] = []
         var turns = 0
@@ -96,24 +107,31 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         var actionError: String?
         var approval: Approval?
         var terminal: ComputerUseExecutionResult?
-        init(taskID: String, goal: String, journal: ComputerUseTaskJournal) {
+        init(taskID: String, goal: String, journal: ComputerUseTaskJournal,
+             clarifiedGoal: ComputerUseUnresolvedTextGoal?) {
             self.taskID = taskID; self.goal = goal; self.journal = journal
+            self.clarifiedGoal = clarifiedGoal
         }
     }
     private let store: ComputerUseTaskJournalStore
     private let propose: Propose
     private let surfaceScopeCheck: SurfaceScopeCheck?
     private let completeCheck: CompleteCheck?
+    private let outcomeCheck: OutcomeCheck?
+    private let completionAnswerTransform: CompletionAnswerTransform?
     private let revalidationFailureObserver: RevalidationFailureObserver?
     private let localFileOperationHandler: LocalFileOperationHandler?
     private let onSuccessfulDispatch: SuccessfulDispatchHandler
     private let approvalTaskIDProvider: ApprovalTaskIDProvider?
     private let screenConsentRecognizer: ScreenConsentRecognizer
+    private let usesColdConsentStartupBudget: Bool
     private let screenConsentTimeout: TimeInterval
     private let finishRun: @MainActor @Sendable () async -> Void
     private let planning = ComputerUsePlanningWorker()
     private var session: Session?
+    private var routedClarifiedGoal: (taskID: String, goal: ComputerUseUnresolvedTextGoal)?
     private var isExecuting = false
+    private static let screenRecognitionFailureGuidance = "The current screen could not be verified for a system permission dialog. Computer use is paused before the next action. Review any dialog, then choose Resume. If this repeats, restart the app."
     private(set) var lastRevalidationDiagnostic: [String: String] = [:]
     /// Equality flags only: never retain action payloads, app content or hashes.
     private(set) var lastApprovalDiagnostic: [String: String] = [:]
@@ -127,21 +145,27 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     init(journalDirectory: URL, propose: @escaping Propose,
          surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
+         outcomeCheck: OutcomeCheck? = nil,
+         completionAnswerTransform: CompletionAnswerTransform? = nil,
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileOperationHandler: LocalFileOperationHandler? = nil,
          onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
          approvalTaskIDProvider: ApprovalTaskIDProvider? = nil,
-         screenConsentRecognizer: @escaping ScreenConsentRecognizer = { try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: $0) },
-         screenConsentTimeout: TimeInterval = 10,
+         screenConsentRecognizer: ScreenConsentRecognizer? = nil,
+         screenConsentTimeout: TimeInterval? = nil,
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
+        self.outcomeCheck = outcomeCheck
+        self.completionAnswerTransform = completionAnswerTransform
         self.revalidationFailureObserver = revalidationFailureObserver
         self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
         self.onSuccessfulDispatch = onSuccessfulDispatch
         self.approvalTaskIDProvider = approvalTaskIDProvider
         self.screenConsentRecognizer = screenConsentRecognizer
-        self.screenConsentTimeout = screenConsentTimeout
+            ?? { try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: $0) }
+        self.usesColdConsentStartupBudget = screenConsentRecognizer == nil && screenConsentTimeout == nil
+        self.screenConsentTimeout = screenConsentTimeout ?? 10
     }
 
     private func checkScopedSurface(_ action: ComputerUsePredictedAction? = nil) throws {
@@ -259,13 +283,37 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         return String(components.joined(separator: "+").prefix(128))
     }
 
-    private func verifyCompletionCandidate(_ answer: String, observation: Observation,
+    private func verifyCompletionCandidate(_ answer: String, input: ComputerUseFaraModel.Input,
+                                           observation: Observation,
                                            tools: ComputerUseHostTools,
                                            assertOwnership: () throws -> Void) async throws {
-        guard surfaceScopeCheck != nil || completeCheck != nil else { return }
+        guard surfaceScopeCheck != nil || completeCheck != nil || outcomeCheck != nil else { return }
         if surfaceScopeCheck != nil { try checkScopedSurface() }
-        guard let completeCheck else { return }
-        let accepted = try await completeCheck(answer)
+        guard completeCheck != nil || outcomeCheck != nil else { return }
+
+        var accepted = true
+        if let outcomeCheck {
+            do {
+                accepted = try await planning.perform(timeout: 45) {
+                    try await outcomeCheck(input, answer)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A missing, malformed, or unavailable review is not proof of
+                // completion. Keep the task resumable through normal reobserve.
+                accepted = false
+            }
+            try Task.checkCancellation()
+            try assertOwnership()
+            try checkScopedSurface()
+        }
+        if accepted, let completeCheck {
+            accepted = try await completeCheck(answer)
+            try Task.checkCancellation()
+            try assertOwnership()
+            try checkScopedSurface()
+        }
         try Task.checkCancellation()
         try assertOwnership()
         try await revalidate(observation, action: nil, tools: tools)
@@ -281,13 +329,51 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     func execute(taskID: String, prompt: String, trustedUserPrompt: String,
                  tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        try await execute(taskID: taskID, prompt: prompt, trustedUserPrompt: trustedUserPrompt,
+            clarifiedGoal: nil, tools: tools, progress: progress)
+    }
+
+    func execute(taskID: String, goal: ComputerUseUnresolvedTextGoal,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws
+        -> ComputerUseExecutionResult {
+        guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
+        guard let originalGoal = goal.userTurns.first,
+              !originalGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              originalGoal.utf8.count <= 8_192 else { throw Failure.changedTask }
+        if let retained = routedClarifiedGoal, retained.taskID == taskID {
+            guard retained.goal == goal else { throw Failure.changedTask }
+        } else {
+            routedClarifiedGoal = (taskID, goal)
+        }
+        return try await execute(taskID: taskID, prompt: originalGoal, trustedUserPrompt: originalGoal,
+            clarifiedGoal: goal, tools: tools, progress: progress)
+    }
+
+    private func execute(taskID: String, prompt: String, trustedUserPrompt: String,
+        clarifiedGoal: ComputerUseUnresolvedTextGoal?, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         guard !isExecuting else { throw ComputerUseTaskExecutionError.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
         do {
             let result: ComputerUseExecutionResult
-            do { result = try await run(taskID: taskID, goal: trustedUserPrompt, tools: tools, progress: progress) }
+            do { result = try await run(taskID: taskID, goal: trustedUserPrompt,
+                clarifiedGoal: clarifiedGoal, tools: tools, progress: progress) }
+            catch ComputerUseHostTools.ToolError.focusedDisplayUnavailable {
+                result = .userInterventionRequired("Move the intended window fully onto one active display, then choose Resume.")
+            }
+            catch ComputerUseHostTools.ToolError.visualSurfaceObscured {
+                result = .userInterventionRequired("Close the covering window or handle the system dialog, then bring the intended window to the front and choose Resume.")
+            }
             catch Failure.authentication { result = .userInterventionRequired("Complete sign-in or the system permission step, then choose Resume.") }
+            catch ComputerUseObservationWorker.Failure.recognitionFailed(let domain, let code) {
+                lastRevalidationDiagnostic = [
+                    "blockedAt": "screen-consent-recognition",
+                    "recognitionErrorDomain": domain,
+                    "recognitionErrorCode": String(code),
+                ]
+                result = .userInterventionRequired(Self.screenRecognitionFailureGuidance)
+            }
             await finishRun()
             return result
         } catch { await finishRun(); throw error }
@@ -311,8 +397,23 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         try checkAuthentication(tools)
         let recognizer = screenConsentRecognizer
         let capturedImage = screen.image
-        let requiresIntervention = try await ComputerUseObservationWorker.perform(timeout: screenConsentTimeout) {
-            try recognizer(capturedImage)
+        let requiresIntervention: Bool
+        do {
+            if usesColdConsentStartupBudget {
+                requiresIntervention = try await ComputerUseObservationWorker.performConsentRecognition(
+                    timeout: screenConsentTimeout) { try recognizer(capturedImage) }
+            } else {
+                requiresIntervention = try await ComputerUseObservationWorker.perform(timeout: screenConsentTimeout) {
+                    try recognizer(capturedImage)
+                }
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            if let workerFailure = error as? ComputerUseObservationWorker.Failure { throw workerFailure }
+            let native = error as NSError
+            throw ComputerUseObservationWorker.Failure.recognitionFailed(domain: native.domain, code: native.code)
         }
         try Task.checkCancellation()
         try checkAuthentication(tools)
@@ -419,7 +520,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
     }
 
-    static func nativeAction(_ proposal: ComputerUseFaraAction, image: ComputerUseDesktopImage) throws -> ComputerUsePredictedAction? {
+    static func nativeAction(_ proposal: ComputerUseFaraAction, image: ComputerUseDesktopImage,
+                             scrollUnits: ComputerUseFaraAction.ScrollUnits = .nativeLogicalPoints) throws -> ComputerUsePredictedAction? {
         switch proposal {
         case .pointer(let kind, let point):
             let count: Int, button: UInt8
@@ -436,9 +538,21 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         case .localFileOperation: return nil
         case .key(let keys): return try ComputerUseNativeKeyChord.action(keys)
         case .scrollAt(let horizontal, let pixels, let point):
-            guard pixels.isFinite, abs(pixels) >= 1, abs(pixels) <= 10_000, pixels.rounded() == pixels else { throw Failure.unsupportedAction }
+            guard pixels.isFinite, abs(pixels) >= 1, abs(pixels) <= 10_000 else { throw Failure.unsupportedAction }
+            let delta: Int
+            switch scrollUnits {
+            case .nativeLogicalPoints:
+                guard pixels.rounded() == pixels else { throw Failure.unsupportedAction }
+                delta = Int(pixels)
+            case .normalizedScreenshot:
+                let logicalSpan = Double(horizontal ? image.displayBounds.width : image.displayBounds.height)
+                let scaled = Double(Int(pixels)) * logicalSpan / 1000
+                guard scaled.isFinite else { throw Failure.unsupportedAction }
+                let nativeDelta = Int(scaled)
+                guard nativeDelta != 0, abs(nativeDelta) <= 10_000 else { throw Failure.unsupportedAction }
+                delta = nativeDelta
+            }
             let target = try image.displayPoint(normalizedX: point.x, normalizedY: point.y)
-            let delta = Int(pixels)
             // Quartz wheel 1 is positive up; wheel 2 is positive left.
             return .scroll(x: target.x, y: target.y, dx: horizontal ? -delta : 0, dy: horizontal ? 0 : delta)
         case .wait, .remember, .reportCompletion: return nil
@@ -456,17 +570,26 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     }
 
     private func complete(_ answer: String, session: Session) throws -> ComputerUseExecutionResult {
+        try Task.checkCancellation()
+        let response = try completionAnswerTransform?(answer) ?? answer
+        try Task.checkCancellation()
         var completed = session.journal; completed.statuses = [.verified]
         try store.save(completed, replacing: session.journal); session.journal = completed
-        session.terminal = .completed(answer)
-        return .completed(answer)
+        session.terminal = .completed(response)
+        return .completed(response)
     }
 
-    private func run(taskID: String, goal: String, tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+    private func run(taskID: String, goal: String, clarifiedGoal: ComputerUseUnresolvedTextGoal?,
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         try Task.checkCancellation()
         guard !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, goal.utf8.count <= 8192 else { throw Failure.changedTask }
         if let old = session, old.taskID == taskID {
             guard old.goal.utf8.elementsEqual(goal.utf8) else { throw Failure.changedTask }
+            if let clarifiedGoal {
+                guard old.clarifiedGoal == clarifiedGoal else {
+                    throw Failure.changedTask
+                }
+            }
             if let terminal = old.terminal { return terminal }
             if let approval = old.approval {
                 guard !approval.performed else { throw Failure.invalidApproval }
@@ -475,10 +598,11 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         } else {
             let rootID = ComputerUseTaskContract.digest(["native-desktop-session-v1", taskID])
             guard try store.load(taskID: rootID) == nil else { throw Failure.recoveredTask }
-            let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTextTaskContract.digest(goal),
-                contractDigest: ComputerUseTaskContract.digest([rootID, goal]), stepIDs: ["model-assessed-completion"], statuses: [.attempted])
+            let identity = clarifiedGoal?.taskIdentityText ?? goal
+            let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTextTaskContract.digest(identity),
+                contractDigest: ComputerUseTaskContract.digest([rootID, identity]), stepIDs: ["model-assessed-completion"], statuses: [.attempted])
             try store.save(journal, replacing: nil)
-            session = Session(taskID: taskID, goal: goal, journal: journal)
+            session = Session(taskID: taskID, goal: goal, journal: journal, clarifiedGoal: clarifiedGoal)
         }
         guard let session else { throw Failure.changedTask }
         let lease = try store.acquireExecution(taskID: session.journal.taskID, expected: session.journal)
@@ -499,7 +623,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
                 surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
                 focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls,
-                desktopDisplayBounds: observation.image.displayBounds)
+                clarifiedGoal: session.clarifiedGoal, desktopDisplayBounds: observation.image.displayBounds)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
             var preservesRejectedActionFeedback = false
@@ -513,7 +637,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 continue
             }
             do {
-                let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image) }
+                let action = try proposal.action.flatMap { try Self.nativeAction($0, image: observation.image,
+                    scrollUnits: proposal.scrollUnits) }
                 if case .handoff = proposal.decision {
                     try checkScopedSurface()
                 } else if case .action(.localFileOperation) = proposal.decision {
@@ -575,7 +700,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         continue
                     case .completionStatus(let success):
                         if success {
-                            try await verifyCompletionCandidate("The model reported completion.", observation: observation,
+                            try await verifyCompletionCandidate("The model reported completion.", input: input, observation: observation,
                                 tools: tools, assertOwnership: { try lease.assertOwnership() })
                             return try complete("The model reported completion.", session: session)
                         }
@@ -589,7 +714,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         return .userInterventionRequired(message)
                     case .refreshObservation: throw Failure.unsupportedAction
                     case .action(.reportCompletion(let answer)):
-                        try await verifyCompletionCandidate(answer, observation: observation,
+                        try await verifyCompletionCandidate(answer, input: input, observation: observation,
                             tools: tools, assertOwnership: { try lease.assertOwnership() })
                         return try complete(answer, session: session)
                     case .action(.wait(let seconds)):

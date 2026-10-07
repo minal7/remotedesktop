@@ -26,6 +26,9 @@ final class ComputerUseDefaultBrowserPageReader {
         let url: String
         /// Rendered AX-tree text, not a claim of pixel visibility.
         let renderedAXText: String
+        /// Complete text values observed on the current outer page. Empty for
+        /// older or synthetic observations that do not carry this evidence.
+        let exactTextValues: [String]
         let controls: [Control]
         /// Safari/Chromium AX trees may omit or flatten iframe contents.
         /// This reader does not claim those contents are complete.
@@ -35,11 +38,12 @@ final class ComputerUseDefaultBrowserPageReader {
 
         init(id: String, application: ComputerUseApplicationIdentity, url: String, renderedAXText: String,
              controls: [Control], iframeContentMayBeOmitted: Bool, truncated: Bool,
-             focusedExpandedMenuHasNoActionableChildren: Bool = false) {
+             focusedExpandedMenuHasNoActionableChildren: Bool = false, exactTextValues: [String] = []) {
             self.id = id
             self.application = application
             self.url = url
             self.renderedAXText = renderedAXText
+            self.exactTextValues = exactTextValues
             self.controls = controls
             self.iframeContentMayBeOmitted = iframeContentMayBeOmitted
             self.truncated = truncated
@@ -99,7 +103,18 @@ final class ComputerUseDefaultBrowserPageReader {
 
     func read(window expectedWindow: AXUIElement,
               application expectedApplication: ComputerUseApplicationIdentity,
-              mayAct: () -> Bool) throws -> Observation? {
+              mayAct: () -> Bool, diagnostic: ((String, [String]) -> Void)? = nil) throws -> Observation? {
+        var focusedAncestorRoles: [String] = []
+        let safeRoles: Set<String> = ["AXWindow", "AXWebArea", "AXGroup", "AXTextArea", "AXTextField",
+            "AXSecureTextField", "AXButton", "AXComboBox", "AXStaticText", "AXLink", "AXOther"]
+        func recordRole(_ role: String) {
+            let safe = safeRoles.contains(role) ? role : "AXOther"
+            if focusedAncestorRoles.count < 16 { focusedAncestorRoles.append(safe) }
+        }
+        func fail(_ reason: String) -> Observation? {
+            diagnostic?(reason, focusedAncestorRoles)
+            return nil
+        }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         var expired = false
         func check() throws {
@@ -141,7 +156,7 @@ final class ComputerUseDefaultBrowserPageReader {
             return (root, focused)
         }
         try check()
-        guard let (root, focused) = try currentScope() else { return nil }
+        guard let (root, focused) = try currentScope() else { return fail("scope_unavailable") }
         let focusedUIElement = try element(kAXFocusedUIElementAttribute as String, root)
         var truncated = false
         func isPruned(_ node: AXUIElement) throws -> Bool {
@@ -173,11 +188,14 @@ final class ComputerUseDefaultBrowserPageReader {
         _ = root
         // Stop at each AXWebArea, so nested iframe content is not treated as
         // an outer page. Multiple discovered outer areas are ambiguous.
-        guard let webArea = try discoverOuterWebArea() else { return nil }
+        guard let webArea = try discoverOuterWebArea() else {
+            return fail(expired ? "outer_page_discovery_deadline" : "outer_page_discovery_incomplete_or_ambiguous")
+        }
         let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
             "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
         var focusedControlIsInPage: Bool?
         var focusedNodeIsInPage = false
+        var focusedPagePath: [AXUIElement] = []
         var focusedPathControls: [AXUIElement] = []
         if let focusedUIElement {
             let focusedRole = try string(kAXRoleAttribute as String, focusedUIElement) ?? ""
@@ -186,33 +204,44 @@ final class ComputerUseDefaultBrowserPageReader {
             var reachedBoundary = false
             for _ in 0..<16 {
                 try check()
-                guard !expired, !seen.contains(where: { CFEqual($0, node) }) else { return nil }
+                guard !expired else { return fail("deadline_during_focus_ancestry") }
+                guard !seen.contains(where: { CFEqual($0, node) }) else { return fail("focused_ancestry_cycle") }
                 seen.append(node)
-                if try isPruned(node) { return nil }
+                let nodeRole = try string(kAXRoleAttribute as String, node) ?? ""
+                recordRole(nodeRole)
+                if try isPruned(node) { return fail("focused_ancestry_pruned") }
                 if CFEqual(node, webArea) {
                     focusedNodeIsInPage = true
                     focusedControlIsInPage = controlRoles.contains(focusedRole)
+                    focusedPagePath = seen.reversed()
                     reachedBoundary = true
                     break
                 }
-                let role = try string(kAXRoleAttribute as String, node) ?? ""
-                if controlRoles.contains(role) { focusedPathControls.append(node) }
-                if role == "AXWebArea" { return nil }
+                if controlRoles.contains(nodeRole) { focusedPathControls.append(node) }
+                if nodeRole == "AXWebArea" { return fail("focused_nested_webarea_boundary") }
                 if CFEqual(node, focused) { reachedBoundary = true; break }
-                guard let parent = try element(kAXParentAttribute as String, node) else { return nil }
+                guard let parent = try element(kAXParentAttribute as String, node) else { return fail("focused_ancestry_parent_missing") }
                 node = parent
             }
-            guard reachedBoundary else { return nil }
+            guard reachedBoundary else { return fail("focused_ancestry_limit_or_window_mismatch") }
             // A focused browser-chrome control is outside the page, but the
             // retained same-window page remains a valid observation.
             if focusedControlIsInPage == nil { focusedControlIsInPage = false }
         }
         guard let url = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea),
-              let parsed = URL(string: url), parsed.scheme?.lowercased() == "https", parsed.host != nil else { return nil }
+              let parsed = URL(string: url), parsed.scheme?.lowercased() == "https", parsed.host != nil else {
+            return fail("outer_page_url_unavailable_or_unsupported")
+        }
 
         var text = "", controls: [Control] = [], controlRefs: [String: AXUIElement] = [:]
+        var exactTextValues: [String] = []
+        var exactTextBytes = 0
+        let exactTextValueLimit = 32
+        let exactTextByteLimit = 4_096
         var focusedEmptyExpandedMenu: AXUIElement?
         var contextBytes = 0
+        // Start at the exact outer page, preserving the normal pruning and
+        // inherited-disabled checks while visiting the verified focus branch first.
         var contentQueue: [(AXUIElement, Bool)] = [(webArea, false)]
         var contentVisited: [AXUIElement] = []
         func bounded(_ chunk: String, to bytes: Int) -> String {
@@ -232,8 +261,26 @@ final class ComputerUseDefaultBrowserPageReader {
             let prefix = bounded(chunk, to: available)
             if !prefix.isEmpty { text += separator + prefix; contextBytes += separator.utf8.count + prefix.utf8.count }
         }
+        func appendExactText(_ value: String) {
+            guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard exactTextValues.count < exactTextValueLimit else {
+                truncated = true
+                return
+            }
+            var byteCount = 0
+            for _ in value.utf8 {
+                byteCount += 1
+                guard exactTextBytes + byteCount <= exactTextByteLimit else {
+                    truncated = true
+                    return
+                }
+            }
+            exactTextValues.append(value)
+            exactTextBytes += byteCount
+        }
         while !contentQueue.isEmpty, contentVisited.count < nodeLimitPerPass, !expired {
-            let (node, inheritedDisabled) = contentQueue.removeFirst()
+            let (node, inheritedDisabled) = focusedPagePath.isEmpty
+                ? contentQueue.removeFirst() : contentQueue.removeLast()
             if contentVisited.contains(where: { CFEqual($0, node) }) { continue }
             contentVisited.append(node)
             if try isPruned(node) { continue }
@@ -244,10 +291,12 @@ final class ComputerUseDefaultBrowserPageReader {
             if !CFEqual(node, webArea), role == "AXWebArea" { continue }
             if role == "AXStaticText", let label = try string(kAXValueAttribute as String, node) ?? string(kAXTitleAttribute as String, node) {
                 appendText(label)
+                appendExactText(label)
             }
             if controlRoles.contains(role), controls.count < 32 {
                 let label = try string(kAXTitleAttribute as String, node) ?? string(kAXDescriptionAttribute as String, node)
                     ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
+                appendExactText(label)
                 let rawExpanded = try value("AXExpanded", node)
                 let expanded = rawExpanded.flatMap { CFGetTypeID($0) == CFBooleanGetTypeID() ? ($0 as? NSNumber)?.boolValue : nil }
                 let isFocusedExpandedMenu = (role == "AXButton" || role == "AXPopUpButton")
@@ -269,31 +318,104 @@ final class ComputerUseDefaultBrowserPageReader {
                     controlRefs[id] = node
                     if hasKnownEmptyMenuChildren { focusedEmptyExpandedMenu = node }
                 } else { truncated = true }
+            } else if controlRoles.contains(role) {
+                // A recognized control omitted at the item cap makes this page partial.
+                truncated = true
             }
             if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
+                let pathIndex = focusedPagePath.firstIndex(where: { CFEqual($0, node) })
+                let nextFocusedNode = pathIndex.flatMap { index in
+                    index + 1 < focusedPagePath.count ? focusedPagePath[index + 1] : nil
+                }
+                let priorityNode = nextFocusedNode.flatMap { expected in
+                    children.first(where: { CFEqual($0, expected) })
+                }
+                let desiredCount = min(children.count, pathIndex == nil ? nodeLimitPerPass : 32)
+                var selectedChildren = Array(children.prefix(desiredCount))
+                if let priorityNode {
+                    if let selectedIndex = selectedChildren.firstIndex(where: { CFEqual($0, priorityNode) }) {
+                        selectedChildren.remove(at: selectedIndex)
+                    } else if !selectedChildren.isEmpty {
+                        selectedChildren.removeLast()
+                    }
+                    selectedChildren.append(priorityNode)
+                }
+                let desiredPendingCount = min(selectedChildren.count, nodeLimitPerPass)
+                if pathIndex != nil, contentQueue.count + desiredPendingCount > nodeLimitPerPass {
+                    let evictCount = contentQueue.count + desiredPendingCount - nodeLimitPerPass
+                    if evictCount <= contentQueue.count {
+                        contentQueue.removeFirst(evictCount)
+                        truncated = true
+                    }
+                }
                 let room = max(0, nodeLimitPerPass - contentVisited.count - contentQueue.count)
-                if children.count > room { truncated = true }
+                if focusedPagePath.isEmpty {
+                    // Preserve the existing breadth-first ordering and admission
+                    // exactly when no verified in-page focus path is available.
+                    if children.count > room { truncated = true }
                     contentQueue.append(contentsOf: children.prefix(room).map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
+                } else {
+                    if children.count > desiredCount || selectedChildren.count > room { truncated = true }
+                    if selectedChildren.count > room {
+                        selectedChildren = pathIndex == nil
+                            ? Array(selectedChildren.prefix(room)) : Array(selectedChildren.suffix(room))
+                    }
+                    // A stack pops the last sibling first. Reverse the ordinary
+                    // sibling sequence, then put the verified focus child last.
+                    if let priorityNode, let index = selectedChildren.firstIndex(where: { CFEqual($0, priorityNode) }) {
+                        selectedChildren.remove(at: index)
+                        selectedChildren.reverse()
+                        selectedChildren.append(priorityNode)
+                    } else {
+                        selectedChildren.reverse()
+                    }
+                    contentQueue.append(contentsOf: selectedChildren.map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
+                }
             }
         }
         if !contentQueue.isEmpty || contentVisited.count >= nodeLimitPerPass { truncated = true }
         try check()
         guard !expired, let (afterRoot, afterWindow) = try currentScope(),
               CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow),
-              let finalArea = try discoverOuterWebArea(), CFEqual(finalArea, webArea) else { return nil }
+              let finalArea = try discoverOuterWebArea(), CFEqual(finalArea, webArea) else {
+            return fail("page_scope_or_outer_area_changed")
+        }
         if let focusedUIElement {
             guard let finalFocus = try element(kAXFocusedUIElementAttribute as String, afterRoot),
-                  CFEqual(finalFocus, focusedUIElement) else { return nil }
+                  CFEqual(finalFocus, focusedUIElement) else { return fail("focused_element_changed_during_read") }
             if focusedNodeIsInPage {
-                guard contentVisited.contains(where: { CFEqual($0, focusedUIElement) }),
-                      focusedPathControls.allSatisfy({ pathControl in
-                          controlRefs.values.contains(where: { CFEqual($0, pathControl) })
-                      }) else { return nil }
+                var finalPath: [AXUIElement] = []
+                var pathNode = finalFocus
+                var reachedOuterPage = false
+                for _ in 0..<16 {
+                    guard !finalPath.contains(where: { CFEqual($0, pathNode) }),
+                          try !isPruned(pathNode) else { return fail("focused_path_changed_or_became_pruned") }
+                    finalPath.append(pathNode)
+                    if CFEqual(pathNode, webArea) { reachedOuterPage = true; break }
+                    let role = try string(kAXRoleAttribute as String, pathNode) ?? ""
+                    guard role != "AXWebArea",
+                          let parent = try element(kAXParentAttribute as String, pathNode) else {
+                        return fail("focused_path_no_longer_reaches_outer_page")
+                    }
+                    pathNode = parent
+                }
+                guard reachedOuterPage, finalPath.count == focusedPagePath.count,
+                      zip(finalPath, focusedPagePath.reversed()).allSatisfy({ CFEqual($0.0, $0.1) }) else {
+                    return fail("focused_path_changed_during_read")
+                }
+                guard contentVisited.contains(where: { CFEqual($0, focusedUIElement) }) else {
+                    return fail("focused_node_not_visited_by_content_walk")
+                }
+                guard focusedPathControls.allSatisfy({ pathControl in
+                    controlRefs.values.contains(where: { CFEqual($0, pathControl) })
+                }) else { return fail("focused_ancestor_control_not_in_catalogue") }
             }
             if focusedControlIsInPage == true,
-               !controlRefs.values.contains(where: { CFEqual($0, focusedUIElement) }) { return nil }
+               !controlRefs.values.contains(where: { CFEqual($0, focusedUIElement) }) {
+                return fail("focused_control_not_in_catalogue")
+            }
         } else if try element(kAXFocusedUIElementAttribute as String, afterRoot) != nil {
-            return nil
+            return fail("focused_element_appeared_during_read")
         }
         var focusedExpandedMenuHasNoActionableChildren = false
         if let focusedEmptyExpandedMenu, let focusedUIElement,
@@ -310,11 +432,12 @@ final class ComputerUseDefaultBrowserPageReader {
         }
         // Re-discover the same unique outer page after content collection.
         let finalURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea)
-        guard finalURL == url, !expired else { return nil }
+        guard finalURL == url, !expired else { return fail(expired ? "deadline_during_final_validation" : "outer_page_url_changed") }
         let observationID = UUID().uuidString
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
             renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
-            focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren)
+            focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren,
+            exactTextValues: exactTextValues)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
             webArea: webArea, url: url, controls: controlRefs,
             controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))
@@ -411,7 +534,9 @@ final class ComputerUseDefaultBrowserPageReader {
     }
 
     private static func permittedCenterMetadata(_ control: Control, within bounds: CGRect) -> CGPoint? {
-        let permittedRoles: Set<String> = ["AXButton", "AXLink", "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
+        // Revalidated editor centers allow focusing by click, not text entry.
+        let permittedRoles: Set<String> = ["AXButton", "AXLink", "AXPopUpButton", "AXCheckBox", "AXRadioButton",
+            "AXTextField", "AXTextArea", "AXComboBox"]
         guard permittedRoles.contains(control.role),
               !control.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               control.enabled == true,

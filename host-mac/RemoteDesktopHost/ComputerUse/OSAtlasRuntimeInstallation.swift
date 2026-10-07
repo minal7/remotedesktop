@@ -554,26 +554,46 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             let endpoint = try await runtime.activateFara(resolveInputs())
             return .init(try await runtime.proposeFara(endpoint: endpoint, input: input))
         }
+        let outcomeCheck: ComputerUseDefaultBrowserExecutor.OutcomeCheck = { input, candidateAnswer in
+            let endpoint = try await runtime.activateFara(resolveInputs())
+            let review = try await runtime.reviewFaraOutcome(endpoint: endpoint, input: input,
+                candidateAnswer: candidateAnswer)
+            return review.acceptsCompletion(for: input)
+        }
         let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
+        let nativeBootstrapPlanner: ComputerUseDefaultBrowserExecutor.NativeBootstrapPlanner?
         if let nativeControlInputs {
             let cachedInputs = NativeControlInputsCache()
+            let resolveNativeInputs: @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs? = {
+                if let cached = cachedInputs.value { return cached }
+                guard let resolved = try await nativeControlInputs() else { return nil }
+                cachedInputs.value = resolved
+                return resolved
+            }
             nativeControlPlanner = { input, page in
-                let inputs: ComputerUseNativeTextRuntimeInputs
-                if let cached = cachedInputs.value { inputs = cached }
-                else if let resolved = try await nativeControlInputs() {
-                    cachedInputs.value = resolved
-                    inputs = resolved
-                } else {
+                guard let inputs = try await resolveNativeInputs() else {
                     return .visualFallback("The native page planner is not installed.", directive: nil)
                 }
                 let endpoint = try await runtime.activateNativeText(inputs)
                 return try await runtime.proposeDefaultBrowserControl(endpoint: endpoint, input: input, page: page,
                     inspectExchange: nativeControlInspectExchange)
             }
-        } else { nativeControlPlanner = nil }
+            nativeBootstrapPlanner = { input in
+                guard let inputs = try await resolveNativeInputs() else {
+                    return .askUser("The local browser planner is unavailable. Review the browser window, then choose Resume.")
+                }
+                let endpoint = try await runtime.activateNativeText(inputs)
+                return try await runtime.proposeDefaultBrowserBootstrap(endpoint: endpoint, input: input,
+                    inspectExchange: nativeControlInspectExchange)
+            }
+        } else {
+            nativeControlPlanner = nil
+            nativeBootstrapPlanner = nil
+        }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
             propose: propose, nativeFilePlanner: nativeFilePlanner, nativeControlPlanner: nativeControlPlanner,
-            finishRun: { await runtime.shutdown() },
+            nativeBootstrapPlanner: nativeBootstrapPlanner,
+            finishRun: { await runtime.shutdown() }, outcomeCheck: outcomeCheck,
             revalidationFailureObserver: browserRevalidationFailureObserver)
     }
 

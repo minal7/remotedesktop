@@ -2753,9 +2753,18 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertEqual(terminals.count, 1, "Only the byte-identical retry may replay a result")
             let result = try XCTUnwrap(terminals.first)
             XCTAssertEqual(result.taskID, original.id)
-            XCTAssertEqual(result.clarification, state == "clarification" ? reference : nil)
+            if state == "clarification" {
+                // This fixture restores only the durable ledger. Without the
+                // manager's live retained question, replay must not publish a
+                // stale clarification reference.
+                XCTAssertNil(result.clarification)
+                XCTAssertFalse(result.supportsClarificationRecovery)
+                XCTAssertEqual(result.text, "The original question is no longer active. Start a new request with the complete instruction.")
+            } else {
+                XCTAssertNil(result.clarification)
+            }
             XCTAssertEqual(result.approvedActionEvidence?.state, state == "confirmed-action" ? .confirmed : state == "unconfirmed-action" ? .unconfirmed : nil)
-            XCTAssertEqual(result.outcome, state == "clarification" ? .userInterventionRequired : state == "unconfirmed-action" ? .unableToComplete : .taskCompleted)
+            XCTAssertEqual(result.outcome, state == "clarification" || state == "unconfirmed-action" ? .unableToComplete : .taskCompleted)
             XCTAssertEqual(executor.callCount, 0)
         }
     }
@@ -2947,6 +2956,7 @@ final class ComputerUseTests: XCTestCase {
             // Renewing the same peer cannot validate an older queued push.
             manager.authorizePeer(senderID: prompt.senderID)
             delivery.finish(true)
+            await fulfillment(of: [action.returned, delivery.returned], timeout: 1)
             await waitUntil { await channel.sentMessages().contains {
                 $0.kind == .status && (try? ComputerUseTaskUpdate.decodeBody($0.body).text) == "ready"
             } }
@@ -3622,13 +3632,13 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(try restored.approvedAction(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID), record)
     }
 
-    func test_defaultComputerUsePackageSelectsPinnedFaraForTwelveGBMacs() throws {
+    func test_defaultComputerUsePackageSelectsPinnedFaraForSixteenGBMacs() throws {
         let manifest = ComputerUseArtifactManifest.current
         XCTAssertEqual(manifest.modelVariant.rawValue, "fara15-4b")
         XCTAssertEqual(manifest.installationVersion, "fara15-4b-q4-k-m-b9992")
         XCTAssertEqual(manifest.modelRepository, "bartowski/Fara1.5-4B-GGUF")
         XCTAssertEqual(manifest.modelRevision, "b97f335231e01efbbad37bb89b5310340fc10735")
-        XCTAssertEqual(manifest.minimumMemoryBytes, 12 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.minimumMemoryBytes, 16 * 1_024 * 1_024 * 1_024)
         XCTAssertEqual(manifest.modelArtifacts.map(\.fileName), ["Fara1.5-4B-Q4_K_M.gguf", "mmproj-Fara1.5-4B-f16.gguf"])
         XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [2_884_850_784, 672_423_584])
         XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), [
@@ -3655,7 +3665,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
             ComputerUseArtifactManifest.ModelVariant.allCases,
-            [.pro4B, .base4B, .nativeText4B, .fara15_4B])
+            [.pro4B, .base4B, .nativeText4B, .fara15_4B, .holo31_4B])
         XCTAssertEqual(manifest.modelRepository, "OS-Copilot/OS-Atlas-Pro-4B")
         XCTAssertEqual(
             manifest.modelRevision,
@@ -4270,6 +4280,204 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertNil(ComputerUseHostTools.stableFrontmostWindowBounds(
             before: nil,
             after: stable))
+    }
+
+    func test_visibleWindowStackRejectsForeignRegularWindowAboveFocusedApp() {
+        let bounds = CGRect(x: 0, y: 33, width: 1728, height: 999)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 1030, layer: 0, bounds: bounds), // visible ChatGPT
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds), // focused Safari
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .occluded)
+    }
+
+    func test_visibleWindowStackRejectsForeignModalOverlayOverFocusedWindow() {
+        let bounds = CGRect(x: 0, y: 33, width: 1728, height: 999)
+        let overlay = CGRect(x: 734, y: 202, width: 260, height: 346)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 46605, layer: 8, bounds: overlay),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .occluded)
+    }
+
+    func test_visibleWindowStackIgnoresForeignNonOverlappingWindow() {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 46605, layer: 0, bounds: CGRect(x: 1200, y: 40, width: 200, height: 100)),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+    }
+
+    func test_visibleWindowStackAllowsSameOwnerFloatingOverlay() {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 15721, layer: 3, bounds: CGRect(x: 100, y: 100, width: 200, height: 120)),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+    }
+
+    func test_visibleWindowStackMissingCandidateIsUnknownAndDuplicateOwnedWindowsAreClear() {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        XCTAssertEqual(ComputerUseVisibleWindowStack(entries: []).assessFocusedWindow(
+            ownerProcessIdentifier: 15721, bounds: bounds), .unknown)
+        let duplicates = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(duplicates.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+    }
+
+    func test_visibleWindowStackIgnoresTransparentForeignOverlay() {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 46605, layer: 8, bounds: bounds, alpha: 0),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+    }
+
+    func test_visibleWindowStackAcceptsFocusedFloatingOrModalWindow() {
+        let bounds = CGRect(x: 40, y: 50, width: 700, height: 500)
+        for layer in [Int(CGWindowLevelForKey(.floatingWindow)), Int(CGWindowLevelForKey(.modalPanelWindow))] {
+            let stack = ComputerUseVisibleWindowStack(entries: [
+                .init(ownerProcessIdentifier: 15721, layer: layer, bounds: bounds),
+            ])
+            XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+        }
+    }
+
+    func test_visibleWindowStackIgnoresStatusLayerSurface() {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        let stack = ComputerUseVisibleWindowStack(entries: [
+            .init(ownerProcessIdentifier: 46605, layer: Int(CGWindowLevelForKey(.statusWindow)), bounds: bounds),
+            .init(ownerProcessIdentifier: 15721, layer: 0, bounds: bounds),
+        ])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .clear)
+    }
+
+    func test_visibleWindowStackTreatsMalformedRelevantEntryAsUnknown() throws {
+        let bounds = CGRect(x: 0, y: 33, width: 900, height: 700)
+        let rawBounds = try XCTUnwrap(CGRectCreateDictionaryRepresentation(bounds))
+        let valid: [String: Any] = [
+            kCGWindowOwnerPID as String: 15721, kCGWindowLayer as String: 0,
+            kCGWindowBounds as String: rawBounds, kCGWindowAlpha as String: 1,
+        ]
+        let malformed: [String: Any] = [
+            kCGWindowOwnerPID as String: 46605, kCGWindowLayer as String: 8,
+            kCGWindowAlpha as String: 1,
+        ]
+        let stack = ComputerUseVisibleWindowStack(windowInfo: [malformed, valid])
+        XCTAssertEqual(stack.assessFocusedWindow(ownerProcessIdentifier: 15721, bounds: bounds), .unknown)
+    }
+
+    func test_focusedDisplaySelectorChoosesUniqueNegativeOriginDisplay() {
+        let focused = CGRect(x: -1500, y: 100, width: 900, height: 700)
+        let left = ComputerUseActiveDisplay(identifier: 8, bounds: CGRect(x: -1920, y: 0, width: 1920, height: 1080))
+        let right = ComputerUseActiveDisplay(identifier: 3, bounds: CGRect(x: 0, y: 0, width: 1440, height: 900))
+        XCTAssertEqual(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: [right, left]), left)
+    }
+
+    func test_focusedDisplaySelectorChoosesVerticalOffsetDisplay() {
+        let focused = CGRect(x: 200, y: 1250, width: 800, height: 600)
+        let top = ComputerUseActiveDisplay(identifier: 2, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900))
+        let bottom = ComputerUseActiveDisplay(identifier: 5, bounds: CGRect(x: 0, y: 900, width: 1200, height: 1000))
+        XCTAssertEqual(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: [top, bottom]), bottom)
+    }
+
+    func test_focusedDisplaySelectorRejectsSpanningAndOffscreenWindows() {
+        let displays = [
+            ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1000, height: 800)),
+            ComputerUseActiveDisplay(identifier: 2, bounds: CGRect(x: 1000, y: 0, width: 1000, height: 800)),
+        ]
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(
+            windowBounds: CGRect(x: 900, y: 100, width: 300, height: 400), activeDisplays: displays))
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(
+            windowBounds: CGRect(x: 2200, y: 100, width: 300, height: 400), activeDisplays: displays))
+    }
+
+    func test_focusedDisplaySelectorRejectsMirroredAndOverlappingAmbiguity() {
+        let focused = CGRect(x: 100, y: 100, width: 500, height: 400)
+        let mirrored = [
+            ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900)),
+            ComputerUseActiveDisplay(identifier: 2, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900)),
+        ]
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: mirrored))
+        let overlapping = [
+            ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1000, height: 900)),
+            ComputerUseActiveDisplay(identifier: 2, bounds: CGRect(x: 800, y: 0, width: 1000, height: 900)),
+        ]
+        let withinSharedArea = CGRect(x: 850, y: 100, width: 100, height: 400)
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(windowBounds: withinSharedArea, activeDisplays: overlapping))
+    }
+
+    func test_focusedDisplaySelectorAcceptsWindowTouchingAdjacentDisplayEdge() {
+        let first = ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1000, height: 800))
+        let second = ComputerUseActiveDisplay(identifier: 2, bounds: CGRect(x: 1000, y: 0, width: 1000, height: 800))
+        let focused = CGRect(x: 100, y: 100, width: 900, height: 400)
+        XCTAssertEqual(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: [first, second]), first)
+    }
+
+    func test_focusedDisplaySelectorRejectsMalformedBoundsAndDuplicateIDs() {
+        let focused = CGRect(x: 100, y: 100, width: 500, height: 400)
+        let malformed = ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 0, height: 900))
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: [malformed]))
+        let duplicateIDs = [
+            ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900)),
+            ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900)),
+        ]
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: duplicateIDs))
+        let invalidID = ComputerUseActiveDisplay(identifier: 0, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900))
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(windowBounds: focused, activeDisplays: [invalidID]))
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(
+            windowBounds: CGRect(x: CGFloat.infinity, y: 0, width: 500, height: 400),
+            activeDisplays: [ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900))]))
+        XCTAssertNil(ComputerUseFocusedDisplaySelector.select(
+            windowBounds: CGRect(x: CGFloat.greatestFiniteMagnitude, y: 0, width: 500, height: 400),
+            activeDisplays: [ComputerUseActiveDisplay(identifier: 1, bounds: CGRect(x: 0, y: 0, width: 1200, height: 900))]))
+    }
+
+    func test_focusedDisplaySelectionRequiresSameDisplayAndBoundsBeforeAndAfter() {
+        let selected = ComputerUseActiveDisplay(identifier: 7, bounds: CGRect(x: -1000, y: 200, width: 1000, height: 800))
+        XCTAssertTrue(ComputerUseFocusedDisplaySelector.isStable(before: selected, after: selected))
+    }
+
+    func test_focusedDisplaySelectionRejectsDisplayTopologyChanges() {
+        let before = ComputerUseActiveDisplay(identifier: 7, bounds: CGRect(x: 0, y: 0, width: 1000, height: 800))
+        let changedID = ComputerUseActiveDisplay(identifier: 8, bounds: before.bounds)
+        let changedBounds = ComputerUseActiveDisplay(identifier: 7, bounds: CGRect(x: 0, y: 0, width: 1200, height: 800))
+        XCTAssertFalse(ComputerUseFocusedDisplaySelector.isStable(before: before, after: changedID))
+        XCTAssertFalse(ComputerUseFocusedDisplaySelector.isStable(before: before, after: changedBounds))
+        XCTAssertFalse(ComputerUseFocusedDisplaySelector.isStable(before: before, after: nil))
+    }
+
+    func test_focusedDisplayUnavailableHandsOffBeforePlanningOrInput() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FocusedDisplayUnavailable-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposalCount = 0
+        var dispatched: [ComputerUsePredictedAction] = []
+        var finishRunCalled = false
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            actionPerformer: { dispatched.append($0) },
+            screenProvider: { throw ComputerUseHostTools.ToolError.focusedDisplayUnavailable })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposalCount += 1
+            return .init(response: "unexpected", action: .wait(0))
+        }, finishRun: { finishRunCalled = true })
+        let result = try? await executor.execute(taskID: UUID().uuidString,
+            prompt: "Read the current screen.", trustedUserPrompt: "Read the current screen.",
+            tools: tools, progress: { _ in })
+        guard case .userInterventionRequired(let message)? = result else {
+            return XCTFail("Expected focused-display handoff; result=\(String(describing: result))")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("display"), message)
+        XCTAssertEqual(proposalCount, 0)
+        XCTAssertTrue(dispatched.isEmpty)
+        XCTAssertTrue(finishRunCalled)
     }
 
     func test_stableCloudKitRetryRefreshesPreStartRecordWithoutChangingMessage() throws {
@@ -6131,7 +6339,13 @@ final class ComputerUseTests: XCTestCase {
                 if updates.count >= minimum { return updates }
                 try await Task.sleep(for: .milliseconds(10))
             }
-            XCTFail("The host did not deliver the expected research status")
+            let sent = await fixture.channel.sentMessages()
+            let deliveryState = sent.map { message in
+                let update = try? ComputerUseTaskUpdate.decodeBody(message.body)
+                return "\(message.kind):outcome=\(String(describing: update?.outcome)),progressBytes=\(update?.researchProgress?.text.utf8.count ?? 0)"
+            }
+            let owner = source.tools.ownedBrowserResearch(taskID: prompt.id)
+            XCTFail("The host did not deliver the expected research status; activity=\(fixture.manager.activity), owner=\(owner != nil), goals=\(source.goal.inputs.count), searches=\(source.search.inputs.count), results=\(source.results.inputs.count), providerCalls=\(source.policy.providerCalls), requests=\(source.server.count("/search?q=concerts")), sent=\(deliveryState)")
             return []
         }
         let delivered = try await reports(1)
@@ -8052,8 +8266,13 @@ final class ComputerUseTests: XCTestCase {
         let posted = events.values()
         XCTAssertEqual(posted.filter { $0.type == .leftMouseDown }.count, 1)
         XCTAssertEqual(posted.filter { $0.type == .leftMouseUp }.count, 1)
-        XCTAssertEqual(posted.filter { $0.type == .keyDown }.count, 1)
-        XCTAssertEqual(posted.filter { $0.type == .keyUp }.count, 1)
+        let commandEvents = posted.filter { $0.keyCode == 0x37 && ($0.type == .keyDown || $0.type == .keyUp || $0.type == .flagsChanged) }
+        XCTAssertEqual(commandEvents.count, 2, "The held Command modifier must have a matching press and release event")
+        XCTAssertTrue(commandEvents[0].modifierFlags.contains(.maskCommand))
+        XCTAssertFalse(commandEvents[1].modifierFlags.contains(.maskCommand))
+        let commandEventTypes = commandEvents.map(\.type)
+        XCTAssertTrue(commandEventTypes == [.keyDown, .keyUp] || commandEventTypes == [.flagsChanged, .flagsChanged],
+            "Expected the platform's key-down/up or modifier flags-changed representation, got \(commandEventTypes)")
         XCTAssertTrue(posted.contains { $0.type == .leftMouseDragged })
         var callbacks = 0
         let text = "A👩🏽‍💻é"
@@ -8354,6 +8573,157 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(executor.continueAfterApprovalCount, 0); XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
     }
 
+    func test_mailAutomationPreflightDenialPausesBeforeClaimAndResumeNeedsFreshApproval() async throws {
+        let taskID = "mail-preflight-resume"
+        let executor = MailPreflightResumeMCPExecutor(taskID: taskID)
+        let routed = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+            desktopFactory: { _ in executor })
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed,
+            taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let firstMessages = await channel.sentMessages()
+        let firstRequest = try ComputerUseApprovalRequest.decodeBody(
+            XCTUnwrap(firstMessages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertTrue(manager.handle(try approvalEnvelope(firstRequest), channel: channel))
+        await waitUntil { manager.activity == .paused || manager.activity == .idle }
+
+        guard manager.activity == .paused else {
+            XCTFail("A typed Mail setup denial must pause the same task before claiming the approved action")
+            return
+        }
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.preflightCount, 1)
+        XCTAssertEqual(executor.continueAfterApprovalCount, 0)
+        XCTAssertTrue(try ledger.approvedActionHistory(taskID: taskID, senderID: prompt.senderID,
+            sessionID: prompt.sessionID).isEmpty)
+
+        let epoch = ledger.hostControlEpoch(taskID: taskID)
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+            revision: 1, hostEpoch: epoch), channel: channel))
+        await waitUntil { await channel.sentMessages().filter { $0.kind == .approvalRequest }.count == 2 }
+        let resumedMessages = await channel.sentMessages()
+        let secondRequest = try ComputerUseApprovalRequest.decodeBody(
+            XCTUnwrap(resumedMessages.last { $0.kind == .approvalRequest }).body)
+        XCTAssertNotEqual(firstRequest.requestID, secondRequest.requestID)
+        XCTAssertEqual(secondRequest.taskID, taskID)
+        XCTAssertTrue(manager.handle(try approvalEnvelope(secondRequest), channel: channel))
+        await waitUntil { manager.activity == .idle && executor.continueAfterApprovalCount == 1 }
+
+        XCTAssertEqual(executor.executeCount, 2)
+        XCTAssertEqual(executor.preflightCount, 2)
+        XCTAssertEqual(executor.approvedGenerations, [7, 8])
+        XCTAssertEqual(executor.approvedActionSideEffectCount, 1)
+        let history = try ledger.approvedActionHistory(taskID: taskID, senderID: prompt.senderID,
+            sessionID: prompt.sessionID)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertNotNil(history.first?.response)
+    }
+
+    func test_capabilityExecutorForwardsApprovedMailPreflightToDesktopRoute() async throws {
+        let taskID = "mail-preflight-wrapper"
+        let desktop = MailPreflightResumeMCPExecutor(taskID: taskID)
+        let routed = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+            desktopFactory: { _ in desktop })
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let result = try await routed.execute(taskID: taskID, prompt: "Draft a fixture",
+            trustedUserPrompt: "Draft a fixture", tools: tools, progress: { _ in })
+        guard case .mcpApprovalRequired(let prepared) = result else {
+            return XCTFail("The fixture must select the desktop route and prepare one approval")
+        }
+        do {
+            try await routed.preflightApprovedAction(prepared)
+            XCTFail("The routed typed Mail denial must reach the desktop continuation")
+        } catch let error as RemoteDesktopMailAutomationPreflightError {
+            XCTAssertEqual(error, .authorizationDenied)
+        }
+        XCTAssertEqual(desktop.preflightCount, 1)
+        XCTAssertEqual(desktop.continueAfterApprovalCount, 0)
+        XCTAssertEqual(desktop.approvedActionSideEffectCount, 0)
+    }
+
+    func test_typedMailSetupFailureAfterHostClaimRemainsTerminalWithoutReplay() async throws {
+        let taskID = "mail-preflight-post-claim-failure"
+        let executor = MailPreflightResumeMCPExecutor(taskID: taskID, deniesFirstPreflight: false,
+            throwsTypedErrorAfterClaim: true)
+        let routed = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
+            desktopFactory: { _ in executor })
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed,
+            taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await channel.sentMessages()
+        let request = try ComputerUseApprovalRequest.decodeBody(
+            XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertTrue(manager.handle(try approvalEnvelope(request), channel: channel))
+        await waitUntil { manager.activity == .idle && executor.continueAfterApprovalCount == 1 }
+
+        let history = try ledger.approvedActionHistory(taskID: taskID, senderID: prompt.senderID,
+            sessionID: prompt.sessionID)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertNil(history[0].response)
+        XCTAssertEqual(executor.preflightCount, 1)
+        XCTAssertEqual(executor.executeCount, 1)
+        XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+
+        XCTAssertTrue(manager.handle(try makeControlEnvelope(kind: .resume, taskID: taskID,
+            revision: 1, hostEpoch: ledger.hostControlEpoch(taskID: taskID)), channel: channel))
+        await Task.yield()
+        XCTAssertEqual(executor.executeCount, 1)
+        let afterResumeMessages = await channel.sentMessages()
+        XCTAssertEqual(afterResumeMessages.filter { $0.kind == .approvalRequest }.count, 1)
+        XCTAssertNil(try ledger.approvedAction(taskID: taskID, senderID: prompt.senderID,
+            sessionID: prompt.sessionID)?.response)
+    }
+
+    func test_mailAutomationPreflightRechecksCancellationAndActionGateBeforeClaim() async throws {
+        let taskID = "mail-preflight-gate"
+        let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "Mail preflight entered"),
+            returned: expectation(description: "Mail preflight released"))
+        let executor = MailPreflightResumeMCPExecutor(taskID: taskID, deniesFirstPreflight: false,
+            preflightGate: gate)
+        let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
+        defer { gate.finish(false); try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let ledger = ComputerUseTaskLedger(fileURL: url)
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await channel.sentMessages()
+        let request = try ComputerUseApprovalRequest.decodeBody(
+            XCTUnwrap(messages.first { $0.kind == .approvalRequest }).body)
+        XCTAssertTrue(manager.handle(try approvalEnvelope(request), channel: channel))
+
+        await fulfillment(of: [gate.started], timeout: 1)
+        let intervention = manager.recordUserInputForIntervention()
+        XCTAssertNotNil(intervention)
+        gate.finish(true)
+        await fulfillment(of: [gate.returned], timeout: 1)
+        await waitUntil { manager.activity == .paused || manager.activity == .idle }
+
+        XCTAssertEqual(executor.preflightCount, 1)
+        XCTAssertEqual(executor.continueAfterApprovalCount, 0)
+        XCTAssertEqual(executor.approvedActionSideEffectCount, 0)
+        XCTAssertTrue(try ledger.approvedActionHistory(taskID: taskID, senderID: prompt.senderID,
+            sessionID: prompt.sessionID).isEmpty)
+    }
+
     func testPendingMCPApprovalStopUsesTerminalCancellation() async throws {
         let taskID = "stop-mcp-browser-progress"
         let tool = try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID, processGeneration: 7,
@@ -8490,11 +8860,13 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(fixture.browser.taskControls?.ownerID, owner)
         try FileManager.default.removeItem(at: directory)
         try FileManager.default.moveItem(at: moved, to: directory)
-        XCTAssertTrue(fixture.manager.handle(delayed, channel: fixture.channel))
+        // The failed atomic write poisons this ledger instance because it
+        // cannot prove whether the handoff reached disk. Restoring the path
+        // cannot make this in-memory manager safe to resume.
+        XCTAssertFalse(fixture.manager.handle(delayed, channel: fixture.channel))
         XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
-        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch + 1)
-        XCTAssertTrue(fixture.manager.handle(try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 2, hostEpoch: epoch + 1), channel: fixture.channel))
-        await waitUntil { executor.callCount == 2 && fixture.manager.activity == .idle }
+        XCTAssertEqual(fixture.ledger.hostControlEpoch(taskID: prompt.id), epoch)
+        XCTAssertNil(fixture.ledger.appliedControlRevision(taskID: prompt.id))
     }
 
     func testLegacyResumeCannotBypassInputRecordedDuringAPrePromptPause() async throws {
@@ -12834,6 +13206,76 @@ private final class ApprovalHoldingMCPComputerUseExecutor:
     func pauseMCPWork() {
         pauseMCPWorkCount += 1
     }
+}
+
+@MainActor
+private final class MailPreflightResumeMCPExecutor: ComputerUseExecuting, MCPApprovalContinuing {
+    let isReady = true
+    let runtimeName = "Mail preflight resume fixture"
+    private let taskID: String
+    private(set) var executeCount = 0
+    private(set) var preflightCount = 0
+    private(set) var continueAfterApprovalCount = 0
+    private(set) var approvedActionSideEffectCount = 0
+    private(set) var approvedGenerations: [UInt64] = []
+    private let deniesFirstPreflight: Bool
+    private let preflightGate: ComputerUsePlanningTestGate<Bool>?
+    private let throwsTypedErrorAfterClaim: Bool
+
+    init(taskID: String, deniesFirstPreflight: Bool = true,
+        preflightGate: ComputerUsePlanningTestGate<Bool>? = nil,
+        throwsTypedErrorAfterClaim: Bool = false) {
+        self.taskID = taskID
+        self.deniesFirstPreflight = deniesFirstPreflight
+        self.preflightGate = preflightGate
+        self.throwsTypedErrorAfterClaim = throwsTypedErrorAfterClaim
+    }
+
+    func execute(prompt: String, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        executeCount += 1
+        let generation = UInt64(6 + executeCount)
+        let tool = try MCPAllowedTool(serverID: RemoteDesktopMailMCP.serverID,
+            processGeneration: generation, toolName: RemoteDesktopMailMCP.toolName,
+            description: "Fixture Mail draft tool", inputSchema: .object(["type": .string("object")]),
+            risk: .approvalRequired,
+            approval: MCPApprovalDisplay(summary: "Create this draft?", details: "Exact fixture values",
+                confirmLabel: "Create draft"))
+        let call = try tool.makeCall(taskID: taskID, arguments: ["to": .string("fixture@example.invalid"),
+            "subject": .string("Fixture"), "body": .string("Fixture body"), "send_now": .bool(false)])
+        let prepared = MCPPreparedApproval(call: call, fingerprint: MCPApprovalFingerprint(call: call),
+            display: call.approvalDisplay)
+        return .mcpApprovalRequired(prepared)
+    }
+
+    func preflightApprovedAction(_ prepared: MCPPreparedApproval) async throws {
+        preflightCount += 1
+        approvedGenerations.append(prepared.call.processGeneration)
+        if let preflightGate { _ = await preflightGate.wait() }
+        try Task.checkCancellation()
+        if deniesFirstPreflight && preflightCount == 1 {
+            throw RemoteDesktopMailAutomationPreflightError.authorizationDenied
+        }
+    }
+
+    func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
+        continueAfterApprovalCount += 1
+        // In the RED implementation, the manager has no preflight hook yet.
+        // Model that old path's typed first-use denial without inventing an effect.
+        if preflightCount == 0 && continueAfterApprovalCount == 1 {
+            throw RemoteDesktopMailAutomationPreflightError.authorizationDenied
+        }
+        if throwsTypedErrorAfterClaim {
+            throw RemoteDesktopMailAutomationPreflightError.authorizationDenied
+        }
+        approvedActionSideEffectCount += 1
+        return .init(callDigest: prepared.call.canonicalDigest,
+            response: "Draft created and left open for review", completionPromptDigest: nil)
+    }
+
+    func cancelMCPWork() {}
+    func pauseMCPWork() {}
 }
 
 @MainActor

@@ -134,6 +134,52 @@ final class ComputerUseObservationWorkerTests: XCTestCase {
         try await waitForReleasedWorker()
     }
 
+    func testConsentRecognitionUsesColdAllowanceOnceThenWarmAllowance() async throws {
+        let warmup = ComputerUseConsentRecognitionWarmup()
+        let coldResult = try await ComputerUseObservationWorker.performConsentRecognition(
+            timeout: 0.02, coldStartTimeout: 0.3, warmup: warmup) {
+                XCTAssertFalse(Thread.isMainThread)
+                Thread.sleep(forTimeInterval: 0.06)
+                return 7
+            }
+        XCTAssertEqual(coldResult, 7, "The first successful cold recognition should use the longer allowance")
+
+        let warmOperationExited = expectation(description: "timed-out warm recognition exited")
+        do {
+            _ = try await ComputerUseObservationWorker.performConsentRecognition(
+                timeout: 0.02, coldStartTimeout: 0.3, warmup: warmup) {
+                    Thread.sleep(forTimeInterval: 0.06)
+                    warmOperationExited.fulfill()
+                    return 8
+                }
+            XCTFail("After one success, later recognition should use the shorter warm allowance")
+        } catch {
+            XCTAssertEqual(error as? ComputerUseObservationWorker.Failure, .timedOut)
+        }
+        await fulfillment(of: [warmOperationExited], timeout: 1)
+        try await waitForReleasedWorker()
+    }
+
+    func testFailedConsentRecognitionDoesNotConsumeColdAllowance() async throws {
+        enum ProbeFailure: Error { case expected }
+        let warmup = ComputerUseConsentRecognitionWarmup()
+        do {
+            _ = try await ComputerUseObservationWorker.performConsentRecognition(
+                timeout: 0.02, coldStartTimeout: 0.3, warmup: warmup) {
+                    throw ProbeFailure.expected
+                }
+            XCTFail("The probe operation should fail")
+        } catch is ProbeFailure { }
+
+        let result = try await ComputerUseObservationWorker.performConsentRecognition(
+            timeout: 0.02, coldStartTimeout: 0.3, warmup: warmup) {
+                XCTAssertFalse(Thread.isMainThread)
+                Thread.sleep(forTimeInterval: 0.06)
+                return 9
+            }
+        XCTAssertEqual(result, 9, "A failed operation must leave the longer cold allowance available")
+    }
+
     private func waitForReleasedWorker() async throws {
         for _ in 0 ..< 100 {
             do {

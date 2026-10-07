@@ -1110,7 +1110,7 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .inputContextTooLarge:
             return "The current task and screenshot exceed the local model's context limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
-            return "AI Computer Use requires a Mac with at least 12 GB of memory."
+            return "AI Computer Use requires a Mac with at least 16 GB of memory."
         case .insufficientAvailableMemory:
             return "There is not enough free memory for AI Computer Use. Close some apps, then choose Retry."
         case .resourceInspectionFailed:
@@ -1582,8 +1582,9 @@ actor OSAtlasLlamaRuntime {
         }
         do {
             try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
-            let (request, data) = try await withTaskCancellationHandler {
+            let proposal = try await withTaskCancellationHandler {
                 var preparedInput = input
+                var correctionUsed = false
                 while true {
                     try Task.checkCancellation()
                     guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
@@ -1599,22 +1600,44 @@ actor OSAtlasLlamaRuntime {
                         + ComputerUseFaraModel.maximumCompletionTokens
                         + ComputerUseFaraModel.contextSafetyReserveTokens
                     let remainingBudget = server.resourceProfile.contextSize - reservedTokens
-                    if exactTokens <= remainingBudget {
-                        try Task.checkCancellation()
-                        guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                        let data = try await server.transport.complete(request: request)
-                        return (request, data)
+                    if exactTokens > remainingBudget {
+                        guard !correctionUsed, !preparedInput.history.isEmpty else {
+                            throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                        }
+                        preparedInput.history.removeFirst()
+                        continue
                     }
-                    guard !preparedInput.history.isEmpty else { throw OSAtlasLlamaRuntimeError.inputContextTooLarge }
-                    preparedInput.history.removeFirst()
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    if correctionUsed {
+                        try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+                    }
+                    let data = try await server.transport.complete(request: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    if let body = request.httpBody { inspectFaraExchange?(body, data) }
+                    do {
+                        return try ComputerUseFaraModel.decode(data)
+                    } catch {
+                        // Only a complete, stopped assistant envelope with an invalid
+                        // action gets one bounded format correction. Never retry transport,
+                        // envelope, cancellation, or a second invalid action response.
+                        _ = try ComputerUseFaraModel.decodePageAnswer(data)
+                        guard !correctionUsed else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                        let feedback = "The previous proposal was rejected before execution; no input was sent. Return one supported action only. For type, use text and optional coordinates, and do not include keys. Enter must be a separate key proposal after an observation."
+                        let combined = [preparedInput.actionError, feedback]
+                            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+                        guard combined.utf8.count <= 16_384 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                        preparedInput.actionError = combined
+                        correctionUsed = true
+                    }
                 }
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }
             try Task.checkCancellation()
             guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-            if let body = request.httpBody { inspectFaraExchange?(body, data) }
-            return try ComputerUseFaraModel.decode(data)
+            return proposal
         } catch {
             if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
             throw error
@@ -1638,6 +1661,51 @@ actor OSAtlasLlamaRuntime {
             guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
             if let body = request.httpBody { inspectFaraExchange?(body, data) }
             return try ComputerUseFaraModel.decodePageAnswer(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    /// Reviews a candidate against one current screenshot while retaining the
+    /// same serialized Fara model owner and resource/cancellation boundaries.
+    func reviewFaraOutcome(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input,
+                           candidateAnswer: String) async throws -> ComputerUseFaraModel.OutcomeReview {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseFaraModel.makeOutcomeReviewRequest(endpoint: endpoint, input: input,
+                candidateAnswer: candidateAnswer)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            let reservedTokens = ComputerUseFaraModel.contextImageTokensPerScreenshot + 512
+                + ComputerUseFaraModel.contextSafetyReserveTokens
+            guard server.resourceProfile.contextSize > reservedTokens else {
+                throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+            }
+            guard exactTokens <= server.resourceProfile.contextSize - reservedTokens else {
+                throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+            }
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            if let body = request.httpBody { inspectFaraExchange?(body, data) }
+            return try ComputerUseFaraModel.decodeOutcomeReview(data)
         } catch {
             if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
             throw error
@@ -1886,6 +1954,36 @@ actor OSAtlasLlamaRuntime {
                 inspectExchange: inspectExchange)
             let plan = try await withTaskCancellationHandler {
                 try await planner.propose(input: input, page: page)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return plan
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    func proposeDefaultBrowserBootstrap(endpoint: OSAtlasLlamaEndpoint,
+        input: ComputerUseFaraModel.Input,
+        inspectExchange: (@Sendable (Data, Data) -> Void)? = nil
+    ) async throws -> ComputerUseDefaultBrowserControlPlan {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
+                bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalDefaultBrowserControlPlanner(connection: connection, transport: server.transport,
+                inspectExchange: inspectExchange)
+            let plan = try await withTaskCancellationHandler {
+                try await planner.proposeBootstrap(input: input)
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }
@@ -2523,7 +2621,7 @@ actor OSAtlasLlamaRuntime {
 
     private func resourceProfileForLaunch(nativeText: Bool = false, trainedVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
-        guard !trainedVision || snapshot.physicalMemoryBytes >= 12 * 1_024 * 1_024 * 1_024 else {
+        guard !trainedVision || snapshot.physicalMemoryBytes >= 16 * 1_024 * 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(

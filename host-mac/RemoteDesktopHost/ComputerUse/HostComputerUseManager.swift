@@ -727,6 +727,18 @@ struct ComputerUseKeyboardCaretEvidence {
     let text: ComputerUseTextSnapshot
     let frame: CGRect
     let image: ComputerUseDesktopImage
+    // Live keyboard captures preserve the whole field and the existing
+    // approval checkpoint. Legacy evidence retains whole-window comparison.
+    let comparisonScope: CGRect?
+    let checkpointBounds: CGRect?
+
+    init(applicationIdentity: ComputerUseApplicationIdentity, window: ComputerUseFrontmostWindowCaptureIdentity,
+         text: ComputerUseTextSnapshot, frame: CGRect, image: ComputerUseDesktopImage,
+         comparisonScope: CGRect? = nil, checkpointBounds: CGRect? = nil) {
+        self.applicationIdentity = applicationIdentity; self.window = window
+        self.text = text; self.frame = frame; self.image = image
+        self.comparisonScope = comparisonScope; self.checkpointBounds = checkpointBounds
+    }
 }
 
 struct ComputerUseApprovalFingerprint: Equatable {
@@ -765,6 +777,8 @@ struct ComputerUseApprovalFingerprint: Equatable {
               evidence.window == otherEvidence.window,
               evidence.text == otherEvidence.text,
               evidence.frame == otherEvidence.frame,
+              evidence.comparisonScope == otherEvidence.comparisonScope,
+              evidence.checkpointBounds == otherEvidence.checkpointBounds,
               evidence.image.displayBounds == otherEvidence.image.displayBounds,
               evidence.image.pixelWidth == otherEvidence.image.pixelWidth,
               evidence.image.pixelHeight == otherEvidence.image.pixelHeight else { return false }
@@ -772,8 +786,32 @@ struct ComputerUseApprovalFingerprint: Equatable {
         // Preserve exact legacy matching once the extra proof has been
         // validated. Otherwise permit only a verified insertion-caret repaint.
         if self == other { return true }
+        let comparisonBounds = evidence.comparisonScope ?? evidence.window.bounds
         return (try? evidence.image.matchesInsertionPointPixels(of: otherEvidence.image,
-            window: evidence.window.bounds, field: evidence.frame)) == true
+            window: comparisonBounds, field: evidence.frame)) == true
+    }
+
+    static func keyboardCaretComparisonScope(
+        focusedFrame: CGRect, windowBounds: CGRect, displayBounds: CGRect, checkpoint: CGPoint,
+        sourcePixelWidth: Int, sourcePixelHeight: Int
+    ) -> CGRect? {
+        func finite(_ rect: CGRect) -> Bool {
+            !rect.isNull && !rect.isEmpty
+                && [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy(\.isFinite)
+        }
+        guard finite(focusedFrame), finite(windowBounds), finite(displayBounds),
+              displayBounds.contains(windowBounds), windowBounds.contains(focusedFrame),
+              checkpoint.x.isFinite, checkpoint.y.isFinite, windowBounds.contains(checkpoint),
+              sourcePixelWidth > 0, sourcePixelHeight > 0 else { return nil }
+        let scaleX = CGFloat(sourcePixelWidth) / displayBounds.width
+        let scaleY = CGFloat(sourcePixelHeight) / displayBounds.height
+        guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0 else { return nil }
+        let checkpointBounds = CGRect(x: checkpoint.x - 48 / scaleX, y: checkpoint.y - 48 / scaleY,
+            width: 96 / scaleX, height: 96 / scaleY).intersection(windowBounds)
+        guard finite(checkpointBounds) else { return nil }
+        let scope = focusedFrame.union(checkpointBounds).intersection(windowBounds)
+        guard finite(scope), scope.contains(focusedFrame), scope.contains(checkpointBounds) else { return nil }
+        return scope
     }
 
     private static func hasEligibleKeyboardEvidence(
@@ -788,7 +826,17 @@ struct ComputerUseApprovalFingerprint: Equatable {
                 && [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy(\.isFinite)
         }
         let selection = text.selection
-        return app.codeIdentity != nil
+        let scopeIsValid: Bool
+        if let scope = evidence.comparisonScope, let checkpoint = evidence.checkpointBounds {
+            let expected = evidence.frame.union(checkpoint).intersection(window)
+            scopeIsValid = finite(scope) && finite(checkpoint)
+                && window.contains(checkpoint) && scope == expected
+                && scope.contains(evidence.frame) && scope.contains(checkpoint)
+        } else {
+            scopeIsValid = evidence.comparisonScope == nil && evidence.checkpointBounds == nil
+        }
+        return scopeIsValid
+            && app.codeIdentity != nil
             && app.bundleIdentifier == applicationID
             && app.processIdentifier == evidence.window.applicationProcessIdentifier
             && finite(window) && finite(display) && finite(evidence.frame)
@@ -838,6 +886,133 @@ struct ComputerUseFrontmostWindowCaptureIdentity: Equatable {
     let bounds: CGRect
 }
 
+struct ComputerUseActiveDisplay: Equatable {
+    let identifier: CGDirectDisplayID
+    let bounds: CGRect
+}
+
+/// Selects the one active display that contains the complete focused AX
+/// window. Nil is fail-closed for spanning, mirrored, or malformed geometry.
+enum ComputerUseFocusedDisplaySelector {
+    static func select(windowBounds: CGRect, activeDisplays: [ComputerUseActiveDisplay]) -> ComputerUseActiveDisplay? {
+        func valid(_ rect: CGRect) -> Bool {
+            !rect.isNull && !rect.isInfinite && !rect.isEmpty
+                && [rect.minX, rect.minY, rect.width, rect.height].allSatisfy { $0.isFinite && abs($0) <= 1_000_000 }
+        }
+        guard valid(windowBounds), !activeDisplays.isEmpty, activeDisplays.count <= 32,
+              activeDisplays.allSatisfy({ $0.identifier != 0 && valid($0.bounds) }),
+              Set(activeDisplays.map(\.identifier)).count == activeDisplays.count else { return nil }
+        let candidates = activeDisplays.filter { $0.bounds.contains(windowBounds) }
+        guard candidates.count == 1, let selected = candidates.first else { return nil }
+        // Mirrored or otherwise overlapping display geometry cannot identify
+        // a unique coordinate-to-panel mapping for this focused window.
+        guard !activeDisplays.contains(where: { display in
+            guard display.identifier != selected.identifier else { return false }
+            let overlap = display.bounds.intersection(windowBounds)
+            return !overlap.isNull && overlap.width > 0 && overlap.height > 0
+        }) else { return nil }
+        return selected
+    }
+
+    static func isStable(before: ComputerUseActiveDisplay?, after: ComputerUseActiveDisplay?) -> Bool {
+        guard let before, let after else { return false }
+        return before == after
+    }
+}
+
+/// One public Window Server entry in top-to-bottom list order. This describes
+/// visible composition; it does not replace the app receiving keyboard events.
+struct ComputerUseVisibleWindowEntry: Equatable {
+    let ownerProcessIdentifier: pid_t
+    let layer: Int
+    let bounds: CGRect
+    let alpha: CGFloat
+
+    init?(windowInfo: [String: Any]) {
+        guard let owner = windowInfo[kCGWindowOwnerPID as String] as? Int,
+              let ownerPID = pid_t(exactly: owner), ownerPID > 0,
+              let layer = windowInfo[kCGWindowLayer as String] as? Int,
+              let rawBounds = windowInfo[kCGWindowBounds as String] as? [String: Any],
+              let alphaNumber = windowInfo[kCGWindowAlpha as String] as? NSNumber else { return nil }
+        var bounds = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
+              !bounds.isNull, !bounds.isInfinite,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite) else { return nil }
+        ownerProcessIdentifier = ownerPID; self.layer = layer
+        self.bounds = bounds; alpha = CGFloat(alphaNumber.doubleValue)
+    }
+
+    init(ownerProcessIdentifier: pid_t, layer: Int, bounds: CGRect, alpha: CGFloat = 1) {
+        self.ownerProcessIdentifier = ownerProcessIdentifier; self.layer = layer
+        self.bounds = bounds; self.alpha = alpha
+    }
+
+    var hasValidGeometryAndAlpha: Bool {
+        ownerProcessIdentifier > 0 && alpha.isFinite && (0...1).contains(alpha)
+            && !bounds.isNull && !bounds.isInfinite && !bounds.isEmpty
+            && [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite)
+    }
+}
+
+/// Pure occlusion assessment for a retained focused window. Unknown means the
+/// stack cannot prove that the visible pixels match the keyboard recipient.
+struct ComputerUseVisibleWindowStack {
+    enum Assessment: Equatable { case clear, occluded, unknown }
+    let entries: [ComputerUseVisibleWindowEntry]
+    private let hasInvalidRelevantEntry: Bool
+
+    private static let relevantLayers: Set<Int> = [
+        Int(CGWindowLevelForKey(.normalWindow)),
+        Int(CGWindowLevelForKey(.floatingWindow)),
+        Int(CGWindowLevelForKey(.modalPanelWindow)),
+    ]
+
+    init(windowInfo: [[String: Any]]) {
+        var parsed: [ComputerUseVisibleWindowEntry] = []
+        var invalid = false
+        for info in windowInfo {
+            guard let layer = info[kCGWindowLayer as String] as? Int else {
+                invalid = true; continue
+            }
+            guard Self.relevantLayers.contains(layer) else { continue }
+            guard let entry = ComputerUseVisibleWindowEntry(windowInfo: info),
+                  entry.hasValidGeometryAndAlpha else {
+                invalid = true; continue
+            }
+            parsed.append(entry)
+        }
+        entries = parsed; hasInvalidRelevantEntry = invalid
+    }
+
+    init(entries: [ComputerUseVisibleWindowEntry]) {
+        self.entries = entries; hasInvalidRelevantEntry = false
+    }
+
+    func assessFocusedWindow(ownerProcessIdentifier: pid_t, bounds: CGRect) -> Assessment {
+        guard !hasInvalidRelevantEntry, !bounds.isNull, !bounds.isInfinite,
+              !bounds.isEmpty,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite) else {
+            return .unknown
+        }
+        let relevant = entries.filter { Self.relevantLayers.contains($0.layer) }
+        guard relevant.allSatisfy(\.hasValidGeometryAndAlpha) else { return .unknown }
+        guard let candidateIndex = relevant.firstIndex(where: {
+            $0.ownerProcessIdentifier == ownerProcessIdentifier && $0.bounds == bounds
+                && $0.hasValidGeometryAndAlpha && $0.alpha > 0
+        }) else { return .unknown }
+        for entry in relevant[..<candidateIndex] {
+            guard entry.hasValidGeometryAndAlpha else { return .unknown }
+            guard entry.alpha > 0, entry.ownerProcessIdentifier != ownerProcessIdentifier else { continue }
+            let intersection = entry.bounds.intersection(bounds)
+            if !intersection.isNull && !intersection.isEmpty
+                && intersection.width > 0 && intersection.height > 0 {
+                return .occluded
+            }
+        }
+        return .clear
+    }
+}
+
 /// Full text remains local until a current-turn document read is verified.
 /// This identity is independent of helper element IDs, which expire with it.
 struct ComputerUseMCPFocusedTextSnapshot: Equatable {
@@ -848,11 +1023,15 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
     let role: String
     let focusedElement: AXUIElement
     let documentIdentity: String?
+    /// True only for the current retained AX binding whose parent path
+    /// reaches an AXWebArea and the current window. Unknown stays false.
+    var isWebContent: Bool = false
 
     func hasSameDocumentTarget(as other: Self) -> Bool {
         application == other.application && window == other.window
             && CFEqual(focusedElement, other.focusedElement)
             && documentIdentity == other.documentIdentity && frame == other.frame && role == other.role
+            && isWebContent == other.isWebContent
             && text.isEditable == other.text.isEditable && text.isSecure == other.text.isSecure
     }
 
@@ -863,6 +1042,7 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
         lhs.application == rhs.application && lhs.window == rhs.window
             && CFEqual(lhs.focusedElement, rhs.focusedElement)
             && lhs.documentIdentity == rhs.documentIdentity
+            && lhs.isWebContent == rhs.isWebContent
             && lhs.frame == rhs.frame && lhs.role == rhs.role
             && lhs.text.value.utf8.elementsEqual(rhs.text.value.utf8)
             && lhs.text.selection == rhs.text.selection
@@ -870,9 +1050,13 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
     }
 
     var isReadable: Bool {
+        isReadable(allowedRoles: ["AXTextArea"])
+    }
+
+    func isReadable(allowedRoles: Set<String>) -> Bool {
         application.identityIsAuthoritative
             && application.identity?.processIdentifier == window.applicationProcessIdentifier
-            && role == "AXTextArea" && text.isEditable && !text.isSecure
+            && allowedRoles.contains(role) && text.isEditable && !text.isSecure
             && !text.targetID.isEmpty
             && frame.width > 0 && frame.height > 0
             && [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
@@ -1086,6 +1270,8 @@ final class ComputerUseHostTools {
     enum ToolError: Error, LocalizedError {
         case paused
         case screenshotUnavailable
+        case visualSurfaceObscured
+        case focusedDisplayUnavailable
         case applicationUnavailable
         case approvalTargetUnavailable
         case approvalTargetChanged
@@ -1095,6 +1281,10 @@ final class ComputerUseHostTools {
             switch self {
             case .paused: return "AI Computer Use is paused."
             case .screenshotUnavailable: return "The Mac screen could not be captured."
+            case .visualSurfaceObscured:
+                return "Close the covering window or handle the system dialog, then bring the intended window to the front and choose Resume."
+            case .focusedDisplayUnavailable:
+                return "Move the intended window fully onto one active display, then choose Resume."
             case .applicationUnavailable:
                 return "The requested Mac app could not be found or opened."
             case .approvalTargetUnavailable:
@@ -1118,6 +1308,7 @@ final class ComputerUseHostTools {
     private let textTarget: any ComputerUseNativeTextTarget
     private let usesDefaultNativeTextTarget: Bool
     private let textEditorOverride: ComputerUseTextEditor?
+    private(set) var nativeVisualTypingDiagnostic: [String: String] = [:]
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
     private var browserToolProposals: (id: UUID, taskID: String, propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools)?
     private var browserResearchAdmissionObserver: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)?
@@ -1884,27 +2075,67 @@ final class ComputerUseHostTools {
         // screenshot remains a full-display input for visual control, while
         // fact extractors can fail closed to this one active window instead
         // of accepting a coherent stale result from another visible app.
-        let windowBeforeCapture = liveFrontmostWindowSnapshot()
-        let displayID = CGMainDisplayID()
+        guard let windowBeforeCapture = liveFrontmostWindowSnapshot() else {
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let activeDisplaysBefore = liveActiveDisplayInventory(),
+              let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowBeforeCapture.bounds, activeDisplays: activeDisplaysBefore) else {
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let stackBeforeCapture = liveVisibleWindowStack(),
+              stackBeforeCapture.assessFocusedWindow(
+                ownerProcessIdentifier: windowBeforeCapture.applicationProcessIdentifier,
+                bounds: windowBeforeCapture.bounds) == .clear else {
+            throw ToolError.visualSurfaceObscured
+        }
+        let displayID = selectedDisplayBefore.identifier
         guard let image = CGDisplayCreateImage(displayID) else {
             throw ToolError.screenshotUnavailable
         }
         let windowAfterCapture = liveFrontmostWindowSnapshot()
+        guard let windowAfterCapture, windowAfterCapture == windowBeforeCapture else {
+            throw ToolError.visualSurfaceObscured
+        }
+        guard let activeDisplaysAfter = liveActiveDisplayInventory(),
+              let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowAfterCapture.bounds, activeDisplays: activeDisplaysAfter),
+              ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let stackAfterCapture = liveVisibleWindowStack(),
+              stackAfterCapture.assessFocusedWindow(
+                ownerProcessIdentifier: windowAfterCapture.applicationProcessIdentifier,
+                bounds: windowAfterCapture.bounds) == .clear else {
+            throw ToolError.visualSurfaceObscured
+        }
         let frontmostWindowBounds = Self.stableFrontmostWindowBounds(
             before: windowBeforeCapture,
             after: windowAfterCapture)
-        let displayBounds = CGDisplayBounds(displayID)
-        let bounds = displayBounds.width > 0 && displayBounds.height > 0
-            ? displayBounds
-            : CGRect(
-                x: 0,
-                y: 0,
-                width: CGDisplayPixelsWide(displayID),
-                height: CGDisplayPixelsHigh(displayID))
+        let displayBounds = selectedDisplayBefore.bounds
         return ComputerUseScreenObservation(
             image: CIImage(cgImage: image),
-            displayBounds: bounds,
+            displayBounds: displayBounds,
             frontmostWindowBounds: frontmostWindowBounds)
+    }
+
+    private func liveActiveDisplayInventory() -> [ComputerUseActiveDisplay]? {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success,
+              count > 0, count <= 32 else { return nil }
+        var identifiers = Array(repeating: CGDirectDisplayID(0), count: Int(count))
+        var actualCount = count
+        let status = identifiers.withUnsafeMutableBufferPointer { buffer in
+            CGGetActiveDisplayList(count, buffer.baseAddress, &actualCount)
+        }
+        guard status == .success, actualCount == count else { return nil }
+        return identifiers.map { ComputerUseActiveDisplay(identifier: $0, bounds: CGDisplayBounds($0)) }
+    }
+
+    private func liveVisibleWindowStack() -> ComputerUseVisibleWindowStack? {
+        guard let windowInfo = CGWindowListCopyWindowInfo(
+            .optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return ComputerUseVisibleWindowStack(windowInfo: windowInfo)
     }
 
     func planningStateFingerprint(
@@ -2275,7 +2506,11 @@ final class ComputerUseHostTools {
         return actionableElementSnapshot(at: point)?.attestationLabel
     }
 
-    private func actionableElementSnapshot(at point: CGPoint, requiringLabel: Bool = true) -> AccessibilitySnapshot? {
+    private func actionableElementSnapshot(
+        at point: CGPoint,
+        requiringLabel: Bool = true,
+        excludingStructuralGeometry: Bool = false
+    ) -> AccessibilitySnapshot? {
         let systemWide = AXUIElementCreateSystemWide()
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -2333,7 +2568,13 @@ final class ComputerUseHostTools {
             // AX hit testing identifies the element at the physical point.
             // Browser AX frames can be offset from that point; use the hit
             // for its label, and validate usable geometry separately.
+            // Structural containers do not identify a specific clicked control;
+            // pointer callers can instead use their scoped point context.
+            let structuralGeometryRoles: Set<String> = [
+                "AXGroup", "AXWebArea", "AXScrollArea", "AXWindow", "AXApplication"
+            ]
             if snapshot.isActionable,
+               (!excludingStructuralGeometry || !structuralGeometryRoles.contains(role)),
                (!requiringLabel || snapshot.attestationLabel != nil) {
                 return snapshot
             }
@@ -2703,10 +2944,13 @@ final class ComputerUseHostTools {
 
         // Once an eligible focused editor was observed, any later target or
         // scope change invalidates the capture instead of dropping its proof.
-        let displayID = CGMainDisplayID()
-        let displayBounds = CGDisplayBounds(displayID)
-        guard displayBounds.width > 0, displayBounds.height > 0,
-              displayBounds.contains(windowBefore.bounds) else { return nil }
+        guard let activeDisplaysBefore = liveActiveDisplayInventory(),
+              let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowBefore.bounds, activeDisplays: activeDisplaysBefore) else {
+            throw ToolError.approvalTargetUnavailable
+        }
+        let displayID = selectedDisplayBefore.identifier
+        let displayBounds = selectedDisplayBefore.bounds
         guard let image = CGDisplayCreateImage(displayID) else { throw ToolError.screenshotUnavailable }
         guard let runningAppAfter = NSWorkspace.shared.frontmostApplication,
               !runningAppAfter.isTerminated,
@@ -2714,8 +2958,13 @@ final class ComputerUseHostTools {
               appAfter == app,
               let windowAfter = liveFrontmostWindowSnapshot(), windowAfter == windowBefore,
               let focusedAfter = focusedElement(), CFEqual(focusedBefore, focusedAfter),
-              let textAfter = try currentTextSnapshot(), textAfter == textBefore,
-              CGMainDisplayID() == displayID, CGDisplayBounds(displayID) == displayBounds else {
+              let textAfter = try currentTextSnapshot(), textAfter == textBefore else {
+            throw ToolError.approvalTargetChanged
+        }
+        guard let activeDisplaysAfter = liveActiveDisplayInventory(),
+              let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowAfter.bounds, activeDisplays: activeDisplaysAfter),
+              ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
             throw ToolError.approvalTargetChanged
         }
         let focusedSnapshotAfter = accessibilitySnapshot(for: focusedAfter)
@@ -2724,18 +2973,39 @@ final class ComputerUseHostTools {
         let desktopImage = try ComputerUseDesktopImage(observation: ComputerUseScreenObservation(
             image: CIImage(cgImage: image), displayBounds: displayBounds,
             frontmostWindowBounds: windowBefore.bounds))
-        guard let digest = try Self.approvalVisualDigest(around: target.visualCheckpoints, image: image,
-            displayBounds: displayBounds, window: windowBefore) else { throw ToolError.approvalTargetUnavailable }
+        guard target.visualCheckpoints.count == 1,
+              let checkpoint = target.visualCheckpoints.first,
+              let comparisonScope = ComputerUseApprovalFingerprint.keyboardCaretComparisonScope(
+                focusedFrame: frame, windowBounds: windowBefore.bounds, displayBounds: displayBounds,
+                checkpoint: checkpoint, sourcePixelWidth: image.width, sourcePixelHeight: image.height),
+              let digest = try Self.approvalVisualDigest(around: target.visualCheckpoints, image: image,
+                displayBounds: displayBounds, window: windowBefore) else { throw ToolError.approvalTargetUnavailable }
+        let checkpointScaleX = CGFloat(image.width) / displayBounds.width
+        let checkpointScaleY = CGFloat(image.height) / displayBounds.height
+        let checkpointBounds = CGRect(x: checkpoint.x - 48 / checkpointScaleX,
+            y: checkpoint.y - 48 / checkpointScaleY, width: 96 / checkpointScaleX,
+            height: 96 / checkpointScaleY).intersection(windowBefore.bounds)
         return (ComputerUseKeyboardCaretEvidence(applicationIdentity: app, window: windowBefore,
-            text: textBefore, frame: frame, image: desktopImage), digest)
+            text: textBefore, frame: frame, image: desktopImage, comparisonScope: comparisonScope,
+            checkpointBounds: checkpointBounds), digest)
     }
 
     fileprivate func performApproved(
         _ action: ComputerUsePredictedAction,
         fingerprint: ComputerUseApprovalFingerprint,
         browserPageEvidence: ComputerUseBrowserPageEvidence?,
+        nativeVisualKeyboard: Bool = false,
         willBeginEffect: () throws -> Void
     ) async throws {
+        if nativeVisualKeyboard, case .typeText(let payload) = action {
+            guard !payload.isEmpty else { throw ComputerUseTextEditError.selectionUnsupported }
+            guard payload.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes else {
+                throw ComputerUseTextEditError.payloadTooLarge
+            }
+            if payload.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+                throw ComputerUseTextEditError.valueNotRepresentable
+            }
+        }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         if let browserPageEvidence {
@@ -2761,15 +3031,24 @@ final class ComputerUseHostTools {
         }
         try willBeginEffect()
         if case .typeText = action {
-            try await performVerified(action)
+            if nativeVisualKeyboard, case .typeText(let payload) = action {
+                if actionPerformer != nil, textEditorOverride == nil {
+                    // Preserve the explicitly injected virtual performer path.
+                    try perform(action)
+                } else {
+                    try await performNativeVisualKeyboardTyping(payload)
+                }
+            } else {
+                try await performVerified(action)
+            }
         } else {
             try perform(action, reportsPartialApprovedEffect: true)
         }
     }
 
-    /// Native model adapters use the same target binding and verified text
-    /// path as approved host input. The adapter still owns the policy decision
-    /// and must persist its attempt in willBeginEffect before posting input.
+    /// Native model adapters retain the same approval fingerprint boundary as
+    /// approved host input. Text dispatch uses its scoped visual-keyboard path;
+    /// the adapter still owns policy and journals in willBeginEffect.
     func prepareNativeActionFingerprint(for action: ComputerUsePredictedAction) throws -> ComputerUseApprovalFingerprint {
         try prepareApproval(for: action).fingerprint
     }
@@ -2783,7 +3062,10 @@ final class ComputerUseHostTools {
         // label. Label attestation keeps its stricter, separate requirement;
         // the executor still validates target authority and current pixels.
         let point = CGPoint(x: x, y: y)
-        guard let frame = actionableElementSnapshot(at: point, requiringLabel: false)?.frame,
+        guard let frame = actionableElementSnapshot(
+            at: point,
+            requiringLabel: false,
+            excludingStructuralGeometry: true)?.frame,
               !frame.isEmpty, [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
               frame.contains(point) else { return nil }
         return frame
@@ -2798,33 +3080,115 @@ final class ComputerUseHostTools {
     }
 
     func mcpFocusedTextSnapshot() throws -> ComputerUseMCPFocusedTextSnapshot? {
+        try focusedTextSnapshot(allowedRoles: ["AXTextArea"], validateProvidedSnapshot: false)
+    }
+
+    func nativeVisualKeyboardTextSnapshot() throws -> ComputerUseMCPFocusedTextSnapshot? {
+        try focusedTextSnapshot(allowedRoles: ["AXTextArea", "AXTextField", "AXComboBox"],
+                                validateProvidedSnapshot: true)
+    }
+
+    /// AX can briefly return no focused text snapshot during a browser's
+    /// inline-completion update. Retry only absence; a readable changed state
+    /// is returned immediately for the caller's exact baseline comparison.
+    private func nativeVisualKeyboardTextSnapshotRetryingNil(
+        deadline: TimeInterval
+    ) async throws -> ComputerUseMCPFocusedTextSnapshot? {
+        let clock = ContinuousClock()
+        let retryDeadline = clock.now.advanced(by: .milliseconds(500))
+        while true {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            if let snapshot = try nativeVisualKeyboardTextSnapshot() { return snapshot }
+            let remaining = retryDeadline - clock.now
+            guard remaining > .zero,
+                  ProcessInfo.processInfo.systemUptime < deadline else { return nil }
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+            try await Task.sleep(for: min(.milliseconds(25), remaining))
+        }
+    }
+
+    private func allowsInlineCompletionRefresh(
+        _ candidate: ComputerUseMCPFocusedTextSnapshot,
+        relativeTo baseline: ComputerUseMCPFocusedTextSnapshot
+    ) -> Bool {
+        let candidateRange = candidate.text.selection
+        let baselineRange = baseline.text.selection
+        let candidateUTF16 = candidate.text.value.utf16
+        let baselineUTF16 = baseline.text.value.utf16
+        guard candidate.hasSameDocumentTarget(as: baseline),
+              candidateRange.location == baselineRange.location,
+              candidateRange.location >= 0, baselineRange.location >= 0,
+              candidateRange.length >= 0, baselineRange.length >= 0,
+              candidateRange.location <= candidateUTF16.count,
+              baselineRange.location <= baselineUTF16.count,
+              ((candidateRange.length == 0 && baselineRange.length == 0)
+                || (candidateRange.length == candidateUTF16.count - candidateRange.location
+                    && baselineRange.length == baselineUTF16.count - baselineRange.location)),
+              candidate.text.value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes,
+              baseline.text.value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes else {
+            return false
+        }
+        // Inline completion may expose a ghost suffix after a collapsed caret.
+        // Only the unchanged prefix through that caret is typing authority.
+        return Array(candidateUTF16.prefix(candidateRange.location))
+            == Array(baselineUTF16.prefix(baselineRange.location))
+    }
+
+    private func focusedTextSnapshot(allowedRoles: Set<String>,
+                                     validateProvidedSnapshot: Bool) throws -> ComputerUseMCPFocusedTextSnapshot? {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         if let mcpFocusedTextSnapshotProvider {
-            return try mcpFocusedTextSnapshotProvider()
+            guard let snapshot = try mcpFocusedTextSnapshotProvider() else { return nil }
+            guard !validateProvidedSnapshot || snapshot.isReadable(allowedRoles: allowedRoles) else { return nil }
+            return snapshot
         }
         // Synthetic screens or app identities cannot authorize live AX reads.
         guard usesLiveFrontmostApplicationIdentity, screenProvider == nil,
               accessibilityContextProvider == nil else { return nil }
         let application = frontmostApplicationSnapshot()
         guard let window = liveFrontmostWindowSnapshot(),
-              let text = try currentTextSnapshot(), let element = focusedElement(),
+              let text = try currentTextSnapshot(), let element = focusedTextElement(),
               let role = Self.stringAttribute(kAXRoleAttribute as CFString, from: element),
               let frame = accessibilitySnapshot(for: element).frame else { return nil }
         var elementPID: pid_t = 0
         guard AXUIElementGetPid(element, &elementPID) == .success,
               elementPID == window.applicationProcessIdentifier else { return nil }
         var windowValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue) == .success,
-              let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
-        let windowElement = unsafeBitCast(windowValue, to: AXUIElement.self)
-        guard CFHash(windowElement) == window.accessibilityWindowHash else { return nil }
+        let windowAttributeResult = AXUIElementCopyAttributeValue(
+            element, kAXWindowAttribute as CFString, &windowValue)
+        let windowElement: AXUIElement
+        if windowAttributeResult == .success {
+            guard let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
+            windowElement = unsafeBitCast(windowValue, to: AXUIElement.self)
+            guard CFHash(windowElement) == window.accessibilityWindowHash else { return nil }
+        } else {
+            // Some native sheet fields omit AXWindow. Accept only an exact,
+            // bounded parent path to the same currently focused app window.
+            guard windowAttributeResult == .noValue else { return nil }
+            let root = AXUIElementCreateApplication(elementPID)
+            var focusedWindowValue: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString,
+                                                 &focusedWindowValue) == .success,
+                  let focusedWindowValue, CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else { return nil }
+            let focusedWindow = unsafeBitCast(focusedWindowValue, to: AXUIElement.self)
+            guard CFHash(focusedWindow) == window.accessibilityWindowHash,
+                  ComputerUseAccessibilityTextTarget.parentPathReachesWindow(
+                    from: element, window: focusedWindow, access: .live, mayAct: mayAct) else { return nil }
+            windowElement = focusedWindow
+        }
         let snapshot = ComputerUseMCPFocusedTextSnapshot(
             application: application, window: window, text: text, frame: frame, role: role,
             focusedElement: element,
-            documentIdentity: Self.stringAttribute(kAXDocumentAttribute as CFString, from: windowElement))
-        guard snapshot.isReadable, try currentTextSnapshot() == text,
+            documentIdentity: Self.stringAttribute(kAXDocumentAttribute as CFString, from: windowElement),
+            isWebContent: (textTarget as? ComputerUseAccessibilityTextTarget)?.isWebContent(
+                targetID: text.targetID, matching: element) ?? false)
+        guard snapshot.isReadable(allowedRoles: allowedRoles), try currentTextSnapshot() == text,
               liveFrontmostWindowSnapshot() == window,
+              focusedTextElement().map({ CFEqual($0, element) }) == true,
               frontmostApplicationSnapshot() == application else { return nil }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
@@ -2855,10 +3219,17 @@ final class ComputerUseHostTools {
             observed = textEditorOverride != nil ? try currentTextSnapshot() : nil
             if textEditorOverride != nil, observed == nil { return nil }
         } else {
-            guard screenProvider == nil, let before = try currentTextSnapshot(),
-                  let focused = focusedElementSnapshot() else { return nil }
-            description = focused.summary
+            guard screenProvider == nil, let before = try currentTextSnapshot() else { return nil }
             observed = before
+            if let target = textTarget as? ComputerUseAccessibilityTextTarget {
+                // The focused AX child can be a suggestion inside an editor.
+                // Describe the same retained binding that supplied this text.
+                guard let retainedDescription = target.editorDescription(targetID: before.targetID) else { return nil }
+                description = retainedDescription
+            } else {
+                guard let focused = focusedElementSnapshot() else { return nil }
+                description = focused.summary
+            }
         }
         let state: ComputerUseNativeTextState?
         if let observed {
@@ -2882,7 +3253,408 @@ final class ComputerUseHostTools {
 
     func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
                             willBeginEffect: () throws -> Void) async throws {
-        try await performApproved(action, fingerprint: fingerprint, browserPageEvidence: nil, willBeginEffect: willBeginEffect)
+        try await performApproved(action, fingerprint: fingerprint, browserPageEvidence: nil,
+                                  nativeVisualKeyboard: true, willBeginEffect: willBeginEffect)
+    }
+
+    /// Native visual text proposals use keyboard events only. The semantic
+    /// AX editing route remains unchanged for MCP and other approved actions.
+    private func performNativeVisualKeyboardTyping(_ payload: String) async throws {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        var stage = "initial-read"
+        var failureType = "none"
+        var attemptedStrokes = 0
+        var completedStrokes = 0
+        var provisionalSpaceTransitions = 0
+        var restoredSpaceTransitions = 0
+        var pendingSpaceUTF16Index: Int?
+        var lastSnapshot: ComputerUseMCPFocusedTextSnapshot?
+        var referenceSnapshot: ComputerUseMCPFocusedTextSnapshot?
+        var expectedLocation: Int?
+        var lastMayAct = false
+        var deadline: TimeInterval = .greatestFiniteMagnitude
+        nativeVisualTypingDiagnostic = [:]
+        defer {
+            let snapshot = lastSnapshot
+            nativeVisualTypingDiagnostic = [
+                "stage": stage,
+                "failureType": failureType,
+                "attemptedStrokes": String(attemptedStrokes),
+                "completedStrokes": String(completedStrokes),
+                "snapshotAvailable": String(snapshot != nil),
+                "samePhysicalTarget": String(snapshot.map { value in
+                    referenceSnapshot.map { value.hasSameDocumentTarget(as: $0) } ?? false
+                } ?? false),
+                "selectionLocation": snapshot.map { String($0.text.selection.location) } ?? "unknown",
+                "selectionLength": snapshot.map { String($0.text.selection.length) } ?? "unknown",
+                "expectedLocation": expectedLocation.map(String.init) ?? "unknown",
+                "editable": snapshot.map { String($0.text.isEditable) } ?? "unknown",
+                "secure": snapshot.map { String($0.text.isSecure) } ?? "unknown",
+                "provisionalSpaceTransitions": String(provisionalSpaceTransitions),
+                "restoredSpaceTransitions": String(restoredSpaceTransitions),
+                "pendingSpace": String(pendingSpaceUTF16Index != nil),
+                "isWebContent": snapshot.map { String($0.isWebContent) } ?? "unknown",
+                "cancelled": String(Task.isCancelled),
+                "mayActAtLastSuccessfulCheck": String(lastMayAct),
+                "deadlineExceeded": String(ProcessInfo.processInfo.systemUptime >= deadline),
+                "elapsedMilliseconds": String(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1_000))
+            ]
+        }
+        let initial: ComputerUseMCPFocusedTextSnapshot?
+        do { initial = try nativeVisualKeyboardTextSnapshot() }
+        catch { failureType = "initialSnapshotError"; throw error }
+        guard let initial else {
+            failureType = "unavailableTarget"
+            throw ComputerUseTextEditError.unavailableTarget
+        }
+        lastSnapshot = initial
+        referenceSnapshot = initial
+        do {
+            guard try currentTextSnapshot() == initial.text else {
+                failureType = "initialSnapshotMismatch"
+                throw ComputerUseTextEditError.preconditionChanged
+            }
+        } catch {
+            if failureType == "none" { failureType = "initialReadError" }
+            throw error
+        }
+        deadline = ProcessInfo.processInfo.systemUptime + ComputerUseTextEditor.defaultMaximumDuration
+        var baseline = initial
+        var postedAnyStroke = false
+
+        let graphemes = Array(payload)
+        for (graphemeIndex, character) in graphemes.enumerated() {
+            let grapheme = String(character)
+            if pendingSpaceUTF16Index != nil && character.isWhitespace {
+                failureType = "pendingSpaceFollowedByWhitespace"
+                throw ComputerUseTextEditError.deliveryUncertain
+            }
+            stage = "pre-key-read"
+            expectedLocation = baseline.text.selection.location + grapheme.utf16.count
+            let entryAllowed = !Task.isCancelled && mayAct()
+            lastMayAct = entryAllowed
+            guard grapheme.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes,
+                  entryAllowed else {
+                failureType = Task.isCancelled ? "interrupted" : "pausedOrPayloadRejected"
+                throw ComputerUseTextEditError.interrupted
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else {
+                failureType = "deadlineExceeded"
+                throw ComputerUseTextEditError.deadlineExceeded
+            }
+            do { try textEditorOverride?.validateContext() }
+            catch {
+                failureType = "preKeyContextChanged"
+                if postedAnyStroke, error as? ComputerUseTextEditError == .preconditionChanged {
+                    throw ComputerUseTextEditError.deliveryUncertain
+                }
+                throw error
+            }
+            let current: ComputerUseMCPFocusedTextSnapshot?
+            do { current = try await nativeVisualKeyboardTextSnapshotRetryingNil(deadline: deadline) }
+            catch {
+                failureType = "preKeySnapshotError"
+                if Task.isCancelled || error is CancellationError
+                    || (error as? ComputerUseTextEditError) == .interrupted {
+                    throw ComputerUseTextEditError.interrupted
+                }
+                if postedAnyStroke { throw ComputerUseTextEditError.deliveryUncertain }
+                throw error
+            }
+            lastSnapshot = current
+            guard let current,
+                  current == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
+                    && allowsInlineCompletionRefresh(current, relativeTo: baseline)) else {
+                failureType = current == nil ? "preKeySnapshotUnavailable" : "preKeySnapshotChanged"
+                throw postedAnyStroke ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
+            }
+            baseline = current
+            referenceSnapshot = current
+            // The final check runs from InputInjector immediately before keydown.
+            // Calling it twice also keeps injected editor context checks at the
+            // same boundary as production ownership checks.
+            do { try textEditorOverride?.validateContext() }
+            catch {
+                failureType = "prePostContextChanged"
+                if postedAnyStroke, error as? ComputerUseTextEditError == .preconditionChanged {
+                    throw ComputerUseTextEditError.deliveryUncertain
+                }
+                throw error
+            }
+            var failedFinalStateCheck = false
+            var passedFinalStateCheck = false
+            var readFailure: Error?
+            let delivered: Bool
+            stage = "final-pre-post"
+            if let textEditorOverride {
+                var final = try nativeVisualKeyboardTextSnapshot()
+                if final == nil {
+                    let retryDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 0.5)
+                    do {
+                        try await Task.sleep(for: .milliseconds(25))
+                        final = try await nativeVisualKeyboardTextSnapshotRetryingNil(deadline: retryDeadline)
+                    } catch {
+                        failureType = "finalPrePostSnapshotRetryError"
+                        if Task.isCancelled || error is CancellationError
+                            || (error as? ComputerUseTextEditError) == .interrupted {
+                            throw ComputerUseTextEditError.interrupted
+                        }
+                        if postedAnyStroke { throw ComputerUseTextEditError.deliveryUncertain }
+                        throw error
+                    }
+                }
+                lastSnapshot = final
+                guard let final,
+                      final == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
+                        && allowsInlineCompletionRefresh(final, relativeTo: baseline)) else {
+                    failureType = "finalPrePostSnapshotChanged"
+                    throw postedAnyStroke ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
+                }
+                baseline = final
+                referenceSnapshot = final
+                let postAllowed = !Task.isCancelled && mayAct()
+                lastMayAct = postAllowed
+                guard postAllowed else {
+                    failureType = "prePostGateClosed"
+                    throw ComputerUseTextEditError.interrupted
+                }
+                guard ProcessInfo.processInfo.systemUptime < deadline else {
+                    failureType = "deadlineExceeded"
+                    throw ComputerUseTextEditError.deadlineExceeded
+                }
+                passedFinalStateCheck = true
+                attemptedStrokes += 1
+                do {
+                    try await textEditorOverride.postUnicode(grapheme, baseline.text)
+                    delivered = true
+                } catch {
+                    failureType = Task.isCancelled ? "cancelledDuringInput" : "inputError"
+                    readFailure = Task.isCancelled ? ComputerUseTextEditError.interrupted : .deliveryUncertain
+                    delivered = false
+                }
+            } else {
+                var finalRetryDeadline: TimeInterval?
+                var strokeDelivered = false
+                while true {
+                    failedFinalStateCheck = false
+                    passedFinalStateCheck = false
+                    readFailure = nil
+                    attemptedStrokes += 1
+                    strokeDelivered = await injector.applyTextStroke(grapheme, ifAllowed: {
+                        !Task.isCancelled && mayAct()
+                            && ProcessInfo.processInfo.systemUptime < deadline
+                    }, beforePosting: {
+                        guard !Task.isCancelled, mayAct(), ProcessInfo.processInfo.systemUptime < deadline else {
+                            return false
+                        }
+                        if let finalRetryDeadline,
+                           ProcessInfo.processInfo.systemUptime >= finalRetryDeadline {
+                            failedFinalStateCheck = true
+                            return false
+                        }
+                        do {
+                            let final = try nativeVisualKeyboardTextSnapshot()
+                            lastSnapshot = final
+                            guard let final,
+                                  final == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
+                                    && allowsInlineCompletionRefresh(final, relativeTo: baseline)) else {
+                                failedFinalStateCheck = true
+                                return false
+                            }
+                            baseline = final
+                            referenceSnapshot = final
+                            guard !Task.isCancelled, mayAct(),
+                                  ProcessInfo.processInfo.systemUptime < deadline else { return false }
+                            if let finalRetryDeadline,
+                               ProcessInfo.processInfo.systemUptime >= finalRetryDeadline {
+                                failedFinalStateCheck = true
+                                return false
+                            }
+                            passedFinalStateCheck = true
+                            return true
+                        } catch {
+                            readFailure = error
+                            failedFinalStateCheck = true
+                            return false
+                        }
+                    })
+                    // InputInjector invokes beforePosting before posting key-down;
+                    // a nil-only rejection here proves this grapheme was not sent.
+                    guard !strokeDelivered, failedFinalStateCheck, !passedFinalStateCheck,
+                          readFailure == nil, lastSnapshot == nil,
+                          !Task.isCancelled, mayAct(),
+                          ProcessInfo.processInfo.systemUptime < deadline else { break }
+                    if finalRetryDeadline == nil {
+                        finalRetryDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 0.5)
+                    }
+                    guard let finalRetryDeadline,
+                          ProcessInfo.processInfo.systemUptime < finalRetryDeadline else { break }
+                    do {
+                        try await Task.sleep(for: .milliseconds(25))
+                        guard !Task.isCancelled, mayAct(),
+                              ProcessInfo.processInfo.systemUptime < deadline else {
+                            throw ComputerUseTextEditError.interrupted
+                        }
+                        guard let recovered = try await nativeVisualKeyboardTextSnapshotRetryingNil(deadline: finalRetryDeadline) else {
+                            break
+                        }
+                        guard recovered == baseline
+                            || (pendingSpaceUTF16Index == nil && postedAnyStroke
+                                && allowsInlineCompletionRefresh(recovered, relativeTo: baseline)) else {
+                            lastSnapshot = recovered
+                            failedFinalStateCheck = true
+                            break
+                        }
+                        lastSnapshot = recovered
+                        baseline = recovered
+                        referenceSnapshot = recovered
+                    } catch {
+                        failureType = "finalPrePostSnapshotRetryError"
+                        if Task.isCancelled || error is CancellationError
+                            || (error as? ComputerUseTextEditError) == .interrupted {
+                            throw ComputerUseTextEditError.interrupted
+                        }
+                        if postedAnyStroke { throw ComputerUseTextEditError.deliveryUncertain }
+                        throw error
+                    }
+                }
+                delivered = strokeDelivered
+            }
+            stage = "input-return"
+            guard delivered else {
+                if let readFailure {
+                    failureType = "inputGuardReadError"
+                    if postedAnyStroke { throw ComputerUseTextEditError.deliveryUncertain }
+                    throw readFailure
+                }
+                if failedFinalStateCheck && !passedFinalStateCheck {
+                    failureType = "finalPrePostStateRejected"
+                    throw postedAnyStroke ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
+                }
+                failureType = "inputNotDeliveredOrUncertain"
+                throw Task.isCancelled ? ComputerUseTextEditError.interrupted : .deliveryUncertain
+            }
+            postedAnyStroke = true
+            completedStrokes += 1
+
+            stage = "post-stroke-read"
+            let strokeBaseline = baseline
+            let expectedLocation = strokeBaseline.text.selection.location + grapheme.utf16.count
+            let expectedPrefix: String
+            if let range = Range(strokeBaseline.text.selection, in: strokeBaseline.text.value) {
+                expectedPrefix = String(strokeBaseline.text.value[..<range.lowerBound]) + grapheme
+            } else {
+                failureType = "postStrokeInvalidBaselineSelection"
+                throw ComputerUseTextEditError.deliveryUncertain
+            }
+            let settleDeadline = min(deadline, ProcessInfo.processInfo.systemUptime + 0.5)
+            var after: ComputerUseMCPFocusedTextSnapshot?
+            lastSnapshot = nil
+            do {
+                after = try await nativeVisualKeyboardTextSnapshotRetryingNil(deadline: settleDeadline)
+                // A readable snapshot equal to the exact pre-stroke baseline may
+                // be an AX read that has not caught up with the posted key. Wait
+                // briefly only in that state; any other readable change is
+                // validated immediately and can never cause this key to repeat.
+                while let candidate = after, candidate == strokeBaseline,
+                      ProcessInfo.processInfo.systemUptime < settleDeadline {
+                    try Task.checkCancellation()
+                    guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else {
+                        throw ComputerUseTextEditError.deadlineExceeded
+                    }
+                    try await Task.sleep(for: .milliseconds(25))
+                    try Task.checkCancellation()
+                    guard mayAct() else { throw ComputerUseTextEditError.interrupted }
+                    guard ProcessInfo.processInfo.systemUptime < deadline else {
+                        throw ComputerUseTextEditError.deadlineExceeded
+                    }
+                    after = try await nativeVisualKeyboardTextSnapshotRetryingNil(deadline: settleDeadline)
+                }
+            } catch {
+                failureType = "postStrokeSnapshotError"
+                if Task.isCancelled || error is CancellationError
+                    || (error as? ComputerUseTextEditError) == .interrupted {
+                    throw ComputerUseTextEditError.interrupted
+                }
+                if (error as? ComputerUseTextEditError) == .deadlineExceeded {
+                    failureType = "deadlineExceeded"
+                    throw ComputerUseTextEditError.deliveryUncertain
+                }
+                throw ComputerUseTextEditError.deliveryUncertain
+            }
+            lastSnapshot = after
+            stage = "post-stroke-validation"
+            let afterAllowed = !Task.isCancelled && mayAct()
+            lastMayAct = afterAllowed
+            let expectedUnits = Array(expectedPrefix.utf16)
+            let observedUnits = after.map { Array($0.text.value.utf16) } ?? []
+            let suffixLength = max(0, observedUnits.count - expectedLocation)
+            var exactExpectedUnits = expectedUnits
+            if let pendingSpaceUTF16Index {
+                guard pendingSpaceUTF16Index < exactExpectedUnits.count else {
+                    failureType = "pendingSpaceIndexOutOfBounds"
+                    throw ComputerUseTextEditError.deliveryUncertain
+                }
+                // The next grapheme must cause the browser to restore this one
+                // known compatibility NBSP. No other Unicode differences are accepted.
+                exactExpectedUnits[pendingSpaceUTF16Index] = 0x20
+            }
+            let hasExactTypedPrefix = observedUnits.count >= exactExpectedUnits.count
+                && Array(observedUnits.prefix(exactExpectedUnits.count)) == exactExpectedUnits
+            let hasPermittedInlineSuffix = after.map {
+                $0.text.selection.length == 0 || $0.text.selection.length == suffixLength
+            } ?? false
+            let nextGrapheme = graphemeIndex + 1 < graphemes.count ? graphemes[graphemeIndex + 1] : nil
+            let previousGraphemeIsNonWhitespace = strokeBaseline.text.value.last.map { !$0.isWhitespace } ?? false
+            let canProvisionallyAcceptSpace = pendingSpaceUTF16Index == nil
+                && grapheme == " "
+                && nextGrapheme.map { !$0.isWhitespace } == true
+                && strokeBaseline.isWebContent
+                && strokeBaseline.role == "AXTextArea"
+                && after?.isWebContent == true
+                && after?.role == "AXTextArea"
+                && strokeBaseline.text.selection.length == 0
+                && strokeBaseline.text.selection.location == strokeBaseline.text.value.utf16.count
+                && after?.text.selection.length == 0
+                && previousGraphemeIsNonWhitespace
+                && strokeBaseline.hasSameDocumentTarget(as: initial)
+                && expectedUnits.count == observedUnits.count
+                && observedUnits.indices.allSatisfy { index in
+                    observedUnits[index] == (index == expectedLocation - 1 ? 0x00A0 : expectedUnits[index])
+                }
+            let exactWholeValue = observedUnits == exactExpectedUnits
+                && after?.text.selection.length == 0
+            guard afterAllowed, ProcessInfo.processInfo.systemUptime < deadline,
+                  let after,
+                  after.hasSameDocumentTarget(as: strokeBaseline),
+                  after.text.isEditable, !after.text.isSecure,
+                  after.text.selection.location == expectedLocation,
+                  after.text.value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes,
+                  (canProvisionallyAcceptSpace || (hasExactTypedPrefix && hasPermittedInlineSuffix)),
+                  pendingSpaceUTF16Index == nil || exactWholeValue else {
+                failureType = Task.isCancelled ? "interrupted"
+                    : (!afterAllowed ? "paused" : (ProcessInfo.processInfo.systemUptime >= deadline
+                        ? "deadlineExceeded" : (after == nil ? "postStrokeSnapshotUnavailable" : "postStrokeStateRejected")))
+                throw Task.isCancelled ? ComputerUseTextEditError.interrupted : .deliveryUncertain
+            }
+            if canProvisionallyAcceptSpace {
+                pendingSpaceUTF16Index = expectedLocation - 1
+                provisionalSpaceTransitions += 1
+            } else if pendingSpaceUTF16Index != nil {
+                pendingSpaceUTF16Index = nil
+                restoredSpaceTransitions += 1
+            }
+            // Inline completions may select a suffix after the inserted text.
+            // Keep validating its bounded snapshot and insertion point without requiring a collapsed range.
+            baseline = after
+            referenceSnapshot = after
+        }
+        guard pendingSpaceUTF16Index == nil else {
+            failureType = "unresolvedPendingSpace"
+            throw ComputerUseTextEditError.deliveryUncertain
+        }
+        stage = "completed"
     }
 
     private struct ApprovalTarget {
@@ -2934,9 +3706,15 @@ final class ComputerUseHostTools {
         case .key:
             let focused = focusedElementSnapshot()
             snapshots = focused.map { [$0] } ?? []
+            guard screenProvider == nil,
+                  let focusedWindow = liveFrontmostWindowSnapshot(),
+                  let activeDisplays = liveActiveDisplayInventory(),
+                  let selectedDisplay = ComputerUseFocusedDisplaySelector.select(
+                    windowBounds: focusedWindow.bounds, activeDisplays: activeDisplays) else {
+                throw ToolError.approvalTargetUnavailable
+            }
             checkpoints = [Self.nativeKeyboardCheckpoint(focusedFrame: focused?.frame,
-                windowBounds: liveFrontmostWindowSnapshot()?.bounds,
-                displayBounds: CGDisplayBounds(CGMainDisplayID()))]
+                windowBounds: focusedWindow.bounds, displayBounds: selectedDisplay.bounds)]
 
         case .typeText:
             guard let focused = focusedElementSnapshot() else {
@@ -3167,6 +3945,33 @@ final class ComputerUseHostTools {
               let value,
               CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
+    }
+
+    /// Text snapshots may resolve an active suggestion row to its owning
+    /// expanded combo box. Generic button/menu focus continues to use the raw
+    /// system-wide focused element above.
+    private func focusedTextElement() -> AXUIElement? {
+        guard let focused = focusedElement(),
+              let runningApplication = NSWorkspace.shared.frontmostApplication,
+              !runningApplication.isTerminated,
+              let role = Self.stringAttribute(kAXRoleAttribute as CFString, from: focused) else { return nil }
+        if [kAXTextFieldRole as String, kAXTextAreaRole as String, kAXComboBoxRole as String].contains(role) {
+            return focused
+        }
+        let root = AXUIElementCreateApplication(runningApplication.processIdentifier)
+        var windowValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString,
+                                            &windowValue) == .success,
+              let windowValue, CFGetTypeID(windowValue) == AXUIElementGetTypeID() else { return nil }
+        let window = unsafeBitCast(windowValue, to: AXUIElement.self)
+        let launchTime = runningApplication.launchDate?.timeIntervalSince1970 ?? 0
+        let bundlePath = runningApplication.bundleURL?.path ?? ""
+        let application = ComputerUseAccessibilityTextTarget.Application(
+            identity: "\(runningApplication.processIdentifier):\(launchTime):\(bundlePath)",
+            root: root)
+        return ComputerUseAccessibilityTextTarget.focusedComboBox(
+            from: focused, application: application, window: window,
+            access: ComputerUseAccessibilityTextTarget.Access.live)
     }
 
     private func focusedElementSnapshot() -> AccessibilitySnapshot? {
@@ -3524,15 +4329,29 @@ final class ComputerUseHostTools {
 
     private func visualDigest(around points: [CGPoint]) throws -> String? {
         guard !points.isEmpty else { return nil }
-        let displayID = CGMainDisplayID()
-        let bounds = CGDisplayBounds(displayID)
+        // A synthetic observation must never be mixed with the live display.
+        guard screenProvider == nil else { return nil }
         let windowBefore = liveFrontmostWindowSnapshot()
+        guard let windowBefore,
+              let activeDisplaysBefore = liveActiveDisplayInventory(),
+              let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowBefore.bounds, activeDisplays: activeDisplaysBefore) else {
+            throw ToolError.focusedDisplayUnavailable
+        }
+        let displayID = selectedDisplayBefore.identifier
+        let bounds = selectedDisplayBefore.bounds
         guard bounds.width > 0, bounds.height > 0,
               let image = CGDisplayCreateImage(displayID) else {
             throw ToolError.screenshotUnavailable
         }
         let windowAfter = liveFrontmostWindowSnapshot()
-        guard windowBefore == windowAfter else { throw ToolError.approvalTargetChanged }
+        guard windowBefore == windowAfter,
+              let activeDisplaysAfter = liveActiveDisplayInventory(),
+              let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowAfter?.bounds ?? .null, activeDisplays: activeDisplaysAfter),
+              ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            throw ToolError.approvalTargetChanged
+        }
         return try Self.approvalVisualDigest(around: points, image: image, displayBounds: bounds, window: windowAfter)
     }
 
@@ -4419,6 +5238,11 @@ final class HostComputerUseManager: ObservableObject {
         "AI Computer Use requires an updated iPhone app with ordered task controls. Update Remote Desktop before trying again. No action was taken."
     static let userInterventionGuidance =
         "AI paused because control of the Mac changed. Check the screen, then tap Let AI continue."
+    static func mailAutomationResumeGuidance(
+        for error: RemoteDesktopMailAutomationPreflightError
+    ) -> String {
+        "\(error.localizedDescription) Then choose Resume. The task will be checked again and needs fresh approval."
+    }
     static let connectionEndedResponse =
         "The connection ended before this task finished. It will not resume automatically."
     static let terminalPersistenceFailureResponse =
@@ -4656,6 +5480,9 @@ final class HostComputerUseManager: ObservableObject {
     private var executor: (any ComputerUseExecuting)?
     private let injector: InputInjector
     private let tools: ComputerUseHostTools
+    var nativeVisualTypingDiagnosticForTests: [String: String] {
+        tools.nativeVisualTypingDiagnostic
+    }
     private let actionGate: ComputerUseActionGate
     private let installer: any ComputerUseModelProvisioning
     private let nativeTextInstaller: (any ComputerUseModelProvisioning)?
@@ -7660,6 +8487,34 @@ final class HostComputerUseManager: ObservableObject {
             do {
                 let result: ComputerUseExecutionResult
                 let claim: ComputerUseTaskLedger.ApprovedActionClaim
+                let recordedAction = try taskLedger.approvedAction(
+                    taskID: context.envelope.id,
+                    senderID: context.envelope.senderID,
+                    sessionID: context.envelope.sessionID,
+                    fingerprint: prepared.fingerprint)
+                if recordedAction == nil {
+                    do {
+                        try await continuation.preflightApprovedAction(prepared)
+                    } catch is CancellationError {
+                        finishUnexpectedCancellationIfCurrent(context: context, token: token)
+                        return
+                    } catch let error as RemoteDesktopMailAutomationPreflightError {
+                        guard currentExecutionToken == token else { return }
+                        if Task.isCancelled {
+                            finishUnexpectedCancellationIfCurrent(context: context, token: token)
+                        } else {
+                            pauseForLocalIntervention(context,
+                                guidance: Self.mailAutomationResumeGuidance(for: error))
+                        }
+                        return
+                    }
+                    try Task.checkCancellation()
+                    guard currentExecutionToken == token else { return }
+                    guard actionGate.allowsActions else {
+                        pauseAfterApprovedOperationWasBlocked(context: context)
+                        return
+                    }
+                }
                 if let plan = try continuation.approvedActionPlan(taskID: context.envelope.id, promptBody: context.requestBody) {
                     claim = try taskLedger.claimApprovedAction(taskID: context.envelope.id,
                         senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
@@ -7768,7 +8623,7 @@ final class HostComputerUseManager: ObservableObject {
             guard history.count < plan.steps.count, prepared.call.taskID == envelope.id,
                   prepared.call.stepEffectID == plan.steps[history.count].effectID,
                   prepared.call.canonicalDigest == plan.steps[history.count].callDigest,
-                  prepared.fingerprint == MCPApprovalFingerprint(call: prepared.call) else { throw MCPClientError.approvalMismatch }
+                  prepared.fingerprint.matches(call: prepared.call) else { throw MCPClientError.approvalMismatch }
         case .unableToComplete, .userInterventionRequired:
             break
         default:
