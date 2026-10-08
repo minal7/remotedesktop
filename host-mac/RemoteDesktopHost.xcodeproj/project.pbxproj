@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		E70F3EE9AA8F4A6FB13FD901 /* CoreJobAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */; };
 		E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00102 /* FARA-NOTICE.txt */; };
 		E0F002F002F002F002F00203 /* HOLO-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */; };
 		E0F002F002F002F002F00201 /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */; };
@@ -321,6 +322,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreJobAcceptanceTests.swift; sourceTree = "<group>"; };
 		E0F001F001F001F001F00102 /* FARA-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-NOTICE.txt"; sourceTree = "<group>"; };
 		E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "HOLO-NOTICE.txt"; sourceTree = "<group>"; };
 		E0F001F001F001F001F00101 /* FARA-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-MIT-LICENSE.txt"; sourceTree = "<group>"; };
@@ -703,6 +705,7 @@
 		A52F892D85EBF7AABE36F075 /* RemoteDesktopHostTests */ = {
 			isa = PBXGroup;
 			children = (
+				E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */,
 				FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */,
 				535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */,
 				DED10FA558220D304359BD34 /* ComputerUseActionTextPlanTests.swift */,
@@ -1168,6 +1171,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				E70F3EE9AA8F4A6FB13FD901 /* CoreJobAcceptanceTests.swift in Sources */,
 				5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */,
 				55A2A0BAF6B182A15DF84ED7 /* ComputerUseActionTextPlanTests.swift in Sources */,
 				8D60C6AE0848631F3AE83F4B /* ComputerUseBrowserDOMTests.swift in Sources */,
