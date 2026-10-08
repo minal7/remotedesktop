@@ -42,6 +42,18 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         return URL(fileURLWithPath: String(cString: canonical), isDirectory: true)
     }
 
+    private func verifiedDraftResult(attachmentPaths: [String] = []) throws -> MCPToolResult {
+        var content: [String: MCPJSONValue] = ["status": .string("draft_opened")]
+        if !attachmentPaths.isEmpty {
+            let receipt = try RemoteDesktopMailAttachmentFileReader.snapshot(paths: attachmentPaths)
+            content["attachment_count"] = .integer(attachmentPaths.count)
+            content["attachment_names"] = .array(attachmentPaths.map { .string(URL(fileURLWithPath: $0).lastPathComponent) })
+            content["attachment_digest"] = .string(try RemoteDesktopMailAttachmentFileReader.approvalDigest(receipt))
+        }
+        return try MCPToolResult(text: "Email draft opened visibly in Mail for review.",
+            structuredContent: .object(content), isError: false, wasTruncated: false)
+    }
+
     func testPlannerFailureNativeAlternativeCannotEnterConfiguredDesktopFactory() async throws {
         let failures: [AppleFoundationMCPPlannerError] = [.generationFailed, .noProposal,
             .unsupportedSchema(toolName: "focused_app", reason: "Unsupported schema")]
@@ -119,7 +131,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             description: RemoteDesktopMailMCP.reviewedDescription,
             inputSchema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
             approval: MCPToolSafetyPolicy.assess(toolName: RemoteDesktopMailMCP.toolName).approval)
-        let pool = StubMCPClientPool(tools: [mailTool])
+        let pool = StubMCPClientPool(tools: [mailTool],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [latest.path]).structuredContent)
         let fallback = StubVisualExecutor(result: .unableToComplete("Unexpected visual fallback"))
         let browserFallback = StubVisualExecutor(result: .unableToComplete("Unexpected browser route"))
         var browserFactoryCalls = 0
@@ -156,7 +169,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         diagnosticTrace.append("outcome: \(String(reflecting: result)); scans: \(fileScans); browser factory calls: \(browserFactoryCalls); browser calls: \(browserFallback.callCount); visual calls: \(fallback.callCount); preparations: \(await pool.preparedApprovalCount()); effects: \(await pool.approvedExecuteCount())")
 
-        guard case .mcpApprovalRequired(let prepared) = result else {
+        guard case .completed("Email draft opened visibly in Mail for review.") = result else {
             XCTAssertEqual(browserFactoryCalls, 0, "The no-effects probe must not enter browser fallback")
             XCTAssertEqual(browserFallback.callCount, 0, "The no-effects probe must not execute browser automation")
             XCTAssertEqual(fallback.callCount, 0, "The no-effects probe must not execute visual automation")
@@ -164,13 +177,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             let failedPerformed = await pool.approvedExecuteCount()
             XCTAssertEqual(failedPrepared, 0)
             XCTAssertEqual(failedPerformed, 0)
-            return XCTFail("The real planner should resolve the unique latest file and stop at Mail approval, got \(result)")
+            return XCTFail("The real planner should resolve the unique latest file and save an unsent draft, got \(result)")
         }
-        XCTAssertEqual(prepared.call.arguments["attachment_paths"], .array([.string(latest.path)]))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
-        XCTAssertEqual(prepared.call.arguments["to"], .string("demo@example.invalid"))
-        XCTAssertEqual(prepared.call.arguments["subject"], .string("Quarterly review"))
-        XCTAssertEqual(prepared.call.arguments["body"], .string("Please review the latest presentation."))
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(latest.path)]))
+        XCTAssertEqual(prepared?.call.arguments["send_now"], .bool(false))
+        XCTAssertEqual(prepared?.call.arguments["to"], .string("demo@example.invalid"))
+        XCTAssertEqual(prepared?.call.arguments["subject"], .string("Quarterly review"))
+        XCTAssertEqual(prepared?.call.arguments["body"], .string("Please review the latest presentation."))
         XCTAssertGreaterThan(fileScans, 0, "The local model must use the host catalog to resolve the file")
         XCTAssertEqual(browserFactoryCalls, 0)
         XCTAssertEqual(browserFallback.callCount, 0, "No browser workflow may execute in this probe")
@@ -178,7 +192,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let preparedCount = await pool.preparedApprovalCount()
         let performedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(preparedCount, 1)
-        XCTAssertEqual(performedCount, 0, "The probe stops at user approval and performs no Mail action")
+        XCTAssertEqual(performedCount, 1, "The probe saves one unsent draft after host preflight")
     }
 
     @available(macOS 26.0, *)
@@ -264,7 +278,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     @available(macOS 26.0, *)
-    func testOptInProductionPlannerResolvesLatestDownloadsPresentationToMailApprovalWithoutEffects() async throws {
+    func testOptInProductionPlannerResolvesLatestDownloadsPresentationToUnsentMailDraft() async throws {
         guard ProcessInfo.processInfo.environment["RUN_PRODUCTION_NATIVE_MAIL_FILE_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_PRODUCTION_NATIVE_MAIL_FILE_PROBE=1 to run the real local planner against a temporary Downloads fixture.")
         }
@@ -276,7 +290,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     @available(macOS 26.0, *)
-    func testOptInProductionPlannerResolvesPresentationWithoutTypeWordsInFilenamesWithoutEffects() async throws {
+    func testOptInProductionPlannerResolvesPresentationWithoutTypeWordsInFilenamesToUnsentDraft() async throws {
         guard ProcessInfo.processInfo.environment["RUN_PRODUCTION_NATIVE_MAIL_FILE_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_PRODUCTION_NATIVE_MAIL_FILE_PROBE=1 to run the real local planner against a temporary Downloads fixture.")
         }
@@ -309,7 +323,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try FileManager.default.setAttributes([.modificationDate: latestDate], ofItemAtPath: latest.path)
         try FileManager.default.setAttributes([.modificationDate: latestDate.addingTimeInterval(-86_400)], ofItemAtPath: older.path)
 
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [latest.path]).structuredContent)
         let fallback = StubVisualExecutor(result: .unableToComplete("Unexpected visual fallback"))
         let browser = StubVisualExecutor(result: .unableToComplete("Unexpected browser route"))
         var browserFactoryCalls = 0
@@ -354,15 +369,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let answeredGoal = try pending.goal.answering(pending.question, with: answer)
         let resumed = try await executor.continueClarification(taskID: "native-self-address-answer",
             originatingTaskID: rootID, goal: answeredGoal, selectedChoice: nil, progress: { trace.append($0) })
-        guard case .mcpApprovalRequired(let approval) = resumed else {
-            return XCTFail("The accepted address and selected spreadsheet must reach exact Mail approval, got \(resumed)")
+        guard case .completed("Email draft opened visibly in Mail for review.") = resumed else {
+            return XCTFail("The accepted address and selected spreadsheet must reach a saved unsent draft, got \(resumed)")
         }
-        XCTAssertEqual(approval.call.taskID, "native-self-address-answer")
-        XCTAssertEqual(approval.call.arguments["attachment_paths"], .array([.string(latest.path)]))
-        XCTAssertEqual(approval.call.arguments["to"], .string(answer))
-        XCTAssertEqual(approval.call.arguments["subject"], .string("Spreadsheet review"))
-        XCTAssertEqual(approval.call.arguments["body"], .string("Please review the attached spreadsheet."))
-        XCTAssertEqual(approval.call.arguments["send_now"], .bool(false))
         XCTAssertGreaterThan(catalogScans, 0)
         XCTAssertEqual(browserFactoryCalls, 0)
         XCTAssertEqual(browser.callCount, 0)
@@ -370,7 +379,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let prepared = await pool.preparedApprovalCount()
         let performed = await pool.approvedExecuteCount()
         XCTAssertEqual(prepared, 1)
-        XCTAssertEqual(performed, 0)
+        XCTAssertEqual(performed, 1)
+        let exactPreparation = await pool.mostRecentPreparation()
+        XCTAssertEqual(exactPreparation?.call.taskID, "native-self-address-answer")
+        XCTAssertEqual(exactPreparation?.call.arguments["attachment_paths"], .array([.string(latest.path)]))
+        XCTAssertEqual(exactPreparation?.call.arguments["to"], .string(answer))
+        XCTAssertEqual(exactPreparation?.call.arguments["subject"], .string("Spreadsheet review"))
+        XCTAssertEqual(exactPreparation?.call.arguments["body"], .string("Please review the attached spreadsheet."))
+        XCTAssertEqual(exactPreparation?.call.arguments["send_now"], .bool(false))
     }
 #endif
 
@@ -1619,16 +1635,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     func testCompoundApprovedRequestReturnsAnActionFactWithoutWholeTaskCompletion() async throws {
-        let planner = StubMCPPlanner(mode: .draft)
+        let planner = StubMCPPlanner(mode: .mail)
         let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "Everything is complete, including the reminders.")
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: fallback, planner: planner, clientPool: pool)
-        let prompt = "Draft the exact acceptance email, then list my reminders."
+        let prompt = "Send the exact acceptance email, then list my reminders."
         let initial = try await executor.execute(taskID: "compound-approved", prompt: prompt, tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = initial else { return XCTFail("An exact action must still require approval") }
         let confirmed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
-        XCTAssertEqual(confirmed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertEqual(confirmed.response, "Mail accepted the approved email for sending.")
         XCTAssertNil(confirmed.completionPromptDigest)
         XCTAssertEqual(fallback.callCount, 0)
         do {
@@ -1639,7 +1655,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
-    func testDescribedDownloadsFileBecomesExactMailApprovalWithoutVisualFallback() async throws {
+    func testDescribedDownloadsFileBecomesExactUnsentMailDraftWithoutVisualFallback() async throws {
         let directory = canonicalTemporaryDirectory
             .appendingPathComponent("MCPDescribedMailFile-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -1650,10 +1666,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
             sort: .init(field: .modifiedAt, direction: .descending))
         let planner = ScriptedLocalFilePlanner(steps: [
-            .listFiles(query), .selectNamedFile(exactFile.lastPathComponent), .mail(exactFile.path),
+            .listFiles(query), .mail(exactFile.path),
         ])
         let fallback = StubVisualExecutor()
-        let pool = RecordingMCPClientPool(tools: [try makeMailTool()], resultsByTool: [:])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            resultText: "Email draft opened visibly in Mail for review.",
+            structuredContent: try verifiedDraftResult(attachmentPaths: [exactFile.path]).structuredContent)
         var factoryCalls = 0
         let executor = try await MCPFirstComputerUseExecutor.load(
             binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: fallback,
@@ -1666,10 +1684,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let result = try await executor.execute(taskID: "described-mail-file", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
 
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("A resolved described file must produce an exact Mail approval, got \(result)")
+        guard case .completed(let message) = result else {
+            return XCTFail("A resolved described file must produce a verified unsent draft, got \(result)")
         }
-        XCTAssertEqual(prepared.call.arguments["attachment_paths"], .array([.string(exactFile.path)]))
+        XCTAssertEqual(message, "Email draft opened visibly in Mail for review.")
         let plannedRequests = await planner.capturedRequests()
         XCTAssertEqual(plannedRequests.first?.localFileCatalog?.inventoryState, .notQueried)
         XCTAssertEqual(plannedRequests.first?.hostResolvedAttachmentPaths, [])
@@ -1692,14 +1710,111 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "sort_field": .string("modifiedAt"),
             "sort_direction": .string("descending"),
             "name_contains": .string(""),
+            "folder_scope": .string("all"),
         ]))
         XCTAssertEqual(plannedRequests.last?.hostResolvedAttachmentPaths, [exactFile.path],
             "The planner schema must bind the revalidated host path through typed data.")
         XCTAssertTrue(plannedRequests.contains { $0.prompt.contains(goal) }, "The original goal must remain in planning context")
         XCTAssertEqual(fallback.callCount, 0)
         XCTAssertEqual(factoryCalls, 1)
-        let calls = await pool.approvedCalls()
-        XCTAssertTrue(calls.isEmpty, "Preparing approval must not execute the Mail action")
+        XCTAssertEqual(plannedRequests.count, 2, "A unique best candidate is selected by the host without a model selection proposal.")
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.arguments["send_now"], .bool(false))
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(exactFile.path)]))
+        let performed = await pool.approvedExecuteCount()
+        let direct = await pool.directExecuteCount()
+        XCTAssertEqual(performed, 1, "The exact draft is saved once after host preflight.")
+        XCTAssertEqual(direct, 0)
+    }
+
+    func testEmptyNameFilterFallbackPreservesScopeAndAllowsOnlyOfferedOlderCandidate() async throws {
+        let directory = canonicalTemporaryDirectory
+            .appendingPathComponent("MCPBroadenedMailFiles-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requested = directory.appendingPathComponent("Board Review.pptx")
+        let newerUnrelated = directory.appendingPathComponent("Unrelated.pptx")
+        try Data("requested deck".utf8).write(to: requested)
+        try Data("newer unrelated deck".utf8).write(to: newerUnrelated)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_600_000_000)],
+            ofItemAtPath: requested.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+            ofItemAtPath: newerUnrelated.path)
+
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending),
+            nameContains: "Board Review deck", folderScope: .downloads)
+        let planner = ScriptedLocalFilePlanner(steps: [
+            .listFiles(query), .selectNamedFile(requested.lastPathComponent), .mail(requested.path),
+        ])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [requested.path]).structuredContent)
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool,
+            localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
+            })
+        let goal = "Draft an email with the latest Board Review deck attached from Downloads."
+        let result = try await executor.execute(taskID: "broadened-mail-file", prompt: goal,
+            trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
+        guard case .completed = result else {
+            return XCTFail("A current offered file may be explicitly selected from a broadened result set, got \(result)")
+        }
+
+        let requests = await planner.capturedRequests()
+        XCTAssertEqual(requests.count, 3)
+        let fallbackContext = try XCTUnwrap(requests[1].localFileCatalog)
+        XCTAssertTrue(fallbackContext.nameFilterWasBroadened)
+        XCTAssertEqual(fallbackContext.query.fileKind, query.fileKind)
+        XCTAssertEqual(fallbackContext.query.folderScope, query.folderScope)
+        XCTAssertEqual(fallbackContext.query.sort, query.sort)
+        XCTAssertEqual(fallbackContext.query.nameContains, "")
+        XCTAssertEqual(Set(fallbackContext.page.candidates.map(\.displayName)),
+            Set([requested.lastPathComponent, newerUnrelated.lastPathComponent]))
+        XCTAssertNil(fallbackContext.selectedCandidate,
+            "A newer unrelated result must not be auto-selected after broadening.")
+        XCTAssertEqual(requests[2].localFileCatalog?.selectedCandidate?.id,
+            fallbackContext.page.candidates.first(where: { $0.displayName == requested.lastPathComponent })?.id)
+        XCTAssertTrue(try XCTUnwrap(requests[2].prompt).contains("\"name_filter_was_broadened\":true"))
+        let performed = await pool.approvedExecuteCount()
+        XCTAssertEqual(performed, 1)
+    }
+
+    func testEmptyBroadenedInventoryDoesNotRepeatAutomatically() async throws {
+        let directory = canonicalTemporaryDirectory
+            .appendingPathComponent("MCPEmptyBroadenedMailFiles-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("spreadsheet".utf8).write(to: directory.appendingPathComponent("Unrelated.xlsx"))
+
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending),
+            nameContains: "Board Review deck", folderScope: .downloads)
+        let planner = ScriptedLocalFilePlanner(steps: [
+            .listFiles(query), .listFiles(query), .clarify("Which presentation should I attach?")
+        ])
+        let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: StubVisualExecutor(), planner: planner,
+            clientPool: StubMCPClientPool(tools: [try makeMailTool()]),
+            localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
+            })
+        let goal = "Draft an email with the latest Board Review deck attached from Downloads."
+        let result = try await executor.execute(taskID: "empty-broadened-mail-file", prompt: goal,
+            trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
+        guard case .clarificationRequired = result else {
+            return XCTFail("An empty broad query should stop for clarification, got \(result)")
+        }
+        let requests = await planner.capturedRequests()
+        XCTAssertEqual(requests.count, 3, "The host must not repeat the broad query after a fresh model query.")
+        let context = try XCTUnwrap(requests[1].localFileCatalog)
+        XCTAssertTrue(context.nameFilterWasBroadened)
+        XCTAssertEqual(context.query.nameContains, "")
+        XCTAssertTrue(context.page.isComplete)
+        XCTAssertTrue(context.page.candidates.isEmpty)
+        XCTAssertEqual(requests[2].localFileCatalog?.query.nameContains, query.nameContains)
+        XCTAssertFalse(try XCTUnwrap(requests[2].localFileCatalog?.nameFilterWasBroadened),
+            "A fresh query starts a new filter stage but cannot trigger a second automatic broadening.")
     }
 
     func testNonFileGoalDoesNotConstructLocalFileCatalog() async throws {
@@ -1719,7 +1834,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(factoryCalls, 0)
     }
 
-    func testTiedLatestFilesRequireScopedChoiceThenApproveChosenExactFile() async throws {
+    func testTiedLatestFilesRequireScopedChoiceThenSaveChosenExactFileAsDraft() async throws {
         let directory = canonicalTemporaryDirectory
             .appendingPathComponent("MCPTiedMailFiles-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -1737,12 +1852,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             .listFiles(query), .askForAll("Which presentation should I attach?"),
             .selectNamedFile(firstFile.lastPathComponent), .mail(firstFile.path),
         ])
-        let attachmentReceipt = try RemoteDesktopMailAttachmentFileReader.snapshot(paths: [firstFile.path])
-        let receiptDigest = try RemoteDesktopMailAttachmentFileReader.approvalDigest(attachmentReceipt)
         let pool = StubMCPClientPool(tools: [try makeMailTool()], structuredContent: .object([
             "status": .string("draft_opened"), "attachment_count": .integer(1),
             "attachment_names": .array([.string(firstFile.lastPathComponent)]),
-            "attachment_digest": .string(receiptDigest),
+            "attachment_digest": .string(try RemoteDesktopMailAttachmentFileReader.approvalDigest(
+                RemoteDesktopMailAttachmentFileReader.snapshot(paths: [firstFile.path]))),
         ]))
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
@@ -1779,21 +1893,19 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let resumed = try await executor.continueClarification(taskID: "answer-valid", originatingTaskID: "tied-root",
             goal: unchangedGoal, selectedChoice: choice, progress: { _ in })
-        guard case .mcpApprovalRequired(let prepared) = resumed else {
-            return XCTFail("The accepted choice must prepare an exact Mail approval, got \(resumed)")
+        guard case .completed(let response) = resumed else {
+            return XCTFail("The accepted choice must save the exact Mail draft, got \(resumed)")
         }
-        XCTAssertEqual(prepared.call.taskID, "answer-valid")
-        XCTAssertEqual(prepared.call.arguments["attachment_paths"], .array([.string(firstFile.path)]))
+        XCTAssertEqual(response, "Email draft opened visibly in Mail for review.")
         let plannedRequests = await planner.capturedRequests()
         XCTAssertTrue(plannedRequests.contains { $0.prompt.contains("host_resolved_attachment_paths") })
         XCTAssertTrue(plannedRequests.allSatisfy { $0.prompt.contains(goal) }, "The original goal must survive the answer turn")
         XCTAssertEqual(fallback.callCount, 0)
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.taskID, "answer-valid")
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(firstFile.path)]))
         let preparedCount = await pool.preparedApprovalCount()
         XCTAssertEqual(preparedCount, 1)
-        try await executor.preflightApprovedAction(prepared)
-        let completed = try await executor.continueAfterApproval(prepared,
-            tools: makeHostTools(), progress: { _ in })
-        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(approvedCount, 1, "The selected-file action should survive the approval continuation exactly once")
     }
@@ -1839,7 +1951,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try Data("original".utf8).write(to: file)
         let query = ComputerUseLocalFileCatalog.Query(fileKind: .spreadsheet, nameContains: "Specification")
         let planner = ScriptedLocalFilePlanner(steps: [
-            .listFiles(query), .selectNamedFile(file.lastPathComponent), .changeThenMail(file.path),
+            .listFiles(query), .changeThenMail(file.path),
         ])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let fallback = StubVisualExecutor()
@@ -1859,14 +1971,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertTrue(message.localizedCaseInsensitiveContains("file") || message.localizedCaseInsensitiveContains("change")
             || message.localizedCaseInsensitiveContains("stale"), "The stop should identify the changed file: \(message)")
         let plannedRequests = await planner.capturedRequests()
-        XCTAssertEqual(plannedRequests.count, 3,
-            "The mutation must occur after selection and before the Mail proposal")
+        XCTAssertEqual(plannedRequests.count, 2,
+            "The mutation occurs after host selection and before the Mail proposal")
         let preparedCount = await pool.preparedApprovalCount()
         XCTAssertEqual(preparedCount, 0)
         XCTAssertEqual(fallback.callCount, 0)
     }
 
-    func testFragmentQueryKeepsSimilarNameDecoyOutOfExactAttachment() async throws {
+    func testFragmentQueryKeepsSimilarNameDecoyOutOfExactDraftAttachment() async throws {
         let directory = canonicalTemporaryDirectory
             .appendingPathComponent("MCPFileFragment-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -1876,9 +1988,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try Data("wanted".utf8).write(to: wanted); try Data("decoy".utf8).write(to: decoy)
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .spreadsheet, nameContains: "Quarterly Spec")),
-            .selectNamedFile(wanted.lastPathComponent), .mail(wanted.path),
+            .selectNamedFile(wanted.lastPathComponent),
+            .mail(wanted.path),
         ])
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [wanted.path]).structuredContent)
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool,
             localFileCatalogFactory: { taskID in
@@ -1887,11 +2001,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let goal = "Draft an email and attach the spreadsheet named Quarterly Spec."
         let result = try await executor.execute(taskID: "fragment-file", prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("The matching fragment should resolve to a specific exact file, got \(result)")
+        guard case .completed("Email draft opened visibly in Mail for review.") = result else {
+            return XCTFail("The matching fragment should resolve to a specific exact draft attachment, got \(result)")
         }
-        XCTAssertEqual(prepared.call.arguments["attachment_paths"], .array([.string(wanted.path)]))
-        XCTAssertNotEqual(prepared.call.arguments["attachment_paths"], .array([.string(decoy.path)]))
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(wanted.path)]))
+        XCTAssertNotEqual(prepared?.call.arguments["attachment_paths"], .array([.string(decoy.path)]))
+        let performed = await pool.approvedExecuteCount()
+        XCTAssertEqual(performed, 1)
     }
 
     func testNonBestDateCandidateCannotBecomeMailAttachment() async throws {
@@ -1907,7 +2024,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .presentation,
                 sort: .init(field: .modifiedAt, direction: .descending))),
-            .selectNamedFile(old.lastPathComponent), .mail(old.path),
+            .mail(old.path),
         ])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
@@ -1936,7 +2053,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         try Data("selected".utf8).write(to: selected); try Data("substitute".utf8).write(to: substitute)
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .spreadsheet, nameContains: "Spec")),
-            .selectNamedFile(selected.lastPathComponent), .mail(substitute.path),
+            .mail(substitute.path),
         ])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
@@ -2128,11 +2245,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             if structured {
                 XCTAssertEqual(fresh, .clarificationRequired("Which document should I use?"))
             } else {
-                guard case .mcpApprovalRequired(let prepared) = fresh else { return XCTFail("A fresh explicit request must remain usable after cleanup") }
-                XCTAssertEqual(prepared.call.processGeneration, 3)
-                let result = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
-                XCTAssertEqual(result.response, "Email draft opened visibly in Mail for review.")
-                XCTAssertNil(result.completionPromptDigest)
+                guard case .completed("Email draft opened visibly in Mail for review.") = fresh else {
+                    return XCTFail("A fresh explicit draft request must remain usable after cleanup, got \(fresh)")
+                }
+                let prepared = await pool.mostRecentPreparation()
+                XCTAssertEqual(prepared?.call.processGeneration, 3)
                 let performed = await pool.approvedExecuteCount()
                 XCTAssertEqual(performed, 1)
             }
@@ -2299,12 +2416,12 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let cleanupGate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "cleanup started"),
                                                            returned: expectation(description: "cleanup returned"))
         defer { effectGate.finish(()); cleanupGate.finish(()) }
-        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "draft created",
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "Mail accepted the approved email for sending.",
             cancellationGate: cleanupGate, approvedOperationGate: effectGate)
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
-            visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .draft), clientPool: pool,
+            visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .mail), clientPool: pool,
             planningWorker: ComputerUsePlanningWorker())
-        let result = try await executor.execute(taskID: "approved", prompt: "Draft the exact acceptance email.", tools: makeHostTools(), progress: { _ in })
+        let result = try await executor.execute(taskID: "approved", prompt: "Send the exact acceptance email.", tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("The fixture needs an exact prepared action") }
         var finished = false
         let approved = Task {
@@ -2320,7 +2437,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertFalse(finished, "A returned effect result must still join cancellation cleanup")
         cleanupGate.finish(())
         let approvedResult = try await approved.value
-        XCTAssertEqual(approvedResult.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertEqual(approvedResult.response, "Mail accepted the approved email for sending.")
         XCTAssertNil(approvedResult.completionPromptDigest)
         await fulfillment(of: [cleanupGate.returned], timeout: 1)
         do { _ = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in }); XCTFail("The consumed approval cannot replay") }
@@ -2408,19 +2525,19 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     func testStructuredApprovalWorksWithoutInstalledVisualModel() async throws {
-        let planner = StubMCPPlanner(mode: .draft)
-        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "draft created")
+        let planner = StubMCPPlanner(mode: .mail)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()], resultText: "Mail accepted the approved email for sending.")
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: ComputerUseDeferredVisualExecutor(), planner: planner, clientPool: pool)
         XCTAssertTrue(executor.isReady)
         XCTAssertTrue(executor.hasAdditionalSetup)
-        let result = try await executor.execute(taskID: "structured-only", prompt: "Draft the exact acceptance email.",
+        let result = try await executor.execute(taskID: "structured-only", prompt: "Send the exact acceptance email.",
             tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("Exact approval must still be required") }
         let before = await pool.approvedExecuteCount()
         XCTAssertEqual(before, 0)
         let completed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
-        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
         XCTAssertNil(completed.completionPromptDigest)
         let after = await pool.approvedExecuteCount()
         XCTAssertEqual(after, 1)
@@ -2563,9 +2680,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedCountAfterCancellation, 0)
     }
 
-    func testMutationProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval() async throws {
+    func testSendProposalStopsBeforeExecutionAndRunsExactlyOnceAfterApproval() async throws {
         let tool = try makeMailTool()
-        let planner = StubMCPPlanner(mode: .draft)
+        let planner = StubMCPPlanner(mode: .mail)
         let pool = StubMCPClientPool(
             tools: [tool],
             resultText: "draft created")
@@ -2579,7 +2696,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let first = try await executor.execute(
             taskID: "task-email-draft",
-            prompt: "Draft the exact acceptance email.",
+            prompt: "Send the exact acceptance email.",
             tools: makeHostTools(),
             progress: { _ in })
 
@@ -2597,7 +2714,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
         XCTAssertNil(completed.completionPromptDigest)
         let directAfterApproval = await pool.directExecuteCount()
         let approvedAfterApproval = await pool.approvedExecuteCount()
@@ -2896,6 +3013,101 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(fallback.callCount, 0)
         let directCalls = await pool.directCalls()
         XCTAssertEqual(directCalls.count, 1)
+    }
+
+    func testUnselectedMailAttachmentMustBeAnExactLiteralInTrustedUserTurns() async throws {
+        let directory = canonicalTemporaryDirectory.appendingPathComponent(
+            "MCPUserPathGrounding-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Review.pptx")
+        try Data("synthetic attachment".utf8).write(to: file)
+        let path = file.path
+        let longerQuotedPath = path + " backup"
+        try Data("synthetic quoted path".utf8).write(to: URL(fileURLWithPath: longerQuotedPath))
+        let mail = try makeMailTool()
+        let mailArguments: [String: MCPJSONValue] = [
+            "to": .string("reviewer@example.invalid"), "subject": .string("Review"),
+            "body": .string("Please review."), "send_now": .bool(false),
+            "attachment_paths": .array([.string(path)]),
+        ]
+
+        let guessedPrompt = "Draft an email to reviewer@example.invalid and attach the exact file at \"\(longerQuotedPath)\"."
+        let guessedPool = RecordingMCPClientPool(tools: [mail], resultsByTool: [
+            RemoteDesktopMailMCP.toolName: try verifiedDraftResult(attachmentPaths: [path]),
+        ])
+        let guessedExecutor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: StubVisualExecutor(),
+            planner: SequencedMCPPlanner(steps: [.call(toolName: RemoteDesktopMailMCP.toolName,
+                arguments: mailArguments, requiredPromptFragment: nil)]), clientPool: guessedPool)
+        let guessed = try await guessedExecutor.execute(taskID: "guessed-path", prompt: guessedPrompt,
+            trustedUserPrompt: guessedPrompt, tools: makeHostTools(), progress: { _ in })
+        guard case .userInterventionRequired = guessed else {
+            return XCTFail("A shorter path extracted from a longer quoted path must stop before Mail preparation: \(guessed)")
+        }
+        let guessedPrepared = await guessedPool.preparedApprovalCount()
+        let guessedApproved = await guessedPool.approvedCalls()
+        XCTAssertEqual(guessedPrepared, 0)
+        XCTAssertTrue(guessedApproved.isEmpty)
+        guessedExecutor.cancelMCPWork()
+
+        let contacts = try makePlannerVisibleReadOnlyTool("contacts_search")
+        let contactContent: MCPJSONValue = .object([
+            "ok": .bool(true),
+            "contacts": .array([.object([
+                "name": .string("Jordan Lee"), "phones": .array([]),
+                "emails": .array([.string("jordan@example.invalid")]),
+            ])]),
+            "untrusted_note": .string(path),
+        ])
+        let contactText = try XCTUnwrap(String(
+            data: MCPDigest.canonicalData(for: contactContent), encoding: .utf8))
+        let contactsPrompt = "Find Jordan Lee in my Contacts, then draft an email to Jordan Lee and attach the relevant presentation."
+        let resultOnlyPool = RecordingMCPClientPool(tools: [contacts, mail], resultsByTool: [
+            "contacts_search": try MCPToolResult(text: contactText, structuredContent: contactContent,
+                isError: false, wasTruncated: false),
+            RemoteDesktopMailMCP.toolName: try verifiedDraftResult(attachmentPaths: [path]),
+        ])
+        let resultOnlyPlanner = SequencedMCPPlanner(steps: [
+            .call(toolName: "contacts_search", arguments: [
+                "query": .string("Jordan Lee"), "limit": .integer(5),
+            ], requiredPromptFragment: nil),
+            .call(toolName: RemoteDesktopMailMCP.toolName, arguments: [
+                "to": .string("jordan@example.invalid"), "subject": .string("Review"),
+                "body": .string("Please review."), "send_now": .bool(false),
+                "attachment_paths": .array([.string(path)]),
+            ], requiredPromptFragment: path),
+        ])
+        let resultOnlyExecutor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: StubVisualExecutor(),
+            planner: resultOnlyPlanner, clientPool: resultOnlyPool)
+        let resultOnly = try await resultOnlyExecutor.execute(taskID: "tool-result-path", prompt: contactsPrompt,
+            trustedUserPrompt: contactsPrompt, tools: makeHostTools(), progress: { _ in })
+        guard case .userInterventionRequired = resultOnly else {
+            return XCTFail("A path present only in a tool result must stop before Mail preparation: \(resultOnly)")
+        }
+        let resultOnlyPrepared = await resultOnlyPool.preparedApprovalCount()
+        let resultOnlyApproved = await resultOnlyPool.approvedCalls()
+        XCTAssertEqual(resultOnlyPrepared, 0)
+        XCTAssertTrue(resultOnlyApproved.isEmpty)
+        resultOnlyExecutor.cancelMCPWork()
+
+        let explicitPrompt = "Draft an email to reviewer@example.invalid and attach the exact file at \"\(path)\"."
+        let explicitPool = RecordingMCPClientPool(tools: [mail], resultsByTool: [
+            RemoteDesktopMailMCP.toolName: try verifiedDraftResult(attachmentPaths: [path]),
+        ])
+        let explicitExecutor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: StubVisualExecutor(),
+            planner: SequencedMCPPlanner(steps: [.call(toolName: RemoteDesktopMailMCP.toolName,
+                arguments: mailArguments, requiredPromptFragment: nil)]), clientPool: explicitPool)
+        let explicit = try await explicitExecutor.execute(taskID: "explicit-path", prompt: explicitPrompt,
+            trustedUserPrompt: explicitPrompt, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(explicit, .completed("Email draft opened visibly in Mail for review."))
+        let explicitPrepared = await explicitPool.preparedApprovalCount()
+        let explicitApproved = await explicitPool.approvedCalls()
+        XCTAssertEqual(explicitPrepared, 1)
+        XCTAssertEqual(explicitApproved.count, 1)
+        explicitExecutor.cancelMCPWork()
     }
 
     func testCompoundDeliveryQuoteAndSaveDoesNotUsePureQuoteFastPath() async throws {
@@ -5452,7 +5664,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(approvedCount, 0)
     }
 
-    func testDraftProposalUsesReliableMailMCPAndWaitsForApproval() async throws {
+    func testDraftProposalUsesReliableMailMCPAndSavesWithoutSendApproval() async throws {
         let tool = try makeMailTool()
         let planner = StubMCPPlanner(mode: .draft)
         let pool = StubMCPClientPool(
@@ -5472,28 +5684,20 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             tools: makeHostTools(),
             progress: { _ in })
 
-        guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected the exact draft to wait for approval")
+        guard case .completed("Email draft opened visibly in Mail for review.") = result else {
+            return XCTFail("Expected the exact draft to save without a send approval, got \(result)")
         }
-        XCTAssertEqual(prepared.call.toolName, RemoteDesktopMailMCP.toolName)
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
         XCTAssertEqual(fallback.callCount, 0)
         let directCount = await pool.directExecuteCount()
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(directCount, 0)
-        XCTAssertEqual(approvedCount, 0)
-
-        let completed = try await executor.continueAfterApproval(
-            prepared,
-            tools: makeHostTools(),
-            progress: { _ in })
-        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
-        XCTAssertNil(completed.completionPromptDigest)
-        let approvedAfterDraft = await pool.approvedExecuteCount()
-        XCTAssertEqual(approvedAfterDraft, 1)
+        XCTAssertEqual(approvedCount, 1)
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.toolName, RemoteDesktopMailMCP.toolName)
+        XCTAssertEqual(prepared?.call.arguments["send_now"], .bool(false))
     }
 
-    func testMailPreflightForwardsExactPreparedApprovalAndPreservesItAfterDenial() async throws {
+    func testSendPreflightForwardsExactPreparedApprovalAndPreservesItAfterDenial() async throws {
         let tool = try makeMailTool()
         let basePool = StubMCPClientPool(
             tools: [tool],
@@ -5504,16 +5708,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             binaryURL: URL(fileURLWithPath:
                 "/Applications/MacControlMCP.app/Contents/MacOS/MacControlMCP"),
             visualFallback: fallback,
-            planner: StubMCPPlanner(mode: .draft),
+            planner: StubMCPPlanner(mode: .mail),
             clientPool: pool)
 
         let result = try await executor.execute(
             taskID: "task-preflight",
-            prompt: "Draft an email to Alex saying the acceptance test passed for review without sending it.",
+            prompt: "Send Alex an email saying the acceptance test passed.",
             tools: makeHostTools(),
             progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else {
-            return XCTFail("Expected the exact draft to wait for approval")
+            return XCTFail("Expected the exact send to wait for approval")
         }
 
         do {
@@ -5547,7 +5751,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             prepared,
             tools: makeHostTools(),
             progress: { _ in })
-        XCTAssertEqual(completed.response, "Email draft opened visibly in Mail for review.")
+        XCTAssertEqual(completed.response, "Mail accepted the approved email for sending.")
         let approvedCalls = await pool.approvedCalls()
         XCTAssertEqual(approvedCalls.count, 1)
         XCTAssertEqual(approvedCalls.first?.call, prepared.call)
@@ -5673,6 +5877,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = RecordingMCPClientPool(tools: [contacts, try makeMailTool()], resultsByTool: [
             "contacts_search": try MCPToolResult(text: resultText, structuredContent: contactContent,
                 isError: false, wasTruncated: false),
+            RemoteDesktopMailMCP.toolName: try verifiedDraftResult(),
         ])
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
@@ -5708,15 +5913,17 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let answer = "jordan@example.invalid"
         let answeredGoal = try pending.goal.answering(question, with: answer)
-        let approval = try await executor.continueClarification(taskID: "generic-clarification-answer",
+        let resumed = try await executor.continueClarification(taskID: "generic-clarification-answer",
             originatingTaskID: "generic-clarification-root", goal: answeredGoal,
             selectedChoice: nil, progress: { _ in })
-        guard case .mcpApprovalRequired(let prepared) = approval else {
-            return XCTFail("The answer should resume root planning and prepare the exact Mail draft approval, got \(approval)")
+        guard case .completed("Email draft opened visibly in Mail for review.") = resumed else {
+            return XCTFail("The answer should resume root planning and save the exact Mail draft, got \(resumed)")
         }
-        XCTAssertEqual(prepared.call.taskID, "generic-clarification-answer")
-        XCTAssertEqual(prepared.call.arguments["to"], .string(answer))
-        XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
+        let performedCalls = await pool.approvedCalls()
+        XCTAssertEqual(performedCalls.count, 1)
+        XCTAssertEqual(performedCalls.first?.taskID, "generic-clarification-answer")
+        XCTAssertEqual(performedCalls.first?.arguments["to"], .string(answer))
+        XCTAssertEqual(performedCalls.first?.arguments["send_now"], .bool(false))
         XCTAssertEqual(planner.requests.count, 3)
         let resumedPayload = try XCTUnwrap(try? JSONDecoder().decode(MCPJSONValue.self,
             from: Data(planner.requests[2].prompt.utf8)))
@@ -5734,7 +5941,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let allReads = await pool.directCalls()
         let approvedCalls = await pool.approvedCalls()
         XCTAssertEqual(allReads.map(\.toolName), ["contacts_search"])
-        XCTAssertTrue(approvedCalls.isEmpty)
+        XCTAssertEqual(approvedCalls.count, 1)
         XCTAssertEqual(fallback.callCount, 0)
         XCTAssertNil(try executor.clarification(taskID: "generic-clarification-root"),
             "The original task ID cannot reopen after answer transfer")
@@ -5944,7 +6151,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let answer = "reviewer@example.invalid"
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .spreadsheet, nameContains: "Spec")),
-            .selectNamedFile(file.lastPathComponent), .clarify(question), .browserRoute,
+            .clarify(question), .browserRoute,
         ])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let desktop = StubVisualExecutor()
@@ -5990,7 +6197,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let answer = "reviewer@example.invalid"
         let planner = ScriptedLocalFilePlanner(steps: [
             .clarify(question), .listFiles(.init(fileKind: .spreadsheet, nameContains: "Spec")),
-            .selectNamedFile(file.lastPathComponent), .browserRoute,
+            .browserRoute,
         ])
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let browser = StubVisualExecutor()
@@ -6050,15 +6257,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let secondPending = try XCTUnwrap(try executor.clarification(taskID: "clarification-chain-answer-1"))
         XCTAssertEqual(secondPending.taskID, "clarification-chain-answer-1")
         let afterSubject = try secondPending.goal.answering(subjectQuestion, with: "Follow up")
-        guard case .mcpApprovalRequired(let prepared) = try await executor.continueClarification(
+        guard case .completed("Email draft opened visibly in Mail for review.") = try await executor.continueClarification(
             taskID: "clarification-chain-answer-2", originatingTaskID: "clarification-chain-answer-1",
             goal: afterSubject, selectedChoice: nil, progress: { _ in }) else {
-            return XCTFail("The second answer must continue from the current answer task")
+            return XCTFail("The second answer must continue and save the draft from the current answer task")
         }
-        XCTAssertEqual(prepared.call.taskID, "clarification-chain-answer-2")
         XCTAssertEqual(planner.requests.count, 3)
         let preparedCount = await pool.preparedApprovalCount()
         XCTAssertEqual(preparedCount, 1)
+        let performedCount = await pool.approvedExecuteCount()
+        XCTAssertEqual(performedCount, 1)
     }
 
     func testGenericPlannerClarificationRejectsForgedOriginChangedGoalAndInvalidation() async throws {
@@ -6103,13 +6311,16 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             if failure != "invalidate" {
                 let valid = try await executor.continueClarification(taskID: "valid-after-\(failure)",
                     originatingTaskID: rootID, goal: answer, selectedChoice: nil, progress: { _ in })
-                guard case .mcpApprovalRequired(let prepared) = valid else {
+                guard case .completed("Email draft opened visibly in Mail for review.") = valid else {
                     return XCTFail("A rejected continuation attempt must leave the authentic question usable, got \(valid)")
                 }
-                XCTAssertEqual(prepared.call.taskID, "valid-after-\(failure)")
-                XCTAssertEqual(prepared.call.arguments["to"], .string("demo@example.invalid"))
                 let finalPreparedCount = await pool.preparedApprovalCount()
                 XCTAssertEqual(finalPreparedCount, 1)
+                let performed = await pool.approvedExecuteCount()
+                let prepared = await pool.mostRecentPreparation()
+                XCTAssertEqual(performed, 1)
+                XCTAssertEqual(prepared?.call.taskID, "valid-after-\(failure)")
+                XCTAssertEqual(prepared?.call.arguments["to"], .string("demo@example.invalid"))
             }
         }
     }
@@ -6197,9 +6408,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let question = "Which recipient email should I use?"
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .spreadsheet, nameContains: "Spec")),
-            .selectNamedFile(file.lastPathComponent), .clarify(question), .mailTo(file.path, "reviewer@example.invalid"),
+            .clarify(question), .mailTo(file.path, "reviewer@example.invalid"),
         ])
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [file.path]).structuredContent)
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool,
             localFileCatalogFactory: { taskID in
@@ -6211,14 +6423,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(first, .clarificationRequired(question))
         let pending = try XCTUnwrap(try executor.clarification(taskID: "file-recipient-root"))
         let answered = try pending.goal.answering(question, with: "reviewer@example.invalid")
-        guard case .mcpApprovalRequired(let prepared) = try await executor.continueClarification(
+        guard case .completed("Email draft opened visibly in Mail for review.") = try await executor.continueClarification(
             taskID: "file-recipient-answer", originatingTaskID: "file-recipient-root", goal: answered,
             selectedChoice: nil, progress: { _ in }) else {
-            return XCTFail("The exact pinned file should remain available after generic recipient clarification")
+            return XCTFail("The exact pinned file should remain available when saving after recipient clarification")
         }
-        XCTAssertEqual(prepared.call.taskID, "file-recipient-answer")
-        XCTAssertEqual(prepared.call.arguments["to"], .string("reviewer@example.invalid"))
-        XCTAssertEqual(prepared.call.arguments["attachment_paths"], .array([.string(file.path)]))
         let requests = await planner.capturedRequests()
         XCTAssertTrue(requests.allSatisfy { $0.taskID == "file-recipient-root" || $0.taskID == "file-recipient-answer" })
         XCTAssertEqual(requests.last?.localFileCatalog?.selectedCandidate?.displayName, file.lastPathComponent)
@@ -6226,7 +6435,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let preparedCount = await pool.preparedApprovalCount()
         let approvedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(preparedCount, 1)
-        XCTAssertEqual(approvedCount, 0)
+        XCTAssertEqual(approvedCount, 1)
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.taskID, "file-recipient-answer")
+        XCTAssertEqual(prepared?.call.arguments["to"], .string("reviewer@example.invalid"))
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(file.path)]))
     }
 
     func testGenericAnswerSurvivesTiedNativeFileChoiceAndSecondAnswerEnvelope() async throws {
@@ -6250,7 +6463,8 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             .selectNamedFile(secondFile.lastPathComponent),
             .mailTo(secondFile.path, "reviewer@example.invalid"),
         ])
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [secondFile.path]).structuredContent)
         var catalogFactories = 0
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool,
@@ -6279,13 +6493,9 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let withFileChoice = try await executor.continueClarification(taskID: "file-choice-answer-envelope",
             originatingTaskID: "recipient-answer-envelope", goal: filePending.goal,
             selectedChoice: selected, progress: { _ in })
-        guard case .mcpApprovalRequired(let approval) = withFileChoice else {
-            return XCTFail("The accepted file choice should reach exact Mail approval, got \(withFileChoice)")
+        guard case .completed("Email draft opened visibly in Mail for review.") = withFileChoice else {
+            return XCTFail("The accepted file choice should save an exact Mail draft, got \(withFileChoice)")
         }
-        XCTAssertEqual(approval.call.taskID, "file-choice-answer-envelope")
-        XCTAssertEqual(approval.call.arguments["to"], .string("reviewer@example.invalid"))
-        XCTAssertEqual(approval.call.arguments["attachment_paths"], .array([.string(secondFile.path)]))
-        XCTAssertEqual(approval.call.arguments["send_now"], .bool(false))
         let requests = await planner.capturedRequests()
         XCTAssertTrue(requests.allSatisfy { $0.taskID == rootID || $0.taskID == "recipient-answer-envelope" || $0.taskID == "file-choice-answer-envelope" })
         XCTAssertEqual(requests.last?.localFileCatalog?.selectedCandidate?.displayName, secondFile.lastPathComponent)
@@ -6301,7 +6511,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let preparedCount = await pool.preparedApprovalCount()
         let performedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(preparedCount, 1)
-        XCTAssertEqual(performedCount, 0)
+        XCTAssertEqual(performedCount, 1)
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.taskID, "file-choice-answer-envelope")
+        XCTAssertEqual(prepared?.call.arguments["to"], .string("reviewer@example.invalid"))
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(secondFile.path)]))
     }
 
     func testUnresolvedMailRecipientAsksTypedQuestionAndKeepsSelectedSpreadsheet() async throws {
@@ -6317,11 +6531,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let body = "Please review the attached spreadsheet."
         let planner = ScriptedLocalFilePlanner(steps: [
             .listFiles(.init(fileKind: .spreadsheet, sort: .init(field: .modifiedAt, direction: .descending))),
-            .selectNamedFile(spreadsheet.lastPathComponent),
             .mailDraft(spreadsheet.path, "me", subject, body),
             .mailDraft(spreadsheet.path, "reviewer@example.invalid", subject, body),
         ])
-        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let pool = StubMCPClientPool(tools: [try makeMailTool()],
+            structuredContent: try verifiedDraftResult(attachmentPaths: [spreadsheet.path]).structuredContent)
         let fallback = StubVisualExecutor(result: .unableToComplete("Unexpected visual fallback"))
         let browserFallback = StubVisualExecutor(result: .unableToComplete("Unexpected browser fallback"))
         var catalogFactories = 0
@@ -6356,17 +6570,11 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(pending.goal.userTurns, [goal])
         let answer = "reviewer@example.invalid"
         let answeredGoal = try pending.goal.answering(pending.question, with: answer)
-        guard case .mcpApprovalRequired(let approval) = try await executor.continueClarification(
+        guard case .completed("Email draft opened visibly in Mail for review.") = try await executor.continueClarification(
             taskID: "unresolved-self-recipient-answer", originatingTaskID: rootID,
             goal: answeredGoal, selectedChoice: nil, progress: { _ in }) else {
-            return XCTFail("A valid recipient answer must resume with the same selected spreadsheet, subject, and body")
+            return XCTFail("A valid recipient answer must save the draft with the same selected spreadsheet, subject, and body")
         }
-        XCTAssertEqual(approval.call.taskID, "unresolved-self-recipient-answer")
-        XCTAssertEqual(approval.call.arguments["to"], .string(answer))
-        XCTAssertEqual(approval.call.arguments["attachment_paths"], .array([.string(spreadsheet.path)]))
-        XCTAssertEqual(approval.call.arguments["subject"], .string(subject))
-        XCTAssertEqual(approval.call.arguments["body"], .string(body))
-        XCTAssertEqual(approval.call.arguments["send_now"], .bool(false))
         let requests = await planner.capturedRequests()
         XCTAssertEqual(requests.last?.localFileCatalog?.selectedCandidate?.displayName, spreadsheet.lastPathComponent)
         XCTAssertEqual(requests.last?.hostResolvedAttachmentPaths, [spreadsheet.path])
@@ -6375,7 +6583,14 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let preparedCount = await pool.preparedApprovalCount()
         let performedCount = await pool.approvedExecuteCount()
         XCTAssertEqual(preparedCount, 1)
-        XCTAssertEqual(performedCount, 0)
+        XCTAssertEqual(performedCount, 1)
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.taskID, "unresolved-self-recipient-answer")
+        XCTAssertEqual(prepared?.call.arguments["to"], .string(answer))
+        XCTAssertEqual(prepared?.call.arguments["attachment_paths"], .array([.string(spreadsheet.path)]))
+        XCTAssertEqual(prepared?.call.arguments["subject"], .string(subject))
+        XCTAssertEqual(prepared?.call.arguments["body"], .string(body))
+        XCTAssertEqual(prepared?.call.arguments["send_now"], .bool(false))
     }
 
     func testInvalidatingOriginalRootClearsSecondGenericClarification() async throws {
@@ -6891,6 +7106,7 @@ private struct NativeFileProbePlanner: MCPProposalPlanning {
         let result = try await planner.propose(request)
         switch result {
         case .localFileOperation(let operation): trace.append("file operation: \(operation)")
+        case .mailRecipientsRequired: trace.append("Mail recipient resolution")
         case .proposedCall(let call): trace.append("Mac proposal: \(call.toolName)")
         case .browserTools: trace.append("browser route proposed")
         case .message(let message): trace.append("planner message: \(message)")
@@ -7031,6 +7247,7 @@ private actor RecordingMCPClientPool: MCPClientPooling {
     private var queuedResultsByTool: [String: [MCPToolResult]]
     private var recordedDirectCalls: [MCPToolCall] = []
     private var recordedApprovedCalls: [MCPToolCall] = []
+    private var recordedPreparations: [MCPPreparedApproval] = []
 
     init(
         tools: [MCPAllowedTool],
@@ -7071,10 +7288,12 @@ private actor RecordingMCPClientPool: MCPClientPooling {
     }
 
     func prepareApproval(_ call: MCPToolCall) async throws -> MCPPreparedApproval {
-        MCPPreparedApproval(
+        let prepared = MCPPreparedApproval(
             call: call,
             fingerprint: MCPApprovalFingerprint(call: call),
             display: call.approvalDisplay)
+        recordedPreparations.append(prepared)
+        return prepared
     }
 
     func performApproved(
@@ -7097,6 +7316,7 @@ private actor RecordingMCPClientPool: MCPClientPooling {
 
     func directCalls() -> [MCPToolCall] { recordedDirectCalls }
     func approvedCalls() -> [MCPToolCall] { recordedApprovedCalls }
+    func preparedApprovalCount() -> Int { recordedPreparations.count }
 }
 
 private final class StubMCPPlanner: MCPProposalPlanning, @unchecked Sendable {

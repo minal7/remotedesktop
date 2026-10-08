@@ -3000,12 +3000,14 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertTrue(system.contains("Skill: file-identification"), "The actual file specialist request must load the bundled skill")
         XCTAssertTrue(system.contains("browser executor"))
         XCTAssertTrue(system.contains("nextCursor"))
-        XCTAssertTrue(system.contains("askFile"))
-        XCTAssertTrue(system.localizedCaseInsensitiveContains("askuser"))
         XCTAssertTrue(system.contains("An accepted user choice resolves ambiguity."))
         let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
         let names = Set(try tools.map { try XCTUnwrap(($0["function"] as? [String: Any])?["name"] as? String) })
         XCTAssertEqual(names, ["askUser", "listFiles", "selectFile", "askFile", "incomplete"])
+        let askFileTool = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "askFile" })
+        let askFileDescription = try XCTUnwrap((askFileTool["function"] as? [String: Any])?["description"] as? String)
+        XCTAssertTrue(askFileDescription.localizedCaseInsensitiveContains("exact current host-offered candidates"),
+            "The choice tool contract must bind every option to the current host catalog.")
         let askUser = try XCTUnwrap(tools.first { ($0["function"] as? [String: Any])?["name"] as? String == "askUser" })
         let description = try XCTUnwrap((askUser["function"] as? [String: Any])?["description"] as? String)
         XCTAssertTrue(description.localizedCaseInsensitiveContains("missing user information needed to identify the requested local file"))
@@ -6672,7 +6674,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 let request = MCPProposalPlanningRequest(taskID: taskID, prompt: prompt, tools: [selectionTool])
                 let proposal = try await ComputerUsePlanningWorker().perform(timeout: 20) { try await planner.propose(request) }
                 switch proposal {
-                case .browserTools, .localFileOperation:
+                case .browserTools, .localFileOperation, .mailRecipientsRequired:
                     throw AppleFoundationMCPPlannerError.unknownProposal
                 case .message(let message):
                     report["plannerMessage"] = message
@@ -7354,7 +7356,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 macControlInstaller: MobileInitiationMacControlInstaller(status: helperInstalled ? .ready(mobileInitiationMacControlReceipt) : .notInstalled),
                 visualExecutorLoader: visual, executorComposer: { receipt, fallback in
                     try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                        visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
                 }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
             manager.start(pairingCode: "123456")
             await waitForCapabilityReady(manager)
@@ -7369,7 +7371,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             XCTAssertEqual(runtimeLoads, 1, "Explicit setup must still validate the installed native runtime")
             let setupActivations = await native.recordedSuccessfulActivations()
             XCTAssertEqual(setupActivations, [nativeReceipt])
-            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
             XCTAssertEqual(nativeExecutions, 0)
             await manager.shutdown()
         }
@@ -7397,7 +7399,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
                 visualExecutorLoader: visual, executorComposer: { receipt, fallback in
                     try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                        visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
                 }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
             defer { releasePreparation = true; manager.stop() }
             manager.start(pairingCode: "123456")
@@ -7416,7 +7418,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             XCTAssertEqual(installCount, 0, "A failed passive preparation cannot start a download loop")
             XCTAssertEqual(preparations, 1); XCTAssertEqual(runtimeLoads, 0)
             XCTAssertTrue(manager.needsAdditionalSetup)
-            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
             let activations = await native.recordedSuccessfulActivations()
             XCTAssertTrue(activations.isEmpty); XCTAssertEqual(visual.loadCount, 0)
             await manager.shutdown()
@@ -7440,13 +7442,13 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 }, macControlInstaller: helper, visualExecutorLoader: visual,
                 executorComposer: { receipt, fallback in
                     try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                        visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                        visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
                 }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
             manager.start(pairingCode: "123456")
             await waitForCapabilityReady(manager)
             XCTAssertTrue(manager.needsAdditionalSetup, "The missing native package still needs explicit setup")
             XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
-            await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+            await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
             let installs = await (native.installCallCount(), model.installCallCount(), helper.installCallCount())
             XCTAssertEqual(installs.0 + installs.1 + installs.2, 0)
             XCTAssertEqual(visual.loadCount, 0)
@@ -7471,7 +7473,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     }, macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt)),
                     visualExecutorLoader: visual, executorComposer: { receipt, fallback in
                         try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                            visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                            visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
                     }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
                 manager.start(pairingCode: "123456")
                 await waitForCapabilityReady(manager)
@@ -7483,7 +7485,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 XCTAssertEqual(manager.needsAdditionalSetup, !(visualInstalled || explicitSetup))
                 XCTAssertTrue(manager.capability.detail.contains("Mac tools"))
                 let visualLoadsBeforeTask = visual.loadCount
-                await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+                await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
                 XCTAssertEqual(nativeCalls, 0, "Available Mac tools must handle the goal before invoking the separate native text model")
                 XCTAssertEqual(visual.loadCount, visualLoadsBeforeTask, "Structured routing cannot load vision even when its package exists")
                 await manager.shutdown()
@@ -7506,7 +7508,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             visualExecutorLoader: visual, executorComposer: { receipt, fallback in
                 compositions += 1
                 return try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                    visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                    visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
             }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
         manager.start(pairingCode: "123456")
         await waitForCapabilityReady(manager)
@@ -7515,7 +7517,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertFalse(progress.contains { $0.phase == .ready })
         XCTAssertEqual(manager.capability.state, .ready)
         XCTAssertTrue(manager.needsAdditionalSetup)
-        await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+        await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
         XCTAssertEqual(compositions, 1, "Failed setup must preserve the existing structured executor")
         let installs = await (native.installCallCount(), helper.installCallCount())
         XCTAssertEqual(installs.0, 1)
@@ -7537,7 +7539,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
             }, macControlInstaller: helper, visualExecutorLoader: visual, executorComposer: { receipt, fallback in
                 try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                    visualFallback: fallback, planner: MobileInitiationUnavailablePlanner(), clientPool: pool)
+                    visualFallback: fallback, planner: MobileInitiationMailApprovalPlanner(), clientPool: pool)
             }, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
         manager.start(pairingCode: "123456")
         await waitForStatusCheck(helper)
@@ -7547,7 +7549,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertTrue(manager.needsAdditionalSetup)
         XCTAssertEqual(manager.capability.state, .ready)
         XCTAssertTrue(manager.capability.detail.contains("Form editing and Mac tools"))
-        await requestStructuredDraft(manager: manager, channel: channel, pool: pool)
+        await requestStructuredSendApproval(manager: manager, channel: channel, pool: pool)
         XCTAssertEqual(visual.loadCount, 1, "Structured work cannot retry the failed visual activation")
         await manager.shutdown()
     }
@@ -7587,12 +7589,12 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
     }
 
-    private func requestStructuredDraft(manager: HostComputerUseManager, channel: MobileInitiationTestChannel,
-                                         pool: MobileInitiationStructuredPool) async {
+    private func requestStructuredSendApproval(manager: HostComputerUseManager, channel: MobileInitiationTestChannel,
+                                                pool: MobileInitiationStructuredPool) async {
         manager.authorizePeer(senderID: "IOS-PEER")
-        let prompt = ComputerUseEnvelope(id: "independent-draft", senderID: "IOS-PEER", targetID: "HOST-ID",
+        let prompt = ComputerUseEnvelope(id: "independent-send-approval", senderID: "IOS-PEER", targetID: "HOST-ID",
             pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
-            body: "Draft an email to codex-acceptance@example.invalid with subject \"Status\" saying Everything is on schedule.")
+            body: "Send an email to codex-acceptance@example.invalid with subject \"Status\" and body \"Everything is on schedule.\"")
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         for _ in 0 ..< 200 {
             if case .awaitingApproval = manager.activity { break }
@@ -7608,7 +7610,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTAssertEqual(calls.first?.arguments["to"], .string("codex-acceptance@example.invalid"))
         XCTAssertEqual(calls.first?.arguments["subject"], .string("Status"))
         XCTAssertEqual(calls.first?.arguments["body"], .string("Everything is on schedule."))
-        XCTAssertEqual(calls.first?.arguments["send_now"], .bool(false))
+        XCTAssertEqual(calls.first?.arguments["send_now"], .bool(true))
         let effects = await pool.effectCount()
         XCTAssertEqual(effects, 0, "No controlled or real Mail effect is authorized by preparing the proposal")
     }
@@ -8691,6 +8693,25 @@ private struct MobileInitiationUnavailablePlanner: MCPProposalPlanning {
     func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
         XCTFail("The unavailable Apple planner cannot be used")
         throw AppleFoundationMCPPlannerError.unavailable(.modelNotReady)
+    }
+}
+
+/// Supplies one fixed Mail proposal to capability-composition tests. It does
+/// not interpret prompt text or invoke a language model.
+private struct MobileInitiationMailApprovalPlanner: MCPProposalPlanning {
+    func availability() -> AppleFoundationMCPPlannerAvailability { .available }
+
+    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
+        guard let mail = request.tools.first(where: {
+            $0.serverID == RemoteDesktopMailMCP.serverID && $0.toolName == RemoteDesktopMailMCP.toolName
+        }) else { throw AppleFoundationMCPPlannerError.unknownProposal }
+        let call = try mail.makeCall(taskID: request.taskID, arguments: [
+            "to": .string("codex-acceptance@example.invalid"),
+            "subject": .string("Status"),
+            "body": .string("Everything is on schedule."),
+            "send_now": .bool(true),
+        ])
+        return .proposedCall(call)
     }
 }
 

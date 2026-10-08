@@ -25,7 +25,9 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Remote Desktop Host uses Apple events only after your approval to open an email draft or send the exact email shown on your mobile device.</string>
+	<string>Remote Desktop Host uses Apple events to create requested Mail drafts and, after your approval, send the exact email shown on your mobile device.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Remote Desktop Host looks up people you name when preparing an email on your Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device.</string>
 	<key>NSHumanReadableCopyright</key>

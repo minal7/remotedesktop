@@ -4126,6 +4126,8 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                 ], options: [.sortedKeys, .prettyPrinted]), encoding: .utf8) ?? "proposed_call"
             case .localFileOperation(let operation):
                 responseDescription = "local_file_operation: \(String(describing: operation))"
+            case .mailRecipientsRequired:
+                responseDescription = "mail_recipients_required"
             }
             await pool.cancelAll()
         } catch {
@@ -5229,8 +5231,9 @@ extension AppleFoundationMCPPlannerTests {
             "An authorized browser route remains available before native file discovery starts.")
         XCTAssertTrue(initial.bindings.contains { $0.allowedTool.toolName == RemoteDesktopMailMCP.toolName })
         XCTAssertEqual(initial.localFileKinds, [.list])
-        XCTAssertTrue(initial.stageInstructions.contains("metadata list"))
-        XCTAssertTrue(initial.stageInstructions.contains("Do not propose the Mail action"))
+        let initialOptions = try FoundationMCPPlannerCapabilityMenu.options(for: initialRequest)
+        XCTAssertTrue(initialOptions.contains { $0.id == "mail-source:described-local" })
+        XCTAssertTrue(initialOptions.contains { $0.id == "mail-source:explicit-path" })
 
         let queriedRequest = MCPProposalPlanningRequest(taskID: "queried", prompt: "Draft and find a file",
             tools: [mail, read], allowsBrowserWorkflow: true, localFileCatalog: queried)
@@ -5261,6 +5264,11 @@ extension AppleFoundationMCPPlannerTests {
         XCTAssertTrue(noCandidates.stageInstructions.contains("page-2"))
         XCTAssertTrue(noCandidates.stageInstructions.contains("genuinely changed query"))
         XCTAssertFalse(noCandidates.stageInstructions.contains("select one exact current candidate"))
+        let queriedOptions = try FoundationMCPPlannerCapabilityMenu.options(for: queriedRequest)
+        XCTAssertFalse(queriedOptions.contains { $0.id == "skill:apple-mail-draft" },
+            "Once lookup starts, the no-attachment Mail route cannot bypass resolution.")
+        XCTAssertFalse(queriedOptions.contains { $0.id == "mail-source:explicit-path" })
+        XCTAssertTrue(queriedOptions.contains { $0.id == "mail-source:described-local" })
 
         let selectedPath = "/private/tmp/host-selected.pptx"
         let selectedRequest = MCPProposalPlanningRequest(taskID: "selected", prompt: "Draft and find a file",
@@ -5298,12 +5306,86 @@ extension AppleFoundationMCPPlannerTests {
     @available(macOS 26.0, *)
     func testNativeMailAttachmentSchemaPinsExactHostResolvedPath() async throws {
         let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
-            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired)
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            serverID: RemoteDesktopMailMCP.serverID)
         let selectedPath = "/private/tmp/host-selected.pptx"
         let baseSchema = try FoundationMCPProposalTool.plannerInputSchema(for: mail, hostResolvedAttachmentPaths: [])
-        XCTAssertEqual(baseSchema, mail.inputSchema, "No-files and explicit user-path drafts retain the original schema.")
+        func restoringPlannerMailDescriptions(in schema: MCPJSONValue, with source: MCPJSONValue) -> MCPJSONValue {
+            guard case .object(var root) = schema,
+                  case .object(var properties)? = root["properties"],
+                  case .object(let sourceRoot) = source,
+                  case .object(let sourceProperties)? = sourceRoot["properties"] else { return schema }
+            for field in ["to", "cc", "bcc", "send_now"] {
+                guard case .object(var property)? = properties[field],
+                      case .object(let sourceProperty)? = sourceProperties[field],
+                      let description = sourceProperty["description"] else { continue }
+                property["description"] = description
+                properties[field] = .object(property)
+            }
+            root["properties"] = .object(properties)
+            return .object(root)
+        }
+        XCTAssertEqual(restoringPlannerMailDescriptions(in: baseSchema, with: mail.inputSchema), mail.inputSchema,
+            "Planner guidance may differ, while the executable Mail constraints remain unchanged.")
+        let noAttachmentSchema = try FoundationMCPProposalTool.plannerInputSchema(
+            for: mail, hostResolvedAttachmentPaths: [], mailAttachmentSource: .noAttachment)
+        guard case .object(let noAttachmentRoot) = noAttachmentSchema,
+              case .object(let noAttachmentProperties)? = noAttachmentRoot["properties"],
+              case .array(let noAttachmentRequired)? = noAttachmentRoot["required"] else {
+            return XCTFail("The no-attachment planner schema should remain a closed object.")
+        }
+        XCTAssertNil(noAttachmentProperties["attachment_paths"])
+        XCTAssertFalse(noAttachmentRequired.contains(.string("attachment_paths")))
+        XCTAssertEqual(noAttachmentRoot["additionalProperties"], .bool(false))
+
+        let explicitPathSchema = try FoundationMCPProposalTool.plannerInputSchema(
+            for: mail, hostResolvedAttachmentPaths: [], mailAttachmentSource: .explicitUserPath)
+        guard case .object(let explicitPathRoot) = explicitPathSchema,
+              case .object(let explicitPathProperties)? = explicitPathRoot["properties"],
+              case .object(let explicitAttachment)? = explicitPathProperties["attachment_paths"],
+              case .array(let explicitRequired)? = explicitPathRoot["required"] else {
+            return XCTFail("The explicit-path planner schema should require an attachment array.")
+        }
+        XCTAssertTrue(explicitRequired.contains(.string("attachment_paths")))
+        XCTAssertEqual(explicitAttachment["minItems"], .integer(1))
+        XCTAssertEqual(explicitAttachment["maxItems"], .integer(5))
+
+        XCTAssertThrowsError(try FoundationMCPProposalTool.plannerInputSchema(
+            for: mail, hostResolvedAttachmentPaths: [], mailAttachmentSource: .describedLocalFile),
+            "A described-file source must finish host selection before exposing the Mail schema.")
+
+        guard case .object(let plannerRoot) = baseSchema,
+              case .object(let plannerProperties)? = plannerRoot["properties"],
+              case .object(let plannerTo)? = plannerProperties["to"],
+              case .string(let toDescription)? = plannerTo["description"],
+              case .object(let plannerCC)? = plannerProperties["cc"],
+              case .string(let ccDescription)? = plannerCC["description"],
+              case .object(let plannerBCC)? = plannerProperties["bcc"],
+              case .string(let bccDescription)? = plannerBCC["description"],
+              case .object(let plannerSendNow)? = plannerProperties["send_now"],
+              case .string(let sendNowDescription)? = plannerSendNow["description"],
+              case .string("boolean")? = plannerSendNow["type"],
+              case .array(let plannerRequired)? = plannerRoot["required"] else {
+            return XCTFail("The planner should explain that user-supplied contact names are supported.")
+        }
+        XCTAssertTrue(toDescription.contains("contact names"))
+        XCTAssertTrue(toDescription.contains("Primary To"))
+        XCTAssertTrue(ccDescription.contains("explicitly assigned") && ccDescription.contains("Cc"))
+        XCTAssertTrue(ccDescription.contains("contact names"))
+        XCTAssertTrue(bccDescription.contains("explicitly assigned") && bccDescription.contains("Bcc"))
+        XCTAssertTrue(bccDescription.contains("contact names"))
+        XCTAssertNotEqual(ccDescription, bccDescription)
+        XCTAssertTrue(plannerRequired.contains(.string("to")))
+        XCTAssertFalse(plannerRequired.contains(.string("cc")))
+        XCTAssertFalse(plannerRequired.contains(.string("bcc")))
+        XCTAssertTrue(plannerRequired.contains(.string("send_now")))
+        XCTAssertTrue(sendNowDescription.contains("explicitly asks to send now"))
+        XCTAssertTrue(sendNowDescription.contains("separate host approval"))
+        XCTAssertTrue(sendNowDescription.contains("delivery was not explicitly requested"))
+        XCTAssertNil(plannerSendNow["default"])
+        XCTAssertNil(plannerSendNow["const"])
         let constrainedSchema = try FoundationMCPProposalTool.plannerInputSchema(
-            for: mail, hostResolvedAttachmentPaths: [selectedPath])
+            for: mail, hostResolvedAttachmentPaths: [selectedPath], mailAttachmentSource: .hostSelectedFile)
         guard case .object(let root) = constrainedSchema,
               case .object(let properties)? = root["properties"],
               case .object(let attachmentSchema)? = properties["attachment_paths"],
@@ -5339,6 +5421,15 @@ extension AppleFoundationMCPPlannerTests {
         } catch {
             XCTFail("Expected a typed recipient failure, got \(error)")
         }
+
+        let builtInMail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            description: RemoteDesktopMailMCP.reviewedDescription, serverID: RemoteDesktopMailMCP.serverID)
+        let builtInRequest = MCPProposalPlanningRequest(taskID: "built-in-mail-recipient", prompt: "Draft a note to me",
+            tools: [builtInMail])
+        XCTAssertEqual(try AppleFoundationMCPPlanner().resolveProposal(rawProposal, request: builtInRequest),
+            .mailRecipientsRequired(builtInMail, rawProposal.arguments),
+            "Only reviewed built-in Mail converts the typed missing-contact result into a host resolution request.")
     }
 
     @available(macOS 26.0, *)
@@ -5546,7 +5637,8 @@ extension AppleFoundationMCPPlannerTests {
     @available(macOS 26.0, *)
     func testNativeMailProposalRejectsPathsOutsideHostResolvedAttachmentSet() async throws {
         let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
-            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired)
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            serverID: RemoteDesktopMailMCP.serverID)
         let selectedPath = "/private/tmp/host-selected.pptx"
         let constrainedSchema = try FoundationMCPProposalTool.plannerInputSchema(
             for: mail, hostResolvedAttachmentPaths: [selectedPath])
@@ -5645,7 +5737,8 @@ extension AppleFoundationMCPPlannerTests {
         let listCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         let listTool = try makeTool(.list, capture: listCapture)
         let listArgs = content(["file_kind": string("presentation"), "date_field": string("modifiedAt"),
-            "direction": string("descending"), "name_contains": string("quarterly"), "cursor": string("cursor-current")])
+            "direction": string("descending"), "folder_scope": string("all"),
+            "name_contains": string("quarterly"), "cursor": string("cursor-current")])
         _ = try await listTool.call(arguments: listArgs)
         let listedOperation = await listCapture.localFileOperation()
         XCTAssertEqual(listedOperation, .listFiles(
@@ -5671,7 +5764,8 @@ extension AppleFoundationMCPPlannerTests {
         let badListTool = try makeTool(.list, capture: badCapture)
         for invalidCursor in ["invented"] {
             let args = content(["file_kind": string("presentation"), "date_field": string("none"),
-                "direction": string("none"), "name_contains": string(""), "cursor": string(invalidCursor)])
+                "direction": string("none"), "folder_scope": string("all"),
+                "name_contains": string(""), "cursor": string(invalidCursor)])
             do { _ = try await badListTool.call(arguments: args); XCTFail("Reject a cursor not offered by the host") }
             catch let error as AppleFoundationMCPPlannerError {
                 guard case .invalidRequest = error else { return XCTFail("Expected cursor schema rejection, got \(error)") }
@@ -5682,13 +5776,15 @@ extension AppleFoundationMCPPlannerTests {
         let resetCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         let resetTool = try makeTool(.list, capture: resetCapture)
         let resetQuery = content(["file_kind": string("document"), "date_field": string("none"),
-            "direction": string("none"), "name_contains": string("brief"), "cursor": string("")])
+            "direction": string("none"), "folder_scope": string("all"),
+            "name_contains": string("brief"), "cursor": string("")])
         _ = try await resetTool.call(arguments: resetQuery)
         let resetOperation = await resetCapture.localFileOperation()
         XCTAssertEqual(resetOperation, .listFiles(query: .init(fileKind: .document, nameContains: "brief"), cursor: nil),
             "An empty cursor always starts a fresh query, even when the current page offers a cursor.")
         let changedQueryWithCursor = content(["file_kind": string("document"), "date_field": string("none"),
-            "direction": string("none"), "name_contains": string("brief"), "cursor": string("cursor-current")])
+            "direction": string("none"), "folder_scope": string("all"),
+            "name_contains": string("brief"), "cursor": string("cursor-current")])
         let changedQueryCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         let changedQueryTool = try makeTool(.list, capture: changedQueryCapture)
         do { _ = try await changedQueryTool.call(arguments: changedQueryWithCursor); XCTFail("A page cursor cannot be reused for a changed query") }
@@ -5700,7 +5796,8 @@ extension AppleFoundationMCPPlannerTests {
         let sameQueryWithoutCursorCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         let sameQueryWithoutCursorTool = try makeTool(.list, capture: sameQueryWithoutCursorCapture)
         let sameQueryWithoutCursor = content(["file_kind": string("presentation"), "date_field": string("modifiedAt"),
-            "direction": string("descending"), "name_contains": string("quarterly"), "cursor": string("")])
+            "direction": string("descending"), "folder_scope": string("all"),
+            "name_contains": string("quarterly"), "cursor": string("")])
         do {
             _ = try await sameQueryWithoutCursorTool.call(arguments: sameQueryWithoutCursor)
             XCTFail("An empty cursor cannot restart the same query and churn candidate IDs.")
@@ -5754,7 +5851,7 @@ extension AppleFoundationMCPPlannerTests {
     }
 
     @available(macOS 26.0, *)
-    func testUnqueriedLocalFileListUsesThreeFieldsAndRejectsRefinements() async throws {
+    func testUnqueriedLocalFileListAcceptsNameAndFolderScopeWithoutCursor() async throws {
         let root = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
             query: .init(),
             page: .init(candidates: [], isComplete: false, nextCursor: nil,
@@ -5766,7 +5863,7 @@ extension AppleFoundationMCPPlannerTests {
               case .array(let required)? = fields["required"] else {
             return XCTFail("Expected a typed root list schema.")
         }
-        let rootKeys: Set<String> = ["file_kind", "date_field", "direction"]
+        let rootKeys: Set<String> = ["file_kind", "date_field", "direction", "folder_scope", "name_contains"]
         XCTAssertEqual(Set(properties.keys), rootKeys)
         let requiredKeys = Set(required.compactMap { value -> String? in
             guard case .string(let key) = value else { return nil }
@@ -5787,20 +5884,25 @@ extension AppleFoundationMCPPlannerTests {
             "file_kind": string("presentation"),
             "date_field": string("modifiedAt"),
             "direction": string("descending"),
+            "folder_scope": string("downloads"),
+            "name_contains": string("Team Update"),
         ]))
         let operation = await capture.localFileOperation()
         XCTAssertEqual(operation, .listFiles(query: .init(
             fileKind: .presentation,
-            sort: .init(field: .modifiedAt, direction: .descending)), cursor: nil))
+            sort: .init(field: .modifiedAt, direction: .descending), nameContains: "Team Update",
+            folderScope: .downloads), cursor: nil))
 
-        for extra in ["cursor", "name_contains"] {
+        for extra in ["cursor"] {
             let extraCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
             var values: [String: GeneratedContent] = [
                 "file_kind": string("presentation"),
                 "date_field": string("modifiedAt"),
                 "direction": string("descending"),
+                "folder_scope": string("downloads"),
+                "name_contains": string("Team Update"),
             ]
-            values[extra] = string(extra == "cursor" ? "" : "Team Update")
+            values[extra] = string("")
             do {
                 _ = try await makeTool(extraCapture).call(arguments: content(values))
                 XCTFail("The unqueried root schema must reject the \(extra) refinement field.")
@@ -5810,13 +5912,13 @@ extension AppleFoundationMCPPlannerTests {
             let rejectedOperation = await extraCapture.localFileOperation()
             XCTAssertNil(rejectedOperation)
         }
-        let rootRequest = MCPProposalPlanningRequest(taskID: "root-source-query", prompt: "Find a presentation",
+        let rootRequest = MCPProposalPlanningRequest(taskID: "root-source-query", prompt: "Find Team Update in Downloads",
             tools: [], localFileCatalog: root)
-        XCTAssertThrowsError(try AppleFoundationMCPPlanner().resolveLocalFileOperation(
-            .listFiles(query: .init(fileKind: .presentation, nameContains: "Team Update"), cursor: nil),
-            request: rootRequest), "The initial source scan must be metadata-only even for direct captured proposals.") { error in
-                XCTAssertEqual(error as? AppleFoundationMCPPlannerError, .unknownProposal)
-            }
+        let namedRootQuery = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            nameContains: "Team Update", folderScope: .downloads)
+        XCTAssertEqual(try AppleFoundationMCPPlanner().resolveLocalFileOperation(
+            .listFiles(query: namedRootQuery, cursor: nil), request: rootRequest),
+            .localFileOperation(.listFiles(query: namedRootQuery, cursor: nil)))
     }
 
     @available(macOS 26.0, *)
@@ -5846,6 +5948,7 @@ extension AppleFoundationMCPPlannerTests {
                 "file_kind": string(fileKind),
                 "date_field": string("modifiedAt"),
                 "direction": string("descending"),
+                "folder_scope": string(context.query.folderScope.rawValue),
                 "name_contains": string(nameContains),
             ]
             if let cursor { values["cursor"] = cursor }
@@ -5883,7 +5986,8 @@ extension AppleFoundationMCPPlannerTests {
             arguments: listArguments(fileKind: "document", cursor: string("")))
         let changedQueryOperation = await changedQueryCapture.localFileOperation()
         XCTAssertEqual(changedQueryOperation, .listFiles(
-            query: .init(fileKind: .document, sort: .init(field: .modifiedAt, direction: .descending)),
+            query: .init(fileKind: .document, sort: .init(field: .modifiedAt, direction: .descending),
+                folderScope: .all),
             cursor: nil))
 
         let literalNameCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
@@ -5933,14 +6037,16 @@ extension AppleFoundationMCPPlannerTests {
         let rootCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         _ = try await fileTool(.list, rootContext, rootCapture).call(arguments: content([
             "file_kind": string("presentation"), "date_field": string("modifiedAt"),
-            "direction": string("descending"),
+            "direction": string("descending"), "folder_scope": string("downloads"),
+            "name_contains": string(""),
         ]))
         guard case .listFiles(let rootQuery, nil)? = await rootCapture.localFileOperation() else {
-            return XCTFail("The first source step must query metadata without a filename filter or cursor.")
+            return XCTFail("The first source step must query the requested folder without a cursor.")
         }
         XCTAssertEqual(rootQuery.fileKind, .presentation)
         XCTAssertEqual(rootQuery.sort, .init(field: .modifiedAt, direction: .descending))
         XCTAssertEqual(rootQuery.nameContains, "")
+        XCTAssertEqual(rootQuery.folderScope, .downloads)
 
         var catalog = try ComputerUseLocalFileCatalog(taskID: "explicit-older-presentation",
             approvedDirectory: directory, pageSize: 8)
@@ -5954,7 +6060,8 @@ extension AppleFoundationMCPPlannerTests {
         let refinementCapture = FoundationMCPProposalCapture(allowedModelToolNames: [:])
         _ = try await fileTool(.list, availableContext, refinementCapture).call(arguments: content([
             "file_kind": string("presentation"), "date_field": string("modifiedAt"),
-            "direction": string("descending"), "name_contains": string("Team Update"), "cursor": string(""),
+            "direction": string("descending"), "folder_scope": string("downloads"),
+            "name_contains": string("Team Update"), "cursor": string(""),
         ]))
         guard case .listFiles(let refinedQuery, nil)? = await refinementCapture.localFileOperation() else {
             return XCTFail("The available-page stage must accept the explicit literal-name refinement.")
@@ -6169,17 +6276,119 @@ extension AppleFoundationMCPPlannerTests {
 }
 
 extension AppleFoundationMCPPlannerTests {
+    @available(macOS 26.0, *)
+    func testCapabilitySelectionUsesMinimalContextAndKeepsExecutionRequestUnchanged() throws {
+        let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            serverID: RemoteDesktopMailMCP.serverID)
+        let selectedCandidate = ComputerUseLocalFileCatalog.Candidate(id: "opaque-selected",
+            displayName: "PRIVATE-Board-Review.pptx", contentTypeIdentifier: nil, fileExtension: "pptx",
+            byteCount: 42, modifiedAt: Date(timeIntervalSince1970: 100), createdAt: nil, addedToDirectoryAt: nil)
+        let localFileContext = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
+            query: .init(fileKind: .presentation, nameContains: "PRIVATE-Board"),
+            page: .init(candidates: [selectedCandidate], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false),
+            selectedCandidate: selectedCandidate)
+        let selectedPath = "/private/fixture/PRIVATE-Board-Review.pptx"
+        let untrusted: MCPJSONValue = .array([.object([
+            "tool": .string("focused_app"),
+            "result": .object(["name": .string("Notes")]),
+        ])])
+        let structuredContext: MCPJSONValue = .object([
+            "original_goal": .string("Email the latest Board Review deck to dana@example.com."),
+            "current_user_request": .string("Save it as a draft in Apple Mail."),
+            "host_clarification_context": .array([.object([
+                "question": .string("Which deck?"), "answer": .string("The latest Board Review deck."),
+            ])]),
+            "local_files": .object([
+                "directory_name": .string("PRIVATE local root"),
+                "candidates": .array([.object([
+                    "id": .string("opaque-selected"), "display_name": .string("PRIVATE-Board-Review.pptx"),
+                    "path": .string(selectedPath),
+                ])]),
+            ]),
+            "host_resolved_attachment_paths": .array([.string(selectedPath)]),
+            "untrusted_tool_results": untrusted,
+        ])
+        let structuredPrompt = try XCTUnwrap(String(data: MCPDigest.canonicalData(for: structuredContext), encoding: .utf8))
+        let structuredRequest = MCPProposalPlanningRequest(taskID: "selection-context", prompt: structuredPrompt,
+            tools: [mail], allowsBrowserWorkflow: true, localFileCatalog: localFileContext,
+            hostResolvedAttachmentPaths: [selectedPath])
+        let options = try FoundationMCPPlannerCapabilityMenu.options(for: structuredRequest)
+        let structuredInput = FoundationMCPPlannerCapabilityMenu.selectionInput(for: structuredRequest, options: options)
+        guard case .object(let fields) = structuredInput else { return XCTFail("Expected a structured selection input.") }
+        XCTAssertEqual(fields["original_goal"], .string("Email the latest Board Review deck to dana@example.com."))
+        XCTAssertEqual(fields["current_user_request"], .string("Save it as a draft in Apple Mail."))
+        XCTAssertEqual(fields["host_clarification_context"], .array([.object([
+            "question": .string("Which deck?"), "answer": .string("The latest Board Review deck."),
+        ])]))
+        XCTAssertEqual(fields["untrusted_tool_results"], untrusted)
+        XCTAssertEqual(fields["host_stage"], .object([
+            "local_file_state": .string("available"), "has_selected_local_file": .bool(true),
+        ]))
+        XCTAssertNil(fields["local_files"])
+        XCTAssertNil(fields["host_resolved_attachment_paths"])
+        XCTAssertNil(fields["host_reviewed_contact_queries"])
+        let selectionJSON = try XCTUnwrap(String(data: MCPDigest.canonicalData(for: structuredInput), encoding: .utf8))
+        XCTAssertFalse(selectionJSON.contains("PRIVATE-Board-Review.pptx"))
+        XCTAssertFalse(selectionJSON.contains(selectedPath))
+        XCTAssertFalse(selectionJSON.contains("PRIVATE local root"))
+        let mailOption = try XCTUnwrap(options.first { $0.id == "skill:apple-mail-draft" })
+        XCTAssertEqual(mailOption.surface, .nativeAppSkill)
+        XCTAssertFalse(options.contains { $0.id == "browser" },
+            "A selected native file remains in the native source phase and cannot switch to browser.")
+
+        let browserRequest = MCPProposalPlanningRequest(taskID: "browser-surface", prompt: "Open the requested site.",
+            tools: [mail], allowsBrowserWorkflow: true)
+        let browserOptions = try FoundationMCPPlannerCapabilityMenu.options(for: browserRequest)
+        let browserOption = try XCTUnwrap(browserOptions.first { $0.id == "browser" })
+        XCTAssertEqual(browserOption.surface, .websiteOrWebmail)
+        XCTAssertEqual(browserOption.label, "Website or webmail workflow")
+        let browserInput = FoundationMCPPlannerCapabilityMenu.selectionInput(for: browserRequest, options: browserOptions)
+        guard case .object(let browserInputFields) = browserInput,
+              case .array(let capabilities)? = browserInputFields["capabilities"],
+              let encodedBrowser = capabilities.first(where: {
+                  guard case .object(let option) = $0, option["id"] == .string("browser") else { return false }
+                  return true
+              }), case .object(let browserFields) = encodedBrowser else {
+            return XCTFail("The selector must receive typed capability surfaces.")
+        }
+        XCTAssertEqual(browserFields["surface"], .string("website_or_webmail"))
+
+        let selectedStage = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: structuredRequest)
+        XCTAssertEqual(selectedStage.request, structuredRequest,
+            "Minimizing selector context must leave every host and user field intact for execution.")
+        XCTAssertEqual(selectedStage.request.hostResolvedAttachmentPaths, [selectedPath])
+        XCTAssertEqual(selectedStage.selectedToolIndices, [0])
+
+        let plainGoal = "Draft the Board Review email in Apple Mail."
+        let plainRequest = MCPProposalPlanningRequest(taskID: "plain-selection", prompt: plainGoal, tools: [])
+        let plainOptions = try FoundationMCPPlannerCapabilityMenu.options(for: plainRequest)
+        guard case .object(let plainFields) = FoundationMCPPlannerCapabilityMenu.selectionInput(
+            for: plainRequest, options: plainOptions) else { return XCTFail("Expected a structured plain-goal input.") }
+        XCTAssertEqual(plainFields["original_goal"], .string(plainGoal))
+        XCTAssertNil(plainFields["current_user_request"])
+        XCTAssertEqual(plainFields["host_stage"], .object([
+            "local_file_state": .string("unavailable"), "has_selected_local_file": .bool(false),
+        ]))
+        XCTAssertNotNil(plainFields["capabilities"])
+    }
+
     func testSkillInstructionsEnterOnlyMatchingPlannerPrompts() throws {
         let catalog = ComputerUseSkillCatalog.load()
+        let mailSkill = try XCTUnwrap(catalog.skills.first { $0.name == "apple-mail-draft" })
         let nativePrompt = catalog.augmenting("native system", for: .nativeMCP, offeredTools: ["remote_desktop_mail"])
         XCTAssertTrue(nativePrompt.contains("native system"))
-        XCTAssertTrue(nativePrompt.contains("Draft a user-requested email"))
+        XCTAssertFalse(mailSkill.body.isEmpty)
+        XCTAssertTrue(nativePrompt.contains(mailSkill.body))
         XCTAssertFalse(catalog.augmenting("native system", for: .nativeMCP, offeredTools: ["remote_desktop_calendar"])
             .contains("apple-mail-draft"))
 
         let fileOnlyPrompt = catalog.augmenting("file selector system", for: .browserFileIdentification, offeredTools: ["listFiles"])
+        let fileSkill = try XCTUnwrap(catalog.skills.first { $0.name == "file-identification" })
         XCTAssertTrue(fileOnlyPrompt.contains("file selector system"))
-        XCTAssertTrue(fileOnlyPrompt.contains("Continue a paginated query"))
+        XCTAssertFalse(fileSkill.body.isEmpty)
+        XCTAssertTrue(fileOnlyPrompt.contains(fileSkill.body))
         XCTAssertFalse(catalog.augmenting("browser executor system", for: .browserFileIdentification, offeredTools: ["navigate"])
             .contains("file-identification"))
     }
@@ -6243,8 +6452,6 @@ extension AppleFoundationMCPPlannerTests {
         XCTAssertEqual(selected.exposure.localFileKinds, [.list], "The source step remains available without exposing Mail early.")
         XCTAssertFalse(selected.exposure.allowsBrowserWorkflow,
             "Selecting a native tool cannot preserve an unchosen browser route.")
-        XCTAssertFalse(selected.instructions.contains("Draft a user-requested email"),
-            "A generic capability stage must not load the unrelated Mail skill body.")
     }
 
     @available(macOS 26.0, *)
@@ -6291,14 +6498,25 @@ extension AppleFoundationMCPPlannerTests {
                 hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
         let request = MCPProposalPlanningRequest(taskID: "mail-skill", prompt: "Draft and attach a described file.",
             tools: [focusedApp, mail], allowsBrowserWorkflow: true, localFileCatalog: source)
-        let selectedSkill = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: request)
-        XCTAssertEqual(selectedSkill.request, request)
-        XCTAssertEqual(selectedSkill.selectedToolIndices, [1], "Only the selected skill's original-index Mail dependency is exposed.")
-        XCTAssertEqual(selectedSkill.exposure.localFileKinds, [.list], "Mail's native source lookup remains available first.")
-        XCTAssertFalse(selectedSkill.exposure.allowsBrowserWorkflow)
-        XCTAssertTrue(selectedSkill.instructions.contains("Draft a user-requested email"))
-        XCTAssertFalse(selectedSkill.instructions.contains("Full native planner instructions."),
+        let noAttachment = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: request)
+        XCTAssertEqual(noAttachment.request, request)
+        XCTAssertEqual(noAttachment.mailAttachmentSource, .noAttachment)
+        XCTAssertEqual(noAttachment.selectedToolIndices, [1], "The base Mail skill keeps its original tool index.")
+        XCTAssertEqual(noAttachment.exposure.localFileKinds, [], "No-attachment Mail does not expose file lookup.")
+        XCTAssertFalse(noAttachment.exposure.allowsBrowserWorkflow)
+        XCTAssertFalse(noAttachment.instructions.contains("Full native planner instructions."),
             "The selected execution prompt must not duplicate the large global planner instructions.")
+
+        let described = try FoundationMCPPlannerCapabilityMenu.select("mail-source:described-local", for: request)
+        XCTAssertEqual(described.mailAttachmentSource, .describedLocalFile)
+        XCTAssertTrue(described.selectedToolIndices.isEmpty, "Mail stays withheld until the host selects a file.")
+        XCTAssertTrue(described.exposure.bindings.isEmpty)
+        XCTAssertEqual(described.exposure.localFileKinds, [.list])
+
+        let explicitPath = try FoundationMCPPlannerCapabilityMenu.select("mail-source:explicit-path", for: request)
+        XCTAssertEqual(explicitPath.mailAttachmentSource, .explicitUserPath)
+        XCTAssertEqual(explicitPath.selectedToolIndices, [1])
+        XCTAssertEqual(explicitPath.exposure.localFileKinds, [])
 
         let candidate = ComputerUseLocalFileCatalog.Candidate(id: "opaque-selected", displayName: "Review.pptx",
             contentTypeIdentifier: nil, fileExtension: "pptx", byteCount: 42, modifiedAt: Date(),
@@ -6308,12 +6526,22 @@ extension AppleFoundationMCPPlannerTests {
                 hasTiedSortValues: false, hasMissingSortValues: false))
         let unresolved = MCPProposalPlanningRequest(taskID: "mail-source", prompt: request.prompt,
             tools: request.tools, allowsBrowserWorkflow: true, localFileCatalog: unresolvedContext)
-        let sourceStage = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: unresolved)
+        let sourceStage = try FoundationMCPPlannerCapabilityMenu.select("mail-source:described-local", for: unresolved)
         XCTAssertEqual(sourceStage.request, unresolved)
         XCTAssertEqual(sourceStage.selectedToolIndices, [], "Mail remains withheld until native file selection completes.")
+        XCTAssertTrue(sourceStage.exposure.bindings.isEmpty)
         XCTAssertEqual(sourceStage.exposure.localFileKinds, [.list, .select])
         XCTAssertFalse(sourceStage.exposure.allowsBrowserWorkflow,
             "The dedicated skill cannot bypass a native-only source stage.")
+        XCTAssertThrowsError(try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: unresolved),
+            "The base no-attachment Mail option is closed after local discovery begins.")
+        XCTAssertThrowsError(try FoundationMCPPlannerCapabilityMenu.select("mail-source:explicit-path", for: unresolved),
+            "The explicit-path route cannot bypass a started catalog lookup.")
+        let unresolvedOptions = try FoundationMCPPlannerCapabilityMenu.options(for: unresolved)
+        XCTAssertEqual(unresolvedOptions.map(\.id).filter { $0.hasPrefix("mail-source:") },
+            ["mail-source:described-local"], "An in-progress catalog exposes no direct Mail bypass.")
+        XCTAssertThrowsError(try FoundationMCPPlannerCapabilityMenu.select("mail-source:unknown", for: request),
+            "Mail source choices must remain closed to the exact offered identifiers.")
 
         let selectedContext = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: unresolvedContext.query,
             page: unresolvedContext.page, selectedCandidate: candidate)
@@ -6322,6 +6550,7 @@ extension AppleFoundationMCPPlannerTests {
             tools: request.tools, localFileCatalog: selectedContext, hostResolvedAttachmentPaths: [selectedPath])
         let afterSelection = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: selectedRequest)
         XCTAssertEqual(afterSelection.request, selectedRequest, "The host-selected path stays unchanged through selection.")
+        XCTAssertEqual(afterSelection.mailAttachmentSource, .hostSelectedFile)
         XCTAssertEqual(afterSelection.request.hostResolvedAttachmentPaths, [selectedPath])
         XCTAssertEqual(afterSelection.selectedToolIndices, [1])
         XCTAssertEqual(afterSelection.exposure.localFileKinds, [])

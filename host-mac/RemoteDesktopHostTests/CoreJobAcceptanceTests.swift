@@ -12,6 +12,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let source_path, source_sha256, attachment_name: String?
         let source_bytes: Int?
         let to, subject, body, cloud_root, destination_path: String?
+        let send_approval_check: Bool?
         let trip: Trip?
     }
 
@@ -104,10 +105,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let taskID = try await Self.waitForSentPrompt(bridge, deadline: .now + .seconds(5))
             record["task_id"] = taskID
             let terminal = try await Self.waitForTerminal(phone, expected: expected,
-                deadline: .now + .seconds(180))
+                deadline: .now + .seconds(180), trace: trace)
             record["task_id"] = taskID
             record["raw_outcome"] = terminal.outcome
-            record["text"] = String(phone.messages.last(where: { $0.author == .assistant })?.text.prefix(12_000) ?? "")
+            record["text"] = String((phone.interventionGuidance
+                ?? phone.messages.last(where: { $0.author == .assistant })?.text ?? phone.statusText).prefix(12_000))
+            record["progress"] = phone.taskProgressHistory
             var evidence: [String: Any] = ["transport": "local-in-process", "manager_ready_before_prompt": ready,
                 "dispatch_counts": ["client_prompt": 1, "native_inputs": NSNull()]]
             evidence["draft_create_approved_count"] = terminal.approvedDrafts
@@ -115,7 +118,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             record["evidence"] = evidence
             switch job {
             case "email":
-                var email: [String: Any] = ["send_effects": NSNull()]
+                var email: [String: Any] = ["send_effects": NSNull(),
+                    "send_approval_observed": terminal.sendApprovalObserved]
                 evidence["email"] = email
                 do {
                     try await Self.exportDraft(expected: expected, trace: trace, evidence: &email)
@@ -162,15 +166,28 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             record["evidence"] = evidence
             record["elapsed_ms"] = Int(Date().timeIntervalSince(started) * 1_000)
-            if let failure = Self.failureClass(outcome: record["raw_outcome"] as? String) {
+            if let failure = Self.failureClass(outcome: record["raw_outcome"] as? String,
+                                               text: record["text"] as? String) {
                 record["failure_class"] = failure
             } else {
                 record["failure_class"] = NSNull()
             }
             record["evidence"] = evidence
         } catch {
-            if record["raw_outcome"] as? String == nil { record["raw_outcome"] = "not-started" }
-            record["failure_class"] = Self.failureClass(error: error)
+            if let client {
+                record["progress"] = client.taskProgressHistory
+                if let outcome = client.latestTerminalOutcome { record["raw_outcome"] = outcome.rawValue }
+                if let guidance = client.interventionGuidance, !guidance.isEmpty { record["text"] = guidance }
+            }
+            let terminalFailure = Self.failureClass(outcome: record["raw_outcome"] as? String,
+                                                     text: record["text"] as? String)
+            if let terminalFailure,
+               (terminalFailure == "guard-rejected" || terminalFailure == "approval-needed"
+                    || terminalFailure == "model-malformed") {
+                record["failure_class"] = terminalFailure
+            } else {
+                record["failure_class"] = Self.failureClass(error: error)
+            }
             if (record["text"] as? String)?.isEmpty != false {
                 record["text"] = String(describing: error).prefix(1_000).description
             }
@@ -195,6 +212,17 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let outcome: String
         let approvedDrafts: Int
         let deniedApprovals: Int
+        let sendApprovalObserved: Bool
+    }
+
+    func testFailureClassSeparatesGeneratedToolSchemaFailuresFromHostGuardRejection() {
+        let unable = RemoteDesktopClientCore.ComputerUseTerminalOutcome.unableToComplete.rawValue
+        XCTAssertEqual(Self.failureClass(outcome: unable,
+            text: "The local planning request is invalid: Generated arguments for example_tool did not satisfy the tool schema: A generated string is shorter than its minimum length."),
+            "model-malformed")
+        XCTAssertEqual(Self.failureClass(outcome: unable,
+            text: "The local planning request is invalid: The selected file changed during validation."),
+            "guard-rejected")
     }
 
     private static func waitForReady(_ host: HostComputerUseManager,
@@ -216,29 +244,45 @@ final class CoreJobAcceptanceTests: XCTestCase {
     }
 
     private static func waitForTerminal(_ client: RemoteDesktopClientCore.ComputerUseSessionModel,
-        expected: Expected, deadline: ContinuousClock.Instant) async throws -> Terminal {
-        var approvedDrafts = 0
+        expected: Expected, deadline: ContinuousClock.Instant, trace: URL) async throws -> Terminal {
         var deniedApprovals = 0
+        var lastObservation = ""
         while ContinuousClock.now < deadline {
+            let observation = String(describing: client.state) + client.statusText
+                + client.taskProgressHistory.joined(separator: "\n")
+            if observation != lastObservation {
+                try Self.write(["state": String(describing: client.state), "status": client.statusText,
+                    "terminal": client.latestTerminalOutcome?.rawValue ?? "",
+                    "intervention": client.interventionGuidance ?? "",
+                    "assistant": String(client.messages.last(where: { $0.author == .assistant })?.text.prefix(12_000) ?? ""),
+                    "progress": client.taskProgressHistory],
+                    to: trace.appendingPathComponent("client-state.json"))
+                lastObservation = observation
+            }
             if case .approvalRequired(let request) = client.state {
                 let details = request.details ?? []
                 let labels = details.map(\.label)
                 let fields = Set(labels).count == labels.count
                     ? Dictionary(uniqueKeysWithValues: details.map { ($0.label, $0.value) }) : [:]
-                let exactDraft = approvedDrafts == 0 && expected.job == "email"
-                    && request.confirmLabel == "Create draft"
-                    && fields["To"] == expected.to && fields["Subject"] == expected.subject
+                let exactFields = fields["To"] == expected.to && fields["Subject"] == expected.subject
                     && fields["Message"] == expected.body && fields["Attachment 1"] == expected.source_path
                     && fields["CC"] == nil && fields["BCC"] == nil
                     && fields["Attachment 2"] == nil && fields["Attachment 3"] == nil
                     && fields["Attachment 4"] == nil && fields["Attachment 5"] == nil
-                if exactDraft { approvedDrafts += 1 }
-                else { deniedApprovals += 1 }
-                client.respondToApproval(request, approved: exactDraft)
+                if expected.send_approval_check == true, expected.job == "email",
+                   request.confirmLabel == "Send email", exactFields {
+                    // Observe the exact approval and leave it pending. No
+                    // approval response can grant permission to send.
+                    return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
+                        deniedApprovals: deniedApprovals, sendApprovalObserved: true)
+                }
+                deniedApprovals += 1
+                client.respondToApproval(request, approved: false)
             }
-            if !client.hasActivePrompt, let outcome = client.latestTerminalOutcome {
-                return Terminal(outcome: outcome.rawValue, approvedDrafts: approvedDrafts,
-                    deniedApprovals: deniedApprovals)
+            if let outcome = client.latestTerminalOutcome,
+               !client.hasActivePrompt || outcome == .userInterventionRequired {
+                return Terminal(outcome: outcome.rawValue, approvedDrafts: 0,
+                    deniedApprovals: deniedApprovals, sendApprovalObserved: false)
             }
             try await Task.sleep(for: .milliseconds(100))
         }
@@ -249,7 +293,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence: inout [String: Any]) async throws {
         guard let subject = expected.subject else { throw HarnessError.missingEvidence("Missing expected draft subject") }
         let script = #"""
-        const Mail = Application("Mail");
+        const Mail = Application("/System/Applications/Mail.app");
         function run(argv) {
             const wanted = argv[0];
             const drafts = Mail.draftsMailbox.messages.whose({subject: wanted})();
@@ -304,7 +348,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             if let result = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
                 json = result
-                if (result["draft_count"] as? Int ?? 0) > 0 || (result["sent_count"] as? Int ?? 0) > 0 { break }
+                if expected.send_approval_check == true || (result["draft_count"] as? Int ?? 0) > 0
+                    || (result["sent_count"] as? Int ?? 0) > 0 { break }
             }
             try await Task.sleep(for: .seconds(1))
         }
@@ -318,6 +363,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence["draft_count"] = draftCount
         evidence["draft_visible_count"] = (json["visible"] as? Bool == true) ? visibleCount : 0
         evidence["send_effects"] = sentCount
+        if expected.send_approval_check == true {
+            guard sentCount == 0 else { throw HarnessError.missingEvidence("The Send approval was bypassed") }
+            return
+        }
         guard draftCount == 1, visibleCount == 1, json["visible"] as? Bool == true,
               sentCount == 0, let source = json["source"] as? String else {
             throw HarnessError.missingEvidence("Mail did not retain exactly one visible unsent draft; sent_matches=\(sentCount)")
@@ -402,9 +451,18 @@ final class CoreJobAcceptanceTests: XCTestCase {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func failureClass(outcome: String?) -> String? {
+    private static func failureClass(outcome: String?, text: String?) -> String? {
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.taskCompleted.rawValue { return nil }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue { return "approval-needed" }
+        if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.unableToComplete.rawValue {
+            if text?.contains("Generated arguments for ") == true,
+               text?.contains(" did not satisfy the tool schema:") == true {
+                return "model-malformed"
+            }
+            if text?.contains("The local planning request is invalid:") == true {
+                return "guard-rejected"
+            }
+        }
         return "other"
     }
 

@@ -1849,12 +1849,15 @@ struct ComputerUseMCPBrowserStepPlanner: Sendable {
         let query: ComputerUseLocalFileCatalog.Query
         let page: ComputerUseLocalFileCatalog.Page
         let selectedCandidate: ComputerUseLocalFileCatalog.Candidate?
+        let nameFilterWasBroadened: Bool
 
         init(query: ComputerUseLocalFileCatalog.Query, page: ComputerUseLocalFileCatalog.Page,
              selectedCandidate: ComputerUseLocalFileCatalog.Candidate? = nil,
+             nameFilterWasBroadened: Bool = false,
              inventoryState: InventoryState = .available) {
             self.inventoryState = inventoryState
             self.query = query; self.page = page; self.selectedCandidate = selectedCandidate
+            self.nameFilterWasBroadened = nameFilterWasBroadened
         }
     }
     private struct ReadingEvidenceBlock {

@@ -465,6 +465,176 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
         await session.stop()
     }
 
+    func testDraftOnlyCallRequiresSavedDraftReceipt() async throws {
+        let runner = RecordingMailAutomationRunner(draftSavedOverride: false)
+        let session = RemoteDesktopMailMCPClientSession(
+            processGeneration: 10,
+            runner: runner)
+        _ = try await session.start()
+        let tools = try await session.listAllowedTools()
+        let tool = try XCTUnwrap(tools.first)
+        let call = try tool.makeCall(
+            taskID: "draft-save-missing",
+            arguments: mailArguments(sendNow: false))
+
+        let result = try await session.execute(call)
+        XCTAssertTrue(result.isError)
+        XCTAssertFalse(result.text.contains("opened visibly"))
+        let invocations = await runner.invocationCount()
+        XCTAssertEqual(invocations, 1)
+        await session.stop()
+    }
+
+    func testSavedMIMEBodyVerifierComparesRenderedTextExactly() throws {
+        func mimeSource(html: String, charset: String, transferEncoding: String) -> String {
+            [
+                "MIME-Version: 1.0",
+                "Content-Type: multipart/alternative; boundary=\"alt\"",
+                "",
+                "--alt",
+                "Content-Type: text/plain; charset=utf-8",
+                "Content-Transfer-Encoding: 7bit",
+                "",
+                "",
+                "--alt",
+                "Content-Type: multipart/related; type=\"text/html\"; boundary=\"related\"",
+                "",
+                "--related",
+                "Content-Type: text/html; charset=\(charset)",
+                "Content-Transfer-Encoding: \(transferEncoding)",
+                "",
+                html,
+                "--related--",
+                "--alt--",
+                "",
+            ].joined(separator: "\r\n")
+        }
+
+        let capturedHTML = "<html aria-label=\"message body\"><head></head><body dir=\"auto\"><div class=\"Apple-Mail-URLShareUserContentTopClass\"><br></div><div class=\"Apple-Mail-URLShareWrapperClass\"><blockquote><span class=\"Apple-string-attachment\"><object type=\"application/x-apple-msg-attachment\" width=\"100\" data=\"cid:fixture\"></object></span><p><font>Please review the attached Board Review deck.<span class=\"Apple-converted-space\">&nbsp;</span></font></p>\n</blockquote></div></body></html>"
+        let unicodeHTML = "<html><head></head><body><div><blockquote><p><font>R=C3=A9sum=C3=A9 =F0=9F=98=80<br>second line<span class=3D\"Apple-converted-space\">&nbsp;</span></font></p></blockquote></div></body></html>"
+        let spacesHTML = "<html><head></head><body><div><blockquote><p><font><span class=\"Apple-converted-space\">&nbsp;</span><span class=\"Apple-converted-space\">&nbsp;</span>keep leading<span class=\"Apple-converted-space\">&nbsp;</span><span class=\"Apple-converted-space\">&nbsp;</span></font></p></blockquote></div></body></html>"
+        let cases: [[String]] = [
+            [mimeSource(html: capturedHTML, charset: "us-ascii", transferEncoding: "7bit"),
+             "Please review the attached Board Review deck."],
+            [mimeSource(html: unicodeHTML, charset: "utf-8", transferEncoding: "quoted-printable"),
+             "Résumé 😀\nsecond line"],
+            [mimeSource(html: spacesHTML, charset: "us-ascii", transferEncoding: "7bit"),
+             "  keep leading "],
+            [mimeSource(html: capturedHTML, charset: "us-ascii", transferEncoding: "7bit"),
+             "Please review"],
+        ]
+        let casesData = try JSONSerialization.data(withJSONObject: cases)
+        let script = """
+        ObjC.import('Foundation');
+        ObjC.import('AppKit');
+        \(RemoteDesktopMailJXA.savedBodyVerificationSource)
+        const inputData = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
+        const inputText = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(inputData, $.NSUTF8StringEncoding));
+        const checks = JSON.parse(inputText);
+        JSON.stringify(checks.map(item => savedBodyMatches({source: function() { return item[0]; }}, item[1])));
+        """
+
+        let process = Process()
+        process.executableURL = RemoteDesktopMailJXA.executableURL
+        process.arguments = ["-l", "JavaScript", "-e", script]
+        let output = Pipe()
+        let input = Pipe()
+        process.standardOutput = output
+        process.standardInput = input
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        input.fileHandleForWriting.write(casesData)
+        input.fileHandleForWriting.closeFile()
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+        guard !process.isRunning else {
+            process.terminate()
+            XCTFail("The bounded MIME body decoder exceeded its test deadline")
+            return
+        }
+        let resultData = output.fileHandleForReading.readDataToEndOfFile()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let matches = try XCTUnwrap(JSONDecoder().decode([Bool].self, from: resultData))
+        XCTAssertEqual(matches, [true, true, true, false])
+    }
+
+    func testSavedDraftReadbackRetriesTransientLookupAndRejectsMismatches() throws {
+        let script = """
+        ObjC.import('Foundation');
+        ObjC.import('AppKit');
+        \(RemoteDesktopMailJXA.savedBodyVerificationSource)
+        const request = {subject: 'M0 draft', body: 'Exact body',
+            to: ['dana@example.com'], cc: [], bcc: []};
+        const expectedNames = ['Board Review.pptx'];
+        const matchingSource = 'MIME-Version: 1.0\\r\\nContent-Type: text/plain; charset=utf-8\\r\\n'
+            + 'Content-Transfer-Encoding: 7bit\\r\\n\\r\\nExact body';
+        function draft(overrides) {
+            const value = Object.assign({
+                id: function() { return 'new-id'; },
+                subject: function() { return 'M0 draft'; },
+                source: function() { return matchingSource; },
+                toRecipients: function() { return [{address: function() { return 'dana@example.com'; }}]; },
+                ccRecipients: function() { return []; },
+                bccRecipients: function() { return []; },
+                mailAttachments: function() { return [{name: function() { return 'Board Review.pptx'; }}]; }
+            }, overrides || {});
+            return value;
+        }
+        function mailFor(value, behavior) {
+            return {draftsMailbox: {messages: {whose: function(criteria) {
+                if (criteria.subject !== request.subject) throw new Error('wrong subject query');
+                return function() {
+                    behavior.calls += 1;
+                    if (behavior.throwFirst && behavior.calls === 1) throw new Error('temporary Mail read');
+                    return behavior.oldOnly ? [Object.assign({}, value, {id: function() { return 'old-id'; }})] : [value];
+                };
+            }}}};
+        }
+        const transient = {calls: 0, throwFirst: true};
+        const retryMail = mailFor(draft(), transient);
+        const first = verifiedSavedDraftAttachmentNames(retryMail, request, ['old-id'], expectedNames);
+        const second = verifiedSavedDraftAttachmentNames(retryMail, request, ['old-id'], expectedNames);
+        const wrongBody = verifiedSavedDraftAttachmentNames(
+            mailFor(draft({source: function() { return matchingSource.replace('Exact body', 'Other body'); }}), {calls: 0}),
+            request, ['old-id'], expectedNames);
+        const wrongRecipient = verifiedSavedDraftAttachmentNames(
+            mailFor(draft({toRecipients: function() { return [{address: function() { return 'other@example.com'; }}]; }}), {calls: 0}),
+            request, ['old-id'], expectedNames);
+        const oldOnly = verifiedSavedDraftAttachmentNames(
+            mailFor(draft(), {calls: 0, oldOnly: true}), request, ['old-id'], expectedNames);
+        JSON.stringify({first: first, second: second, wrongBody: wrongBody,
+            wrongRecipient: wrongRecipient, oldOnly: oldOnly, attempts: transient.calls});
+        """
+
+        let process = Process()
+        process.executableURL = RemoteDesktopMailJXA.executableURL
+        process.arguments = ["-l", "JavaScript", "-e", script]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        let deadline = Date().addingTimeInterval(5)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.025)
+        }
+        guard !process.isRunning else {
+            process.terminate()
+            XCTFail("The bounded saved-draft readback fixture exceeded its test deadline")
+            return
+        }
+        let result = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: output.fileHandleForReading.readDataToEndOfFile()) as? [String: Any])
+        XCTAssertEqual(process.terminationStatus, 0)
+        XCTAssertTrue(result["first"] is NSNull)
+        XCTAssertEqual(result["second"] as? [String], ["Board Review.pptx"])
+        XCTAssertTrue(result["wrongBody"] is NSNull)
+        XCTAssertTrue(result["wrongRecipient"] is NSNull)
+        XCTAssertTrue(result["oldOnly"] is NSNull)
+        XCTAssertEqual(result["attempts"] as? Int, 2)
+    }
+
     func testMailPreflightDenialRetainsPreparedApprovalWithoutClaimingOrDispatching() async throws {
         let root = canonicalTemporaryDirectory
             .appendingPathComponent("MailPreflightApproval-\(UUID().uuidString)", isDirectory: true)
@@ -1271,6 +1441,11 @@ private struct RecordedMailAutomationPayload: Codable, Equatable, Sendable {
 
 private actor RecordingMailAutomationRunner: RemoteDesktopMailAutomationRunning {
     private var values: [Data] = []
+    private let draftSavedOverride: Bool?
+
+    init(draftSavedOverride: Bool? = nil) {
+        self.draftSavedOverride = draftSavedOverride
+    }
 
     func run(payload: Data) async throws -> RemoteDesktopMailAutomationReceipt {
         values.append(payload)
@@ -1278,7 +1453,10 @@ private actor RecordingMailAutomationRunner: RemoteDesktopMailAutomationRunning 
         let names = (object?["attachments"] as? [[String: Any]] ?? []).compactMap {
             $0["file_name"] as? String
         }
-        return RemoteDesktopMailAutomationReceipt(attachmentNames: names)
+        let sendNow = object?["send_now"] as? Bool ?? false
+        return RemoteDesktopMailAutomationReceipt(
+            attachmentNames: names,
+            draftSaved: draftSavedOverride ?? !sendNow)
     }
 
     func invocations() -> [Data] { values }

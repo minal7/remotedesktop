@@ -207,28 +207,23 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
     }
 
     func testActualControlRequestLoadsReviewedBrowserFormSkill() throws {
+        let input = makeInput()
         let request = try makePlanner(PlannerTransport(reply: try envelope(
             #"{"outcome":"visualFallback","control_id":null,"explanation":"Use the current screenshot."}"#)))
-            .makeRequest(input: makeInput(), page: page(controls: []))
+            .makeRequest(input: input, page: page(controls: []))
         let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         let system = try XCTUnwrap(messages.first?["content"] as? String)
 
-        XCTAssertTrue(system.contains("Skill: browser-form-entry"))
-        XCTAssertTrue(system.localizedCaseInsensitiveContains("focused"))
-        XCTAssertTrue(system.localizedCaseInsensitiveContains("draft"))
-        XCTAssertTrue(system.contains("Send"))
-        let expandedChoiceRule = try XCTUnwrap(system.range(of: "Matching typed text in an expanded editable combobox is not a completed field."))
-        let genericFieldRule = try XCTUnwrap(system.range(of: "First determine which requested field remains unfinished"))
-        XCTAssertLessThan(expandedChoiceRule.lowerBound, genericFieldRule.lowerBound)
-        XCTAssertTrue(system.contains("The immediate next action must complete its displayed exact choice or one Tab step"))
-        XCTAssertTrue(system.contains("do not focus or type in another field until a fresh observation shows the choice closed and committed"))
-        XCTAssertTrue(system.contains("the focused City combobox contains “Paris” and is expanded"))
-        XCTAssertTrue(system.contains("Only after any expanded choice is committed, use pressControl for an enabled observed_control in the next field"))
-        XCTAssertTrue(system.contains("Use visualFallback to type only when the requested field is currently focused"))
-        XCTAssertTrue(system.contains("Preserve the complete exact requested values in all remaining completion criteria"))
+        let catalog = ComputerUseSkillCatalog.load()
+        let formInstructions = try XCTUnwrap(catalog.instructions(for: .defaultBrowserControl, offeredTools: ["computer_use"]))
+        XCTAssertTrue(system.contains(formInstructions), "The request must include the reviewed bundled skill body")
         XCTAssertFalse(system.contains("Skill: apple-mail-draft"))
         XCTAssertFalse(system.contains("Skill: file-identification"))
+
+        let contextText = try XCTUnwrap(messages.last?["content"] as? String)
+        let context = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contextText.utf8)) as? [String: Any])
+        XCTAssertEqual(context["original_goal"] as? String, input.goal)
     }
 
     func testRequestSelectsOnlySafeCurrentTextEntryAndButtonControls() throws {

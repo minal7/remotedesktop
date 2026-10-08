@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import OSLog
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -455,6 +456,32 @@ enum RemoteDesktopMailAttachmentFileReader {
 
 struct RemoteDesktopMailAutomationReceipt: Equatable, Sendable {
     let attachmentNames: [String]
+    let draftSaved: Bool
+}
+
+enum RemoteDesktopMailAutomationStage: String, Decodable, Equatable, Sendable {
+    case readRequest = "read_request"
+    case activateMail = "activate_mail"
+    case createMessage = "create_message"
+    case setMessageFields = "set_message_fields"
+    case prepareStaging = "prepare_staging"
+    case stageAttachment = "stage_attachment"
+    case attachFile = "attach_file"
+    case verifyAttachedNames = "verify_attached_names"
+    case sendMessage = "send_message"
+    case saveDraft = "save_draft"
+    case verifySavedDraft = "verify_saved_draft"
+    case validateReceipt = "validate_receipt"
+    case scriptProcess = "script_process"
+    case complete
+}
+
+struct RemoteDesktopMailAutomationFailure: Error, Equatable, Sendable, LocalizedError {
+    let stage: RemoteDesktopMailAutomationStage
+
+    var errorDescription: String? {
+        "Mail automation stopped at stage \(stage.rawValue)."
+    }
 }
 
 protocol RemoteDesktopMailAutomationRunning: Sendable {
@@ -466,8 +493,187 @@ protocol RemoteDesktopMailAutomationRunning: Sendable {
 enum RemoteDesktopMailJXA {
     static let executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
 
+    static let savedBodyVerificationSource = #"""
+    function mimeHeader(headers, name) {
+        const unfolded = headers.replace(/\r?\n[ \t]+/g, " ");
+        const prefix = name.toLowerCase() + ":";
+        const line = unfolded.split(/\r?\n/).find(item => item.toLowerCase().indexOf(prefix) === 0);
+        return line ? line.slice(prefix.length).trim() : "";
+    }
+
+    function mimeEntityParts(body, boundary, visit) {
+        const marker = "--" + boundary;
+        let markerAt = body.indexOf(marker);
+        let count = 0;
+        while (markerAt >= 0 && count < 12) {
+            const contentAt = markerAt + marker.length;
+            if (body.substr(contentAt, 2) === "--") break;
+            let partStart = contentAt;
+            if (body.substr(partStart, 2) === "\r\n") partStart += 2;
+            else if (body.charAt(partStart) === "\n") partStart += 1;
+
+            const crlfNext = body.indexOf("\r\n" + marker, partStart);
+            const lfNext = body.indexOf("\n" + marker, partStart);
+            let partEnd = -1;
+            let nextMarker = -1;
+            if (crlfNext >= 0 && (lfNext < 0 || crlfNext <= lfNext)) {
+                partEnd = crlfNext;
+                nextMarker = crlfNext + 2;
+            } else if (lfNext >= 0) {
+                partEnd = lfNext;
+                nextMarker = lfNext + 1;
+            }
+            if (partEnd < 0) break;
+            const part = body.substring(partStart, partEnd);
+            if (visit(part) === true) return true;
+            markerAt = nextMarker;
+            count += 1;
+        }
+        return false;
+    }
+
+    function decodeMimeText(body, encoding, charset) {
+        const transfer = encoding.toLowerCase();
+        let text = body;
+        if (transfer === "quoted-printable") {
+            let encoded = "";
+            for (let index = 0; index < body.length; index += 1) {
+                const code = body.charCodeAt(index);
+                if (code === 61) {
+                    if (body.charAt(index + 1) === "\r" && body.charAt(index + 2) === "\n") {
+                        index += 2;
+                        continue;
+                    }
+                    if (body.charAt(index + 1) === "\n") { index += 1; continue; }
+                    const pair = body.substr(index + 1, 2);
+                    if (!/^[0-9a-f]{2}$/i.test(pair)) return null;
+                    encoded += "%" + pair;
+                    index += 2;
+                } else {
+                    if (code > 127) return null;
+                    encoded += "%" + code.toString(16).padStart(2, "0");
+                }
+            }
+            try { text = decodeURIComponent(encoded); } catch (_) { return null; }
+        } else if (transfer === "base64") {
+            const data = $.NSData.alloc.initWithBase64EncodedStringOptions($(body.replace(/\s/g, "")), 0);
+            if (!data) return null;
+            const decoded = $.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding);
+            if (!decoded) return null;
+            text = ObjC.unwrap(decoded);
+        } else if (transfer !== "7bit" && transfer !== "8bit" && transfer !== "binary" && transfer !== "") {
+            return null;
+        }
+
+        const encodingValue = charset.toLowerCase();
+        if (encodingValue && encodingValue !== "utf-8" && encodingValue !== "utf8"
+            && encodingValue !== "us-ascii" && encodingValue !== "ascii") return null;
+        return text;
+    }
+
+    function findMimeText(raw, depth, budget) {
+        if (depth > 5 || budget.parts >= 24 || raw.length > 192 * 1024 * 1024) return null;
+        const separator = raw.match(/\r?\n\r?\n/);
+        if (!separator || separator.index === undefined) return null;
+        const headerText = raw.substring(0, separator.index);
+        const body = raw.substring(separator.index + separator[0].length);
+        const contentType = mimeHeader(headerText, "Content-Type");
+        if (/^multipart\//i.test(contentType)) {
+            const boundaryMatch = contentType.match(/boundary\s*=\s*(?:"([^"]+)"|([^;\s]+))/i);
+            if (!boundaryMatch) return null;
+            let plain = null;
+            let html = null;
+            mimeEntityParts(body, boundaryMatch[1] || boundaryMatch[2], part => {
+                budget.parts += 1;
+                const found = findMimeText(part, depth + 1, budget);
+                if (!found) return false;
+                if (found.type === "text/html" && !html) html = found;
+                if (found.type === "text/plain" && !plain) plain = found;
+                return !!html;
+            });
+            return html || plain;
+        }
+
+        const mediaType = contentType.split(";")[0].trim().toLowerCase();
+        if (mediaType !== "text/html" && mediaType !== "text/plain") return null;
+        const charsetMatch = contentType.match(/charset\s*=\s*(?:"([^"]+)"|([^;\s]+))/i);
+        const charset = charsetMatch ? (charsetMatch[1] || charsetMatch[2]) : "utf-8";
+        if (body.length > 64 * 1024) return null;
+        const decoded = decodeMimeText(body, mimeHeader(headerText, "Content-Transfer-Encoding"), charset);
+        return decoded === null ? null : {type: mediaType, text: decoded, charset: charset};
+    }
+
+    function savedBodyMatches(message, expectedBody) {
+        const source = String(message.source());
+        if (source.length > 192 * 1024 * 1024) return false;
+        const found = findMimeText(source, 0, {parts: 0});
+        if (!found) return false;
+        let rendered = found.text;
+        if (found.type === "text/html") {
+            rendered = rendered.replace(/<div class="Apple-Mail-URLShareUserContentTopClass"><br><\/div>/g, "");
+            rendered = rendered.replace(
+                /<span class="Apple-string-attachment">\s*(?:<object\b[^>]*><\/object>|<img\b[^>]*\/?>)\s*<\/span>/g,
+                "");
+            // This single terminal NBSP is Mail's cursor/layout marker, not
+            // requested text. Earlier converted-space spans remain meaningful.
+            rendered = rendered.replace(
+                /<span class="Apple-converted-space">&nbsp;<\/span>(?=(?:<\/(?:font|p|blockquote|div|body)>|\s)*<\/body>\s*<\/html>\s*$)/i,
+                "");
+            const charset = found.charset.toLowerCase();
+            const metaCharset = charset === "us-ascii" || charset === "ascii" ? "us-ascii" : "utf-8";
+            if (!/<meta\b[^>]*charset\s*=/i.test(rendered)) {
+                if (/<head\b[^>]*>/i.test(rendered)) {
+                    rendered = rendered.replace(/<head\b[^>]*>/i, match => match + "<meta charset=\"" + metaCharset + "\">");
+                } else {
+                    rendered = "<meta charset=\"" + metaCharset + "\">" + rendered;
+                }
+            }
+            const htmlData = $(rendered).dataUsingEncoding($.NSUTF8StringEncoding);
+            const htmlOptions = $.NSDictionary.dictionaryWithObjectForKey(
+                $.NSHTMLTextDocumentType, $.NSDocumentTypeDocumentAttribute);
+            const richText = $.NSAttributedString.alloc.initWithDataOptionsDocumentAttributesError(
+                htmlData, htmlOptions, null, null);
+            if (!richText) return false;
+            rendered = ObjC.unwrap(richText.string).replace(/\r\n?/g, "\n").replace(/\u2028/g, "\n");
+            // AppKit adds one terminal newline when closing the HTML block.
+            if (rendered.endsWith("\n")) rendered = rendered.slice(0, -1);
+        } else {
+            rendered = rendered.replace(/\r\n?/g, "\n");
+        }
+        return rendered === String(expectedBody).replace(/\r\n?/g, "\n");
+    }
+
+    function verifiedSavedDraftAttachmentNames(mail, request, previousDraftIDs, expectedNames) {
+        try {
+            const matchingSubjects = mail.draftsMailbox.messages.whose({subject: request.subject})();
+            const newDrafts = matchingSubjects.filter(message =>
+                previousDraftIDs.indexOf(message.id()) === -1);
+            if (newDrafts.length !== 1) return null;
+
+            const draft = newDrafts[0];
+            const recipients = draft.toRecipients().map(item => String(item.address()));
+            const ccRecipients = draft.ccRecipients().map(item => String(item.address()));
+            const bccRecipients = draft.bccRecipients().map(item => String(item.address()));
+            const savedNames = draft.mailAttachments().map(item => String(item.name()));
+            if (String(draft.subject()) !== request.subject
+                || !savedBodyMatches(draft, request.body)
+                || JSON.stringify(recipients) !== JSON.stringify(request.to)
+                || JSON.stringify(ccRecipients) !== JSON.stringify(request.cc)
+                || JSON.stringify(bccRecipients) !== JSON.stringify(request.bcc)
+                || JSON.stringify(savedNames) !== JSON.stringify(expectedNames)) return null;
+            return savedNames;
+        } catch (_) {
+            // Mail can briefly reject a getter while its save is settling.
+            return null;
+        }
+    }
+
+    """#
+
     static let source = #"""
     ObjC.import('Foundation');
+    ObjC.import('AppKit');
+    \#(savedBodyVerificationSource)
 
     function readRequest() {
         const data = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
@@ -478,78 +684,100 @@ enum RemoteDesktopMailJXA {
     }
 
     function run() {
-        const request = readRequest();
-        const mail = Application('Mail');
-        mail.activate();
-
-        const outgoingMessage = mail.OutgoingMessage({
-            subject: request.subject,
-            content: request.body,
-            visible: true
-        });
-        mail.outgoingMessages.push(outgoingMessage);
-
-        // The approved body is exact: never append a configured Mail signature.
-        outgoingMessage.messageSignature = null;
-        request.to.forEach(address =>
-            outgoingMessage.toRecipients.push(mail.ToRecipient({address: address}))
-        );
-        request.cc.forEach(address =>
-            outgoingMessage.ccRecipients.push(mail.CcRecipient({address: address}))
-        );
-        request.bcc.forEach(address =>
-            outgoingMessage.bccRecipients.push(mail.BccRecipient({address: address}))
-        );
-        outgoingMessage.visible = true;
-
+        let stage = "read_request";
         const stagedPaths = [];
-        const expectedNames = (request.attachments || []).map(item => item.file_name);
-        const temporaryDirectory = ObjC.unwrap($.NSTemporaryDirectory());
-        const fileManager = $.NSFileManager.defaultManager;
-        const privateDirectory = temporaryDirectory + "/RemoteDesktopMail-" + ObjC.unwrap($.NSUUID.UUID.UUIDString);
-        const privateAttributes = $.NSDictionary.dictionaryWithObjectForKey($(448), $('NSFilePosixPermissions'));
-        if (!fileManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
-            $(privateDirectory), false, privateAttributes, null)) {
-            throw new Error("Mail could not create a private attachment staging directory");
-        }
+        let fileManager = null;
+        let privateDirectory = null;
         try {
+            const request = readRequest();
+            const mail = Application('/System/Applications/Mail.app');
+            stage = "activate_mail";
+            mail.activate();
+
+            // Mail's outgoing and saved message IDs use different identifiers.
+            // Snapshot matching drafts before creating this composer instead.
+            const previousDraftIDs = mail.draftsMailbox.messages.whose({subject: request.subject})()
+                .map(message => message.id());
+
+            stage = "create_message";
+            const outgoingMessage = mail.OutgoingMessage({
+                subject: request.subject,
+                content: request.body,
+                visible: true
+            });
+            mail.outgoingMessages.push(outgoingMessage);
+
+            stage = "set_message_fields";
+            // The approved body is exact: never append a configured Mail signature.
+            outgoingMessage.messageSignature = null;
+            request.to.forEach(address =>
+                outgoingMessage.toRecipients.push(mail.ToRecipient({address: address}))
+            );
+            request.cc.forEach(address =>
+                outgoingMessage.ccRecipients.push(mail.CcRecipient({address: address}))
+            );
+            request.bcc.forEach(address =>
+                outgoingMessage.bccRecipients.push(mail.BccRecipient({address: address}))
+            );
+            outgoingMessage.visible = true;
+            // Mail can clear an outgoing body's contents while recipients and
+            // signature settings initialize; restore the approved exact body.
+            outgoingMessage.content = request.body;
+
+            const expectedNames = (request.attachments || []).map(item => item.file_name);
+            const temporaryDirectory = ObjC.unwrap($.NSTemporaryDirectory());
+            fileManager = $.NSFileManager.defaultManager;
+            privateDirectory = temporaryDirectory + "/RemoteDesktopMail-" + ObjC.unwrap($.NSUUID.UUID.UUIDString);
+            const privateAttributes = $.NSDictionary.dictionaryWithObjectForKey($(448), $('NSFilePosixPermissions'));
+            stage = "prepare_staging";
+            if (!fileManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+                $(privateDirectory), false, privateAttributes, null)) {
+                throw new Error("staging directory");
+            }
+
             (request.attachments || []).forEach((item, index) => {
+                stage = "stage_attachment";
                 const itemDirectory = privateDirectory + "/" + index;
                 if (!fileManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
                     $(itemDirectory), false, privateAttributes, null)) {
-                    throw new Error("Mail could not create an attachment staging directory");
+                    throw new Error("attachment directory");
                 }
                 const path = itemDirectory + "/" + item.file_name;
                 const bytes = $.NSData.alloc.initWithBase64EncodedStringOptions($(item.base64_data), 0);
                 if (!bytes || !bytes.writeToFileAtomically($(path), true)) {
-                    throw new Error("Mail could not stage an approved attachment");
+                    throw new Error("attachment bytes");
                 }
                 const fileAttributes = $.NSDictionary.dictionaryWithObjectForKey($(256), $('NSFilePosixPermissions'));
                 if (!fileManager.setAttributesOfItemAtPathError(fileAttributes, $(path), null)) {
-                    throw new Error("Mail could not protect an approved attachment staging file");
+                    throw new Error("attachment permissions");
                 }
                 stagedPaths.push(path);
+                stage = "attach_file";
                 outgoingMessage.content.attachments.push(mail.Attachment({fileName: Path(path)}));
             });
 
-            const deadline = Date.now() + 8_000;
             let observedNames = [];
-            while (Date.now() < deadline) {
-                observedNames = outgoingMessage.content.attachments().map(item => {
-                    const path = item.fileName();
-                    return ObjC.unwrap($.NSURL.fileURLWithPath($(path)).lastPathComponent);
-                });
-                if (observedNames.length === expectedNames.length
-                    && observedNames.every((name, index) => name === expectedNames[index])) break;
-                delay(0.05);
-            }
-            if (observedNames.length !== expectedNames.length
-                || !observedNames.every((name, index) => name === expectedNames[index])) {
-                throw new Error("Mail did not confirm the exact approved attachments");
-            }
-
             if (request.send_now) {
+                stage = "verify_attached_names";
+                const deadline = Date.now() + 8_000;
+                while (Date.now() < deadline) {
+                    observedNames = outgoingMessage.content.attachments().map(item => {
+                        // Mail declares attachment.fileName as a file/Path, not a string.
+                        const path = String(item.fileName());
+                        const url = $.NSURL.fileURLWithPath($(path));
+                        return ObjC.unwrap(url.lastPathComponent);
+                    });
+                    if (observedNames.length === expectedNames.length
+                        && observedNames.every((name, index) => name === expectedNames[index])) break;
+                    delay(0.05);
+                }
+                if (observedNames.length !== expectedNames.length
+                    || !observedNames.every((name, index) => name === expectedNames[index])) {
+                    throw new Error("Mail did not confirm the exact approved attachments");
+                }
+
                 // Keep Mail in front while the approved send runs.
+                stage = "send_message";
                 mail.activate();
                 $.NSThread.sleepForTimeInterval(0.2);
                 const sentSuccessfully = outgoingMessage.send();
@@ -558,12 +786,40 @@ enum RemoteDesktopMailJXA {
                 }
                 mail.activate();
             } else {
+                stage = "save_draft";
+                outgoingMessage.save();
+                // Save keeps the same outgoing composer available for review.
+                outgoingMessage.visible = true;
+                mail.activate();
+
+                stage = "verify_saved_draft";
+                const draftDeadline = Date.now() + 10_000;
+                let saved = false;
+                while (Date.now() < draftDeadline) {
+                    const savedNames = verifiedSavedDraftAttachmentNames(
+                        mail, request, previousDraftIDs, expectedNames);
+                    if (savedNames !== null) {
+                        saved = true;
+                        observedNames = savedNames;
+                        break;
+                    }
+                    delay(0.1);
+                }
+                if (!saved) throw new Error("draft readback");
                 mail.activate();
             }
-            return JSON.stringify({attachment_names: observedNames});
+            stage = "complete";
+            return JSON.stringify({success: true, stage: stage,
+                attachment_names: observedNames, draft_saved: !request.send_now});
+        } catch (_) {
+            // Stable stage codes are diagnostic only; never return exception text or request data.
+            return JSON.stringify({success: false, stage: stage,
+                attachment_names: [], draft_saved: false});
         } finally {
-            stagedPaths.forEach(path => fileManager.removeItemAtPathError($(path), null));
-            fileManager.removeItemAtPathError($(privateDirectory), null);
+            if (fileManager) {
+                stagedPaths.forEach(path => fileManager.removeItemAtPathError($(path), null));
+                if (privateDirectory) fileManager.removeItemAtPathError($(privateDirectory), null);
+            }
         }
     }
     """#
@@ -572,11 +828,21 @@ enum RemoteDesktopMailJXA {
 }
 
 private struct RemoteDesktopMailAutomationReceiptPayload: Decodable {
+    let success: Bool
+    let stage: String
     let attachmentNames: [String]
-    enum CodingKeys: String, CodingKey { case attachmentNames = "attachment_names" }
+    let draftSaved: Bool
+    enum CodingKeys: String, CodingKey {
+        case success, stage
+        case attachmentNames = "attachment_names"
+        case draftSaved = "draft_saved"
+    }
 }
 
 actor SystemRemoteDesktopMailAutomationRunner: RemoteDesktopMailAutomationRunning {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.threadmark.RemoteDesktopHost",
+        category: "MailAutomation")
     private var activeProcess: Process?
 
     func run(payload: Data) async throws -> RemoteDesktopMailAutomationReceipt {
@@ -635,16 +901,28 @@ actor SystemRemoteDesktopMailAutomationRunner: RemoteDesktopMailAutomationRunnin
         }
         try Task.checkCancellation()
         guard status == 0 else {
-            throw MCPClientError.toolFailed(
-                "Mail did not accept the local automation action (status \(status)).")
+            Self.logFailure(.scriptProcess)
+            throw RemoteDesktopMailAutomationFailure(stage: .scriptProcess)
         }
         let output = standardOutput.fileHandleForReading.readDataToEndOfFile()
         guard output.count <= 4_096,
               let receipt = try? JSONDecoder().decode(RemoteDesktopMailAutomationReceiptPayload.self, from: output),
+              let stage = RemoteDesktopMailAutomationStage(rawValue: receipt.stage),
               receipt.attachmentNames.count <= RemoteDesktopMailRequest.maximumAttachments else {
-            throw MCPClientError.toolFailed("Mail returned no bounded attachment confirmation.")
+            Self.logFailure(.validateReceipt)
+            throw RemoteDesktopMailAutomationFailure(stage: .validateReceipt)
         }
-        return RemoteDesktopMailAutomationReceipt(attachmentNames: receipt.attachmentNames)
+        guard receipt.success, stage == .complete else {
+            Self.logFailure(stage)
+            throw RemoteDesktopMailAutomationFailure(stage: stage)
+        }
+        return RemoteDesktopMailAutomationReceipt(
+            attachmentNames: receipt.attachmentNames,
+            draftSaved: receipt.draftSaved)
+    }
+
+    private static func logFailure(_ stage: RemoteDesktopMailAutomationStage) {
+        logger.error("Mail automation failed at stage \(stage.rawValue, privacy: .public)")
     }
 
 }
@@ -795,8 +1073,9 @@ private actor RemoteDesktopMailMCPHandler {
             }
             let receipt = try await runner.run(payload: mail.automationPayload(attachments: snapshots))
             let expectedNames = snapshots.map(\.fileName)
-            guard receipt.attachmentNames == expectedNames else {
-                throw MCPClientError.toolFailed("Mail did not confirm the exact approved attachment names.")
+            guard receipt.attachmentNames == expectedNames,
+                  receipt.draftSaved == !mail.sendNow else {
+                throw MCPClientError.toolFailed("Mail did not confirm the approved action result.")
             }
             let message: String
             if mail.sendNow {
@@ -821,6 +1100,9 @@ private actor RemoteDesktopMailMCPHandler {
                 isError: false)
         } catch is CancellationError {
             return Self.failure("The local Mail action was canceled.")
+        } catch let failure as RemoteDesktopMailAutomationFailure {
+            return Self.failure(
+                "Mail could not complete the approved local action at stage \(failure.stage.rawValue).")
         } catch {
             // Never return paths, content, or AppleScript diagnostics.
             return Self.failure("Mail could not complete the approved local action.")

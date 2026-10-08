@@ -51,6 +51,8 @@ private struct CapturingMCPProposalPlanning: MCPProposalPlanning {
                 trace.append("Planner result: browserTools")
             case .localFileOperation:
                 trace.append("Planner result: localFileOperation")
+            case .mailRecipientsRequired:
+                trace.append("Planner result: mailRecipientsRequired")
             case .message(let message):
                 trace.append("Planner result: message \(String(message.prefix(4_096)))")
             case .proposedCall(let call):

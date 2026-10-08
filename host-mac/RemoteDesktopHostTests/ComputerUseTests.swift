@@ -2732,7 +2732,8 @@ final class ComputerUseTests: XCTestCase {
                 _ = try ledger.claimApprovedAction(taskID: original.id, senderID: original.senderID, sessionID: original.sessionID, prepared: prepared)
                 if state == "confirmed-action" {
                     try ledger.recordApprovedActionResult(taskID: original.id, senderID: original.senderID, sessionID: original.sessionID,
-                        fingerprint: prepared.fingerprint, response: "Confirmed original effect")
+                        fingerprint: prepared.fingerprint, response: "Confirmed original effect",
+                        completionPromptDigest: MCPDigest.sha256(of: .string(original.body)))
                 }
             } else {
                 try ledger.complete(taskID: original.id, response: "Original result", outcome: state == "clarification" ? .userInterventionRequired : .taskCompleted,
@@ -9817,7 +9818,15 @@ final class ComputerUseTests: XCTestCase {
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            approvalTargetProvider: { _ in
+                ComputerUseApprovalTargetSnapshot(
+                    context: "pause-control approval fixture",
+                    applicationID: "com.threadmark.tests.fixture",
+                    accessibilityIdentity: "pause-control-approval-target")
+            },
+            actionPerformer: { _ in },
             channelFactory: { _ in channel })
+        defer { manager.stop() }
         let prompt = makeEnvelope(kind: .prompt, body: "Reply to the message")
         manager.authorizePeer(senderID: prompt.senderID)
         manager.handle(prompt, channel: channel)

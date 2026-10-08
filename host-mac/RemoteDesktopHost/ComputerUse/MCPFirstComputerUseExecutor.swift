@@ -263,6 +263,7 @@ final class MCPFirstComputerUseExecutor:
         var selectedPath: URL?
         var selectedByUserCandidateID: String?
         var selectedByUserPath: URL?
+        var didBroadenNameFilter = false
         var pendingClarification: ComputerUseNativeTextExecutor.Clarification?
         var choicesByID: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
         var invalidated = false
@@ -292,6 +293,14 @@ final class MCPFirstComputerUseExecutor:
         let state: PlanningState
         let fileRun: NativeFileRun?
         let tools: ComputerUseHostTools
+        var mailRecipients: PendingMailRecipients? = nil
+    }
+
+    private struct PendingMailRecipients {
+        var resolver: ComputerUseMailRecipients
+        let field: String
+        let index: Int
+        let addressesByChoiceID: [String: String]
     }
 
     private struct ContactReadRequirements: Equatable {
@@ -425,9 +434,8 @@ final class MCPFirstComputerUseExecutor:
         documentPlanner: ComputerUseMCPDocumentPlanner = .init(),
         browserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init(),
         localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory = { taskID in
-            let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
-                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
-            return try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: downloads, pageSize: 8)
+            try ComputerUseLocalFileCatalog(taskID: taskID,
+                approvedRoots: ComputerUseLocalFileCatalog.standardApprovedRoots(), pageSize: 8, usesSpotlight: true)
         },
         browserExecutorFactory: @escaping BrowserExecutorFactory = {
             try OSAtlasVisualExecutorLoader().prepareDefaultBrowser(receipt: nil)
@@ -1080,6 +1088,31 @@ final class MCPFirstComputerUseExecutor:
             }
             retainedStructuredRoute = nil
         }
+        if let pending = pendingStructuredClarification, var recipients = pending.mailRecipients,
+           let selectedChoice {
+            try beginExecution()
+            defer { activeExecutionEpoch = nil }
+            try await waitForStartedCancellation()
+            guard taskID != originatingTaskID, pending.info.taskID == originatingTaskID,
+                  pending.state.taskID == originatingTaskID, pending.info.expiresAt > Date(),
+                  pending.info.goal == goal, pending.info.choices?.contains(selectedChoice) == true,
+                  let address = recipients.addressesByChoiceID[selectedChoice.id] else {
+                throw ExecutorError.visualApprovalContinuationUnavailable
+            }
+            try pending.tools.requireActive()
+            try checkExecutionCancellation()
+            try recipients.resolver.select(address: address, field: recipients.field, index: recipients.index)
+            pendingStructuredClarification = nil
+            let state = pending.state.withTaskID(taskID)
+            if let run = pending.fileRun {
+                guard !run.invalidated, run.currentTaskID == originatingTaskID,
+                      nativeFileRun === run else { throw ExecutorError.approvalStateChanged }
+                run.currentTaskID = taskID
+                run.planningState = state
+            }
+            return try await runStructured(state: state, tools: pending.tools, fileRun: pending.fileRun,
+                mailRecipients: recipients.resolver, progress: progress)
+        }
         if pendingStructuredClarification != nil, selectedChoice != nil {
             throw ExecutorError.visualApprovalContinuationUnavailable
         }
@@ -1121,7 +1154,8 @@ final class MCPFirstComputerUseExecutor:
             run.selectedByUserCandidateID = candidate.id
             run.selectedByUserPath = selectedURL
             run.context = .init(query: run.context.query, page: run.context.page,
-                selectedCandidate: candidate)
+                selectedCandidate: candidate,
+                nameFilterWasBroadened: run.context.nameFilterWasBroadened)
             run.currentTaskID = taskID
             run.pendingClarification = nil
             run.choicesByID.removeAll()
@@ -2215,10 +2249,12 @@ final class MCPFirstComputerUseExecutor:
         state initialState: PlanningState,
         tools: ComputerUseHostTools,
         fileRun initialFileRun: NativeFileRun?,
+        mailRecipients initialMailRecipients: ComputerUseMailRecipients? = nil,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         var state = initialState
         var activeFileRun = initialFileRun
+        var continuingRecipients = initialMailRecipients
         try await waitForStartedCancellation()
         try planningWorker.requireAvailable()
         return try await withNewHelperGeneration { generation in
@@ -2261,10 +2297,18 @@ final class MCPFirstComputerUseExecutor:
                     tools: structuredTools, allowsBrowserWorkflow: true,
                     localFileCatalog: localFileContext,
                     hostResolvedAttachmentPaths: resolvedPaths)
-                let proposal: MCPProposalPlanningResult
+                var proposal: MCPProposalPlanningResult
                 do {
-                    proposal = try await planningWorker.perform(timeout: planningTimeout) { [planner] in
-                        try await planner.propose(request)
+                    if let recipients = continuingRecipients {
+                        continuingRecipients = nil
+                        guard let mail = structuredTools.first(where: {
+                            $0.serverID == RemoteDesktopMailMCP.serverID && $0.toolName == RemoteDesktopMailMCP.toolName
+                        }) else { throw AppleFoundationMCPPlannerError.unknownProposal }
+                        proposal = .mailRecipientsRequired(mail, recipients.arguments)
+                    } else {
+                        proposal = try await planningWorker.perform(timeout: planningTimeout) { [planner] in
+                            try await planner.propose(request)
+                        }
                     }
                 } catch let failure as RemoteDesktopMailRecipientFailure {
                     try checkGenerationCancellation(generation)
@@ -2276,7 +2320,37 @@ final class MCPFirstComputerUseExecutor:
                 try checkGenerationCancellation(generation)
                 try tools.requireActive()
 
+                if case .mailRecipientsRequired(let mailTool, let arguments) = proposal {
+                    var resolver = try ComputerUseMailRecipients(arguments: arguments)
+                    let resolution: ComputerUseMailRecipients.Resolution
+                    do { resolution = try await resolver.resolve() }
+                    catch is CancellationError { throw CancellationError() }
+                    catch { return .userInterventionRequired(error.localizedDescription) }
+                    try requireFileWorkActive(tools: tools, generation: generation)
+                    switch resolution {
+                    case .ready(let resolved):
+                        proposal = .proposedCall(try mailTool.makeCall(taskID: state.taskID, arguments: resolved))
+                    case .missing(let question):
+                        return try retainStructuredClarification(question, state: state,
+                            fileRun: activeFileRun, tools: tools)
+                    case .choose(let name, let field, let index, let matches):
+                        var addresses: [String: String] = [:]
+                        let choices = try matches.map { match in
+                            let id = UUID().uuidString
+                            addresses[id] = match.address
+                            return try ComputerUseClarificationChoice(id: id,
+                                label: match.name.isEmpty ? name : match.name, detail: match.address)
+                        }
+                        return try retainStructuredClarification("Which \(name) should receive the email?",
+                            state: state, fileRun: activeFileRun, tools: tools, choices: choices,
+                            mailRecipients: .init(resolver: resolver, field: field, index: index,
+                                addressesByChoiceID: addresses))
+                    }
+                }
+
                 switch proposal {
+                case .mailRecipientsRequired:
+                    throw AppleFoundationMCPPlannerError.unknownProposal
                 case .browserTools:
                     throw RoutingSignal.browserTools
                 case .localFileOperation(let operation):
@@ -2334,6 +2408,17 @@ final class MCPFirstComputerUseExecutor:
                                     state: state, fileRun: activeFileRun, tools: tools)
                             }
                         }
+                        if call.serverID == RemoteDesktopMailMCP.serverID,
+                           call.toolName == RemoteDesktopMailMCP.toolName,
+                           activeFileRun == nil,
+                           let mailRequest = try? RemoteDesktopMailRequest(arguments: call.arguments),
+                           !mailRequest.attachmentPaths.allSatisfy({ path in
+                               Self.isExactAbsolutePathInTrustedUserTurns(
+                                   path, turns: state.clarificationGoal.userTurns)
+                            }) {
+                            return .userInterventionRequired(
+                                "The attachment path must appear exactly in a user-provided message before Mail can prepare this action.")
+                        }
                         if let activeFileRun, activeFileRun.selectedCandidate == nil {
                             return .userInterventionRequired("Resolve the file from the current Downloads list before preparing a Mail attachment.")
                         }
@@ -2348,6 +2433,22 @@ final class MCPFirstComputerUseExecutor:
                         if let activeFileRun {
                             do { try validateNativeFileMailProposal(call, run: activeFileRun, state: state) }
                             catch { return .userInterventionRequired("The selected file changed while approval was being prepared. Search Downloads again.") }
+                        }
+                        if call.serverID == RemoteDesktopMailMCP.serverID,
+                           call.toolName == RemoteDesktopMailMCP.toolName,
+                           try RemoteDesktopMailRequest(arguments: call.arguments).sendNow == false {
+                            // Draft creation is reversible. Keep the same exact-file
+                            // snapshot, journal and receipt checks without asking to send.
+                            try await clientPool.preflightApproved(prepared.call, fingerprint: prepared.fingerprint)
+                            try requireFileWorkActive(tools: tools, generation: generation)
+                            if let activeFileRun {
+                                try validateNativeFileMailProposal(call, run: activeFileRun, state: state)
+                            }
+                            progress("Saving your draft in Mail…")
+                            let result = try await clientPool.performApproved(prepared.call, fingerprint: prepared.fingerprint)
+                            let verified = try MCPApprovedActionResult.verified(call: prepared.call,
+                                result: result, trustedUserPrompt: state.trustedUserPrompt)
+                            return .completed(verified.response)
                         }
                         pendingApprovalState = state
                         pendingApprovalDigest = call.canonicalDigest
@@ -2403,7 +2504,9 @@ final class MCPFirstComputerUseExecutor:
         _ question: String,
         state: PlanningState,
         fileRun: NativeFileRun?,
-        tools: ComputerUseHostTools
+        tools: ComputerUseHostTools,
+        choices: [ComputerUseClarificationChoice]? = nil,
+        mailRecipients: PendingMailRecipients? = nil
     ) throws -> ComputerUseExecutionResult {
         guard (1...512).contains(question.utf8.count),
               !question.unicodeScalars.contains(where: { $0.value == 0 }),
@@ -2416,10 +2519,10 @@ final class MCPFirstComputerUseExecutor:
         ])
         let info = ComputerUseNativeTextExecutor.Clarification(
             taskID: state.taskID, goal: state.clarificationGoal,
-            question: question, scope: scope, expiresAt: Date().addingTimeInterval(600))
+            question: question, scope: scope, expiresAt: Date().addingTimeInterval(600), choices: choices)
         pendingStructuredClarification = PendingStructuredClarification(
             rootTaskID: state.rootTaskID, info: info, state: state,
-            fileRun: fileRun, tools: tools)
+            fileRun: fileRun, tools: tools, mailRecipients: mailRecipients)
         return .clarificationRequired(question)
     }
 
@@ -2464,20 +2567,42 @@ final class MCPFirstComputerUseExecutor:
                 }
                 let page = try catalog.nextPage(after: cursor)
                 run.catalog = catalog
-                run.context = .init(query: query, page: page, selectedCandidate: run.selectedCandidate)
+                run.context = .init(query: query, page: page, selectedCandidate: run.selectedCandidate,
+                    nameFilterWasBroadened: run.context.nameFilterWasBroadened)
                 return (run, nil)
             }
             var catalog = try localFileCatalogFactory(run.rootTaskID)
-            let discovery = try await catalog.discoverOffMainActor(query: query)
+            let discoveryDeadline = Date().addingTimeInterval(20)
+            var effectiveQuery = query
+            var discovery = try await catalog.discoverOffMainActor(query: query,
+                timeout: max(0.001, discoveryDeadline.timeIntervalSinceNow))
             try requireFileWorkActive(tools: tools, generation: generation)
             catalog = discovery.catalog
+            var nameFilterWasBroadened = false
+            if !run.didBroadenNameFilter, discovery.page.isComplete, discovery.page.candidates.isEmpty,
+               discovery.page.nextCursor == nil, !query.nameContains.isEmpty {
+                run.didBroadenNameFilter = true
+                effectiveQuery = .init(fileKind: query.fileKind, sort: query.sort,
+                    nameContains: "", folderScope: query.folderScope)
+                discovery = try await catalog.discoverOffMainActor(query: effectiveQuery,
+                    timeout: max(0.001, discoveryDeadline.timeIntervalSinceNow))
+                try requireFileWorkActive(tools: tools, generation: generation)
+                catalog = discovery.catalog
+                nameFilterWasBroadened = true
+            }
             // A fresh scan creates a new inventory and new opaque candidate
             // IDs even when the query text is unchanged.
             run.selectedCandidate = nil
             run.selectedPath = nil
             run.catalog = catalog
-            run.context = .init(query: query, page: discovery.page, selectedCandidate: run.selectedCandidate)
+            run.context = .init(query: effectiveQuery, page: discovery.page,
+                selectedCandidate: run.selectedCandidate, nameFilterWasBroadened: nameFilterWasBroadened)
             nativeFileRun = run
+            if !nameFilterWasBroadened,
+               let candidate = catalog.automaticSelectionCandidate(for: effectiveQuery) {
+                return try await processLocalFileOperation(.selectFile(candidateID: candidate.id),
+                    state: state, current: run, tools: tools, generation: generation)
+            }
             return (run, nil)
 
         case .selectFile(let candidateID):
@@ -2491,7 +2616,11 @@ final class MCPFirstComputerUseExecutor:
                 return (run, .userInterventionRequired("The accepted file choice cannot be replaced by a different file."))
             }
             let reaffirmingPinnedChoice = run.selectedByUserCandidateID == candidateID
-            guard reaffirmingPinnedChoice || Self.nativeFileSelectionIsUnambiguous(candidate, run: run, catalog: catalog) else {
+            let fallbackSelectionIsCurrentAndComplete = run.context.nameFilterWasBroadened
+                && run.context.page.isComplete
+                && run.context.page.candidates.contains(where: { $0.id == candidate.id })
+            guard reaffirmingPinnedChoice || fallbackSelectionIsCurrentAndComplete
+                    || Self.nativeFileSelectionIsUnambiguous(candidate, run: run, catalog: catalog) else {
                 return (run, .userInterventionRequired("More than one file matches the best date. Choose from the full set of matching files."))
             }
             do {
@@ -2504,7 +2633,8 @@ final class MCPFirstComputerUseExecutor:
                 try requireFileWorkActive(tools: tools, generation: generation)
                 run.selectedCandidate = candidate
                 run.selectedPath = path
-                run.context = .init(query: run.context.query, page: run.context.page, selectedCandidate: candidate)
+                run.context = .init(query: run.context.query, page: run.context.page, selectedCandidate: candidate,
+                    nameFilterWasBroadened: run.context.nameFilterWasBroadened)
                 nativeFileRun = run
                 return (run, nil)
             } catch is CancellationError {
@@ -2526,17 +2656,25 @@ final class MCPFirstComputerUseExecutor:
                 return (current, .userInterventionRequired("The proposed file choices are incomplete or expired. Search Downloads again."))
             }
             let allowedIDs: [String]
-            switch catalog.rankedBestCandidates(for: run.context.query) {
-            case .ids(let ids):
-                allowedIDs = ids
-            case .unranked:
+            if run.context.nameFilterWasBroadened {
                 let offered = Set(run.context.page.candidates.map(\.id))
-                guard candidateIDs.allSatisfy(offered.contains) else {
-                    return (run, .userInterventionRequired("The proposed choices are no longer in the current file list."))
+                guard run.context.page.isComplete, candidateIDs.allSatisfy(offered.contains) else {
+                    return (run, .userInterventionRequired("The proposed choices are no longer in the complete current file list."))
                 }
                 allowedIDs = candidateIDs
-            case .incomplete, .missingBestValue:
-                return (run, .userInterventionRequired("The file list does not establish a complete best-date group. Search by a clearer name."))
+            } else {
+                switch catalog.rankedBestCandidates(for: run.context.query) {
+                case .ids(let ids):
+                    allowedIDs = ids
+                case .unranked:
+                    let offered = Set(run.context.page.candidates.map(\.id))
+                    guard candidateIDs.allSatisfy(offered.contains) else {
+                        return (run, .userInterventionRequired("The proposed choices are no longer in the current file list."))
+                    }
+                    allowedIDs = candidateIDs
+                case .incomplete, .missingBestValue:
+                    return (run, .userInterventionRequired("The file list does not establish a complete best-date group. Search by a clearer name."))
+                }
             }
             guard allowedIDs.count >= 2, allowedIDs.count <= 8,
                   Set(candidateIDs) == Set(allowedIDs),
@@ -2551,7 +2689,7 @@ final class MCPFirstComputerUseExecutor:
                 }
                 do { _ = try catalog.resolve(candidateID: id, taskID: run.rootTaskID) }
                 catch { return (run, .userInterventionRequired("A file changed while choices were being prepared. Search Downloads again.")) }
-                let details = "\(candidate.fileExtension.uppercased()) · \(candidate.byteCount) bytes"
+                let details = "\(candidate.folderLabel) · \(candidate.fileExtension.uppercased()) · \(candidate.byteCount) bytes"
                 choices.append(try ComputerUseClarificationChoice(id: candidate.id,
                     label: candidate.displayName, detail: details))
                 candidates[id] = candidate
@@ -2630,6 +2768,34 @@ final class MCPFirstComputerUseExecutor:
               call.arguments["attachment_paths"] == .array([.string(path)]) else {
             throw AppleFoundationMCPPlannerError.noProposal
         }
+    }
+
+    private nonisolated static func isExactAbsolutePathInTrustedUserTurns(
+        _ path: String, turns: [String]) -> Bool {
+        guard path.hasPrefix("/"), !path.isEmpty, !path.contains("\0") else { return false }
+        let needle = Array(path.utf8)
+        func isBoundary(_ byte: UInt8) -> Bool {
+            (byte >= 0x09 && byte <= 0x0D) || byte == 0x20
+                || [0x22, 0x27, 0x28, 0x29, 0x2C, 0x3B, 0x3C, 0x3E, 0x5B, 0x5D, 0x60, 0x7B, 0x7D].contains(byte)
+        }
+        for turn in turns {
+            let haystack = Array(turn.utf8)
+            guard needle.count <= haystack.count else { continue }
+            for start in 0...(haystack.count - needle.count) {
+                let end = start + needle.count
+                let openingQuote: UInt8? = start > 0 && [0x22, 0x27, 0x60].contains(haystack[start - 1])
+                    ? haystack[start - 1] : nil
+                let closingQuoteMatches = openingQuote.map {
+                    end < haystack.count && haystack[end] == $0
+                } ?? true
+                guard haystack[start..<end].elementsEqual(needle),
+                      (start == 0 || isBoundary(haystack[start - 1])),
+                      (end == haystack.count || isBoundary(haystack[end])),
+                      closingQuoteMatches else { continue }
+                return true
+            }
+        }
+        return false
     }
 
     private func validateFileApprovalForContinuation(_ call: MCPToolCall,
@@ -2908,6 +3074,7 @@ final class MCPFirstComputerUseExecutor:
             .object([
                 "id": .string(value.id),
                 "display_name": .string(value.displayName),
+                "folder": .string(value.folderLabel),
                 "content_type_identifier": value.contentTypeIdentifier.map(MCPJSONValue.string) ?? .null,
                 "file_extension": .string(value.fileExtension),
                 "byte_count": .integer(Int(value.byteCount)),
@@ -2921,17 +3088,19 @@ final class MCPFirstComputerUseExecutor:
         }
         let query = localFileContext.query
         let localFiles = MCPJSONValue.object([
-            "directory_name": .string("Downloads"),
+            "directory_name": .string("Documents, Desktop, Downloads, iCloud Drive"),
             "state": .string(localFileContext.inventoryState.rawValue),
             "query": localFileContext.inventoryState == .notQueried ? .null : .object([
                 "file_kind": .string(query.fileKind.rawValue),
                 "sort_field": query.sort.map { .string($0.field.rawValue) } ?? .null,
                 "sort_direction": query.sort.map { .string($0.direction.rawValue) } ?? .null,
                 "name_contains": .string(query.nameContains),
+                "folder_scope": .string(query.folderScope.rawValue),
             ]),
             "candidates": .array(localFileContext.page.candidates.map(candidate)),
             "selected_candidate": localFileContext.selectedCandidate.map(candidate) ?? .null,
             "is_complete": .bool(localFileContext.page.isComplete),
+            "name_filter_was_broadened": .bool(localFileContext.nameFilterWasBroadened),
             "has_tied_sort_values": .bool(localFileContext.page.hasTiedSortValues),
             "has_missing_sort_values": .bool(localFileContext.page.hasMissingSortValues),
             "next_cursor": localFileContext.page.nextCursor.map(MCPJSONValue.string) ?? .null,

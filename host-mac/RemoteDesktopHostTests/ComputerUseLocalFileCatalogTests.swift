@@ -110,10 +110,12 @@ final class ComputerUseLocalFileCatalogTests: XCTestCase {
         try fixture.write("Notes.txt", bytes: Data([3]), modifiedAt: tiedDate)
 
         var catalog = try ComputerUseLocalFileCatalog(taskID: "task-a", approvedDirectory: fixture.directory, pageSize: 1)
-        let first = try catalog.discover(query: .init(fileKind: .presentation,
-            sort: .init(field: .modifiedAt, direction: .descending)))
+        let tiedQuery = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let first = try catalog.discover(query: tiedQuery)
         XCTAssertTrue(first.hasTiedSortValues, "Tie diagnostics cover the complete query result, not only this page")
         XCTAssertEqual(first.candidates.map(\.displayName), ["Alpha.pptx"], "Date ties use a deterministic filename tie-break")
+        XCTAssertNil(catalog.automaticSelectionCandidate(for: tiedQuery), "A tied top group must remain a user choice.")
         let second = try catalog.nextPage(after: XCTUnwrap(first.nextCursor))
         XCTAssertEqual(second.candidates.map(\.displayName), ["Beta.pptx"])
 
@@ -134,6 +136,35 @@ final class ComputerUseLocalFileCatalogTests: XCTestCase {
             XCTAssertEqual(candidate.addedToDirectoryAt, originalAddedDates[candidate.displayName],
                 "Sorting preserves the exact optional date; it never substitutes another timestamp")
         }
+    }
+
+    func testAutomaticSelectionRequiresUniqueBestOrUniqueWholeUnrankedInventory() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let latest = try fixture.write("Latest.pptx", bytes: Data([1]),
+            modifiedAt: Date(timeIntervalSince1970: 1_700_000_200))
+        _ = try fixture.write("Older.pptx", bytes: Data([2]),
+            modifiedAt: Date(timeIntervalSince1970: 1_700_000_100))
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "automatic-selection", approvedDirectory: fixture.directory,
+            pageSize: 1)
+
+        let rankedQuery = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let rankedPage = try catalog.discover(query: rankedQuery)
+        let rankedCandidate = try XCTUnwrap(catalog.automaticSelectionCandidate(for: rankedQuery))
+        XCTAssertEqual(rankedCandidate.id, rankedPage.candidates.first?.id)
+        XCTAssertEqual(try catalog.resolve(candidateID: rankedCandidate.id, taskID: "automatic-selection"), latest)
+
+        let unrankedQuery = ComputerUseLocalFileCatalog.Query(fileKind: .presentation)
+        let firstPage = try catalog.discover(query: unrankedQuery)
+        XCTAssertEqual(firstPage.candidates.count, 1, "The page is a singleton even though the inventory has another item.")
+        XCTAssertNotNil(firstPage.nextCursor)
+        XCTAssertNil(catalog.automaticSelectionCandidate(for: unrankedQuery),
+            "A singleton first page cannot stand in for a unique whole inventory.")
+        let secondPage = try catalog.nextPage(after: XCTUnwrap(firstPage.nextCursor))
+        XCTAssertEqual(secondPage.candidates.count, 1, "The last page is also a singleton.")
+        XCTAssertNil(catalog.automaticSelectionCandidate(for: unrankedQuery),
+            "Pagination must not make the final page's sole item look globally unique.")
     }
 
     func testNewQueryInvalidatesPriorCursorAndCandidateIDs() throws {
@@ -168,6 +199,8 @@ final class ComputerUseLocalFileCatalogTests: XCTestCase {
         let second = try catalog.nextPage(after: XCTUnwrap(first.nextCursor))
         XCTAssertFalse(second.isComplete)
         XCTAssertNil(second.nextCursor, "Once the bounded inventory is exhausted, callers must not interpret it as a complete no-match")
+        XCTAssertNil(catalog.automaticSelectionCandidate(for: .init()),
+            "An exhausted but truncated inventory cannot prove that its apparent sole result is unique.")
     }
 
     func testResolveRequiresExactCandidateAndSameTaskAndRejectsChangedFile() throws {
@@ -222,6 +255,56 @@ final class ComputerUseLocalFileCatalogTests: XCTestCase {
         XCTAssertFalse(page.candidates.contains { $0.displayName == "linked.pptx" || $0.displayName == "Folder.pptx" })
     }
 
+    func testApprovedRootsShareRankingAndFolderScopeKeepsDuplicateNamesDistinct() throws {
+        let fixture = try MultiRootFixture()
+        defer { fixture.remove() }
+        let olderDate = Date(timeIntervalSince1970: 1_700_000_100)
+        let latestDate = olderDate.addingTimeInterval(60)
+        let downloadsFile = try fixture.write("Downloads", "Board Review.pptx", bytes: Data([1]), modifiedAt: latestDate)
+        let documentsFile = try fixture.write("Documents", "Board Review.pptx", bytes: Data([2]), modifiedAt: olderDate)
+        let desktopFile = try fixture.write("Desktop", "Notes.txt", bytes: Data([3]))
+        let iCloudFile = try fixture.write("iCloud Drive", "Budget.xlsx", bytes: Data([4]))
+
+        let roots = [
+            ComputerUseLocalFileCatalog.ApprovedRoot(label: "Downloads", scope: .downloads, url: fixture.downloads),
+            ComputerUseLocalFileCatalog.ApprovedRoot(label: "Documents", scope: .documents, url: fixture.documents),
+            ComputerUseLocalFileCatalog.ApprovedRoot(label: "Desktop", scope: .desktop, url: fixture.desktop),
+            ComputerUseLocalFileCatalog.ApprovedRoot(label: "iCloud Drive", scope: .iCloud, url: fixture.iCloud),
+        ]
+        var catalog = try ComputerUseLocalFileCatalog(taskID: "multi-root", approvedRoots: roots, pageSize: 1)
+        let latest = try catalog.discover(query: .init(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending)))
+        let latestCandidate = try XCTUnwrap(latest.candidates.first)
+        XCTAssertEqual(latestCandidate.displayName, "Board Review.pptx")
+        XCTAssertEqual(latestCandidate.folderLabel, "Downloads")
+        XCTAssertEqual(try catalog.resolve(candidateID: latestCandidate.id, taskID: "multi-root"), downloadsFile)
+        let next = try catalog.nextPage(after: XCTUnwrap(latest.nextCursor))
+        let olderCandidate = try XCTUnwrap(next.candidates.first)
+        XCTAssertEqual(olderCandidate.folderLabel, "Documents")
+        XCTAssertEqual(try catalog.resolve(candidateID: olderCandidate.id, taskID: "multi-root"), documentsFile)
+
+        for (scope, expectedLabel) in [
+            (ComputerUseLocalFileCatalog.FolderScope.downloads, "Downloads"),
+            (.documents, "Documents"),
+            (.desktop, "Desktop"),
+            (.iCloud, "iCloud Drive"),
+        ] {
+            let scoped = try catalog.discover(query: .init(folderScope: scope))
+            XCTAssertEqual(Set(scoped.candidates.map(\.folderLabel)), [expectedLabel])
+            XCTAssertNil(scoped.nextCursor)
+        }
+
+        var page = try catalog.discover(query: .init(folderScope: .all))
+        var allCandidates = page.candidates
+        while let cursor = page.nextCursor {
+            page = try catalog.nextPage(after: cursor)
+            allCandidates.append(contentsOf: page.candidates)
+        }
+        XCTAssertEqual(Set(allCandidates.map(\.folderLabel)), ["Downloads", "Documents", "Desktop", "iCloud Drive"])
+        XCTAssertTrue(allCandidates.contains { $0.displayName == desktopFile.lastPathComponent })
+        XCTAssertTrue(allCandidates.contains { $0.displayName == iCloudFile.lastPathComponent })
+    }
+
     private struct Fixture {
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         var directory: URL { parent.appendingPathComponent("Downloads", isDirectory: true) }
@@ -236,6 +319,33 @@ final class ComputerUseLocalFileCatalogTests: XCTestCase {
         func setModified(_ name: String, to date: Date) throws {
             try FileManager.default.setAttributes([.modificationDate: date], ofItemAtPath: directory.appendingPathComponent(name).path)
         }
+        func remove() { try? FileManager.default.removeItem(at: parent) }
+    }
+
+    private struct MultiRootFixture {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        var downloads: URL { parent.appendingPathComponent("Downloads", isDirectory: true) }
+        var documents: URL { parent.appendingPathComponent("Documents", isDirectory: true) }
+        var desktop: URL { parent.appendingPathComponent("Desktop", isDirectory: true) }
+        var iCloud: URL { parent.appendingPathComponent("iCloud Drive", isDirectory: true) }
+
+        init() throws {
+            for root in [downloads, documents, desktop, iCloud] {
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            }
+        }
+
+        @discardableResult func write(_ folder: String, _ name: String, bytes: Data,
+                                      modifiedAt: Date? = nil) throws -> URL {
+            let root = parent.appendingPathComponent(folder, isDirectory: true)
+            let url = root.appendingPathComponent(name)
+            try bytes.write(to: url)
+            if let modifiedAt {
+                try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: url.path)
+            }
+            return url
+        }
+
         func remove() { try? FileManager.default.removeItem(at: parent) }
     }
 }

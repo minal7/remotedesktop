@@ -2443,9 +2443,13 @@ final class ComputerUseFaraActionTests: XCTestCase {
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
             baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
 
-        func systemPrompt(_ input: ComputerUseFaraModel.Input) throws -> String {
+        func requestBody(_ input: ComputerUseFaraModel.Input) throws -> [String: Any] {
             let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        }
+
+        func systemPrompt(_ input: ComputerUseFaraModel.Input) throws -> String {
+            let body = try requestBody(input)
             let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
             return try XCTUnwrap(messages.first?["content"] as? String)
         }
@@ -2461,10 +2465,20 @@ final class ComputerUseFaraActionTests: XCTestCase {
         var defaultBrowser = genericDesktop
         defaultBrowser.defaultBrowserTask = true
         let scopedPrompt = try systemPrompt(defaultBrowser)
-        XCTAssertTrue(scopedPrompt.contains("Skill: browser-navigation"))
-        XCTAssertTrue(scopedPrompt.contains("address or search editor"))
-        XCTAssertTrue(scopedPrompt.contains("fresh observation"))
-        XCTAssertTrue(scopedPrompt.contains("ask_user_question"))
+        let catalog = ComputerUseSkillCatalog.load()
+        let navigationInstructions = try XCTUnwrap(catalog.instructions(for: .defaultBrowserVisual, offeredTools: ["computer_use"]))
+        XCTAssertTrue(scopedPrompt.contains(navigationInstructions), "Only a scoped default-browser task receives this skill body")
+        let actionSchema = try XCTUnwrap(ComputerUseFaraModel.desktopToolSchema()["function"] as? [String: Any])
+        let parameters = try XCTUnwrap(actionSchema["parameters"] as? [String: Any])
+        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
+        let action = try XCTUnwrap(properties["action"] as? [String: Any])
+        XCTAssertTrue(try XCTUnwrap(action["enum"] as? [String]).contains("ask_user_question"),
+            "The native handoff capability remains available for blocked navigation")
+
+        let scopedBody = try requestBody(defaultBrowser)
+        let scopedMessages = try XCTUnwrap(scopedBody["messages"] as? [[String: Any]])
+        let serializedMessages = String(decoding: try JSONSerialization.data(withJSONObject: scopedMessages), as: UTF8.self)
+        XCTAssertTrue(serializedMessages.contains(defaultBrowser.goal), "The original task remains in the model context")
     }
 
     func testDefaultBrowserTaskFlagIsInvalidForOwnedBrowserSurface() throws {

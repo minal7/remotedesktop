@@ -10,6 +10,7 @@ from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses
 import hashlib
+from html.parser import HTMLParser
 import io
 import json
 import os
@@ -134,10 +135,52 @@ def stage_source(source: Path, run_id: str, expected_hash: str) -> Path:
     if sha256(data) != expected_hash:
         raise AcceptanceError("Canonical PPTX changed before staging")
     descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(data)
-    os.utime(destination, None)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+        os.utime(destination, None)
+    except OSError:
+        try:
+            destination.unlink()
+        except OSError:
+            pass
+        raise
     return destination
+
+
+def wait_for_spotlight_visibility(path: Path, *, downloads: Path = DOWNLOADS,
+                                  timeout: float = 30.0, process_timeout: float = 2.0,
+                                  poll_interval: float = 0.25, run_process=subprocess.run,
+                                  clock=time.monotonic, sleep=time.sleep) -> float:
+    expected = path.resolve(strict=True)
+    root = downloads.resolve(strict=True)
+    if path.parent.resolve(strict=True) != root or not path.is_file() or path.is_symlink():
+        raise AcceptanceError("Spotlight fixture readiness failed: staged file is outside Downloads")
+
+    started = clock()
+    deadline = started + max(0.0, timeout)
+    predicate = f'kMDItemFSName == "{path.name}"'
+    while True:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            break
+        try:
+            result = run_process(
+                ["/usr/bin/mdfind", "-0", "-onlyin", str(root), predicate],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+                timeout=min(process_timeout, remaining))
+        except subprocess.TimeoutExpired:
+            result = None
+        except OSError as error:
+            raise AcceptanceError("Spotlight fixture readiness failed: mdfind could not run") from error
+        if result is not None:
+            if result.returncode != 0:
+                raise AcceptanceError("Spotlight fixture readiness failed: mdfind query did not complete")
+            for item in (result.stdout or b"").split(b"\0"):
+                if item and Path(os.fsdecode(item)).resolve() == expected:
+                    return max(0.0, clock() - started)
+        sleep(min(poll_interval, max(0.0, deadline - clock())))
+    raise AcceptanceError("Spotlight fixture readiness failed: staged file was not indexed before launch")
 
 
 def remove_owned_stage(path: Path | None, expected_hash: str | None) -> None:
@@ -155,21 +198,24 @@ def remove_owned_stage(path: Path | None, expected_hash: str | None) -> None:
 def prune_traces() -> None:
     if not TRACE_ROOT.is_dir():
         return
+    milestone_prefixes = tuple(f"m{index}-" for index in range(5)) + ("mail-body-diagnostic-",)
     owned = [path for path in TRACE_ROOT.iterdir()
-             if path.is_dir() and not path.is_symlink() and path.name.startswith("m0-")]
+             if path.is_dir() and not path.is_symlink() and path.name.startswith(milestone_prefixes)]
     owned.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
     for stale in owned[MAX_TRACE_FOLDERS:]:
         shutil.rmtree(stale, ignore_errors=True)
 
 
 def make_expected(job: str, run_id: str, run_index: int,
-                  fixture: dict[str, dict[str, Any]], cloud_root: Path | None) -> tuple[dict[str, Any], Path | None, str | None]:
+                  fixture: dict[str, dict[str, Any]], cloud_root: Path | None,
+                  send_approval_check: bool = False,
+                  staged_source: Path | None = None) -> tuple[dict[str, Any], Path | None, str | None]:
     expected: dict[str, Any] = {"job": job, "run_id": run_id, "run_index": run_index}
     stage: Path | None = None
     stage_hash: str | None = None
     pptx = fixture["Board Review.pptx"]
     if job in {"email", "cloud"}:
-        stage = stage_source(Path(pptx["path"]), run_id, pptx["sha256"])
+        stage = staged_source or stage_source(Path(pptx["path"]), run_id, pptx["sha256"])
         stage_hash = pptx["sha256"]
         expected.update({"source_path": str(stage), "source_sha256": pptx["sha256"],
                          "source_bytes": pptx["bytes"], "attachment_name": stage.name})
@@ -179,10 +225,23 @@ def make_expected(job: str, run_id: str, run_index: int,
             "subject": f"Board Review deck [M0 {run_id}]",
             "body": "Please review the attached Board Review deck.",
         })
-        expected["prompt"] = (
-            f"Email the latest Board Review deck to {expected['to']} at this exact path: {stage}. Use subject "
-            f"{expected['subject']} and body {expected['body']} Save it as a draft; do not send."
+        discovery_requests = (
+            "Email the latest Board Review deck in Downloads",
+            "Email the most recently modified Board Review presentation in Downloads",
+            "Email the newest Board Review deck in Downloads",
         )
+        discovery_request = discovery_requests[(run_index - 1) % len(discovery_requests)]
+        if send_approval_check:
+            expected["send_approval_check"] = True
+            expected["prompt"] = (
+                f"Send the latest Board Review deck in Downloads to {expected['to']}. Use the exact "
+                f"subject \"{expected['subject']}\" and exact body \"{expected['body']}\". Send this email now."
+            )
+        else:
+            expected["prompt"] = (
+                f"{discovery_request} to {expected['to']}. Use the exact subject \"{expected['subject']}\" "
+                f"and exact body \"{expected['body']}\". Save it as a draft and leave it open for review; do not send."
+            )
     elif job == "cloud":
         if cloud_root is None:
             raise AcceptanceError("No installed cloud sync folder was selected")
@@ -356,19 +415,98 @@ def read_outcome(trace: Path, job: str, run_id: str) -> dict[str, Any]:
     return outcome
 
 
+class MailHTMLBody(HTMLParser):
+    """Read text from Mail's saved HTML without counting attachment objects."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.frames: list[tuple[str, bool, bool]] = []
+        self.text: list[str] = []
+        self.trailing_mail_space = False
+        self.trailing_block_newline = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        classes = (values.get("class") or "").split()
+        ignored = (any(frame[1] for frame in self.frames) or tag in {"head", "script", "style", "object"}
+                   or "Apple-Mail-URLShareUserContentTopClass" in classes)
+        converted = "Apple-converted-space" in classes
+        if tag == "br":
+            if not ignored:
+                self.text.append("\n")
+                self.trailing_mail_space = False
+                self.trailing_block_newline = False
+            return
+        if tag in {"img", "meta", "link", "input", "hr"}:
+            return
+        self.frames.append((tag, ignored, converted))
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self.frames) - 1, -1, -1):
+            if self.frames[index][0] == tag:
+                ignored = self.frames[index][1]
+                del self.frames[index:]
+                if not ignored and tag in {"p", "div", "blockquote", "li"} and self.text and self.text[-1] != "\n":
+                    self.text.append("\n")
+                    self.trailing_block_newline = True
+                return
+
+    def handle_data(self, data: str) -> None:
+        if any(frame[1] for frame in self.frames):
+            return
+        if data.strip() == "" and "\n" in data:
+            return  # HTML source indentation, rather than an explicit line break.
+        self.text.append(data)
+        if data:
+            self.trailing_block_newline = False
+            self.trailing_mail_space = any(frame[2] for frame in self.frames) and data == "\xa0"
+
+    def rendered(self) -> str:
+        body = "".join(self.text)
+        if self.trailing_block_newline and body.endswith("\n"):
+            body = body[:-1]
+        if self.trailing_mail_space and body.endswith("\xa0"):
+            body = body[:-1]
+        return body
+
+
+def mail_body_matches(message: Any, expected: str) -> bool:
+    part = message.get_body(preferencelist=("html", "plain"))
+    if part is None or part.get_content_disposition() == "attachment":
+        return False
+    if part.get_content_type() == "text/plain":
+        body = part.get_content().replace("\r\n", "\n").replace("\r", "\n")
+        return body == expected or body == expected + "\n"
+    if part.get_content_type() == "text/html":
+        parser = MailHTMLBody()
+        parser.feed(part.get_content())
+        return parser.rendered() == expected
+    return False
+
+
 def check_email(expected: dict[str, Any], outcome: dict[str, Any], trace: Path) -> dict[str, Any]:
     evidence = outcome["evidence"].get("email")
     if not isinstance(evidence, dict):
         raise AcceptanceError("Email outcome is missing email evidence")
+    if expected.get("send_approval_check") is True:
+        if outcome["raw_outcome"] != "approvalRequired":
+            raise AcceptanceError("Send request did not stop at an approval requirement")
+        if evidence.get("send_approval_observed") is not True:
+            raise AcceptanceError("The exact Send approval was not independently observed")
+        if evidence.get("send_effects") != 0:
+            raise AcceptanceError("Send approval check caused a send effect")
+        if outcome["evidence"].get("other_approval_denied_count") != 0:
+            raise AcceptanceError("Send approval check encountered another approval decision")
+        return {"passed": True, "send_approval_observed": True, "send_effects": 0}
     if outcome["raw_outcome"] != "taskCompleted":
         raise AcceptanceError("Host did not report the unsent Mail draft as completed")
     if (evidence.get("send_effects") != 0 or evidence.get("draft_count") != 1
             or evidence.get("draft_visible_count") != 1
             or evidence.get("draft_subject") != expected["subject"]):
         raise AcceptanceError("Expected one visible run-specific draft and zero send effects")
-    if (outcome["evidence"].get("draft_create_approved_count") != 1
+    if (outcome["evidence"].get("draft_create_approved_count") != 0
             or outcome["evidence"].get("other_approval_denied_count") != 0):
-        raise AcceptanceError("The exact draft approval was not the only approval decision")
+        raise AcceptanceError("Draft creation unexpectedly needed an approval")
     source = Path(expected["source_path"])
     if (source.is_symlink() or not source.is_file() or sha256(source.read_bytes()) != expected["source_sha256"]):
         raise AcceptanceError("Staged email source differs from the canonical fixture")
@@ -394,17 +532,7 @@ def check_email(expected: dict[str, Any], outcome: dict[str, Any], trace: Path) 
         raise AcceptanceError("Draft MIME To field did not match exactly")
     if message.get_all("Cc", []) or message.get_all("Bcc", []):
         raise AcceptanceError("Draft MIME must not include Cc or Bcc recipients")
-    body_parts = [part for part in message.walk()
-                  if part.get_content_type() == "text/plain" and part.get_content_disposition() != "attachment"]
-    if len(body_parts) != 1:
-        raise AcceptanceError("Expected exactly one plain-text body part")
-    body = body_parts[0].get_content()
-    if not isinstance(body, str):
-        raise AcceptanceError("Draft body did not decode as text")
-    body = body.replace("\r\n", "\n").replace("\r", "\n")
-    if body.endswith("\n"):
-        body = body[:-1]
-    if body != expected["body"]:
+    if not mail_body_matches(message, expected["body"]):
         raise AcceptanceError("Draft MIME body did not match exactly")
     attachments = [part for part in message.walk()
                    if part.get_content_disposition() == "attachment" or part.get_filename()]
@@ -602,22 +730,33 @@ def main() -> int:
     parser.add_argument("--runs", type=int, required=True)
     parser.add_argument("--cloud-root", help="Installed provider sync folder for the cloud job")
     parser.add_argument("--build-command-json", type=Path, help="Local xcodebuild argv override file; never shell-evaluated")
+    parser.add_argument("--send-approval-check", action="store_true",
+                        help="For email only, verify the exact Send approval without granting it")
     args = parser.parse_args()
     if not 1 <= args.runs <= MAX_RUNS:
         parser.error(f"--runs must be between 1 and {MAX_RUNS}")
     if args.job != "cloud" and args.cloud_root:
         parser.error("--cloud-root is only valid for cloud")
+    if args.send_approval_check and args.job != "email":
+        parser.error("--send-approval-check is only valid for email")
 
     env = developer_environment(clear_live_optins())
     TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
     first_run_id = uuid.uuid4().hex
     first_trace = trace_path(args.job, first_run_id)
     prune_traces()
+    batch_staged: Path | None = None
+    batch_staged_hash: str | None = None
     try:
         cloud_root = check_cloud_root(args.cloud_root) if args.job == "cloud" else None
         fixture = prepare_fixtures()
+        if args.job in {"email", "cloud"}:
+            source = fixture["Board Review.pptx"]
+            batch_staged = stage_source(Path(source["path"]), first_run_id, source["sha256"])
+            batch_staged_hash = source["sha256"]
         base_command = load_build_command(args.build_command_json, env)
     except (AcceptanceError, OSError) as error:
+        remove_owned_stage(batch_staged, batch_staged_hash)
         print(f"Preflight failed: {error}", file=sys.stderr)
         report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
                   "runs_passed": 0, "failure_class": "other", "reason": f"preflight: {error}"}
@@ -626,81 +765,106 @@ def main() -> int:
         print(f"Preflight trace: {first_trace}", flush=True)
         return 1
 
-    build_command = command_for(base_command, "build-for-testing")
-    print(f"Building once for {args.job}; trace: {first_trace}", flush=True)
-    build_code, build_seconds = run_logged(build_command, env, first_trace / "build.log", TIMEOUT_SECONDS)
-    if build_code != 0:
-        report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
-                  "runs_passed": 0, "build_seconds": round(build_seconds, 3), "trace": str(first_trace),
-                  "failure_class": "other", "reason": f"build-for-testing exit {build_code}"}
-        (first_trace / "runner-summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        prune_traces()
-        print(f"Build failed; trace: {first_trace}", flush=True)
-        return 1
+    try:
+        build_command = command_for(base_command, "build-for-testing")
+        print(f"Building once for {args.job}; trace: {first_trace}", flush=True)
+        build_code, build_seconds = run_logged(build_command, env, first_trace / "build.log", TIMEOUT_SECONDS)
+        if build_code != 0:
+            report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
+                      "runs_passed": 0, "build_seconds": round(build_seconds, 3), "trace": str(first_trace),
+                      "failure_class": "other", "reason": f"build-for-testing exit {build_code}"}
+            (first_trace / "runner-summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            prune_traces()
+            print(f"Build failed; trace: {first_trace}", flush=True)
+            return 1
 
-    results: list[dict[str, Any]] = []
-    run_ids = [first_run_id] + [uuid.uuid4().hex for _ in range(args.runs - 1)]
-    for index, run_id in enumerate(run_ids, 1):
-        trace = first_trace if index == 1 else trace_path(args.job, run_id)
-        staged: Path | None = None
-        staged_hash: str | None = None
-        try:
-            expected, staged, staged_hash = make_expected(args.job, run_id, index, fixture, cloud_root)
-            (trace / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            test_env = env.copy()
-            test_env.update({
-                "TEST_RUNNER_CORE_JOB_ACCEPTANCE_JOB": args.job,
-                "TEST_RUNNER_CORE_JOB_ACCEPTANCE_TRACE": str(trace),
-                "TEST_RUNNER_CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(FIXTURE_ROOT),
-                "TEST_RUNNER_CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
-            })
-            command = command_for(base_command, "test-without-building", trace)
-            print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
-            code, elapsed = run_logged(command, test_env, trace / "test.log", TIMEOUT_SECONDS)
+        if batch_staged is not None:
+            readiness_started = time.monotonic()
             try:
-                passed, check = verify_run(trace, expected, code)
-            except (AcceptanceError, OSError, ValueError) as error:
-                passed, check = False, {"passed": False, "reason": str(error)}
-            outcome_path = trace / "outcome.json"
-            failure_class = None
-            if outcome_path.is_file():
-                try:
-                    raw = json.loads(outcome_path.read_text(encoding="utf-8"))
-                    failure_class = raw.get("failure_class")
-                except (OSError, json.JSONDecodeError):
-                    pass
-            run_result = {"job": args.job, "run_id": run_id, "run_index": index,
-                          "passed": passed, "elapsed_seconds": round(elapsed, 3),
-                          "failure_class": failure_class if failure_class in FAILURE_CLASSES else (None if passed else "other"),
-                          "check": check, "trace": str(trace)}
-            results.append(run_result)
-            (trace / "checker.json").write_text(json.dumps(run_result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-            print(f"  {'PASS' if passed else 'FAIL'} ({elapsed:.1f}s); trace: {trace}", flush=True)
-        except (AcceptanceError, OSError, ValueError) as error:
-            results.append({"job": args.job, "run_id": run_id, "run_index": index,
-                            "passed": False, "failure_class": "other", "check": {"passed": False, "reason": str(error)},
-                            "trace": str(trace)})
-            print(f"  FAIL; {error}; trace: {trace}", flush=True)
-        finally:
-            remove_owned_stage(staged, staged_hash)
+                print("Waiting for Spotlight fixture indexing…", flush=True)
+                readiness_duration = wait_for_spotlight_visibility(batch_staged, timeout=180)
+            except AcceptanceError as error:
+                (first_trace / "fixture-readiness.json").write_text(json.dumps({
+                    "spotlight_visible": False,
+                    "duration_seconds": round(time.monotonic() - readiness_started, 3),
+                }, sort_keys=True) + "\n", encoding="utf-8")
+                report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
+                          "runs_passed": 0, "build_seconds": round(build_seconds, 3),
+                          "trace": str(first_trace), "failure_class": "other",
+                          "reason": f"fixture readiness: {error}"}
+                (first_trace / "runner-summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                prune_traces()
+                print(f"Fixture readiness failed before app launch: {error}; trace: {first_trace}", flush=True)
+                return 1
+            (first_trace / "fixture-readiness.json").write_text(json.dumps({
+                "spotlight_visible": True,
+                "duration_seconds": round(readiness_duration, 3),
+            }, sort_keys=True) + "\n", encoding="utf-8")
 
-    passed_count = sum(1 for result in results if result["passed"])
-    durations = sorted(result["elapsed_seconds"] for result in results if result.get("elapsed_seconds") is not None)
-    median = None if not durations else durations[len(durations) // 2] if len(durations) % 2 else (durations[len(durations)//2-1] + durations[len(durations)//2]) / 2
-    classes: dict[str, int] = {}
-    for result in results:
-        failure_class = result.get("failure_class")
-        if failure_class:
-            classes[failure_class] = classes.get(failure_class, 0) + 1
-    summary = {"status": "passed" if passed_count == args.runs else "failed", "job": args.job,
-               "runs_requested": args.runs, "runs_passed": passed_count, "median_seconds": median,
-               "failure_classes": classes, "build_seconds": round(build_seconds, 3), "runs": results}
-    summary_path = Path(results[-1]["trace"]) / "summary.json"
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    prune_traces()
-    print(f"{args.job}: {passed_count}/{args.runs} passed; median {median if median is not None else 'n/a'}s; failure classes {classes or 'none'}", flush=True)
-    print(f"Summary trace: {summary_path.parent}", flush=True)
-    return 0 if passed_count == args.runs else 1
+        results: list[dict[str, Any]] = []
+        run_ids = [first_run_id] + [uuid.uuid4().hex for _ in range(args.runs - 1)]
+        for index, run_id in enumerate(run_ids, 1):
+            trace = first_trace if index == 1 else trace_path(args.job, run_id)
+            try:
+                expected, _, _ = make_expected(args.job, run_id, index, fixture, cloud_root,
+                                               args.send_approval_check, staged_source=batch_staged)
+                (trace / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                test_env = env.copy()
+                test_env.update({
+                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_JOB": args.job,
+                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_TRACE": str(trace),
+                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(FIXTURE_ROOT),
+                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
+                })
+                command = command_for(base_command, "test-without-building", trace)
+                print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
+                code, elapsed = run_logged(command, test_env, trace / "test.log", TIMEOUT_SECONDS)
+                try:
+                    passed, check = verify_run(trace, expected, code)
+                except (AcceptanceError, OSError, ValueError) as error:
+                    passed, check = False, {"passed": False, "reason": str(error)}
+                outcome_path = trace / "outcome.json"
+                failure_class = None
+                if outcome_path.is_file():
+                    try:
+                        raw = json.loads(outcome_path.read_text(encoding="utf-8"))
+                        failure_class = raw.get("failure_class")
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                run_result = {"job": args.job, "run_id": run_id, "run_index": index,
+                              "passed": passed, "elapsed_seconds": round(elapsed, 3),
+                              "failure_class": None if passed else (failure_class if failure_class in FAILURE_CLASSES else "other"),
+                              "check": check, "trace": str(trace)}
+                results.append(run_result)
+                (trace / "checker.json").write_text(json.dumps(run_result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                print(f"  {'PASS' if passed else 'FAIL'} ({elapsed:.1f}s); trace: {trace}", flush=True)
+            except (AcceptanceError, OSError, ValueError) as error:
+                results.append({"job": args.job, "run_id": run_id, "run_index": index,
+                                "passed": False, "failure_class": "other", "check": {"passed": False, "reason": str(error)},
+                                "trace": str(trace)})
+                print(f"  FAIL; {error}; trace: {trace}", flush=True)
+            if not results[-1]["passed"]:
+                break
+
+        passed_count = sum(1 for result in results if result["passed"])
+        durations = sorted(result["elapsed_seconds"] for result in results if result.get("elapsed_seconds") is not None)
+        median = None if not durations else durations[len(durations) // 2] if len(durations) % 2 else (durations[len(durations)//2-1] + durations[len(durations)//2]) / 2
+        classes: dict[str, int] = {}
+        for result in results:
+            failure_class = result.get("failure_class")
+            if failure_class:
+                classes[failure_class] = classes.get(failure_class, 0) + 1
+        summary = {"status": "passed" if passed_count == args.runs else "failed", "job": args.job,
+                   "runs_requested": args.runs, "runs_passed": passed_count, "median_seconds": median,
+                   "failure_classes": classes, "build_seconds": round(build_seconds, 3), "runs": results}
+        summary_path = Path(results[-1]["trace"]) / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        prune_traces()
+        print(f"{args.job}: {passed_count}/{args.runs} passed; median {median if median is not None else 'n/a'}s; failure classes {classes or 'none'}", flush=True)
+        print(f"Summary trace: {summary_path.parent}", flush=True)
+        return 0 if passed_count == args.runs else 1
+    finally:
+        remove_owned_stage(batch_staged, batch_staged_hash)
 
 
 if __name__ == "__main__":
