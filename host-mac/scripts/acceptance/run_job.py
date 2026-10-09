@@ -762,23 +762,89 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
     evidence = outcome["evidence"].get("gmail")
     if not isinstance(evidence, dict):
         raise AcceptanceError("Gmail outcome is missing focused browser evidence")
-    if evidence.get("harness_granted_approvals") != 0 or outcome["evidence"].get("draft_create_approved_count") != 0:
-        raise AcceptanceError("Gmail acceptance must not grant any approval")
+    def count(value: Any) -> bool:
+        return type(value) is int and value >= 0
+
+    attachment_count = evidence.get("attachment_approval_count")
+    attachment_grants = evidence.get("attachment_approval_responses_granted")
+    total_grants = evidence.get("approval_responses_granted")
+    harness_grants = evidence.get("harness_granted_approvals")
+    events = evidence.get("approval_events")
+    omitted = evidence.get("approval_events_omitted")
+    denied = evidence.get("approval_responses_denied")
+    if (not count(attachment_count) or attachment_count > 1
+            or not isinstance(evidence.get("attachment_approval_verified"), bool)
+            or not count(attachment_grants) or attachment_grants > 1
+            or not count(total_grants) or not count(harness_grants)
+            or total_grants != harness_grants or harness_grants != attachment_grants
+            or not count(denied) or denied != 0
+            or not count(omitted) or omitted != 0
+            or not isinstance(events, list)
+            or any(not isinstance(event, dict) for event in events)
+            or any(not isinstance(event.get("request_id"), str) or not event.get("request_id")
+                   or not isinstance(event.get("task_id"), str)
+                   or event.get("task_id") != outcome.get("task_id") for event in events)
+            or len({event.get("request_id") for event in events if isinstance(event, dict)}) != len(events)
+            or type(outcome["evidence"].get("draft_create_approved_count")) is not int
+            or outcome["evidence"].get("draft_create_approved_count") != 0):
+        raise AcceptanceError("Gmail approvals include a denied, duplicate, unverified, or unrelated decision")
+    file_events = [event for event in events if isinstance(event, dict)
+                   and event.get("confirm_label") == "Attach file"]
+    verified_file_events = [event for event in file_events if event.get("verified_file_approval") is True]
+    expected_file_details = {
+        "File": expected.get("attachment_name"),
+        "Size": f"{expected.get('source_bytes')} bytes",
+        "Destination": f"Gmail ({expected.get('to')})",
+        "To": expected.get("to"),
+        "Subject": expected.get("subject"),
+    }
+    verified_details_match = all(
+        isinstance(event.get("details"), list)
+        and len(event["details"]) == len(expected_file_details)
+        and all(isinstance(detail, dict) and set(detail) >= {"label", "value"}
+                and isinstance(detail.get("label"), str) and isinstance(detail.get("value"), str)
+                for detail in event["details"])
+        and len({detail["label"] for detail in event["details"]}) == len(expected_file_details)
+        and {detail["label"]: detail["value"] for detail in event["details"]}
+            == expected_file_details
+        for event in verified_file_events
+    )
+    if (len(file_events) != attachment_count
+            or len(verified_file_events) != attachment_grants
+            or not verified_details_match
+            or (attachment_count == 1 and (evidence.get("attachment_approval_verified") is not True
+                                           or attachment_grants != 1))
+            or (attachment_count == 0 and (evidence.get("attachment_approval_verified") is not False
+                                           or attachment_grants != 0))
+            or any(event.get("verified_file_approval") is True
+                   and event.get("confirm_label") != "Attach file" for event in events)):
+        raise AcceptanceError("Gmail file approval was not one independently verified picker approval")
+    send_granted = evidence.get("send_approval_responses_granted")
+    send_denied = evidence.get("send_approval_responses_denied")
+    send_count = evidence.get("send_approval_count")
+    if (not count(send_granted) or send_granted != 0
+            or not count(send_denied) or send_denied != 0
+            or not count(send_count) or send_count > 1
+            or send_count != (1 if evidence.get("send_approval_observed") is True else 0)):
+        raise AcceptanceError("Gmail Send approval must remain pending without a response")
     if expected.get("send_approval_check") is True:
         if outcome["raw_outcome"] != "approvalRequired" or evidence.get("send_approval_observed") is not True:
             raise AcceptanceError("Gmail Send run did not stop at the host approval prompt")
-        if (evidence.get("send_approval_count") != 1 or evidence.get("approval_responses_granted") != 0
-                or evidence.get("approval_responses_denied") != 0):
-            raise AcceptanceError("Gmail Send run did not leave exactly one ungranted approval pending")
-        if evidence.get("send_approval_fields_exact") is not True:
+        send_events = [event for event in events if isinstance(event, dict)
+                       and event.get("confirm_label") == "Send email"]
+        if send_count != 1 or len(send_events) != 1 or len(events) != attachment_count + send_count:
+            raise AcceptanceError("Gmail Send run did not leave exactly one Send approval pending")
+        if (evidence.get("send_approval_fields_exact") is not True
+                or send_events[0].get("send_fields_exact") is not True):
             raise AcceptanceError("Gmail Send approval did not show the exact recipient, subject, message, and attachment")
         return {"passed": True, "send_approval_observed": True, "stop_state": "approval-pending",
-                "harness_granted_approvals": 0}
+                "harness_granted_approvals": harness_grants}
 
     if outcome["raw_outcome"] != "taskCompleted":
         raise AcceptanceError("Gmail draft run did not complete")
-    if evidence.get("approval_responses_denied", 0) != 0:
-        raise AcceptanceError("Gmail draft run unexpectedly reached an approval prompt")
+    if (send_count != 0 or evidence.get("send_approval_observed") is not False
+            or len(events) != attachment_count):
+        raise AcceptanceError("Gmail draft run unexpectedly reached a Send approval prompt")
     saved_url = validate_gmail_compose_url(evidence.get("saved_draft_url"))
     expected_draft_url = expected.get("gmail_existing_draft_url")
     if expected_draft_url and gmail_draft_identity(saved_url) != gmail_draft_identity(expected_draft_url):
@@ -796,7 +862,8 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
     return {"passed": True, "draft_saved_verified": True, "saved_draft_count": 1,
             "saved_attachment_count": 1,
             "fields_exact": True, "attachment_name_and_size_verified": True,
-            "attachment_bytes_verified": False}
+            "attachment_bytes_verified": False,
+            "attachment_approval_responses_granted": attachment_grants}
 
 
 def check_cloud(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:

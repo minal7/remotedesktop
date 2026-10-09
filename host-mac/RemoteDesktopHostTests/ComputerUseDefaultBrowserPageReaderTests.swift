@@ -1100,6 +1100,116 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
         XCTAssertNil(try reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
     }
+
+    func testRetainedPageURLAllowsModalFocusOnlyForOneListedWindowAndOuterPage() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        graph.focusedWindow = graph.otherWindow
+        graph.set("root", kAXWindowsAttribute, [graph.window, graph.otherWindow] as CFArray)
+        graph.set("other-window", kAXRoleAttribute, "AXWindow" as NSString)
+        let otherWeb = graph.element("other-web")
+        graph.set("other-web", kAXRoleAttribute, "AXWebArea" as NSString)
+        graph.set("other-web", "AXURL", "https://drive.google.com/other-window" as NSString)
+        graph.set("other-window", kAXChildrenAttribute, [otherWeb] as CFArray)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        XCTAssertEqual(try reader.readRetainedPageURL(window: graph.window,
+            application: graph.identity, mayAct: { true }), "https://drive.google.com/drive/my-drive")
+        XCTAssertFalse(graph.reads.contains { $0.1 == (kAXFocusedWindowAttribute as String) },
+            "Retained URL observation remains valid while a recognized native panel owns focus")
+
+        graph.set("root", kAXWindowsAttribute, [graph.window] as CFArray)
+        XCTAssertNil(try reader.readRetainedPageURL(window: graph.otherWindow,
+            application: graph.identity, mayAct: { true }), "An unlisted window cannot supply the page URL")
+        graph.set("root", kAXWindowsAttribute, [graph.window, graph.window] as CFArray)
+        XCTAssertNil(try reader.readRetainedPageURL(window: graph.window,
+            application: graph.identity, mayAct: { true }), "Duplicate window membership is ambiguous")
+    }
+
+    func testRetainedPageURLSkipsNativeOpenPanelSubtree() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        let sheet = graph.element("native-open-panel")
+        graph.set("native-open-panel", kAXRoleAttribute, "AXSheet" as NSString)
+        var panelChildren: [AXUIElement] = []
+        for index in 0..<300 {
+            let name = "picker-node-\(index)"
+            let node = graph.element(name)
+            graph.set(name, kAXRoleAttribute, "AXGroup" as NSString)
+            graph.set(name, kAXChildrenAttribute, [] as CFArray)
+            panelChildren.append(node)
+        }
+        let misleadingPage = graph.element("picker-preview-webarea")
+        graph.set("picker-preview-webarea", kAXRoleAttribute, "AXWebArea" as NSString)
+        graph.set("picker-preview-webarea", "AXURL", "https://attacker.invalid/picker-preview" as NSString)
+        panelChildren.append(misleadingPage)
+        graph.set("native-open-panel", kAXChildrenAttribute, panelChildren as CFArray)
+        graph.set("window", kAXChildrenAttribute, [graph.element("web"), sheet] as CFArray)
+
+        XCTAssertEqual(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+            .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true }),
+            "https://drive.google.com/drive/my-drive")
+        XCTAssertFalse(graph.reads.contains { $0.0.hasPrefix("picker-") },
+            "The retained page URL read must not traverse native panel contents")
+    }
+
+    func testRetainedPageURLRejectsMultipleProtectedAndNestedOuterPages() throws {
+        let multiple = PageAXGraph(); multiple.makePage()
+        let otherPage = multiple.element("other-web")
+        multiple.set("other-web", kAXRoleAttribute, "AXWebArea" as NSString)
+        multiple.set("other-web", "AXURL", "https://drive.google.com/other" as NSString)
+        multiple.set("window", kAXChildrenAttribute, [multiple.element("web"), otherPage] as CFArray)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: multiple.access)
+            .readRetainedPageURL(window: multiple.window, application: multiple.identity, mayAct: { true }))
+
+        let protected = PageAXGraph(); protected.makePage()
+        protected.set("web", "AXProtectedContent", NSNumber(value: true))
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: protected.access)
+            .readRetainedPageURL(window: protected.window, application: protected.identity, mayAct: { true }))
+
+        let nestedOnly = PageAXGraph(); nestedOnly.makePage()
+        nestedOnly.remove("web", "AXURL" as CFString)
+        nestedOnly.set("iframe", "AXURL", "https://drive.google.com/iframe" as NSString)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: nestedOnly.access)
+            .readRetainedPageURL(window: nestedOnly.window, application: nestedOnly.identity, mayAct: { true }),
+            "A nested iframe URL cannot substitute for a missing outer-page URL")
+    }
+
+    func testRetainedPageURLRejectsChangedURLOrApplicationDuringRead() throws {
+        for change in ["url", "application"] {
+            let graph = PageAXGraph(); graph.makePage()
+            var changed = false
+            graph.afterRead = { node, attribute in
+                guard !changed, node == "web", attribute == "AXURL" else { return }
+                changed = true
+                if change == "url" {
+                    graph.set("web", "AXURL", "https://drive.google.com/changed" as NSString)
+                } else {
+                    graph.frontmostIdentity = graph.otherIdentity
+                }
+            }
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true }), change)
+        }
+    }
+
+    func testRetainedPageURLStopsWhenPausedOrCancelled() async throws {
+        let graph = PageAXGraph(); graph.makePage()
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+        do {
+            _ = try reader.readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { false })
+            XCTFail("A paused task must not read retained page metadata")
+        } catch ComputerUseHostTools.ToolError.paused { }
+
+        let cancelled = Task {
+            try reader.readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return true
+            })
+        }
+        do {
+            _ = try await cancelled.value
+            XCTFail("A cancelled task must not read retained page metadata")
+        } catch is CancellationError { }
+    }
 }
 
 @MainActor
@@ -1149,6 +1259,7 @@ private final class PageAXGraph {
 
     func makePage(text: String = "Quarterly report") {
         set("root", kAXFocusedWindowAttribute, element("window"))
+        set("root", kAXWindowsAttribute, [element("window")] as CFArray)
         set("window", kAXRoleAttribute, "AXWindow" as NSString)
         set("window", kAXChildrenAttribute, [element("web")] as CFArray)
         set("web", kAXParentAttribute, element("window"))

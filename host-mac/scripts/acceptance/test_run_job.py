@@ -231,6 +231,44 @@ class GmailHarnessTests(unittest.TestCase):
         with self.assertRaises(runner.AcceptanceError):
             runner.check_gmail({"send_approval_check": False}, outcome)
 
+    def test_gmail_accepts_only_one_independently_verified_file_approval(self) -> None:
+        expected = self.expected_approval_fields()
+        file_event = {"request_id": "file-request", "task_id": "task",
+            "confirm_label": "Attach file", "verified_file_approval": True,
+            "details": [
+                {"label": "File", "value": "Quarterly Metrics.xlsx"},
+                {"label": "Size", "value": "2793 bytes"},
+                {"label": "Destination", "value": "Gmail (checker-only@example.invalid)"},
+                {"label": "To", "value": "checker-only@example.invalid"},
+                {"label": "Subject", "value": "Remote Desktop acceptance [test]"},
+            ]}
+        outcome = self.exact_metadata()
+        outcome["evidence"]["gmail"].update({
+            "attachment_approval_count": 1,
+            "attachment_approval_verified": True,
+            "attachment_approval_responses_granted": 1,
+            "approval_responses_granted": 1,
+            "harness_granted_approvals": 1,
+            "approval_events": [file_event],
+        })
+        self.assertTrue(runner.check_gmail(expected, outcome)["passed"])
+
+        extra = self.exact_metadata()
+        extra["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
+        extra["evidence"]["gmail"]["attachment_approval_count"] = 2
+        extra["evidence"]["gmail"]["approval_events"] *= 2
+        unverified = self.exact_metadata()
+        unverified["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
+        unverified["evidence"]["gmail"]["attachment_approval_verified"] = False
+        unrelated = self.exact_metadata()
+        unrelated["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
+        unrelated["evidence"]["gmail"]["approval_events"].append(
+            {"confirm_label": "Delete draft", "verified_file_approval": True})
+        for invalid in (extra, unverified, unrelated):
+            with self.subTest(approval_events=invalid["evidence"]["gmail"]["approval_events"]):
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_gmail(expected, invalid)
+
     def test_retry_draft_identity_ignores_mailbox_view_but_binds_account_and_id(self) -> None:
         expected_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_ownedDraft123"
         outcome = self.exact_metadata()
@@ -263,23 +301,55 @@ class GmailHarnessTests(unittest.TestCase):
                     runner.check_gmail({"send_approval_check": False}, outcome)
 
     def test_send_gate_requires_exact_pending_approval_and_zero_effects(self) -> None:
+        expected = self.expected_approval_fields(send=True)
+        file_event = {"request_id": "file-request", "task_id": "task", "confirm_label": "Attach file",
+            "verified_file_approval": True, "details": [
+                {"label": "File", "value": "Quarterly Metrics.xlsx"},
+                {"label": "Size", "value": "2793 bytes"},
+                {"label": "Destination", "value": "Gmail (checker-only@example.invalid)"},
+                {"label": "To", "value": "checker-only@example.invalid"},
+                {"label": "Subject", "value": "Remote Desktop acceptance [test]"},
+            ]}
         outcome = self.exact_metadata()
         outcome["raw_outcome"] = "approvalRequired"
         outcome["evidence"]["gmail"].update({
+            "attachment_approval_count": 1,
+            "attachment_approval_verified": True,
+            "attachment_approval_responses_granted": 1,
+            "approval_responses_granted": 1,
+            "harness_granted_approvals": 1,
             "send_approval_observed": True,
             "send_approval_fields_exact": True,
             "send_approval_count": 1,
-            "approval_responses_granted": 0,
+            "send_approval_responses_granted": 0,
+            "send_approval_responses_denied": 0,
+            "approval_events": [
+                file_event,
+                {"request_id": "send-request", "task_id": "task", "confirm_label": "Send email",
+                 "send_fields_exact": True},
+            ],
         })
-        self.assertTrue(runner.check_gmail({"send_approval_check": True}, outcome)["passed"])
+        self.assertTrue(runner.check_gmail(expected, outcome)["passed"])
         for key, value in (("send_approval_fields_exact", False), ("send_approval_count", 2),
-                           ("approval_responses_granted", 1)):
+                           ("send_approval_responses_granted", 1), ("send_approval_responses_denied", 1)):
             invalid = self.exact_metadata()
             invalid["raw_outcome"] = "approvalRequired"
             invalid["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
             invalid["evidence"]["gmail"][key] = value
             with self.subTest(key=key), self.assertRaises(runner.AcceptanceError):
-                runner.check_gmail({"send_approval_check": True}, invalid)
+                runner.check_gmail(expected, invalid)
+        invalid = self.exact_metadata()
+        invalid["raw_outcome"] = "approvalRequired"
+        invalid["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
+        invalid["evidence"]["gmail"]["approval_events"][1]["send_fields_exact"] = False
+        with self.assertRaises(runner.AcceptanceError):
+            runner.check_gmail(expected, invalid)
+
+    @staticmethod
+    def expected_approval_fields(send: bool = False) -> dict:
+        return {"send_approval_check": send, "attachment_name": "Quarterly Metrics.xlsx",
+            "source_bytes": 2_793, "to": "checker-only@example.invalid",
+            "subject": "Remote Desktop acceptance [test]"}
 
     def test_cloud_job_is_explicitly_paused(self) -> None:
         with patch.object(sys, "argv", [str(RUNNER_PATH), "cloud", "--runs", "1"]), \
@@ -305,7 +375,7 @@ class GmailHarnessTests(unittest.TestCase):
 
     @staticmethod
     def exact_metadata() -> dict:
-        return {"raw_outcome": "taskCompleted", "evidence": {
+        return {"raw_outcome": "taskCompleted", "task_id": "task", "evidence": {
             "draft_create_approved_count": 0, "gmail": {
                 "draft_saved_verified": True, "saved_draft_count": 1,
                 "saved_attachment_count": 1,
@@ -314,6 +384,12 @@ class GmailHarnessTests(unittest.TestCase):
                 "saved_body_matches": True, "saved_attachment_name_visible": True,
                 "saved_attachment_size_visible": True, "attachment_bytes_verified": False,
                 "harness_granted_approvals": 0, "approval_responses_denied": 0,
+                "approval_responses_granted": 0,
+                "attachment_approval_count": 0, "attachment_approval_verified": False,
+                "attachment_approval_responses_granted": 0,
+                "send_approval_observed": False, "send_approval_fields_exact": False,
+                "send_approval_count": 0, "send_approval_responses_granted": 0,
+                "send_approval_responses_denied": 0,
                 "approval_events": [], "approval_events_omitted": 0,
             }}}
 

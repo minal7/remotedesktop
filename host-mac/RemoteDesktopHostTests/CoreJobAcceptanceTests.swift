@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import Foundation
 import XCTest
 @testable import RemoteDesktopHost
@@ -143,6 +144,63 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
             webAreaDescription: "Another page", url: url, expectedAccount: account,
             subject: subject, composeRegions: [facts]))
+    }
+
+    func testGmailFileApprovalDetailsRequireExactSingleFileRequest() {
+        let expected = Expected(job: "gmail", run_id: "run", prompt: "",
+            source_path: "/fixture/Board Review.pptx", source_sha256: String(repeating: "a", count: 64),
+            attachment_name: "Board Review.pptx", source_bytes: 2_793,
+            to: "sender@example.com", subject: "Remote Desktop acceptance [token]", body: "Body",
+            cloud_root: nil, destination_path: nil, gmail_existing_draft_url: nil,
+            send_approval_check: false, trip: nil)
+        func request(_ details: [(String, String)], label: String = "Attach file")
+            -> RemoteDesktopClientCore.ComputerUseApprovalRequest {
+            .init(taskID: "task", message: "Attach selected file",
+                details: details.map { .init(label: $0.0, value: $0.1) }, confirmLabel: label)
+        }
+        let exact = request([
+            ("File", "Board Review.pptx"), ("Size", "2793 bytes"),
+            ("Destination", "Gmail (sender@example.com)"), ("To", "sender@example.com"),
+            ("Subject", "Remote Desktop acceptance [token]"),
+        ])
+        XCTAssertTrue(Self.gmailAttachmentApprovalDetailsMatch(exact, expected: expected))
+        XCTAssertFalse(Self.gmailAttachmentApprovalDetailsMatch(request([
+            ("File", "Board Review.pptx"), ("Size", "2793 bytes"),
+            ("Destination", "Gmail (sender@example.com)"), ("To", "sender@example.com"),
+            ("Subject", "Remote Desktop acceptance [token]"), ("CC", "other@example.com"),
+        ]), expected: expected))
+        XCTAssertFalse(Self.gmailAttachmentApprovalDetailsMatch(request([
+            ("File", "Board Review.pptx"), ("Size", "2793 bytes"),
+            ("Destination", "Gmail (sender@example.com)"), ("To", "sender@example.com"),
+            ("Subject", "Remote Desktop acceptance [token]"),
+        ], label: "Send email"), expected: expected))
+    }
+
+    func testGmailAcceptanceSanitizesSessionValidationPhase() {
+        for phase in ["capture", "target", "sheet", "focus", "complete"] {
+            XCTAssertEqual(Self.sanitizedSessionValidationPhase(phase), phase)
+        }
+        for rejected in ["targetLost", "capture extra", "phase=focus", ""] {
+            XCTAssertNil(Self.sanitizedSessionValidationPhase(rejected))
+        }
+        XCTAssertNil(Self.sanitizedSessionValidationPhase(nil))
+    }
+
+    func testGmailAcceptanceSanitizesSessionCaptureReasonAndAXErrorCode() {
+        for reason in ["frontmost_unavailable", "frontmost_process_mismatch", "frontmost_identity_mismatch",
+            "windows_read", "windows_malformed", "windows_unconvertible", "focused_window_read",
+            "focused_window_malformed", "focused_window_unconvertible", "capture_deadline",
+            "capture_cancelled", "final_frontmost_unavailable", "final_frontmost_changed",
+            "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed"] {
+            XCTAssertEqual(Self.sanitizedSessionCaptureReason(reason), reason)
+        }
+        for rejected in ["https://mail.google.com/", "recipient@example.com", "phase=capture_failure", "unknown"] {
+            XCTAssertNil(Self.sanitizedSessionCaptureReason(rejected))
+        }
+        XCTAssertNil(Self.sanitizedSessionCaptureReason(nil))
+        XCTAssertEqual(Self.sanitizedSessionCaptureAXErrorCode("-25202"), -25_202)
+        XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("-999999"))
+        XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("private text"))
     }
 
     func testGmailAcceptanceDoesNotTreatComposeURLParametersAsFieldEvidence() {
@@ -475,7 +533,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let taskID = try await Self.waitForSentPrompt(bridge, deadline: .now + .seconds(5))
             record["task_id"] = taskID
             record["raw_outcome"] = "running"
-            let terminal = try await Self.waitForTerminal(phone, expected: expected,
+            let terminal = try await Self.waitForTerminal(phone, expected: expected, taskID: taskID,
                 deadline: .now + .seconds(job == "gmail" ? 420 : 180), trace: trace)
             record["task_id"] = taskID
             record["raw_outcome"] = terminal.outcome
@@ -536,11 +594,16 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 var gmail: [String: Any] = ["approval_events": terminal.approvalEvents,
                     "approval_events_omitted": terminal.approvalEventsOmitted,
                     "approval_responses_denied": terminal.deniedApprovals,
-                    "harness_granted_approvals": terminal.approvedDrafts,
-                    "approval_responses_granted": terminal.approvedDrafts,
+                    "harness_granted_approvals": terminal.attachmentApprovalResponsesGranted,
+                    "approval_responses_granted": terminal.attachmentApprovalResponsesGranted,
+                    "attachment_approval_count": terminal.attachmentApprovalCount,
+                    "attachment_approval_verified": terminal.attachmentApprovalVerified,
+                    "attachment_approval_responses_granted": terminal.attachmentApprovalResponsesGranted,
                     "send_approval_observed": terminal.sendApprovalObserved,
                     "send_approval_fields_exact": terminal.sendApprovalFieldsExact,
                     "send_approval_count": terminal.sendApprovalObserved ? 1 : 0,
+                    "send_approval_responses_granted": terminal.sendApprovalResponsesGranted,
+                    "send_approval_responses_denied": terminal.sendApprovalResponsesDenied,
                     "attachment_bytes_verified": false]
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail, verifySavedDraft: true)
@@ -627,6 +690,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
            phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil {
             result["gmailNavigationPhase"] = phase
         }
+        if let phase = Self.sanitizedSessionValidationPhase(raw["sessionValidationPhase"]) {
+            result["sessionValidationPhase"] = phase
+        }
+        if let reason = Self.sanitizedSessionCaptureReason(raw["sessionCaptureReason"]) {
+            result["sessionCaptureReason"] = reason
+        }
+        if let code = Self.sanitizedSessionCaptureAXErrorCode(raw["sessionCaptureAXErrorCode"]) {
+            result["sessionCaptureAXErrorCode"] = code
+        }
         let sessionFailures: Set<String> = ["changedTaskOrGoal", "targetLost", "ambiguousWindows",
             "noNewFocusedWindow", "existingWindowsChanged", "interrupted", "journalUncertain",
             "authenticationHandoff", "browserAutomationPermissionRequired"]
@@ -647,12 +719,39 @@ final class CoreJobAcceptanceTests: XCTestCase {
         return result
     }
 
+    private static func sanitizedSessionValidationPhase(_ raw: String?) -> String? {
+        guard let raw, ["capture", "target", "sheet", "focus", "complete"].contains(raw) else { return nil }
+        return raw
+    }
+
+    private static func sanitizedSessionCaptureReason(_ raw: String?) -> String? {
+        let allowed: Set<String> = ["capture_cancelled", "frontmost_unavailable", "frontmost_process_mismatch",
+            "frontmost_identity_mismatch", "windows_read", "windows_malformed", "windows_unconvertible",
+            "focused_window_read", "focused_window_malformed", "focused_window_unconvertible",
+            "capture_deadline", "final_frontmost_unavailable", "final_frontmost_changed",
+            "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
+            "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate", "duplicate_id",
+            "duplicate_element", "bounds_ax_read_failure"]
+        guard let raw, allowed.contains(raw) else { return nil }
+        return raw
+    }
+
+    private static func sanitizedSessionCaptureAXErrorCode(_ raw: String?) -> Int? {
+        guard let raw, let code = Int(raw), (-65_535...65_535).contains(code) else { return nil }
+        return code
+    }
+
     private struct Terminal {
         let outcome: String
         let approvedDrafts: Int
         let deniedApprovals: Int
+        let attachmentApprovalCount: Int
+        let attachmentApprovalVerified: Bool
+        let attachmentApprovalResponsesGranted: Int
         let sendApprovalObserved: Bool
         let sendApprovalFieldsExact: Bool
+        let sendApprovalResponsesGranted: Int
+        let sendApprovalResponsesDenied: Int
         let approvalEvents: [[String: Any]]
         let approvalEventsOmitted: Int
     }
@@ -707,11 +806,133 @@ final class CoreJobAcceptanceTests: XCTestCase {
         throw HarnessError.transport("The serialized client did not publish the job prompt")
     }
 
+    private static func gmailAttachmentApprovalDetailsMatch(
+        _ request: RemoteDesktopClientCore.ComputerUseApprovalRequest, expected: Expected
+    ) -> Bool {
+        guard request.confirmLabel == "Attach file",
+              let name = expected.attachment_name, let byteCount = expected.source_bytes,
+              let recipient = expected.to, let subject = expected.subject,
+              let details = request.details, details.count == 5 else { return false }
+        let labels = details.map(\.label)
+        guard Set(labels).count == labels.count else { return false }
+        let fields = Dictionary(uniqueKeysWithValues: details.map { ($0.label, $0.value) })
+        return fields.count == 5
+            && fields["File"] == name
+            && fields["Size"] == "\(byteCount) bytes"
+            && fields["Destination"] == "Gmail (\(recipient))"
+            && fields["To"] == recipient
+            && fields["Subject"] == subject
+            && fields["CC"] == nil && fields["BCC"] == nil
+    }
+
+    @MainActor
+    private static func gmailAttachmentApprovalHasIndependentPickerProof(
+        expected: Expected, diagnostic: (String) -> Void = { _ in }
+    ) -> Bool {
+        func fail(_ reason: String) -> Bool {
+            diagnostic(reason)
+            return false
+        }
+        guard let sourcePath = expected.source_path, let expectedBytes = expected.source_bytes,
+              let expectedDigest = expected.source_sha256?.lowercased(), expectedBytes >= 0,
+              expectedDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
+            return fail("source")
+        }
+        let sourceURL = URL(fileURLWithPath: sourcePath).standardizedFileURL
+        var sourceInfo = stat()
+        guard sourceURL.isFileURL, lstat(sourceURL.path, &sourceInfo) == 0,
+              (sourceInfo.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              sourceInfo.st_size == off_t(expectedBytes),
+              sourceURL.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL == sourceURL,
+              (try? Self.sha256(sourceURL)) == expectedDigest else { return fail("source") }
+
+        let selectedURL = sourceURL.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        var panelFailureReason = "panel"
+        func exactPanel() -> (ComputerUseApplicationIdentity,
+            ComputerUseDefaultBrowserSession.Window, ComputerUseDefaultBrowserSession.FileOpenPanel)? {
+            guard let handler = ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler(),
+                  let running = NSWorkspace.shared.frontmostApplication, !running.isTerminated,
+                  handler.bundleIdentifier == "com.apple.Safari",
+                  running.bundleIdentifier == handler.bundleIdentifier,
+                  let proof = ComputerUseReviewedApplicationCodeVerifier.proofForRunningApplication(
+                    runningApplication: running),
+                  proof.canonicalBundlePath == handler.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path,
+                  let application = ComputerUseApplicationIdentity(runningApplication: running,
+                    codeIdentity: proof), application.matchesReviewedApplication(named: "Safari") else {
+                panelFailureReason = "application"
+                return nil
+            }
+            guard let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
+                  snapshot.application == application, !snapshot.hasUnrecognizedSheets,
+                  let panel = snapshot.fileOpenPanel, panel.isFocused, panel.primaryActionEnabled == true,
+                  panel.selectedFileURLs.count == 1,
+                  panel.selectedFileURLs[0].standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL == selectedURL else {
+                panelFailureReason = "panel"
+                return nil
+            }
+            let parents = snapshot.windows.filter { $0.id == panel.parentWindowID }
+            guard parents.count == 1, let parent = parents.first,
+                  parent.application == application,
+                  CFEqual(parent.accessibilityElement, panel.parentWindowElement) else { return nil }
+            return (application, parent, panel)
+        }
+        guard let (application, parent, initialPanel) = exactPanel() else { return fail(panelFailureReason) }
+        let reader = ComputerUseDefaultBrowserPageReader()
+        guard let pageURL = try? reader.readRetainedPageURL(window: parent.accessibilityElement,
+                application: application, mayAct: { !Task.isCancelled }),
+              URLComponents(string: pageURL)?.host?.lowercased() == "mail.google.com" else { return fail("url") }
+        guard let accountIndex = ComputerUseGmailAccountDirectory.accountIndex(from: pageURL) else {
+            return fail("account")
+        }
+        let account = ComputerUseGmailAccountDirectory.Account(email: expected.to ?? "", displayName: "",
+            index: accountIndex)
+        guard !account.email.isEmpty else { return fail("account") }
+
+        var revalidationFailed = false
+        let revalidate: @MainActor () throws -> Void = {
+            guard !Task.isCancelled, let (freshApplication, freshParent, freshPanel) = exactPanel(),
+                  freshApplication == application, freshParent.id == parent.id,
+                  CFEqual(freshParent.accessibilityElement, parent.accessibilityElement),
+                  CFEqual(freshPanel.accessibilityElement, initialPanel.accessibilityElement) else {
+                revalidationFailed = true
+                throw HarnessError.missingEvidence("The Gmail picker or retained parent changed during approval proof")
+            }
+        }
+        let accountLabel: String?
+        do {
+            accountLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+                window: parent.accessibilityElement, application: application, revalidate: revalidate)
+        } catch { return fail(revalidationFailed ? "stability" : "account") }
+        let title: String?
+        do {
+            title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                window: parent.accessibilityElement, application: application, revalidate: revalidate)
+        } catch { return fail(revalidationFailed ? "stability" : "account") }
+        guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: pageURL, windowTitle: title,
+                accountControlLabel: accountLabel, expected: account) else { return fail("account") }
+        guard let afterPageURL = try? reader.readRetainedPageURL(window: parent.accessibilityElement,
+                application: application, mayAct: { !Task.isCancelled }) else { return fail("url") }
+        guard afterPageURL == pageURL,
+              let (afterApplication, afterParent, afterPanel) = exactPanel(),
+              afterApplication == application, afterParent.id == parent.id,
+              CFEqual(afterParent.accessibilityElement, parent.accessibilityElement),
+              CFEqual(afterPanel.accessibilityElement, initialPanel.accessibilityElement) else {
+            return fail("stability")
+        }
+        return true
+    }
+
     private static func waitForTerminal(_ client: RemoteDesktopClientCore.ComputerUseSessionModel,
-        expected: Expected, deadline: ContinuousClock.Instant, trace: URL) async throws -> Terminal {
+        expected: Expected, taskID: String, deadline: ContinuousClock.Instant, trace: URL) async throws -> Terminal {
         var deniedApprovals = 0
+        var attachmentApprovalCount = 0
+        var attachmentApprovalVerified = false
+        var attachmentApprovalResponsesGranted = 0
+        let sendApprovalResponsesGranted = 0
+        let sendApprovalResponsesDenied = 0
         var approvalEvents: [[String: Any]] = []
         var approvalEventsOmitted = 0
+        var respondedRequestIDs = Set<String>()
         var lastObservation = ""
         var answeredGmailAccountClarifications = Set<String>()
         while ContinuousClock.now < deadline {
@@ -743,6 +964,43 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 }
             }
             if case .approvalRequired(let request) = client.state {
+                if expected.job == "gmail", request.confirmLabel == "Attach file" {
+                    attachmentApprovalCount += 1
+                    let freshRequest: Bool
+                    if case .approvalRequired(let current) = client.state {
+                        freshRequest = current == request && current.taskID == taskID
+                            && !current.requestID.isEmpty && !respondedRequestIDs.contains(current.requestID)
+                    } else {
+                        freshRequest = false
+                    }
+                    if attachmentApprovalCount == 1, attachmentApprovalResponsesGranted == 0,
+                       freshRequest, Self.gmailAttachmentApprovalDetailsMatch(request, expected: expected),
+                       Self.gmailAttachmentApprovalHasIndependentPickerProof(expected: expected, diagnostic: { reason in
+                           try? Self.write(["reason": reason],
+                               to: trace.appendingPathComponent("gmail-attachment-proof.json"))
+                       }),
+                       case .approvalRequired(let current) = client.state, current == request,
+                       current.taskID == taskID, !respondedRequestIDs.contains(current.requestID) {
+                        attachmentApprovalVerified = true
+                        respondedRequestIDs.insert(request.requestID)
+                        attachmentApprovalResponsesGranted += 1
+                        if approvalEvents.count < 24 {
+                            approvalEvents.append([
+                                "request_id": request.requestID,
+                                "task_id": request.taskID,
+                                "confirm_label": request.confirmLabel ?? "",
+                                "verified_file_approval": true,
+                                "details": (request.details ?? []).map { ["label": $0.label, "value": $0.value] },
+                            ])
+                        } else {
+                            approvalEventsOmitted += 1
+                        }
+                        try? Self.write(["events": approvalEvents, "omitted": approvalEventsOmitted],
+                            to: trace.appendingPathComponent("gmail-approval-events.json"))
+                        client.respondToApproval(request, approved: true)
+                        continue
+                    }
+                }
                 let details = request.details ?? []
                 let labels = details.map(\.label)
                 let fields = Set(labels).count == labels.count
@@ -753,12 +1011,17 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     && fields["Attachment 2"] == nil && fields["Attachment 3"] == nil
                     && fields["Attachment 4"] == nil && fields["Attachment 5"] == nil
                 if expected.send_approval_check == true, expected.job == "email",
+                   request.taskID == taskID, !respondedRequestIDs.contains(request.requestID),
                    request.confirmLabel == "Send email", exactFields {
                     // Observe the exact approval and leave it pending. No
                     // approval response can grant permission to send.
                     return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
-                        deniedApprovals: deniedApprovals, sendApprovalObserved: true,
-                        sendApprovalFieldsExact: true,
+                        deniedApprovals: deniedApprovals, attachmentApprovalCount: attachmentApprovalCount,
+                        attachmentApprovalVerified: attachmentApprovalVerified,
+                        attachmentApprovalResponsesGranted: attachmentApprovalResponsesGranted,
+                        sendApprovalObserved: true, sendApprovalFieldsExact: true,
+                        sendApprovalResponsesGranted: sendApprovalResponsesGranted,
+                        sendApprovalResponsesDenied: sendApprovalResponsesDenied,
                         approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
                 }
                 let gmailSendMessage = fields["Message"] as? String ?? ""
@@ -772,17 +1035,27 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     && fields["CC"] == nil && fields["BCC"] == nil
                     && fields["Attachment 2"] == nil && fields["Attachment 3"] == nil
                     && fields["Attachment 4"] == nil && fields["Attachment 5"] == nil
-                if expected.send_approval_check == true, expected.job == "gmail", gmailSendFieldsExact {
+                if expected.job == "gmail", request.confirmLabel == "Send email" {
+                    let taskBoundSendApproval = request.taskID == taskID
+                        && !request.requestID.isEmpty && !respondedRequestIDs.contains(request.requestID)
                     let event: [String: Any] = [
                         "request_id": request.requestID,
                         "task_id": request.taskID,
                         "confirm_label": request.confirmLabel ?? "",
+                        "send_fields_exact": taskBoundSendApproval && gmailSendFieldsExact,
                         "message": request.message,
                         "details": (request.details ?? []).map { ["label": $0.label, "value": $0.value] },
                     ]
                     return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
-                        deniedApprovals: deniedApprovals, sendApprovalObserved: true,
-                        sendApprovalFieldsExact: true, approvalEvents: [event], approvalEventsOmitted: 0)
+                        deniedApprovals: deniedApprovals, attachmentApprovalCount: attachmentApprovalCount,
+                        attachmentApprovalVerified: attachmentApprovalVerified,
+                        attachmentApprovalResponsesGranted: attachmentApprovalResponsesGranted,
+                        sendApprovalObserved: true,
+                        sendApprovalFieldsExact: expected.send_approval_check == true
+                            && taskBoundSendApproval && gmailSendFieldsExact,
+                        sendApprovalResponsesGranted: sendApprovalResponsesGranted,
+                        sendApprovalResponsesDenied: sendApprovalResponsesDenied,
+                        approvalEvents: approvalEvents + [event], approvalEventsOmitted: approvalEventsOmitted)
                 }
                 if expected.job == "gmail" {
                     if approvalEvents.count < 24 {
@@ -805,8 +1078,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if let outcome = client.latestTerminalOutcome,
                !client.hasActivePrompt || outcome == .userInterventionRequired {
                 return Terminal(outcome: outcome.rawValue, approvedDrafts: 0,
-                    deniedApprovals: deniedApprovals, sendApprovalObserved: false,
-                    sendApprovalFieldsExact: false,
+                    deniedApprovals: deniedApprovals, attachmentApprovalCount: attachmentApprovalCount,
+                    attachmentApprovalVerified: attachmentApprovalVerified,
+                    attachmentApprovalResponsesGranted: attachmentApprovalResponsesGranted,
+                    sendApprovalObserved: false, sendApprovalFieldsExact: false,
+                    sendApprovalResponsesGranted: sendApprovalResponsesGranted,
+                    sendApprovalResponsesDenied: sendApprovalResponsesDenied,
                     approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
             }
             try await Task.sleep(for: .milliseconds(100))

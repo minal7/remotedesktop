@@ -99,6 +99,8 @@ final class ComputerUseDefaultBrowserSession {
         case existingWindowsChanged, interrupted, journalUncertain, authenticationHandoff, browserAutomationPermissionRequired
     }
 
+    enum ValidationPhase: String { case capture, target, sheet, focus, complete }
+
     typealias ResolveHandler = @MainActor () throws -> ComputerUseDefaultBrowserTarget.Handler
     typealias LaunchApplication = @MainActor (ComputerUseDefaultBrowserTarget.Handler, @escaping @MainActor () throws -> Void) async throws -> ComputerUseApplicationIdentity
     typealias CaptureWindows = @MainActor (ComputerUseApplicationIdentity) throws -> WindowSnapshot
@@ -129,6 +131,31 @@ final class ComputerUseDefaultBrowserSession {
         }
     }
 
+    @MainActor private final class CaptureDiagnosticState {
+        var reason: String?
+        var axErrorCode: Int?
+
+        func reset() { reason = nil; axErrorCode = nil }
+
+        func record(_ message: String) {
+            let token = message.split(separator: " ").first(where: { $0.hasPrefix("reason=") })
+                .map { String($0.dropFirst("reason=".count)) }
+                ?? (message.hasPrefix("phase=ax_attribute_read_failure") ? "bounds_ax_read_failure" : nil)
+            let allowed: Set<String> = ["capture_cancelled", "frontmost_unavailable", "frontmost_process_mismatch",
+                "frontmost_identity_mismatch", "windows_read", "windows_malformed", "windows_unconvertible",
+                "focused_window_read", "focused_window_malformed", "focused_window_unconvertible",
+                "capture_deadline", "final_frontmost_unavailable", "final_frontmost_changed",
+                "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
+                "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate",
+                "duplicate_id", "duplicate_element", "bounds_ax_read_failure"]
+            if let token, allowed.contains(token) { reason = token }
+            if let field = message.split(separator: " ").first(where: { $0.hasPrefix("ax_error=") }),
+               let code = Int(field.dropFirst("ax_error=".count)), (-65_535...65_535).contains(code) {
+                axErrorCode = code
+            }
+        }
+    }
+
     private let journalDirectory: URL
     private let resolveHandler: ResolveHandler
     private let launchApplication: LaunchApplication
@@ -136,13 +163,23 @@ final class ComputerUseDefaultBrowserSession {
     private let captureRetainedWindow: CaptureRetainedWindow?
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private let safariAddressBarAX: SafariAddressBarAXAccess
+    private let captureDiagnosticProvider: @MainActor () -> String?
+    private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
     private var runState: RunState?
+    private(set) var lastValidationPhaseForDiagnostics: ValidationPhase?
     var currentWindow: Window? { runState?.target }
     var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
     var currentActionBounds: CGRect? { runState?.currentActionBounds }
+    var lastCaptureReasonForDiagnostics: String? { captureDiagnosticProvider() }
+    var lastCaptureAXErrorCodeForDiagnostics: Int? { captureDiagnosticAXErrorProvider() }
 
     convenience init(journalDirectory: URL,
                       captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
+        let captureDiagnosticState = CaptureDiagnosticState()
+        let recordDiagnostic: @MainActor (String) -> Void = { message in
+            captureDiagnosticState.record(message)
+            captureWindowsDiagnostic(message)
+        }
         try self.init(journalDirectory: journalDirectory,
             resolveHandler: {
                 guard let handler = ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler() else {
@@ -152,12 +189,15 @@ final class ComputerUseDefaultBrowserSession {
             },
             launchApplication: Self.launchVerifiedHandler,
             captureWindows: { application in
-                try Self.captureWindowsForApplication(application, diagnostic: captureWindowsDiagnostic)
+                captureDiagnosticState.reset()
+                return try Self.captureWindowsForApplication(application, diagnostic: recordDiagnostic)
             },
             captureRetainedWindow: { application, target in
-                try Self.captureWindowsForApplication(application, expectedWindow: target,
-                    diagnostic: captureWindowsDiagnostic)
-            })
+                captureDiagnosticState.reset()
+                return try Self.captureWindowsForApplication(application, expectedWindow: target,
+                    diagnostic: recordDiagnostic)
+            }, captureDiagnosticProvider: { captureDiagnosticState.reason },
+            captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode })
     }
 
     init(journalDirectory: URL,
@@ -166,7 +206,9 @@ final class ComputerUseDefaultBrowserSession {
          captureWindows: @escaping CaptureWindows,
          safariAddressBarAX: SafariAddressBarAXAccess = .live,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
-         captureRetainedWindow: CaptureRetainedWindow? = nil) throws {
+         captureRetainedWindow: CaptureRetainedWindow? = nil,
+         captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
+         captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil }) throws {
         self.journalDirectory = journalDirectory
         self.resolveHandler = resolveHandler
         self.launchApplication = launchApplication
@@ -174,6 +216,8 @@ final class ComputerUseDefaultBrowserSession {
         self.captureRetainedWindow = captureRetainedWindow
         self.safariAddressBarAX = safariAddressBarAX
         self.makeStore = makeStore
+        self.captureDiagnosticProvider = captureDiagnosticProvider
+        self.captureDiagnosticAXErrorProvider = captureDiagnosticAXErrorProvider
     }
 
     func ensure(taskID: String, goal: String, tools: ComputerUseHostTools) async throws -> Window {
@@ -237,36 +281,46 @@ final class ComputerUseDefaultBrowserSession {
     }
 
     func validate(taskID: String, goal: String, tools: ComputerUseHostTools) throws {
+        lastValidationPhaseForDiagnostics = nil
         try Task.checkCancellation()
         try tools.requireActive()
         guard let state = runState, state.taskID == taskID,
               state.goalDigest == ComputerUseTextTaskContract.digest(goal),
               let expected = state.target, let app = state.app else {
+            lastValidationPhaseForDiagnostics = .target
             throw Failure.changedTaskOrGoal
         }
         let current: WindowSnapshot
+        lastValidationPhaseForDiagnostics = .capture
         if let captureRetainedWindow { current = try captureRetainedWindow(app, expected) }
         else { current = try captureWindows(app) }
+        lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == expected.id }),
               Self.sameWindow(focused, expected) else {
             throw current.hasSheets ? Failure.authenticationHandoff : Failure.targetLost
         }
         let panel = current.fileOpenPanel
+        lastValidationPhaseForDiagnostics = .sheet
         if current.hasSheets {
             guard !current.hasUnrecognizedSheets, let panel,
                   panel.parentWindowID == expected.id,
-                  CFEqual(panel.parentWindowElement, expected.accessibilityElement),
-                  current.focusedWindowID == expected.id || panel.isFocused else {
+                  CFEqual(panel.parentWindowElement, expected.accessibilityElement) else {
+                throw Failure.authenticationHandoff
+            }
+            lastValidationPhaseForDiagnostics = .focus
+            guard current.focusedWindowID == expected.id || panel.isFocused else {
                 throw Failure.authenticationHandoff
             }
         } else {
-            guard !current.hasUnrecognizedSheets, panel == nil,
-                  current.focusedWindowID == expected.id else { throw Failure.targetLost }
+            guard !current.hasUnrecognizedSheets, panel == nil else { throw Failure.targetLost }
+            lastValidationPhaseForDiagnostics = .focus
+            guard current.focusedWindowID == expected.id else { throw Failure.targetLost }
         }
         state.target = focused // Refresh current geometry; bounds are not window authority.
         state.currentFileOpenPanel = panel
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
+        lastValidationPhaseForDiagnostics = .complete
     }
 
     /// Navigates through Safari's observed address field using only the
@@ -317,8 +371,17 @@ final class ComputerUseDefaultBrowserSession {
             diagnostic("phase=address_field_not_focused_before_navigation")
             throw error
         }
+        try Task.checkCancellation()
+        try tools.requireActive()
         do { try validate(taskID: taskID, goal: goal, tools: tools) }
         catch { diagnostic("phase=pre_address_write_scope_validation_failed"); throw error }
+        guard isCurrentSafariAddressField(addressField, target: target),
+              focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true else {
+            diagnostic("phase=pre_address_write_focus_validation_failed")
+            throw Failure.targetLost
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
         // Focus-only failures are safe to retry. Once the destination write
         // begins, a partial write or uncertain Return must not be replayed.
         state.navigationDispatches.insert(url.absoluteString)
@@ -507,14 +570,26 @@ final class ComputerUseDefaultBrowserSession {
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
-            try validate(taskID: taskID, goal: goal, tools: tools)
+            do {
+                try validate(taskID: taskID, goal: goal, tools: tools)
+            } catch let failure as Failure {
+                let transientAXRead = failure == .targetLost
+                    && (lastCaptureReasonForDiagnostics == "windows_read"
+                        || lastCaptureReasonForDiagnostics == "focused_window_read")
+                    && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
+                guard transientAXRead, ContinuousClock.now < deadline else { throw failure }
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            }
             if let focused = focusedSafariAddressField(in: target) {
                 if CFEqual(focused, initiallyObserved),
-                   isCurrentSafariAddressField(focused, target: target) { return focused }
+                   isCurrentSafariAddressField(focused, target: target),
+                   ContinuousClock.now < deadline { return focused }
                 if let reacquired = try? uniqueSafariAddressField(in: target, diagnostic: diagnostic),
+                   ContinuousClock.now < deadline,
                    isCurrentSafariAddressField(reacquired, target: target),
                    let currentFocus = focusedSafariAddressField(in: target), CFEqual(currentFocus, reacquired) {
-                    return reacquired
+                    if ContinuousClock.now < deadline { return reacquired }
                 }
             }
             if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
@@ -567,32 +642,44 @@ final class ComputerUseDefaultBrowserSession {
     }
 
     private func validate(taskID: String, goalDigest: String, tools: ComputerUseHostTools) throws {
+        lastValidationPhaseForDiagnostics = nil
         guard let state = runState, state.taskID == taskID, state.goalDigest == goalDigest,
-              let target = state.target, let app = state.app else { throw Failure.targetLost }
+              let target = state.target, let app = state.app else {
+            lastValidationPhaseForDiagnostics = .target
+            throw Failure.targetLost
+        }
         try tools.requireActive()
         let current: WindowSnapshot
+        lastValidationPhaseForDiagnostics = .capture
         if let captureRetainedWindow { current = try captureRetainedWindow(app, target) }
         else { current = try captureWindows(app) }
+        lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == target.id }),
               Self.sameWindow(focused, target) else {
             throw current.hasSheets ? Failure.authenticationHandoff : Failure.targetLost
         }
         let panel = current.fileOpenPanel
+        lastValidationPhaseForDiagnostics = .sheet
         if current.hasSheets {
             guard !current.hasUnrecognizedSheets, let panel,
                   panel.parentWindowID == target.id,
-                  CFEqual(panel.parentWindowElement, target.accessibilityElement),
-                  current.focusedWindowID == target.id || panel.isFocused else {
+                  CFEqual(panel.parentWindowElement, target.accessibilityElement) else {
+                throw Failure.authenticationHandoff
+            }
+            lastValidationPhaseForDiagnostics = .focus
+            guard current.focusedWindowID == target.id || panel.isFocused else {
                 throw Failure.authenticationHandoff
             }
         } else {
-            guard !current.hasUnrecognizedSheets, panel == nil,
-                  current.focusedWindowID == target.id else { throw Failure.targetLost }
+            guard !current.hasUnrecognizedSheets, panel == nil else { throw Failure.targetLost }
+            lastValidationPhaseForDiagnostics = .focus
+            guard current.focusedWindowID == target.id else { throw Failure.targetLost }
         }
         state.target = focused // Refresh current geometry; bounds are not window authority.
         state.currentFileOpenPanel = panel
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
+        lastValidationPhaseForDiagnostics = .complete
     }
 
     private func makeExecution(state: RunState, goalDigest: String,
@@ -890,19 +977,43 @@ final class ComputerUseDefaultBrowserSession {
         expectedWindow: Window? = nil,
         diagnostic: @MainActor (String) -> Void = { _ in }
     ) throws -> WindowSnapshot {
-        try Task.checkCancellation()
-        guard let frontmost = NSWorkspace.shared.frontmostApplication,
-              !frontmost.isTerminated, frontmost.processIdentifier == application.processIdentifier,
-              frontmost.bundleIdentifier == application.bundleIdentifier,
-              let identity = ComputerUseApplicationIdentity(runningApplication: frontmost),
-              identity == application else { throw Failure.targetLost }
+        guard !Task.isCancelled else {
+            diagnostic("phase=capture_failure reason=capture_cancelled")
+            throw CancellationError()
+        }
+        guard let frontmost = NSWorkspace.shared.frontmostApplication, !frontmost.isTerminated else {
+            diagnostic("phase=capture_failure reason=frontmost_unavailable")
+            throw Failure.targetLost
+        }
+        guard frontmost.processIdentifier == application.processIdentifier,
+              frontmost.bundleIdentifier == application.bundleIdentifier else {
+            diagnostic("phase=capture_failure reason=frontmost_process_mismatch")
+            throw Failure.targetLost
+        }
+        guard let identity = ComputerUseApplicationIdentity(runningApplication: frontmost),
+              identity == application else {
+            diagnostic("phase=capture_failure reason=frontmost_identity_mismatch")
+            throw Failure.targetLost
+        }
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let root = AXUIElementCreateApplication(application.processIdentifier)
+        var rootReadAXError: Int?
         func read(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
-            AXUIElementSetMessagingTimeout(element, 0.15)
+            let isApplicationWindowRead = CFEqual(element, root)
+                && (attribute == (kAXWindowsAttribute as CFString)
+                    || attribute == (kAXFocusedWindowAttribute as CFString))
+            AXUIElementSetMessagingTimeout(element, isApplicationWindowRead ? 0.5 : 0.15)
             var value: CFTypeRef?
             let result = AXUIElementCopyAttributeValue(element, attribute, &value)
             guard result == .success else {
+                if CFEqual(element, root), attribute == (kAXWindowsAttribute as CFString) {
+                    rootReadAXError = Int(result.rawValue)
+                    diagnostic("phase=capture_failure reason=windows_read ax_error=\(result.rawValue)")
+                } else if CFEqual(element, root), attribute == (kAXFocusedWindowAttribute as CFString) {
+                    rootReadAXError = Int(result.rawValue)
+                    diagnostic("phase=capture_failure reason=focused_window_read ax_error=\(result.rawValue)")
+                }
                 if let expectedWindow,
                    CFEqual(element, expectedWindow.accessibilityElement),
                    attribute == (kAXPositionAttribute as CFString) || attribute == (kAXSizeAttribute as CFString) {
@@ -918,12 +1029,31 @@ final class ComputerUseDefaultBrowserSession {
             guard let raw = read(element, attribute), CFGetTypeID(raw) == AXValueGetTypeID() else { return false }
             return AXValueGetValue(raw as! AXValue, type, &result)
         }
-        let root = AXUIElementCreateApplication(application.processIdentifier)
-        guard let windowsValue = read(root, kAXWindowsAttribute as CFString),
-              CFGetTypeID(windowsValue) == CFArrayGetTypeID(),
-              var elements = windowsValue as? [AXUIElement],
-              let focusedValue = read(root, kAXFocusedWindowAttribute as CFString),
-              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { throw Failure.targetLost }
+        guard let windowsValue = read(root, kAXWindowsAttribute as CFString) else {
+            if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
+            else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
+            else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=windows_read") }
+            throw Failure.targetLost
+        }
+        guard CFGetTypeID(windowsValue) == CFArrayGetTypeID() else {
+            diagnostic("phase=capture_failure reason=windows_malformed")
+            throw Failure.targetLost
+        }
+        guard var elements = windowsValue as? [AXUIElement] else {
+            diagnostic("phase=capture_failure reason=windows_unconvertible")
+            throw Failure.targetLost
+        }
+        rootReadAXError = nil
+        guard let focusedValue = read(root, kAXFocusedWindowAttribute as CFString) else {
+            if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
+            else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
+            else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=focused_window_read") }
+            throw Failure.targetLost
+        }
+        guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            diagnostic("phase=capture_failure reason=focused_window_malformed")
+            throw Failure.targetLost
+        }
         let focusedElement = focusedValue as! AXUIElement
         if let expectedWindow {
             guard expectedWindow.application == application,
@@ -1057,10 +1187,21 @@ final class ComputerUseDefaultBrowserSession {
                 windowFailure("pid", index: index, element: element)
                 throw Failure.ambiguousWindows
             }
-            let (windowBounds, boundsReason) = checkedWindowBounds(element)
-            guard let bounds = windowBounds else {
-                windowFailure("bounds_\(boundsReason)", index: index, element: element)
-                throw Failure.ambiguousWindows
+            let containsNativeFocus = focusedWithin(focusedElement, element)
+            let requireBounds = expectedWindow != nil || containsNativeFocus
+            let bounds: CGRect
+            if requireBounds {
+                let (windowBounds, boundsReason) = checkedWindowBounds(element)
+                guard let windowBounds else {
+                    windowFailure("bounds_\(boundsReason)", index: index, element: element)
+                    throw Failure.ambiguousWindows
+                }
+                bounds = windowBounds
+            } else {
+                // Startup inventory preserves background AX identity only. This
+                // metadata cannot become an action target: the focused/new target
+                // has fresh bounds, and retained validation refreshes them again.
+                bounds = .zero
             }
             let hash = CFHash(element)
             let windowIdentity = ComputerUseFrontmostWindowCaptureIdentity(
@@ -1072,7 +1213,7 @@ final class ComputerUseDefaultBrowserSession {
             // A background window's chooser or sign-in sheet does not own
             // input in this window. Keep all window identities for startup
             // comparison, but inspect sheets only under current native focus.
-            guard focusedWithin(focusedElement, element) else { continue }
+            guard containsNativeFocus else { continue }
             let axSheets = array(element, "AXSheets" as CFString)
             if !axSheets.isEmpty { hasSheets = true }
             for sheet in axSheets where string(sheet, kAXRoleAttribute as CFString) != "AXSheet" {
@@ -1166,10 +1307,21 @@ final class ComputerUseDefaultBrowserSession {
         } else if hasSheets {
             hasUnrecognizedSheets = true
         }
-        guard let after = NSWorkspace.shared.frontmostApplication,
-              !after.isTerminated,
-              let afterIdentity = ComputerUseApplicationIdentity(runningApplication: after),
-              afterIdentity == application, !Task.isCancelled, ContinuousClock.now < deadline else {
+        guard let after = NSWorkspace.shared.frontmostApplication, !after.isTerminated else {
+            diagnostic("phase=capture_failure reason=final_frontmost_unavailable")
+            throw Failure.targetLost
+        }
+        guard let afterIdentity = ComputerUseApplicationIdentity(runningApplication: after),
+              afterIdentity == application else {
+            diagnostic("phase=capture_failure reason=final_frontmost_changed")
+            throw Failure.targetLost
+        }
+        guard !Task.isCancelled else {
+            diagnostic("phase=capture_failure reason=capture_cancelled")
+            throw Failure.targetLost
+        }
+        guard ContinuousClock.now < deadline else {
+            diagnostic("phase=capture_failure reason=capture_deadline")
             throw Failure.targetLost
         }
         return WindowSnapshot(application: application, windows: windows,

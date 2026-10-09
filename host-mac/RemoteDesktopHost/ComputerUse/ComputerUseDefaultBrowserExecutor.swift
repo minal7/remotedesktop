@@ -345,23 +345,37 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
             if action != nil, let account = gmailJob?.request.account {
-                guard let page = try pageReader.read(window: window.accessibilityElement,
-                    application: window.application,
-                    mayAct: { !Task.isCancelled && (try? session.validate(taskID: taskID, goal: goal, tools: tools)) != nil }),
-                    page.application == window.application,
-                    ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                let accountURL: String
+                let observedAccountLabel: String?
+                if session.currentFileOpenPanel != nil {
+                    guard let url = try pageReader.readRetainedPageURL(window: window.accessibilityElement,
+                        application: window.application,
+                        mayAct: { (try? tools.requireActive()) != nil }),
+                        ComputerUseGmailAccountDirectory.accountIndex(from: url) == account.index else {
+                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    }
+                    accountURL = url
+                    observedAccountLabel = nil
+                } else {
+                    guard let page = try pageReader.read(window: window.accessibilityElement,
+                        application: window.application,
+                        mayAct: { (try? tools.requireActive()) != nil }),
+                        page.application == window.application,
+                        ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    }
+                    accountURL = page.url
+                    observedAccountLabel = page.controls.first(where: {
+                        $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
+                    })?.label
                 }
-                let observedAccountLabel = page.controls.first(where: {
-                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                })?.label
                 let accountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
                     window: window.accessibilityElement, application: window.application,
                     revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
                 let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(window: window.accessibilityElement,
                     application: window.application,
                     revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
-                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: accountURL,
                     windowTitle: title, accountControlLabel: accountLabel, expected: account) else {
                     throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                 }
@@ -415,6 +429,29 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             dispatchedPickerConfirmationCandidateID = pendingPickerConfirmation.candidateID
             gmailRecipientsVerified = false
             self.pendingPickerConfirmation = nil
+        }
+
+        func attachApprovalPresentation(for action: ComputerUsePredictedAction) -> MCPComputerUseApprovalPresentation? {
+            guard let pendingPickerConfirmation, pendingPickerConfirmation.action == action,
+                  let selectedCandidate, pendingPickerConfirmation.candidateID == selectedCandidate.id,
+                  let job = gmailJob,
+                  let attachment = job.attachment,
+                  attachment.candidateID == selectedCandidate.id,
+                  attachment.displayName == selectedCandidate.displayName,
+                  attachment.byteCount == selectedCandidate.byteCount,
+                  let window = session.currentWindow,
+                  let panel = session.currentFileOpenPanel,
+                  panel.primaryActionEnabled == true,
+                  panel.parentWindowID == window.id,
+                  CFEqual(panel.parentWindowElement, window.accessibilityElement) else { return nil }
+            let selectedURL: URL
+            do {
+                guard let resolvedURL = try selectedFileURL() else { return nil }
+                selectedURL = resolvedURL
+            } catch { return nil }
+            guard ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel,
+                    candidateURL: selectedURL) else { return nil }
+            return job.attachApprovalPresentation()
         }
 
         func modelInput(_ input: ComputerUseFaraModel.Input,
@@ -661,6 +698,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
         if let phase = scope.gmailNavigationPhase { diagnostic["gmailNavigationPhase"] = phase }
+        if let phase = scope.session.lastValidationPhaseForDiagnostics {
+            diagnostic["sessionValidationPhase"] = phase.rawValue
+        }
+        if let reason = scope.session.lastCaptureReasonForDiagnostics {
+            diagnostic["sessionCaptureReason"] = reason
+        }
+        if let code = scope.session.lastCaptureAXErrorCodeForDiagnostics {
+            diagnostic["sessionCaptureAXErrorCode"] = String(code)
+        }
         diagnostic["lastSessionFailureForDiagnostics"] = String(describing: lastSessionFailureForDiagnostics)
         return diagnostic
     }
@@ -672,8 +718,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     var readyDetail: String { desktop.readyDetail }
 
     func gmailApprovalPresentation(for action: ComputerUsePredictedAction) -> MCPComputerUseApprovalPresentation? {
-        guard scope.gmailPendingSendAction == action else { return nil }
-        return scope.gmailJob?.sendApprovalPresentation()
+        if scope.gmailPendingSendAction == action {
+            return scope.gmailJob?.sendApprovalPresentation()
+        }
+        return scope.attachApprovalPresentation(for: action)
     }
 
     init(journalDirectory: URL, session suppliedSession: ComputerUseDefaultBrowserSession? = nil,

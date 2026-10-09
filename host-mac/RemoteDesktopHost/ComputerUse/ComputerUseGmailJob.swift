@@ -206,6 +206,20 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         return .init(message: "Send this email through Gmail?", details: details, confirmLabel: "Send email")
     }
 
+    func attachApprovalPresentation() -> MCPComputerUseApprovalPresentation? {
+        guard requiresAttachment, let attachment, let account = request.account else { return nil }
+        var details = [
+            ComputerUseApprovalRequest.Detail(label: "File", value: attachment.displayName),
+            ComputerUseApprovalRequest.Detail(label: "Size", value: "\(attachment.byteCount) bytes"),
+            ComputerUseApprovalRequest.Detail(label: "Destination", value: "Gmail (\(account.email))"),
+            ComputerUseApprovalRequest.Detail(label: "To", value: request.to.joined(separator: ", ")),
+            ComputerUseApprovalRequest.Detail(label: "Subject", value: request.subject),
+        ]
+        if !request.cc.isEmpty { details.append(.init(label: "CC", value: request.cc.joined(separator: ", "))) }
+        if !request.bcc.isEmpty { details.append(.init(label: "BCC", value: request.bcc.joined(separator: ", "))) }
+        return .init(message: "Attach this file to the Gmail draft?", details: details, confirmLabel: "Attach file")
+    }
+
     static func isApprovedDraftURL(_ url: URL) -> Bool {
         isGmailURL(url) && isComposeOrDraftURL(url)
     }
@@ -845,7 +859,7 @@ enum ComputerUseGmailRecipientVerifier {
             let role = read(element, kAXRoleAttribute as String) as? String ?? ""
             let subrole = read(element, kAXSubroleAttribute as String) as? String ?? ""
             guard subrole != (kAXSecureTextFieldSubrole as String),
-                  !["AXTable", "AXOutline", "AXList", "AXTextArea", "AXSecureTextField", "AXMenu", "AXMenuItem"].contains(role) else { return }
+                  !["AXTable", "AXOutline", "AXList", "AXTextArea", "AXSecureTextField", "AXMenu", "AXMenuItem", "AXSheet"].contains(role) else { return }
             if role == "AXGroup" {
                 let labels = [kAXTitleAttribute, kAXDescriptionAttribute]
                     .compactMap { read(element, $0 as String) as? String }

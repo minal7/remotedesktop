@@ -303,18 +303,22 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private let defaultWritable: Bool
         private let focusDelayAfterCommandL: Int?
         private let writeStatus: AXError
+        private let deactivateOnWritableRead: Int?
         private var writableReadCount = 0
         private var focusedReadCountAfterCommandL = 0
         private var commandLDispatched = false
         private var addressValue = ""
         private(set) var writeCount = 0
+        private(set) var isActive = true
 
         init(processIdentifier: pid_t, writableValues: [Bool], defaultWritable: Bool = true,
-             focusDelayAfterCommandL: Int? = nil, writeStatus: AXError = .cannotComplete) {
+             focusDelayAfterCommandL: Int? = nil, writeStatus: AXError = .cannotComplete,
+             deactivateOnWritableRead: Int? = nil) {
             self.writableValues = writableValues
             self.defaultWritable = defaultWritable
             self.focusDelayAfterCommandL = focusDelayAfterCommandL
             self.writeStatus = writeStatus
+            self.deactivateOnWritableRead = deactivateOnWritableRead
             applicationElement = AXUIElementCreateApplication(processIdentifier)
             window = AXUIElementCreateApplication(processIdentifier + 100)
             toolbar = AXUIElementCreateApplication(processIdentifier + 101)
@@ -323,9 +327,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         func isSettable(_ element: AXUIElement) -> Bool {
             guard CFEqual(element, field) else { return false }
-            defer { writableReadCount += 1 }
-            return writableReadCount < writableValues.count ? writableValues[writableReadCount] : defaultWritable
+            let readIndex = writableReadCount
+            writableReadCount += 1
+            let result = readIndex < writableValues.count ? writableValues[readIndex] : defaultWritable
+            if readIndex == deactivateOnWritableRead { isActive = false }
+            return result
         }
+
+        func reactivate() { isActive = true }
+
+        var hasDispatchedCommandL: Bool { commandLDispatched }
 
         func setValue(_ element: AXUIElement, _ value: String) -> AXError {
             guard CFEqual(element, field) else { return .illegalArgument }
@@ -1018,11 +1029,19 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         for failure in [ComputerUseDefaultBrowserSession.Failure.targetLost, .ambiguousWindows] {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let background = try XCTUnwrap(fixture.desktop.windows.first)
+            let backgroundIdentity = ComputerUseFrontmostWindowCaptureIdentity(
+                applicationProcessIdentifier: background.identity.applicationProcessIdentifier,
+                accessibilityWindowHash: background.identity.accessibilityWindowHash, bounds: .zero)
+            fixture.desktop.windows[0] = .init(id: background.id, application: background.application,
+                accessibilityElement: background.accessibilityElement, identity: backgroundIdentity)
             fixture.desktop.transientWindowFailures = 1
             fixture.desktop.transientWindowFailure = failure
             let session = try fixture.session()
             let window = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
             XCTAssertEqual(window.id, "new")
+            XCTAssertNotEqual(window.identity.bounds, .zero,
+                "Exactly-one-new focused ownership must return the target's positive geometry")
             XCTAssertEqual(fixture.desktop.keyCount, 1)
         }
     }
@@ -2783,7 +2802,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     func testSafariNavigationLatchRetriesOnlyBeforeAddressWriteBegins() async throws {
         let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
-        for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused"] {
+        for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused",
+                         "inactive-after-focus", "transient-capture-read", "persistent-capture-read"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNavigationLatch-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -2801,8 +2821,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 writableValues: scenario == "pre-write-authority" ? [true, false, false, false] : [],
                 defaultWritable: scenario != "pre-write-authority",
                 focusDelayAfterCommandL: scenario == "delayed-focus" ? 2
-                    : scenario == "never-focused" ? Int.max : nil,
-                writeStatus: scenario == "delayed-focus" ? .success : .cannotComplete)
+                    : scenario == "never-focused" ? Int.max
+                    : ["transient-capture-read", "persistent-capture-read"].contains(scenario) ? 0 : nil,
+                writeStatus: ["delayed-focus", "transient-capture-read"].contains(scenario) ? .success : .cannotComplete,
+                deactivateOnWritableRead: scenario == "inactive-after-focus" ? 2 : nil)
             let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
                 accessibilityElement: AXUIElementCreateApplication(pid + 199),
                 identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 40,
@@ -2811,7 +2833,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var launches = 0
             var focusDispatches = 0
             var returnDispatches = 0
-            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            var transientCaptureFailures = 0
+            var captureReason: String?
+            var captureAXErrorCode: Int?
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { graph.isActive },
                 approvalTargetProvider: { _ in
                     .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
                         accessibilityIdentity: "retained-safari-window")
@@ -2854,13 +2879,25 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 },
                 captureWindows: { identity in
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    if graph.hasDispatchedCommandL
+                        && (scenario == "persistent-capture-read"
+                            || (scenario == "transient-capture-read" && transientCaptureFailures == 0)) {
+                        transientCaptureFailures += 1
+                        captureReason = "windows_read"
+                        captureAXErrorCode = Int(AXError.cannotComplete.rawValue)
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    captureReason = nil
+                    captureAXErrorCode = nil
                     return .init(application: app, windows: [existing] + (retained.map { [$0] } ?? []),
                         focusedWindowID: retained?.id ?? existing.id, hasSheets: false)
                 },
                 safariAddressBarAX: .init(read: { graph.read($0, $1) },
                     processIdentifier: { _ in pid },
                     valueIsSettable: { graph.isSettable($0) },
-                    setValue: { graph.setValue($0, $1) }))
+                    setValue: { graph.setValue($0, $1) }),
+                captureDiagnosticProvider: { captureReason },
+                captureDiagnosticAXErrorProvider: { captureAXErrorCode })
 
             let taskID = "safari-latch-\(scenario)"
             let goal = "Open the signed-in Gmail inbox in the retained Safari window."
@@ -2868,7 +2905,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(launches, 1)
 
             var firstDiagnostics: [String] = []
-            if scenario == "delayed-focus" {
+            if scenario == "delayed-focus" || scenario == "transient-capture-read" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                     tools: tools, diagnostic: { firstDiagnostics.append($0) })
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
@@ -2881,6 +2918,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                         tools: tools, diagnostic: { firstDiagnostics.append($0) })
                     XCTFail("The injected pre-write/write failure should stop navigation")
+                } catch let error as ComputerUseHostTools.ToolError where scenario == "inactive-after-focus" {
+                    XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
                     XCTAssertEqual(failure, .targetLost)
                 }
@@ -2888,6 +2927,19 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             if scenario == "never-focused" {
                 XCTAssertEqual(focusDispatches, 1, "A single navigation invocation may dispatch Cmd-L only once")
                 XCTAssertEqual(graph.writeCount, 0)
+            }
+            if scenario == "persistent-capture-read" {
+                XCTAssertEqual(focusDispatches, 1, "A persistent AX read failure must not replay Cmd-L")
+                XCTAssertEqual(graph.writeCount, 0, "Unverified retained focus must never authorize the URL write")
+                XCTAssertEqual(returnDispatches, 0)
+                XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
+                continue
+            }
+            if scenario == "inactive-after-focus" {
+                XCTAssertEqual(graph.writeCount, 0, "Inactive state after focus observation must block URL writes")
+                XCTAssertFalse(firstDiagnostics.contains("phase=ax_navigation_latched"),
+                    "The URL must remain retryable until the write latch is set")
+                graph.reactivate()
             }
 
             var retryDiagnostics: [String] = []
@@ -2910,6 +2962,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertEqual(focusDispatches, 2, "A fresh Resume may dispatch one Cmd-L in its own invocation")
                 XCTAssertEqual(graph.writeCount, 0)
+            } else if scenario == "inactive-after-focus" {
+                XCTAssertFalse(firstDiagnostics.contains("phase=ax_navigation_latched"))
+                XCTAssertTrue(retryDiagnostics.contains("phase=ax_navigation_latched"))
+                XCTAssertTrue(retryDiagnostics.contains(where: { $0.hasPrefix("phase=ax_address_value_write_failed") }))
+                XCTAssertEqual(graph.writeCount, 1, "A later active retry must still be allowed to begin one write")
             } else {
                 XCTAssertTrue(firstDiagnostics.contains(where: { $0.hasPrefix("phase=ax_address_value_write_failed") }))
                 XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")

@@ -463,6 +463,56 @@ final class ComputerUseGmailJobTests: XCTestCase {
         XCTAssertTrue(presentation.details.contains(.init(label: "Attachment", value: "Review.pptx (1024 bytes)")))
     }
 
+    func testAttachApprovalPresentationUsesExactFileAndDraftFields() throws {
+        let account = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 2)
+        var job = try ComputerUseGmailJob(request: .init(to: ["alex@example.com", "sam@example.com"],
+            cc: ["copy@example.com"], bcc: ["hidden@example.com"], subject: "Review",
+            body: "Please review.", fileDescription: "deck", sendRequested: false,
+            existingDraftURL: nil, account: account))
+        XCTAssertNil(job.attachApprovalPresentation(), "A presentation requires a resolved attachment")
+        try job.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 1_024))
+
+        let presentation = try XCTUnwrap(job.attachApprovalPresentation())
+        XCTAssertEqual(presentation.message, "Attach this file to the Gmail draft?")
+        XCTAssertEqual(presentation.confirmLabel, "Attach file")
+        XCTAssertEqual(presentation.details.map(\.label), ["File", "Size", "Destination", "To", "Subject", "CC", "BCC"])
+        XCTAssertEqual(presentation.details.map(\.value), ["Review.pptx", "1024 bytes", "Gmail (current@example.com)",
+            "alex@example.com, sam@example.com", "Review", "copy@example.com", "hidden@example.com"])
+    }
+
+    func testAttachApprovalPresentationRequiresAccountAndPrecedesSendApproval() throws {
+        var job = try ComputerUseGmailJob(request: .init(to: ["alex@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "deck", sendRequested: false,
+            existingDraftURL: nil))
+        try job.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 1_024))
+        XCTAssertNil(job.attachApprovalPresentation(), "Destination must be tied to a known Gmail account")
+
+        var sendJob = try ComputerUseGmailJob(request: .init(to: ["alex@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "deck", sendRequested: true,
+            existingDraftURL: nil, account: .init(email: "current@example.com", displayName: "Current", index: 2)))
+        try sendJob.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 1_024))
+        let attachmentPresentation = try XCTUnwrap(sendJob.attachApprovalPresentation())
+        XCTAssertEqual(attachmentPresentation.message, "Attach this file to the Gmail draft?")
+        XCTAssertEqual(attachmentPresentation.confirmLabel, "Attach file")
+        XCTAssertEqual(attachmentPresentation.details.map(\.label), ["File", "Size", "Destination", "To", "Subject"])
+        XCTAssertEqual(attachmentPresentation.details.map(\.value), ["Review.pptx", "1024 bytes", "Gmail (current@example.com)",
+            "alex@example.com", "Review"])
+
+        let sendPresentation = try XCTUnwrap(sendJob.sendApprovalPresentation())
+        XCTAssertEqual(sendPresentation.message, "Send this email through Gmail?")
+        XCTAssertEqual(sendPresentation.confirmLabel, "Send email")
+    }
+
+    func testAttachApprovalPresentationOmitsEmptyCopyFields() throws {
+        var job = try ComputerUseGmailJob(request: .init(to: ["alex@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "deck", sendRequested: false,
+            existingDraftURL: nil, account: .init(email: "current@example.com", displayName: "Current", index: 2)))
+        try job.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 1_024))
+        let presentation = try XCTUnwrap(job.attachApprovalPresentation())
+        XCTAssertEqual(presentation.details.map(\.label), ["File", "Size", "Destination", "To", "Subject"])
+    }
+
     func testSendWithoutAttachmentStillPresentsExactFields() throws {
         let job = try ComputerUseGmailJob(request: .init(to: ["alex@example.com"], cc: [], bcc: [],
             subject: "Review", body: "Please review.", fileDescription: "", sendRequested: true,

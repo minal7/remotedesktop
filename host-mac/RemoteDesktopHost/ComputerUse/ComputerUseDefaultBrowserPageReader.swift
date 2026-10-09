@@ -116,6 +116,97 @@ final class ComputerUseDefaultBrowserPageReader {
 
     init(access: Access? = nil) { self.access = access ?? .live }
 
+    /// Reads only the HTTPS URL from the exact retained page while the user
+    /// interface may be focused on a recognized native panel. This grants no
+    /// authority to inspect controls or act on the page.
+    func readRetainedPageURL(window expectedWindow: AXUIElement,
+                             application expectedApplication: ComputerUseApplicationIdentity,
+                             mayAct: () -> Bool) throws -> String? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        var expired = false
+        func check() throws {
+            try Task.checkCancellation()
+            guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
+            if ContinuousClock.now >= deadline { expired = true }
+        }
+        func value(_ name: String, _ element: AXUIElement) throws -> CFTypeRef? {
+            try check()
+            guard !expired else { return nil }
+            access.timeout(element, 0.1)
+            let result = access.read(name, element)
+            try check()
+            return expired ? nil : result
+        }
+        func string(_ name: String, _ element: AXUIElement) throws -> String? {
+            guard let raw = try value(name, element) else { return nil }
+            if let string = raw as? String { return string }
+            if let url = raw as? URL { return url.absoluteString }
+            return nil
+        }
+        func isPruned(_ node: AXUIElement) throws -> Bool {
+            let role = try string(kAXRoleAttribute as String, node) ?? ""
+            let subrole = try string(kAXSubroleAttribute as String, node) ?? ""
+            let hidden = (try value(kAXHiddenAttribute as String, node) as? NSNumber)?.boolValue == true
+            let protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+            return role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String)
+                || hidden || protected
+        }
+        func currentRoot() throws -> AXUIElement? {
+            guard let (identity, root) = access.frontmost(), identity == expectedApplication else { return nil }
+            return root
+        }
+        func listedWindow(_ root: AXUIElement) throws -> Bool {
+            guard let windows = try value(kAXWindowsAttribute as String, root) as? [AXUIElement],
+                  windows.filter({ CFEqual($0, expectedWindow) }).count == 1,
+                  (try string(kAXRoleAttribute as String, expectedWindow)) == "AXWindow" else { return false }
+            return true
+        }
+        func uniqueOuterWebArea(in window: AXUIElement) throws -> AXUIElement? {
+            var pending = [window]
+            var visited: [AXUIElement] = []
+            var found: [AXUIElement] = []
+            var incomplete = false
+            while !pending.isEmpty, visited.count < nodeLimitPerPass, !expired {
+                try check()
+                let node = pending.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, node) }) else { continue }
+                visited.append(node)
+                if try isPruned(node) { continue }
+                let role = try string(kAXRoleAttribute as String, node) ?? ""
+                if role == "AXSheet" { continue }
+                if role == "AXWebArea" {
+                    found.append(node)
+                    continue
+                }
+                if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
+                    let room = max(0, nodeLimitPerPass - visited.count - pending.count)
+                    if children.count > room { incomplete = true }
+                    pending.append(contentsOf: children.prefix(room))
+                }
+            }
+            guard pending.isEmpty, !incomplete, !expired, found.count == 1 else { return nil }
+            return found[0]
+        }
+        func httpsURL(from webArea: AXUIElement) throws -> String? {
+            guard let rawURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea),
+                  let components = URLComponents(string: rawURL), components.scheme?.lowercased() == "https",
+                  let host = components.host, !host.isEmpty else { return nil }
+            return rawURL
+        }
+
+        try check()
+        guard let root = try currentRoot(), try listedWindow(root),
+              let webArea = try uniqueOuterWebArea(in: expectedWindow),
+              let url = try httpsURL(from: webArea) else { return nil }
+        try check()
+        guard let afterRoot = try currentRoot(), CFEqual(afterRoot, root),
+              try listedWindow(afterRoot),
+              let afterWebArea = try uniqueOuterWebArea(in: expectedWindow),
+              CFEqual(afterWebArea, webArea), try httpsURL(from: afterWebArea) == url,
+              !expired else { return nil }
+        return url
+    }
+
     func read(window expectedWindow: AXUIElement,
               application expectedApplication: ComputerUseApplicationIdentity,
               mayAct: () -> Bool, diagnostic: ((String, [String]) -> Void)? = nil) throws -> Observation? {
