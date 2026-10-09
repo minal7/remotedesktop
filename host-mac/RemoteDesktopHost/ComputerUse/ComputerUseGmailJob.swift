@@ -14,6 +14,15 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         let fileDescription: String
         let sendRequested: Bool
         let existingDraftURL: URL?
+        let account: ComputerUseGmailAccountDirectory.Account?
+
+        init(to: [String], cc: [String], bcc: [String], subject: String, body: String,
+             fileDescription: String, sendRequested: Bool, existingDraftURL: URL? = nil,
+             account: ComputerUseGmailAccountDirectory.Account? = nil) {
+            self.to = to; self.cc = cc; self.bcc = bcc
+            self.subject = subject; self.body = body; self.fileDescription = fileDescription
+            self.sendRequested = sendRequested; self.existingDraftURL = existingDraftURL; self.account = account
+        }
     }
 
     struct Attachment: Equatable, Sendable {
@@ -53,6 +62,10 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         catch { throw Error.invalidRequest }
         if let draftURL = request.existingDraftURL {
             guard Self.isGmailURL(draftURL), Self.isComposeOrDraftURL(draftURL) else { throw Error.invalidDraftURL }
+            if let account = request.account,
+               ComputerUseGmailAccountDirectory.accountIndex(from: draftURL.absoluteString) != account.index {
+                throw Error.invalidDraftURL
+            }
         }
         self.request = request
     }
@@ -68,7 +81,8 @@ struct ComputerUseGmailJob: Equatable, Sendable {
 
     var composeURL: URL? {
         if let existingDraftURL = request.existingDraftURL { return existingDraftURL }
-        var components = URLComponents(string: "https://mail.google.com/mail/u/0/")
+        let accountIndex = request.account?.index ?? 0
+        var components = URLComponents(string: "https://mail.google.com/mail/u/\(accountIndex)/")
         var items = [URLQueryItem(name: "view", value: "cm"), URLQueryItem(name: "fs", value: "1"),
             URLQueryItem(name: "to", value: request.to.joined(separator: ", ")),
             URLQueryItem(name: "su", value: request.subject), URLQueryItem(name: "body", value: request.body)]
@@ -89,7 +103,7 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     }
 
     func verifiesComposeContents(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        guard let url = URL(string: observation.url), Self.isGmailURL(url) else { return false }
+        guard let url = URL(string: observation.url), Self.isGmailURL(url), matchesAccount(url) else { return false }
         let fields = observation.formFieldValues
         func exactField(_ label: String, _ value: String) -> Bool {
             fields.contains { field in
@@ -103,7 +117,7 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     }
 
     func verifiesRecipients(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        guard let url = URL(string: observation.url), Self.isGmailURL(url) else { return false }
+        guard let url = URL(string: observation.url), Self.isGmailURL(url), matchesAccount(url) else { return false }
         let fields = observation.formFieldValues
         func fieldsFor(_ fieldName: String) -> [ComputerUseDefaultBrowserPageReader.Observation.FormFieldValue] {
             fields.filter { field in
@@ -123,7 +137,7 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     }
 
     func verifiesAttachment(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        guard let url = URL(string: observation.url), Self.isGmailURL(url) else { return false }
+        guard let url = URL(string: observation.url), Self.isGmailURL(url), matchesAccount(url) else { return false }
         guard let attachment else { return !requiresAttachment }
         var formatter = ByteCountFormatter()
         formatter.countStyle = .file
@@ -146,13 +160,13 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     }
 
     func verifiesSend(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        request.sendRequested && URL(string: observation.url).map(Self.isGmailURL) == true && observation.exactTextValues.contains {
+        request.sendRequested && URL(string: observation.url).map { Self.isGmailURL($0) && matchesAccount($0) } == true && observation.exactTextValues.contains {
             $0.localizedCaseInsensitiveContains("Message sent")
         }
     }
 
     func verifiesSavedDraft(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        !request.sendRequested && URL(string: observation.url).map(Self.isGmailURL) == true && observation.exactTextValues.contains {
+        !request.sendRequested && URL(string: observation.url).map { Self.isGmailURL($0) && matchesAccount($0) } == true && observation.exactTextValues.contains {
             $0.localizedCaseInsensitiveContains("Draft saved")
                 || $0.localizedCaseInsensitiveContains("Saved to Drafts")
         }
@@ -175,6 +189,11 @@ struct ComputerUseGmailJob: Equatable, Sendable {
 
     static func isApprovedDraftURL(_ url: URL) -> Bool {
         isGmailURL(url) && isComposeOrDraftURL(url)
+    }
+
+    private func matchesAccount(_ url: URL) -> Bool {
+        guard let account = request.account else { return true }
+        return ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) == account.index
     }
 
     private static func isGmailURL(_ url: URL) -> Bool {
@@ -205,6 +224,225 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         }
     }
 
+}
+
+enum ComputerUseGmailAccountDirectory {
+    struct Account: Equatable, Hashable, Sendable {
+        let email: String
+        let displayName: String
+        let index: Int
+    }
+    struct Link: Equatable, Sendable { let label: String; let url: String }
+    struct Snapshot: Equatable, Sendable { let current: Account; let accounts: [Account] }
+    enum MenuRead: Equatable, Sendable { case notOpen, invalid, accounts(Snapshot) }
+    enum PreferenceResolution: Equatable, Sendable {
+        case askUser
+        case selected(Account)
+        case unavailable
+    }
+
+    static func resolvePreference(_ preferredEmail: String?, in snapshot: Snapshot) -> PreferenceResolution {
+        guard let preferredEmail else { return .askUser }
+        guard let match = snapshot.accounts.first(where: {
+            $0.email.caseInsensitiveCompare(preferredEmail) == .orderedSame
+        }) else { return .unavailable }
+        return .selected(match)
+    }
+
+    static func accountIndex(from rawURL: String, requireAccountLink: Bool = false) -> Int? {
+        guard let url = URL(string: rawURL), let c = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              c.scheme?.lowercased() == "https", c.host?.lowercased() == "mail.google.com",
+              c.user == nil, c.password == nil, c.port == nil,
+              !requireAccountLink || (c.query == nil && c.fragment == nil),
+              let match = c.path.range(of: #"^/mail/u/([0-9]+)/?$"#, options: .regularExpression),
+              let range = c.path[match].range(of: #"[0-9]+"#, options: .regularExpression),
+              let index = Int(c.path[range]), (0...9_999).contains(index) else { return nil }
+        return index
+    }
+
+    static func inboxURL(index: Int) -> URL? {
+        guard (0...9_999).contains(index) else { return nil }
+        return URL(string: "https://mail.google.com/mail/u/\(index)/")
+    }
+
+    static func email(in rawLabel: String) -> String? {
+        let pattern = #"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]{1,128}@[A-Z0-9](?:[A-Z0-9-]{0,188}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,62}[A-Z0-9])?)+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = rawLabel as NSString
+        let matches = regex.matches(in: rawLabel, range: NSRange(location: 0, length: ns.length))
+        guard matches.count == 1, let range = Range(matches[0].range, in: rawLabel) else { return nil }
+        let value = String(rawLabel[range])
+        guard value.utf8.count <= 320, !value.contains("..") else { return nil }
+        return value.lowercased()
+    }
+
+    static func snapshot(currentLabel: String, currentURL: String, links: [Link]) -> Snapshot? {
+        guard currentLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                .range(of: #"^Google Account:"#, options: [.regularExpression, .caseInsensitive]) != nil,
+              let currentEmail = email(in: currentLabel), let currentIndex = accountIndex(from: currentURL) else { return nil }
+        func name(_ label: String, email: String) -> String {
+            var value = label.replacingOccurrences(of: email, with: "", options: .caseInsensitive)
+            value = value.replacingOccurrences(of: #"\(opens a new tab\)"#, with: "",
+                options: [.regularExpression, .caseInsensitive])
+            value = value.replacingOccurrences(of: #"^Google Account:"#, with: "", options: .regularExpression)
+            value = value.replacingOccurrences(of: #"\([^)]*@[^)]*\)"#, with: "", options: .regularExpression)
+            value = value.replacingOccurrences(of: #",\s*Google membership$"#, with: "", options: [.regularExpression, .caseInsensitive])
+            value = value.replacingOccurrences(of: #"\s+(?:AI Pro\s+)?account(?:\s+Collapse accounts list)?$"#,
+                with: "", options: [.regularExpression, .caseInsensitive])
+            value = value.replacingOccurrences(of: #"\s+Collapse accounts list$"#,
+                with: "", options: [.regularExpression, .caseInsensitive])
+            value = value.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "(),")))
+            return value.isEmpty ? email : String(value.prefix(96))
+        }
+        let current = Account(email: currentEmail, displayName: name(currentLabel, email: currentEmail), index: currentIndex)
+        var byEmail: [String: Account] = [current.email: current]
+        var byIndex: [Int: String] = [current.index: current.email]
+        for link in links {
+            let lower = link.label.lowercased()
+            guard !["signed out", "sign in", "sign out", "add another account"].contains(where: lower.contains),
+                  let index = accountIndex(from: link.url, requireAccountLink: true),
+                  let address = email(in: link.label) else { continue }
+            let item = Account(email: address, displayName: name(link.label, email: address), index: index)
+            if let prior = byEmail[address], prior.index != index { return nil }
+            if let priorEmail = byIndex[index], priorEmail != address { return nil }
+            byEmail[address] = item
+            byIndex[index] = address
+        }
+        guard byEmail.count <= ComputerUseClarificationChoice.maximumChoices else { return nil }
+        return Snapshot(current: current, accounts: byEmail.values.sorted { $0.index < $1.index })
+    }
+
+    @MainActor
+    static func openMenu(observation: ComputerUseDefaultBrowserPageReader.Observation,
+        window: AXUIElement, reader: ComputerUseDefaultBrowserPageReader,
+        revalidate: @MainActor () throws -> Void) throws -> Bool {
+        try revalidate()
+        let controls = observation.controls.filter { $0.role == "AXButton" && $0.label.hasPrefix("Google Account:") }
+        guard controls.count == 1,
+              let element = reader.retainedControl(observationID: observation.id, controlID: controls[0].id,
+                application: observation.application, window: window) else { return false }
+        var raw: CFArray?
+        guard AXUIElementCopyActionNames(element, &raw) == .success,
+              (raw as? [String])?.contains("AXPress") == true else { return false }
+        try revalidate()
+        guard AXUIElementPerformAction(element, "AXPress" as CFString) == .success else { return false }
+        try revalidate()
+        return true
+    }
+
+    @MainActor
+    static func readMenu(window: AXUIElement, application: ComputerUseApplicationIdentity, currentURL: String,
+        closeMenu: Bool, revalidate: @MainActor () throws -> Void) throws -> MenuRead {
+        try revalidate()
+        guard frontmostMatches(application) else { return .invalid }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        var visited = 0, overflow = false, outerWebAreaSeen = false
+        func read(_ element: AXUIElement, _ attr: String) -> CFTypeRef? {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { overflow = true; return nil }
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attr as CFString, &value) == .success,
+                  !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+            return value
+        }
+        var groups: [AXUIElement] = []
+        func find(_ element: AXUIElement, depth: Int) {
+            guard depth <= 16, visited < 512, ContinuousClock.now < deadline, !Task.isCancelled else { overflow = true; return }
+            visited += 1
+            if read(element, kAXHiddenAttribute as String) as? Bool == true
+                || read(element, "AXProtectedContent") as? Bool == true { return }
+            let role = read(element, kAXRoleAttribute as String) as? String ?? ""
+            guard !["AXTable", "AXOutline", "AXList", "AXTextArea", "AXSecureTextField"].contains(role) else { return }
+            if role == "AXWebArea" { guard !outerWebAreaSeen else { return }; outerWebAreaSeen = true }
+            if role == "AXGroup" {
+                let labels = [kAXTitleAttribute, kAXDescriptionAttribute]
+                    .compactMap { read(element, $0 as String) as? String }
+                if labels.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .localizedCaseInsensitiveCompare("Account and settings") == .orderedSame }) {
+                    groups.append(element); return
+                }
+            }
+            guard let children = read(element, kAXChildrenAttribute as String) as? [AXUIElement], children.count <= 128 else {
+                if ["AXWindow", "AXGroup", "AXWebArea", "AXScrollArea"].contains(role) { overflow = true }
+                return
+            }
+            children.forEach { find($0, depth: depth + 1) }
+        }
+        find(window, depth: 0)
+        guard !overflow, !Task.isCancelled, ContinuousClock.now < deadline else { return .invalid }
+        guard !groups.isEmpty else { return .notOpen }
+        guard groups.count == 1 else { return .invalid }
+        let root = groups[0]
+        var nodesVisited = 0, treeInvalid = false
+        guard let currentLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+            window: window, application: application, revalidate: revalidate),
+              let currentEmail = email(in: currentLabel) else { return .invalid }
+        var selectedMenuEmails = Set<String>(), links: [Link] = [], closeButtons: [AXUIElement] = []
+        var menuOverflow = false
+        func collect(_ element: AXUIElement, depth: Int) {
+            guard depth <= 12, nodesVisited < 128, ContinuousClock.now < deadline, !Task.isCancelled else {
+                menuOverflow = true; return
+            }
+            nodesVisited += 1
+            let role = read(element, kAXRoleAttribute as String) as? String ?? ""
+            if read(element, kAXHiddenAttribute as String) as? Bool == true
+                || read(element, "AXProtectedContent") as? Bool == true
+                || ["AXTable", "AXOutline", "AXList", "AXTextArea", "AXSecureTextField", "AXTextField"].contains(role) {
+                return
+            }
+            if role == "AXButton" || role == "AXLink" {
+                let labels = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute, kAXValueAttribute]
+                    .compactMap { read(element, $0 as String) as? String }
+                if role == "AXButton" {
+                    for label in labels where label.localizedCaseInsensitiveContains("Collapse accounts list") {
+                        if let email = email(in: label) { selectedMenuEmails.insert(email) }
+                    }
+                    if labels.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .localizedCaseInsensitiveCompare("Close") == .orderedSame }) { closeButtons.append(element) }
+                } else if role == "AXLink" {
+                    let raw = read(element, "AXURL")
+                    let url = (raw as? URL)?.absoluteString ?? raw as? String ?? ""
+                    if let label = labels.first { links.append(.init(label: label, url: url)) }
+                }
+            }
+            guard let children = read(element, kAXChildrenAttribute as String) as? [AXUIElement], children.count <= 128 else {
+                if ["AXGroup", "AXMenu", "AXWindow"].contains(role) { treeInvalid = true }
+                return
+            }
+            children.forEach { collect($0, depth: depth + 1) }
+        }
+        collect(root, depth: 0)
+        guard !treeInvalid, !menuOverflow, !overflow, !Task.isCancelled, ContinuousClock.now < deadline,
+              selectedMenuEmails.count == 1, selectedMenuEmails.contains(currentEmail),
+              let snapshot = snapshot(currentLabel: currentLabel, currentURL: currentURL, links: links) else { return .invalid }
+        if closeMenu {
+            guard closeButtons.count == 1 else { return .invalid }
+            var actions: CFArray?
+            guard AXUIElementCopyActionNames(closeButtons[0], &actions) == .success,
+                  (actions as? [String])?.contains("AXPress") == true else { return .invalid }
+            try revalidate()
+            guard AXUIElementPerformAction(closeButtons[0], "AXPress" as CFString) == .success else { return .invalid }
+            try revalidate()
+        }
+        return .accounts(snapshot)
+    }
+
+    @MainActor
+    private static func frontmostMatches(_ expected: ComputerUseApplicationIdentity) -> Bool {
+        guard let app = NSWorkspace.shared.frontmostApplication, !app.isTerminated else { return false }
+        return app.processIdentifier == expected.processIdentifier && app.bundleIdentifier == expected.bundleIdentifier
+    }
+}
+
+@MainActor
+final class ComputerUseGmailAccountPreferences {
+    private let defaults: UserDefaults
+    private let key: String
+    init(defaults: UserDefaults = .standard, key: String = "ComputerUse.gmail.accountEmail") {
+        self.defaults = defaults; self.key = key
+    }
+    var preferredEmail: String? { defaults.string(forKey: key).map { $0.lowercased() } }
+    func remember(_ account: ComputerUseGmailAccountDirectory.Account) { defaults.set(account.email, forKey: key) }
 }
 
 /// Reads the actual recipient chips from one Gmail compose region. Each chip

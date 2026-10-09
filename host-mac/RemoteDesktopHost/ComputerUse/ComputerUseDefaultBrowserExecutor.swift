@@ -156,6 +156,38 @@ struct ComputerUseGmailRecipientChoiceSet: Equatable, Sendable {
     }
 }
 
+struct ComputerUseGmailAccountChoiceSet: Equatable, Sendable {
+    let taskID: String
+    let choices: [ComputerUseClarificationChoice]
+    private let accountsByID: [String: ComputerUseGmailAccountDirectory.Account]
+
+    init(taskID: String, accounts: [ComputerUseGmailAccountDirectory.Account]) throws {
+        guard !taskID.isEmpty, (2...ComputerUseClarificationChoice.maximumChoices).contains(accounts.count),
+              Set(accounts.map(\.email)).count == accounts.count,
+              Set(accounts.map(\.index)).count == accounts.count else {
+            throw ComputerUseTextClarificationStore.Failure.invalidChoice
+        }
+        var entries: [String: ComputerUseGmailAccountDirectory.Account] = [:]
+        var choices: [ComputerUseClarificationChoice] = []
+        for account in accounts {
+            let id = "gmail-account-\(UUID().uuidString.lowercased())"
+            let choice = try ComputerUseClarificationChoice(id: id,
+                label: account.displayName.isEmpty ? account.email : account.displayName, detail: account.email)
+            entries[id] = account
+            choices.append(choice)
+        }
+        try ComputerUseClarificationChoice.validate(choices)
+        self.taskID = taskID
+        self.choices = choices
+        accountsByID = entries
+    }
+
+    func account(for choice: ComputerUseClarificationChoice, taskID: String) -> ComputerUseGmailAccountDirectory.Account? {
+        guard self.taskID == taskID, choices.contains(choice) else { return nil }
+        return accountsByID[choice.id]
+    }
+}
+
 @MainActor
 final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
     ComputerUseTextClarificationContinuing, ComputerUseClarifiedGoalExecuting, ComputerUseGmailApprovalPresenting {
@@ -189,10 +221,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var userSelectedCandidateID: String?
         var pendingClarification: ComputerUseNativeTextExecutor.Clarification?
         var pendingChoiceCandidates: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
-        enum PendingChoiceKind: Equatable { case file, gmailRecipient }
+        enum PendingChoiceKind: Equatable { case file, gmailRecipient, gmailAccount }
         var pendingChoiceKind: PendingChoiceKind?
         var pendingGmailRecipientChoiceSet: ComputerUseGmailRecipientChoiceSet?
+        var pendingGmailAccountChoiceSet: ComputerUseGmailAccountChoiceSet?
         var selectedGmailRecipientAddress: String?
+        var selectedGmailAccount: ComputerUseGmailAccountDirectory.Account?
+        var currentGmailAccountIndex: Int?
+        var gmailAccountMenuOpenAttempts = 0
+        var gmailExistingDraftNavigationPrepared = false
         var executionTaskID: String?
         var selectedChoice: ComputerUseClarificationChoice?
         var clarifiedGoal: ComputerUseUnresolvedTextGoal?
@@ -289,6 +326,26 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 throw ComputerUseDesktopExecutor.Failure.unsupportedAction
             } else if !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+            if action != nil, let account = gmailJob?.request.account {
+                guard let page = try pageReader.read(window: window.accessibilityElement,
+                    application: window.application,
+                    mayAct: { !Task.isCancelled && (try? session.validate(taskID: taskID, goal: goal, tools: tools)) != nil }),
+                    page.application == window.application,
+                    ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                let observedAccountLabel = page.controls.first(where: {
+                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
+                })?.label
+                let accountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
+                    window: window.accessibilityElement, application: window.application,
+                    revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
+                guard ComputerUseGmailAccountDirectory.email(in: accountLabel ?? "") == account.email else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                try Task.checkCancellation()
+                try session.validate(taskID: taskID, goal: goal, tools: tools)
             }
             if let expectedAddress = gmailRecipientMenuAddressToDismiss,
                let action, case .key(let usage, let modifiers) = action,
@@ -495,6 +552,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 pendingChoiceCandidates = candidates
                 pendingChoiceKind = .file
                 pendingGmailRecipientChoiceSet = nil
+                pendingGmailAccountChoiceSet = nil
                 executionTaskID = clarificationTaskID
                 clarificationNonce = nonce
                 return .clarificationRequired(question)
@@ -536,6 +594,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     private let gmailContentExtractor: GmailContentExtractor?
     private let gmailRecipientLookup: GmailRecipientLookup
     private let gmailExistingDraftURL: URL?
+    private let gmailAccountPreferences: ComputerUseGmailAccountPreferences
 
     private func prepareGmailJobIfNeeded(_ originalRequest: String, tools: ComputerUseHostTools) async throws
         -> ComputerUseExecutionResult? {
@@ -550,13 +609,12 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         try scope.check(nil, tools)
         scope.gmailSetup = .init(intent: intent, extraction: extraction)
         scope.gmailNavigationStage = .navigateTarget
-        scope.gmailNavigationTargetURL = gmailExistingDraftURL
-            ?? URL(string: "https://mail.google.com/mail/u/0/")
+        scope.gmailNavigationTargetURL = ComputerUseGmailAccountDirectory.inboxURL(index: 0)
         return nil
     }
     private func surfacePendingGmailClarification(_ result: ComputerUseExecutionResult,
         taskID: String) -> ComputerUseExecutionResult {
-        guard scope.pendingChoiceKind == .gmailRecipient,
+        guard scope.pendingChoiceKind == .gmailRecipient || scope.pendingChoiceKind == .gmailAccount,
               let pending = scope.pendingClarification,
               case .userInterventionRequired(let message) = result,
               message == pending.question, pending.expiresAt > Date(),
@@ -607,15 +665,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 approvedRoots: ComputerUseLocalFileCatalog.standardApprovedRoots(), pageSize: 8, usesSpotlight: true)
          }, gmailContentExtractor: GmailContentExtractor? = nil,
          gmailRecipientLookup: @escaping GmailRecipientLookup = { try await ComputerUseMailRecipients.contacts($0) },
-         gmailExistingDraftURL: URL? = nil) throws {
+         gmailExistingDraftURL: URL? = nil,
+         gmailAccountPreferences: ComputerUseGmailAccountPreferences? = nil) throws {
         let session: ComputerUseDefaultBrowserSession
         if let suppliedSession { session = suppliedSession }
         else { session = try ComputerUseDefaultBrowserSession(journalDirectory: journalDirectory) }
+        let accountPreferences = gmailAccountPreferences ?? ComputerUseGmailAccountPreferences()
         let scope = Scope(session: session, pageReader: pageReader ?? ComputerUseDefaultBrowserPageReader(),
             localFileCatalogFactory: localFileCatalogFactory)
         self.scope = scope
         self.gmailContentExtractor = gmailContentExtractor
         self.gmailRecipientLookup = gmailRecipientLookup
+        self.gmailAccountPreferences = accountPreferences
         if let gmailExistingDraftURL {
             guard ComputerUseGmailJob.isApprovedDraftURL(gmailExistingDraftURL) else {
                 throw ComputerUseGmailJob.Error.invalidDraftURL
@@ -886,23 +947,113 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     return waitForGmailPage("Gmail could not be opened in the retained browser window. Review it, then choose Resume.")
                 }
                 scope.gmailNavigationWaitCount = 0
-                let accountLabel: String?
-                if let observedLabel = page.controls.first(where: {
-                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                })?.label {
-                    accountLabel = observedLabel
-                } else {
-                    accountLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
-                        window: window.accessibilityElement, application: window.application,
+                if scope.selectedGmailAccount == nil {
+                    let menu = try ComputerUseGmailAccountDirectory.readMenu(window: window.accessibilityElement,
+                        application: window.application, currentURL: page.url, closeMenu: true,
                         revalidate: { try scope.check(nil, tools) })
+                    switch menu {
+                    case .notOpen:
+                        guard scope.gmailAccountMenuOpenAttempts == 0,
+                              try ComputerUseGmailAccountDirectory.openMenu(observation: page,
+                                window: window.accessibilityElement, reader: scope.pageReader,
+                                revalidate: { try scope.check(nil, tools) }) else {
+                            return .init(response: "", decision: .handoff(
+                                "The signed-in Gmail account list could not be verified. Open the account menu and choose Resume."),
+                                includeInModelHistory: false)
+                        }
+                        scope.gmailAccountMenuOpenAttempts += 1
+                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                    case .invalid:
+                        return .init(response: "", decision: .handoff(
+                            "The Gmail account list could not be verified. Review the account menu, then choose Resume."),
+                            includeInModelHistory: false)
+                    case .accounts(let snapshot):
+                        scope.currentGmailAccountIndex = snapshot.current.index
+                        switch ComputerUseGmailAccountDirectory.resolvePreference(
+                            accountPreferences.preferredEmail, in: snapshot) {
+                        case .selected(let preferred):
+                            scope.selectedGmailAccount = preferred
+                        case .unavailable:
+                            return .init(response: "", decision: .handoff(
+                                "Your preferred Gmail account is not signed in. Sign in to that account, then choose Resume."),
+                                includeInModelHistory: false)
+                        case .askUser where snapshot.accounts.count == 1:
+                            scope.selectedGmailAccount = snapshot.accounts[0]
+                        case .askUser:
+                            guard let rootTaskID = scope.taskID else { throw Failure.noRetainedWindow }
+                            let choiceTaskID = scope.executionTaskID ?? rootTaskID
+                            let choiceSet = try ComputerUseGmailAccountChoiceSet(taskID: choiceTaskID,
+                                accounts: snapshot.accounts)
+                            let unresolved = try ComputerUseUnresolvedTextGoal(userRequest: setup.intent.originalRequest)
+                            let nonce = UUID()
+                            let digest = ComputerUseTaskContract.digest(["gmail-account-choice-v1", rootTaskID,
+                                choiceTaskID, unresolved.taskIdentityText, page.url, nonce.uuidString])
+                            let question = "Which signed-in Google account should I use? Choose the matching email address."
+                            scope.pendingClarification = .init(taskID: choiceTaskID, goal: unresolved,
+                                question: question, scope: digest, expiresAt: Date().addingTimeInterval(600),
+                                choices: choiceSet.choices)
+                            scope.pendingGmailAccountChoiceSet = choiceSet
+                            scope.pendingChoiceKind = .gmailAccount
+                            scope.pendingGmailRecipientChoiceSet = nil
+                            scope.selectedGmailRecipientAddress = nil
+                            scope.clarificationNonce = nonce
+                            scope.clarificationRetired = false
+                            scope.executionTaskID = choiceTaskID
+                            return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
+                        }
+                    }
                 }
+                guard let selectedAccount = scope.selectedGmailAccount,
+                      let observedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: page.url) else {
+                    return .init(response: "", decision: .handoff(
+                        "The selected Gmail account is not active in the browser. Review the account, then choose Resume."),
+                        includeInModelHistory: false)
+                }
+                if observedIndex != selectedAccount.index {
+                    guard let target = ComputerUseGmailAccountDirectory.inboxURL(index: selectedAccount.index) else {
+                        return .init(response: "", decision: .handoff(
+                            "The selected Gmail account route could not be verified. Review the account, then choose Resume."),
+                            includeInModelHistory: false)
+                    }
+                    scope.gmailNavigationTargetURL = target
+                    scope.gmailNavigationStage = .navigateTarget
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                }
+                let observedAccountLabel = page.controls.first(where: {
+                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
+                })?.label
+                let currentAccountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
+                    window: window.accessibilityElement, application: window.application,
+                    revalidate: { try scope.check(nil, tools) })
+                guard let currentAccountLabel,
+                      ComputerUseGmailAccountDirectory.email(in: currentAccountLabel) == selectedAccount.email else {
+                    return .init(response: "", decision: .handoff(
+                        "The selected Gmail account could not be confirmed. Review the account, then choose Resume."),
+                        includeInModelHistory: false)
+                }
+                if let existingURL = gmailExistingDraftURL {
+                    guard ComputerUseGmailAccountDirectory.accountIndex(from: existingURL.absoluteString) == selectedAccount.index else {
+                        return .init(response: "", decision: .handoff(
+                            "The existing Gmail draft belongs to a different account. It was not opened or changed."),
+                            includeInModelHistory: false)
+                    }
+                    if !scope.gmailExistingDraftNavigationPrepared {
+                        scope.gmailExistingDraftNavigationPrepared = true
+                        scope.gmailNavigationTargetURL = existingURL
+                        scope.gmailNavigationStage = .navigateTarget
+                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                    }
+                }
+                let accountLabel: String?
+                accountLabel = currentAccountLabel
                 switch try await ComputerUseWebJobRequest.resolveRecipient(in: setup.intent.originalRequest,
                     trustedAccountControlLabel: accountLabel, lookup: gmailRecipientLookup) {
                 case .addresses(let addresses):
                     let job = try ComputerUseGmailJob(request: .init(to: addresses, cc: [], bcc: [],
                         subject: setup.extraction.subject, body: setup.extraction.body,
                         fileDescription: setup.extraction.fileDescription,
-                        sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL))
+                        sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL,
+                        account: selectedAccount))
                     scope.gmailJob = job
                     scope.gmailFileQuery = setup.extraction.fileQuery
                     scope.gmailRecipientsVerified = false
@@ -942,6 +1093,25 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
                 case .clarification(let question):
                     return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
+                }
+            }
+            if let job = scope.gmailJob {
+                guard let account = job.request.account,
+                      ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                    return .init(response: "", decision: .handoff(
+                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
+                        includeInModelHistory: false)
+                }
+                let observedAccountLabel = page.controls.first(where: {
+                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
+                })?.label
+                let currentLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
+                    window: window.accessibilityElement, application: window.application,
+                    revalidate: { try scope.check(nil, tools) })
+                guard ComputerUseGmailAccountDirectory.email(in: currentLabel ?? "") == account.email else {
+                    return .init(response: "", decision: .handoff(
+                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
+                        includeInModelHistory: false)
                 }
             }
             if var job = scope.gmailJob {
@@ -1508,7 +1678,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             scope.pendingClarification = nil
             scope.pendingChoiceCandidates.removeAll()
             scope.pendingGmailRecipientChoiceSet = nil
+            scope.pendingGmailAccountChoiceSet = nil
             scope.selectedGmailRecipientAddress = nil
+            scope.selectedGmailAccount = nil
             scope.pendingChoiceKind = nil
             scope.clarificationRetired = true
             throw Failure.invalidFileChoice
@@ -1521,7 +1693,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         scope.pendingClarification = nil
         scope.pendingChoiceCandidates.removeAll()
         scope.pendingGmailRecipientChoiceSet = nil
+        scope.pendingGmailAccountChoiceSet = nil
         scope.selectedGmailRecipientAddress = nil
+        scope.selectedGmailAccount = nil
         scope.pendingChoiceKind = nil
         scope.clarifiedGoal = nil
         scope.routedClarifiedGoal = nil
@@ -1554,6 +1728,14 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             switch scope.pendingChoiceKind {
             case .some(.gmailRecipient):
                 guard scope.selectedGmailRecipientAddress != nil else { throw Failure.invalidFileChoice }
+            case .some(.gmailAccount):
+                guard let account = scope.selectedGmailAccount,
+                      scope.pendingGmailAccountChoiceSet == nil,
+                      scope.gmailSetup != nil,
+                      scope.selectedChoice?.id == selectedChoice.id,
+                      scope.pendingClarification == nil,
+                      scope.clarificationNonce == nil,
+                      account.email == selectedChoice.detail else { throw Failure.invalidFileChoice }
             case .some(.file), .none:
                 guard scope.userSelectedCandidateID == selectedChoice.id else { throw Failure.invalidFileChoice }
             }
@@ -1567,11 +1749,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             case .some(.gmailRecipient):
                 guard let choiceSet = scope.pendingGmailRecipientChoiceSet,
                       let address = choiceSet.address(for: selectedChoice, taskID: originatingTaskID),
-                      let setup = scope.gmailSetup else { throw Failure.invalidFileChoice }
+                      let setup = scope.gmailSetup,
+                      let account = scope.selectedGmailAccount else { throw Failure.invalidFileChoice }
                 let job = try ComputerUseGmailJob(request: .init(to: [address], cc: [], bcc: [],
                     subject: setup.extraction.subject, body: setup.extraction.body,
                     fileDescription: setup.extraction.fileDescription,
-                    sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL))
+                    sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL,
+                    account: account))
                 scope.gmailJob = job
                 scope.gmailFileQuery = setup.extraction.fileQuery
                 scope.gmailSetup = nil
@@ -1582,6 +1766,23 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 scope.gmailNavigationStage = .navigateTarget
                 scope.selectedGmailRecipientAddress = address
                 scope.pendingGmailRecipientChoiceSet = nil
+            case .some(.gmailAccount):
+                guard let choiceSet = scope.pendingGmailAccountChoiceSet,
+                      let account = choiceSet.account(for: selectedChoice, taskID: originatingTaskID),
+                      scope.gmailSetup != nil,
+                      gmailExistingDraftURL.map({
+                          ComputerUseGmailAccountDirectory.accountIndex(from: $0.absoluteString) == account.index
+                      }) ?? true else { throw Failure.invalidFileChoice }
+                gmailAccountPreferences.remember(account)
+                scope.selectedGmailAccount = account
+                scope.pendingGmailAccountChoiceSet = nil
+                if scope.currentGmailAccountIndex != account.index {
+                    guard let target = ComputerUseGmailAccountDirectory.inboxURL(index: account.index) else {
+                        throw Failure.invalidFileChoice
+                    }
+                    scope.gmailNavigationTargetURL = target
+                    scope.gmailNavigationStage = .navigateTarget
+                }
             case .some(.file), .none:
                 guard let candidate = scope.pendingChoiceCandidates[selectedChoice.id],
                       candidate.id == selectedChoice.id else { throw Failure.invalidFileChoice }
@@ -1605,7 +1806,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             scope.pendingChoiceCandidates.removeAll()
             scope.clarificationNonce = nil
         }
-        return try await execute(taskID: rootTaskID, prompt: rootGoal,
+        let result = try await execute(taskID: rootTaskID, prompt: rootGoal,
             trustedUserPrompt: rootGoal, tools: tools, progress: progress)
+        return surfacePendingGmailClarification(result, taskID: taskID)
     }
 }

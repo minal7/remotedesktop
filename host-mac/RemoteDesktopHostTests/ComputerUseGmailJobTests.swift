@@ -1,9 +1,198 @@
 import Foundation
+import AppKit
 import ApplicationServices
 import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseGmailJobTests: XCTestCase {
+    func testGmailAccountSnapshotUsesOnlyValidatedSignedInNumericRoutes() throws {
+        let snapshot = try XCTUnwrap(ComputerUseGmailAccountDirectory.snapshot(
+            currentLabel: "Google Account: Test Current (current@example.com), Google membership",
+            currentURL: "https://mail.google.com/mail/u/0/#inbox",
+            links: [
+                .init(label: "Test Other other@example.com (opens a new tab)",
+                    url: "https://mail.google.com/mail/u/1/"),
+                .init(label: "Signed out · Another Person other@example.com", url: "https://mail.google.com/mail/u/2/"),
+                .init(label: "Add another account add@example.com", url: "https://accounts.google.com/AccountChooser"),
+                .init(label: "Foreign account foreign@example.com", url: "https://drive.google.com/mail/u/3/"),
+            ]))
+        XCTAssertEqual(snapshot.current, .init(email: "current@example.com", displayName: "Test Current", index: 0))
+        XCTAssertEqual(snapshot.accounts, [
+            .init(email: "current@example.com", displayName: "Test Current", index: 0),
+            .init(email: "other@example.com", displayName: "Test Other", index: 1),
+        ])
+    }
+
+    func testGmailAccountSnapshotRejectsAmbiguousIdentityBindings() {
+        let header = "Google Account: Current (current@example.com), Google membership"
+        XCTAssertNil(ComputerUseGmailAccountDirectory.snapshot(currentLabel: header,
+            currentURL: "https://mail.google.com/mail/u/0/", links: [
+                .init(label: "Other other@example.com", url: "https://mail.google.com/mail/u/0/"),
+            ]), "One numeric account route cannot identify two different accounts")
+        XCTAssertNil(ComputerUseGmailAccountDirectory.snapshot(currentLabel: header,
+            currentURL: "https://mail.google.com/mail/u/0/", links: [
+                .init(label: "Current current@example.com", url: "https://mail.google.com/mail/u/1/"),
+            ]), "One email cannot map to two numeric account routes")
+        XCTAssertNil(ComputerUseGmailAccountDirectory.snapshot(currentLabel: "Account current@example.com",
+            currentURL: "https://mail.google.com/mail/u/0/", links: []))
+    }
+
+    func testGmailAccountPreferenceMapsByObservedEmailAndFailsClosedWhenMissing() throws {
+        let current = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 0)
+        let preferred = ComputerUseGmailAccountDirectory.Account(email: "preferred@example.com",
+            displayName: "Preferred", index: 2)
+        let snapshot = ComputerUseGmailAccountDirectory.Snapshot(current: current,
+            accounts: [current, preferred])
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.resolvePreference(nil, in: snapshot), .askUser)
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.resolvePreference("PREFERRED@example.com", in: snapshot),
+            .selected(preferred), "Remembered identity follows the freshly observed email-to-route mapping")
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.resolvePreference("missing@example.com", in: snapshot), .unavailable)
+    }
+
+    func testGmailAccountRouteSupportsComposeQueryButAccountMenuLinksStayBare() {
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.accountIndex(
+            from: "https://mail.google.com/mail/u/1/?view=cm&to=person%40example.com"), 1)
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.accountIndex(
+            from: "https://mail.google.com/mail/u/0/#inbox"), 0)
+        XCTAssertNil(ComputerUseGmailAccountDirectory.accountIndex(
+            from: "https://mail.google.com/mail/u/1/?view=cm", requireAccountLink: true))
+        XCTAssertNil(ComputerUseGmailAccountDirectory.accountIndex(
+            from: "https://mail.google.com.evil.test/mail/u/1/"))
+        XCTAssertNil(ComputerUseGmailAccountDirectory.accountIndex(
+            from: "https://user@mail.google.com/mail/u/1/"))
+    }
+
+    @MainActor
+    func testGmailAccountPreferenceStoresOnlyExplicitlySelectedEmail() throws {
+        let suite = "ComputerUseGmailAccountPreferencesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let preferences = ComputerUseGmailAccountPreferences(defaults: defaults, key: "selected")
+        let account = ComputerUseGmailAccountDirectory.Account(email: "preferred@example.com",
+            displayName: "Preferred Account", index: 1)
+        XCTAssertNil(preferences.preferredEmail)
+        preferences.remember(account)
+        XCTAssertEqual(preferences.preferredEmail, "preferred@example.com")
+    }
+
+    func testGmailAccountChoiceIsBoundToTaskAndExactAccountEmail() throws {
+        let accounts = [
+            ComputerUseGmailAccountDirectory.Account(email: "one@example.com", displayName: "One", index: 0),
+            ComputerUseGmailAccountDirectory.Account(email: "two@example.com", displayName: "Two", index: 1),
+        ]
+        let choices = try ComputerUseGmailAccountChoiceSet(taskID: "account-choice-origin", accounts: accounts)
+        XCTAssertEqual(choices.choices.map(\.id).count, 2)
+        XCTAssertTrue(choices.choices.allSatisfy { $0.id.hasPrefix("gmail-account-") })
+        XCTAssertEqual(choices.choices.map(\.detail), ["one@example.com", "two@example.com"])
+        XCTAssertEqual(choices.account(for: choices.choices[1], taskID: "account-choice-origin"), accounts[1])
+        XCTAssertNil(choices.account(for: choices.choices[1], taskID: "foreign-task"))
+        let forged = try ComputerUseClarificationChoice(id: choices.choices[1].id,
+            label: choices.choices[1].label, detail: "forged@example.com")
+        XCTAssertNil(choices.account(for: forged, taskID: "account-choice-origin"))
+    }
+
+    func testGmailDraftCompositionAndVerificationStayOnSelectedAccountRoute() throws {
+        let account = ComputerUseGmailAccountDirectory.Account(email: "preferred@example.com",
+            displayName: "Preferred Account", index: 1)
+        let job = try ComputerUseGmailJob(request: .init(to: ["recipient@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "", sendRequested: false,
+            existingDraftURL: nil, account: account))
+        let composeURL = try XCTUnwrap(job.composeURL)
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.accountIndex(from: composeURL.absoluteString), 1)
+        XCTAssertTrue(composeURL.absoluteString.contains("view=cm"))
+        let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 42,
+            codeIdentity: nil)!
+        func observation(_ url: String) -> ComputerUseDefaultBrowserPageReader.Observation {
+            .init(id: "compose", application: identity, url: url, renderedAXText: "", controls: [],
+                iframeContentMayBeOmitted: true, truncated: false, formFieldValues: [
+                    .init(label: "To recipients", role: "AXTextField", value: "recipient@example.com"),
+                    .init(label: "Subject", role: "AXTextField", value: "Review"),
+                    .init(label: "Message Body", role: "AXTextArea", value: "Please review."),
+                ])
+        }
+        XCTAssertTrue(job.verifiesCompose(observation("https://mail.google.com/mail/u/1/?view=cm")))
+        XCTAssertFalse(job.verifiesCompose(observation("https://mail.google.com/mail/u/0/?view=cm")))
+        XCTAssertNoThrow(try ComputerUseGmailJob(request: .init(to: ["recipient@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "", sendRequested: false,
+            existingDraftURL: URL(string: "https://mail.google.com/mail/u/1/?view=cm&to=recipient%40example.com"),
+            account: account)))
+        XCTAssertThrowsError(try ComputerUseGmailJob(request: .init(to: ["recipient@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "", sendRequested: false,
+            existingDraftURL: URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=Abc123"), account: account)))
+    }
+
+    @MainActor
+    func testOptInGmailAccountMenuCaptureProbe() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["RUN_GMAIL_ACCOUNT_CAPTURE_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in read-only capture of a manually opened Gmail account menu")
+        }
+        let expectedCurrent = try XCTUnwrap(env["GMAIL_ACCOUNT_EXPECTED_CURRENT_EMAIL"])
+        let expectedOther = try XCTUnwrap(env["GMAIL_ACCOUNT_EXPECTED_OTHER_EMAIL"])
+        let tracePath = try XCTUnwrap(env["GMAIL_ACCOUNT_CAPTURE_TRACE"])
+        let traceRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/RemoteDesktopHost/Traces", isDirectory: true)
+            .standardizedFileURL
+        let traceURL = URL(fileURLWithPath: tracePath).standardizedFileURL
+        guard traceURL.path.hasPrefix(traceRoot.path + "/") else {
+            return XCTFail("Capture trace must be written under the external Remote Desktop Host trace directory")
+        }
+        try FileManager.default.createDirectory(at: traceURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let defaultHandler = try XCTUnwrap(ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler())
+        let initialFrontmost = NSWorkspace.shared.frontmostApplication
+        let readiness: [String: Any] = [
+            "default_browser_bundle": defaultHandler.bundleIdentifier,
+            "default_browser_path": defaultHandler.bundleURL.standardizedFileURL.path,
+            "initial_frontmost_bundle": initialFrontmost?.bundleIdentifier ?? "none",
+            "initial_frontmost_path": initialFrontmost?.bundleURL?.standardizedFileURL.path ?? "none",
+        ]
+        let readinessData = try JSONSerialization.data(withJSONObject: readiness, options: [.sortedKeys])
+        let readyURL = URL(fileURLWithPath: traceURL.path + ".ready")
+        try readinessData.write(to: readyURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: readyURL.path)
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        var foreground: (ComputerUseDefaultBrowserTarget.Handler,
+            ComputerUseApplicationIdentity, ComputerUseFrontmostWindowCaptureIdentity)?
+        while foreground == nil, ContinuousClock.now < deadline {
+            foreground = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow()
+            if foreground == nil { try await Task.sleep(for: .milliseconds(100)) }
+        }
+        guard let (handler, app, focusedWindow) = foreground else {
+            let currentFrontmost = NSWorkspace.shared.frontmostApplication
+            return XCTFail("Timed out waiting for observed default Safari window; frontmostBundle=\(currentFrontmost?.bundleIdentifier ?? "none"), defaultBundle=\(defaultHandler.bundleIdentifier)")
+        }
+        let frontmost = try XCTUnwrap(NSWorkspace.shared.frontmostApplication)
+        XCTAssertFalse(frontmost.isTerminated)
+        XCTAssertEqual(frontmost.bundleIdentifier, handler.bundleIdentifier)
+        XCTAssertEqual(frontmost.processIdentifier, app.processIdentifier)
+        let windows = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(app)
+        let retained = try XCTUnwrap(windows.windows.first(where: { $0.identity == focusedWindow }))
+        XCTAssertEqual(windows.focusedWindowID, retained.id)
+        let page = try XCTUnwrap(ComputerUseDefaultBrowserPageReader().read(window: retained.accessibilityElement,
+            application: app, mayAct: { true }))
+        guard let pageComponents = URLComponents(string: page.url),
+              pageComponents.host?.lowercased() == "mail.google.com",
+              pageComponents.fragment?.localizedCaseInsensitiveContains("inbox") == true,
+              ComputerUseGmailAccountDirectory.accountIndex(from: page.url) != nil else {
+            return XCTFail("The frontmost browser must already show a Gmail account route")
+        }
+        guard case .accounts(let snapshot) = try ComputerUseGmailAccountDirectory.readMenu(
+            window: retained.accessibilityElement, application: app, currentURL: page.url,
+            closeMenu: false, revalidate: {}) else {
+            return XCTFail("The manually opened signed-in account menu could not be read")
+        }
+        XCTAssertEqual(snapshot.current.email, expectedCurrent.lowercased())
+        XCTAssertEqual(Set(snapshot.accounts.map(\.email)), Set([expectedCurrent.lowercased(), expectedOther.lowercased()]))
+        let evidence: [String: Any] = ["current_email": snapshot.current.email,
+            "current_index": snapshot.current.index,
+            "accounts": snapshot.accounts.map { ["email": $0.email, "index": $0.index] }]
+        let data = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+        try data.write(to: traceURL, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: traceURL.path)
+    }
+
     @MainActor
     func testHostNavigationRequiresMatchingFrontNativeWindow() throws {
         let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",

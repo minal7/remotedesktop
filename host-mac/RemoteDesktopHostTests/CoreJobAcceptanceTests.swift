@@ -49,6 +49,32 @@ private enum GmailAcceptanceControlTrace {
 @MainActor
 final class CoreJobAcceptanceTests: XCTestCase {
 
+    func testGmailAcceptanceAccountChoiceRequiresOneExactHostOfferedMatch() throws {
+        let wanted = try RemoteDesktopClientCore.ComputerUseClarificationChoice(id: "gmail-account-wanted",
+            label: "Test Account", detail: "self@example.com")
+        let other = try RemoteDesktopClientCore.ComputerUseClarificationChoice(id: "gmail-account-other",
+            label: "Other Account", detail: "other@example.com")
+        XCTAssertEqual(Self.gmailAccountChoice(in: [other, wanted], expectedAddress: "self@example.com"), wanted)
+        XCTAssertNil(Self.gmailAccountChoice(in: [wanted], expectedAddress: "self@example.com"),
+            "A single option is not an observed account-choice list")
+        let tooMany = try (0..<9).map { index in
+            try RemoteDesktopClientCore.ComputerUseClarificationChoice(id: "gmail-account-\(index)",
+                label: "Account \(index)", detail: "account\(index)@example.com")
+        }
+        XCTAssertNil(Self.gmailAccountChoice(in: tooMany, expectedAddress: "self@example.com"),
+            "An overfull account list must not be auto-answered")
+        let third = try RemoteDesktopClientCore.ComputerUseClarificationChoice(id: "gmail-account-third",
+            label: "Third Account", detail: "third@example.com")
+        XCTAssertNil(Self.gmailAccountChoice(in: [other, third], expectedAddress: "self@example.com"),
+            "A valid account list without the expected address must not be answered")
+        XCTAssertNil(Self.gmailAccountChoice(in: [other, wanted, try RemoteDesktopClientCore.ComputerUseClarificationChoice(
+            id: "gmail-account-duplicate", label: "Duplicate", detail: "self@example.com")],
+            expectedAddress: "self@example.com"), "Ambiguous exact matches must not be answered automatically")
+        XCTAssertNil(Self.gmailAccountChoice(in: [other, try RemoteDesktopClientCore.ComputerUseClarificationChoice(
+            id: "foreign-choice", label: "Self", detail: "self@example.com")],
+            expectedAddress: "self@example.com"), "Matching display details do not authorize a foreign choice ID")
+    }
+
     private struct Expected: Decodable {
         let job, run_id, prompt: String
         let source_path, source_sha256, attachment_name: String?
@@ -364,6 +390,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         var approvalEvents: [[String: Any]] = []
         var approvalEventsOmitted = 0
         var lastObservation = ""
+        var answeredGmailAccountClarifications = Set<String>()
         while ContinuousClock.now < deadline {
             let observation = String(describing: client.state) + client.statusText
                 + client.taskProgressHistory.joined(separator: "\n")
@@ -375,6 +402,22 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     "progress": client.taskProgressHistory],
                     to: trace.appendingPathComponent("client-state.json"))
                 lastObservation = observation
+            }
+            if expected.job == "gmail", let expectedAddress = expected.to,
+               case .answer(let reference, let validUntil) = client.composerMode,
+               validUntil > Date(),
+               let choices = client.clarificationChoices,
+               let choice = Self.gmailAccountChoice(in: choices, expectedAddress: expectedAddress) {
+                let clarificationKey = "\(reference.taskID):\(choice.id)"
+                if !answeredGmailAccountClarifications.contains(clarificationKey),
+                   client.sendClarificationChoice(choice.id) {
+                    answeredGmailAccountClarifications.insert(clarificationKey)
+                    try Self.write(["task_id": reference.taskID, "choice_id": choice.id,
+                        "account_detail": choice.detail ?? "", "choice_count": choices.count,
+                        "answer_sent": true], to: trace.appendingPathComponent("gmail-account-choice.json"))
+                    try await Task.sleep(for: .milliseconds(100))
+                    continue
+                }
             }
             if case .approvalRequired(let request) = client.state {
                 let details = request.details ?? []
@@ -446,6 +489,16 @@ final class CoreJobAcceptanceTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(100))
         }
         throw HarnessError.transport("Timed out waiting for the shipped client terminal outcome")
+    }
+
+    private static func gmailAccountChoice(in choices: [RemoteDesktopClientCore.ComputerUseClarificationChoice],
+                                           expectedAddress: String) -> RemoteDesktopClientCore.ComputerUseClarificationChoice? {
+        guard (2...RemoteDesktopClientCore.ComputerUseClarificationChoice.maximumChoices).contains(choices.count),
+              !expectedAddress.isEmpty,
+              choices.allSatisfy({ $0.id.hasPrefix("gmail-account-") }) else { return nil }
+        let matches = choices.filter { $0.detail?.utf8.elementsEqual(expectedAddress.utf8) == true }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
     }
 
     private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any],
