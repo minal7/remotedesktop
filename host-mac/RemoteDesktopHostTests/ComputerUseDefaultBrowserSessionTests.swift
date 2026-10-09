@@ -294,6 +294,66 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    private final class SafariAddressBarAXGraph {
+        let applicationElement: AXUIElement
+        let window: AXUIElement
+        private let toolbar: AXUIElement
+        private let field: AXUIElement
+        private let writableValues: [Bool]
+        private var writableReadCount = 0
+        private(set) var writeCount = 0
+
+        init(processIdentifier: pid_t, writableValues: [Bool]) {
+            self.writableValues = writableValues
+            applicationElement = AXUIElementCreateApplication(processIdentifier)
+            window = AXUIElementCreateApplication(processIdentifier + 100)
+            toolbar = AXUIElementCreateApplication(processIdentifier + 101)
+            field = AXUIElementCreateApplication(processIdentifier + 102)
+        }
+
+        func isSettable(_ element: AXUIElement) -> Bool {
+            guard CFEqual(element, field) else { return false }
+            defer { writableReadCount += 1 }
+            return writableReadCount < writableValues.count ? writableValues[writableReadCount] : true
+        }
+
+        func setValue(_ element: AXUIElement, _ value: String) -> AXError {
+            guard CFEqual(element, field) else { return .illegalArgument }
+            writeCount += 1
+            return .cannotComplete
+        }
+
+        func read(_ attribute: String, _ element: AXUIElement) -> CFTypeRef? {
+            if CFEqual(element, applicationElement) {
+                if attribute == (kAXFocusedWindowAttribute as String) { return window as CFTypeRef }
+                if attribute == (kAXFocusedUIElementAttribute as String) { return field as CFTypeRef }
+                return nil
+            }
+            if CFEqual(element, window) {
+                if attribute == (kAXRoleAttribute as String) { return "AXWindow" as CFTypeRef }
+                if attribute == (kAXChildrenAttribute as String) { return [toolbar] as CFArray }
+                return nil
+            }
+            if CFEqual(element, toolbar) {
+                if attribute == (kAXRoleAttribute as String) { return "AXToolbar" as CFTypeRef }
+                if attribute == (kAXParentAttribute as String) { return window as CFTypeRef }
+                if attribute == (kAXChildrenAttribute as String) { return [field] as CFArray }
+                return nil
+            }
+            if CFEqual(element, field) {
+                if attribute == (kAXRoleAttribute as String) { return "AXTextField" as CFTypeRef }
+                if attribute == (kAXParentAttribute as String) { return toolbar as CFTypeRef }
+                if attribute == "AXIdentifier" { return "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" as CFTypeRef }
+                if attribute == (kAXEnabledAttribute as String) { return NSNumber(value: true) }
+                if attribute == (kAXSubroleAttribute as String) { return "" as CFTypeRef }
+                if attribute == "AXHidden" || attribute == "AXProtectedContent" { return NSNumber(value: false) }
+                if attribute == (kAXChildrenAttribute as String) { return [] as CFArray }
+                if attribute == (kAXValueAttribute as String) { return "" as CFTypeRef }
+            }
+            return nil
+        }
+    }
+
     func testEnsureOpensExactlyOneWindowAndResumeReturnsSameRetainedWindow() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -2598,6 +2658,307 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_KEY_FINGERPRINT_PROBE=1 to sample Return fingerprints after typing a Gmail URL without dispatching Return.")
         }
         try await runDefaultBrowserURLTypingProbe(url: "https://mail.google.com/", sampleKeyFingerprint: true)
+    }
+
+    @MainActor
+    func testSafariAddressBarCandidateIsUniqueWritableAndChromeScoped() throws {
+        let pid: pid_t = 91
+        let element = AXUIElementCreateApplication(pid)
+        func candidate(identifier: String = "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
+                       role: String = "AXTextField", processIdentifier: pid_t = 91,
+                       enabled: Bool = true, settable: Bool = true, secure: Bool = false,
+                       hidden: Bool = false, protected: Bool = false) -> ComputerUseDefaultBrowserSession.SafariAddressBarCandidate {
+            .init(element: element, processIdentifier: processIdentifier, role: role, identifier: identifier,
+                  isEnabled: enabled, valueIsSettable: settable, isSecure: secure,
+                  isHidden: hidden, isProtected: protected)
+        }
+        let valid = candidate()
+        XCTAssertTrue(CFEqual(try XCTUnwrap(ComputerUseDefaultBrowserSession.selectedSafariAddressBarCandidate(
+            from: [valid], processIdentifier: pid)), element))
+        XCTAssertNil(ComputerUseDefaultBrowserSession.selectedSafariAddressBarCandidate(
+            from: [valid, valid], processIdentifier: pid), "Ambiguous address fields must fail closed")
+        for rejected in [candidate(identifier: "page-search"), candidate(role: "AXTextArea"),
+                         candidate(processIdentifier: 92), candidate(enabled: false),
+                         candidate(settable: false), candidate(secure: true),
+                         candidate(hidden: true), candidate(protected: true)] {
+            XCTAssertNil(ComputerUseDefaultBrowserSession.selectedSafariAddressBarCandidate(
+                from: [rejected], processIdentifier: pid))
+        }
+    }
+
+    func testGmailNavigationURLRequiresHTTPSNumericAccountRoute() {
+        for valid in ["https://mail.google.com/mail/u/0/#inbox",
+                      "https://mail.google.com/mail/u/12/"] {
+            XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedGmailNavigationURL(URL(string: valid)!))
+        }
+        for invalid in ["http://mail.google.com/mail/u/0/#inbox",
+                        "https://mail.google.com.evil.invalid/mail/u/0/",
+                        "https://user@mail.google.com/mail/u/0/",
+                        "https://mail.google.com/mail/u/x/",
+                        "https://mail.google.com/mail/u/10000/"] {
+            XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedGmailNavigationURL(URL(string: invalid)!))
+        }
+    }
+
+    func testSafariNavigationLatchRetriesOnlyBeforeAddressWriteBegins() async throws {
+        let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
+
+        for scenario in ["pre-write-authority", "uncertain-write"] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SafariNavigationLatch-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let pid: pid_t = scenario == "pre-write-authority" ? 731 : 732
+            let bundlePath = "/System/Applications/Safari.app"
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+                bundleIdentifier: "com.apple.Safari", canonicalBundlePath: bundlePath,
+                canonicalExecutablePath: "\(bundlePath)/Contents/MacOS/Safari",
+                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
+            let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+                processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
+            let handler = ComputerUseDefaultBrowserTarget.Handler(
+                bundleURL: URL(fileURLWithPath: bundlePath), bundleIdentifier: "com.apple.Safari")
+            let graph = SafariAddressBarAXGraph(processIdentifier: pid,
+                writableValues: scenario == "pre-write-authority" ? [true, false, true, false] : [])
+            let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
+                accessibilityElement: AXUIElementCreateApplication(pid + 199),
+                identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 40,
+                    bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+            var retained: ComputerUseDefaultBrowserSession.Window?
+            var launches = 0
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                approvalTargetProvider: { _ in
+                    .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+                        accessibilityIdentity: "retained-safari-window")
+                },
+                actionPerformer: { action in
+                    guard case .key(let usage, let modifiers) = action,
+                          usage == 0x11, modifiers == (1 << 3) else {
+                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                    }
+                    launches += 1
+                    retained = .init(id: "retained", application: app,
+                        accessibilityElement: graph.window,
+                        identity: .init(applicationProcessIdentifier: pid,
+                            accessibilityWindowHash: 41,
+                            bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+                },
+                screenProvider: {
+                    .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                        displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                        frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+                },
+                frontmostApplicationIdentityProvider: { app },
+                frontmostApplicationProvider: { app.bundleIdentifier })
+            let session = try ComputerUseDefaultBrowserSession(journalDirectory: root,
+                resolveHandler: { handler },
+                launchApplication: { _, beforeOpen in
+                    try beforeOpen()
+                    return app
+                },
+                captureWindows: { identity in
+                    guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    return .init(application: app, windows: [existing] + (retained.map { [$0] } ?? []),
+                        focusedWindowID: retained?.id ?? existing.id, hasSheets: false)
+                },
+                safariAddressBarAX: .init(read: { graph.read($0, $1) },
+                    processIdentifier: { _ in pid },
+                    valueIsSettable: { graph.isSettable($0) },
+                    setValue: { graph.setValue($0, $1) }))
+
+            let taskID = "safari-latch-\(scenario)"
+            let goal = "Open the signed-in Gmail inbox in the retained Safari window."
+            _ = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+            XCTAssertEqual(launches, 1)
+
+            var firstDiagnostics: [String] = []
+            do {
+                try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                    tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                XCTFail("The injected pre-write/write failure should stop navigation")
+            } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                XCTAssertEqual(failure, .targetLost)
+            }
+
+            var retryDiagnostics: [String] = []
+            do {
+                try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                    tools: tools, diagnostic: { retryDiagnostics.append($0) })
+                XCTFail("The injected failure should remain deterministic on retry")
+            } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                XCTAssertEqual(failure, .targetLost)
+            }
+
+            if scenario == "pre-write-authority" {
+                XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
+                XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
+                XCTAssertFalse(retryDiagnostics.contains("phase=already_latched"))
+                XCTAssertEqual(graph.writeCount, 0)
+            } else {
+                XCTAssertTrue(firstDiagnostics.contains(where: { $0.hasPrefix("phase=ax_address_value_write_failed") }))
+                XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
+                XCTAssertEqual(graph.writeCount, 1)
+            }
+        }
+    }
+
+    func testOptInSafariHostNavigationUsesOwnedWindowAndGmailInboxOnly() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_AX_NAVIGATION_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_AX_NAVIGATION_PROBE=1 for an inbox-only Safari navigation check.")
+        }
+        let handler = try XCTUnwrap(ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler())
+        guard handler.bundleIdentifier == "com.apple.Safari" else {
+            throw XCTSkip("The inbox-only host-navigation check is limited to the default Safari app.")
+        }
+        let journal = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SafariHostNavigation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: journal, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: journal) }
+        let session = try ComputerUseDefaultBrowserSession(journalDirectory: journal)
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let taskID = UUID().uuidString
+        let goal = "Open the signed-in Gmail inbox in the retained Safari window."
+        let target = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        let inbox = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
+        var diagnostics: [String] = []
+        var screenEvidence = Self.sanitizedVisibleWindowEvidence(window: target.accessibilityElement,
+            application: target.application)
+        do {
+            _ = try tools.currentScreen()
+            screenEvidence["current_screen"] = "success"
+        } catch let error as ComputerUseHostTools.ToolError {
+            screenEvidence["current_screen"] = Self.safeToolErrorName(error)
+        } catch {
+            screenEvidence["current_screen"] = "other_error"
+        }
+        var reachedInbox = false
+        defer {
+            Self.writeNavigationProbeResultIfRequested(success: reachedInbox, diagnostics: diagnostics,
+                screenEvidence: screenEvidence)
+        }
+        try await session.navigateRetainedSafariTab(to: inbox, taskID: taskID, goal: goal,
+            tools: tools, diagnostic: { diagnostics.append($0) })
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        var observed: ComputerUseDefaultBrowserPageReader.Observation?
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            if let current = session.currentWindow,
+               current.id == target.id,
+               CFEqual(current.accessibilityElement, target.accessibilityElement) {
+                observed = try? ComputerUseDefaultBrowserPageReader().read(
+                    window: target.accessibilityElement, application: target.application,
+                    mayAct: { (try? tools.requireActive()) != nil })
+                if let url = observed?.url,
+                   let parts = URLComponents(string: url),
+                   parts.scheme == "https", parts.host == "mail.google.com",
+                   ComputerUseGmailAccountDirectory.accountIndex(from: url) == 0,
+                   parts.fragment?.localizedCaseInsensitiveContains("inbox") == true {
+                    reachedInbox = true
+                    break
+                }
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let finalURL = try XCTUnwrap(observed?.url)
+        let finalComponents = try XCTUnwrap(URLComponents(string: finalURL))
+        XCTAssertEqual(finalComponents.host, "mail.google.com")
+        XCTAssertEqual(ComputerUseGmailAccountDirectory.accountIndex(from: finalURL), 0)
+        XCTAssertTrue(finalComponents.fragment?.localizedCaseInsensitiveContains("inbox") == true,
+            "Gmail may canonicalize the URL, but the retained page must reach the inbox route")
+        var retryDiagnostics: [String] = []
+        do {
+            try await session.navigateRetainedSafariTab(to: inbox, taskID: taskID, goal: goal,
+                tools: tools, diagnostic: { retryDiagnostics.append($0) })
+            XCTFail("A completed navigation must not be dispatched again on Resume")
+        } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+            XCTAssertEqual(failure, .targetLost)
+        }
+        XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
+        let resumed = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        XCTAssertEqual(resumed.id, target.id)
+        XCTAssertTrue(CFEqual(resumed.accessibilityElement, target.accessibilityElement))
+    }
+
+    private static func safeToolErrorName(_ error: ComputerUseHostTools.ToolError) -> String {
+        switch error {
+        case .visualSurfaceObscured: return "visual_surface_obscured"
+        case .focusedDisplayUnavailable: return "focused_display_unavailable"
+        case .screenshotUnavailable: return "screenshot_unavailable"
+        case .applicationUnavailable: return "application_unavailable"
+        case .paused: return "paused"
+        case .approvalTargetUnavailable: return "approval_target_unavailable"
+        case .approvalTargetChanged: return "approval_target_changed"
+        case .approvedActionEffectMayHaveOccurred: return "effect_uncertain"
+        }
+    }
+
+    private static func sanitizedVisibleWindowEvidence(window: AXUIElement,
+                                                       application: ComputerUseApplicationIdentity) -> [String: Any] {
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        AXUIElementSetMessagingTimeout(window, 0.1)
+        var focusedWindowValue: CFTypeRef?
+        let focusedWindowRead = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString,
+            &focusedWindowValue) == .success
+        var bounds: CGRect?
+        if focusedWindowRead, let focusedWindowValue,
+           CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID(),
+           CFEqual(unsafeBitCast(focusedWindowValue, to: AXUIElement.self), window) {
+            var positionValue: CFTypeRef?
+            var sizeValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
+               AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
+               let positionValue, let sizeValue,
+               CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() {
+                var origin = CGPoint.zero
+                var size = CGSize.zero
+                if AXValueGetValue(unsafeBitCast(positionValue, to: AXValue.self), .cgPoint, &origin),
+                   AXValueGetValue(unsafeBitCast(sizeValue, to: AXValue.self), .cgSize, &size) {
+                    bounds = CGRect(origin: origin, size: size)
+                }
+            }
+        }
+        let windowInfo = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let assessment: String
+        if let bounds {
+            switch ComputerUseVisibleWindowStack(windowInfo: windowInfo).assessFocusedWindow(
+                ownerProcessIdentifier: application.processIdentifier, bounds: bounds) {
+            case .clear: assessment = "clear"
+            case .occluded: assessment = "occluded"
+            case .unknown: assessment = "unknown"
+            }
+        } else { assessment = "ax_bounds_unavailable" }
+        let rows: [[String: Any]] = windowInfo.prefix(64).map { entry in
+            let rawBounds = entry[kCGWindowBounds as String] as? [String: Any]
+            var rect = CGRect.zero
+            let parsed = rawBounds.map { CGRectMakeWithDictionaryRepresentation($0 as CFDictionary, &rect) } ?? false
+            let values = parsed && [rect.minX, rect.minY, rect.width, rect.height].allSatisfy(\.isFinite)
+                ? [rect.minX, rect.minY, rect.width, rect.height].map { Double($0) } : []
+            return ["pid": entry[kCGWindowOwnerPID as String] as? Int ?? -1,
+                "layer": entry[kCGWindowLayer as String] as? Int ?? -1,
+                "alpha": entry[kCGWindowAlpha as String] as? Double ?? -1,
+                "bounds": values]
+        }
+        let axBounds = bounds.map { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] } ?? []
+        return ["stack_assessment": assessment, "ax_bounds": axBounds,
+            "retained_pid": application.processIdentifier,
+            "frontmost_pid": NSWorkspace.shared.frontmostApplication?.processIdentifier ?? -1,
+            "window_count": windowInfo.count, "window_rows_truncated": windowInfo.count > rows.count,
+            "windows": rows]
+    }
+
+    private static func writeNavigationProbeResultIfRequested(success: Bool, diagnostics: [String],
+                                                                screenEvidence: [String: Any]) {
+        guard let path = ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_AX_NAVIGATION_RESULT_PATH"],
+              !path.isEmpty else { return }
+        let payload: [String: Any] = ["success": success, "diagnostics": Array(diagnostics.suffix(12)),
+            "screen_evidence": screenEvidence]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else { return }
+        let url = URL(fileURLWithPath: path)
+        do {
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch { /* Best-effort, opt-in test evidence only. */ }
     }
 
     private func runDefaultBrowserURLTypingProbe(url: String, sampleKeyFingerprint: Bool = false) async throws {

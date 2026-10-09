@@ -49,6 +49,28 @@ private enum GmailAcceptanceControlTrace {
 @MainActor
 final class CoreJobAcceptanceTests: XCTestCase {
 
+    private enum GmailPreferencePreflight: Equatable {
+        case allowed
+        case missingExpectedAddress
+        case malformedPreference
+        case conflictingPreference
+    }
+
+    func testGmailAcceptancePreferencePreflightFailsClosedOnConflict() {
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: nil,
+            expectedAddress: "self@example.com"), .allowed)
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: "self@example.com",
+            expectedAddress: "self@example.com"), .allowed)
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: "other@example.com",
+            expectedAddress: "self@example.com"), .conflictingPreference)
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: "not-an-address",
+            expectedAddress: "self@example.com"), .malformedPreference)
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: nil,
+            expectedAddress: "not-an-address"), .missingExpectedAddress)
+        XCTAssertEqual(Self.gmailPreferencePreflight(preferredEmail: nil,
+            expectedAddress: nil), .missingExpectedAddress)
+    }
+
     func testGmailAcceptanceAccountChoiceRequiresOneExactHostOfferedMatch() throws {
         let wanted = try RemoteDesktopClientCore.ComputerUseClarificationChoice(id: "gmail-account-wanted",
             label: "Test Account", detail: "self@example.com")
@@ -124,6 +146,25 @@ final class CoreJobAcceptanceTests: XCTestCase {
             record["failure_class"] = "other"
             record["text"] = "The runner's expected.json or fixture root does not match this invocation"
             throw HarnessError.prerequisite("The runner's expected.json or fixture root does not match this invocation")
+        }
+
+        if job == "gmail" {
+            let preferredEmail = ComputerUseGmailAccountPreferences().preferredEmail
+            let preflightMessage: String?
+            switch Self.gmailPreferencePreflight(preferredEmail: preferredEmail, expectedAddress: expected.to) {
+            case .allowed:
+                preflightMessage = nil
+            case .conflictingPreference:
+                preflightMessage = "The saved Gmail account preference conflicts with the requested acceptance account; no task was started."
+            case .missingExpectedAddress, .malformedPreference:
+                preflightMessage = "The Gmail acceptance account could not be verified exactly; no task was started."
+            }
+            if let preflightMessage {
+                record["failure_class"] = "other"
+                record["text"] = preflightMessage
+                record["elapsed_ms"] = Int(Date().timeIntervalSince(started) * 1_000)
+                throw HarnessError.prerequisite(preflightMessage)
+            }
         }
 
         var manager: HostComputerUseManager?
@@ -366,6 +407,22 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "text-entry")
     }
 
+    func testFailureClassSeparatesScreenPermissionAndWindowHandoffs() {
+        let intervention = RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue
+        XCTAssertEqual(Self.failureClass(outcome: intervention,
+            text: "Close the covering window or handle the system dialog, then bring the intended window to the front and choose Resume."),
+            "guard-rejected")
+        XCTAssertEqual(Self.failureClass(outcome: intervention,
+            text: "Complete sign-in or the system permission step, then choose Resume."), "permission")
+        XCTAssertEqual(Self.failureClass(outcome: intervention,
+            text: "The intended browser window changed or is unavailable. Restore it, then choose Resume."), "window-lost")
+        XCTAssertEqual(Self.failureClass(outcome: intervention,
+            text: "The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."),
+            "text-entry")
+        XCTAssertEqual(Self.failureClass(outcome: intervention, text: "Review this step, then choose Resume."),
+            "approval-needed")
+    }
+
     private static func waitForReady(_ host: HostComputerUseManager,
         deadline: ContinuousClock.Instant) async -> Bool {
         while ContinuousClock.now < deadline {
@@ -499,6 +556,19 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let matches = choices.filter { $0.detail?.utf8.elementsEqual(expectedAddress.utf8) == true }
         guard matches.count == 1 else { return nil }
         return matches[0]
+    }
+
+    private static func gmailPreferencePreflight(preferredEmail: String?,
+                                                 expectedAddress: String?) -> GmailPreferencePreflight {
+        guard let expectedAddress,
+              ComputerUseGmailAccountDirectory.email(in: expectedAddress) == expectedAddress.lowercased() else {
+            return .missingExpectedAddress
+        }
+        guard let preferredEmail else { return .allowed }
+        guard ComputerUseGmailAccountDirectory.email(in: preferredEmail) == preferredEmail.lowercased() else {
+            return .malformedPreference
+        }
+        return preferredEmail.utf8.elementsEqual(expectedAddress.utf8) ? .allowed : .conflictingPreference
     }
 
     private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any],
@@ -1046,10 +1116,25 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     private static func failureClass(outcome: String?, text: String?) -> String? {
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.taskCompleted.rawValue { return nil }
-        if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue { return "approval-needed" }
         if text?.localizedCaseInsensitiveContains("The app did not confirm the exact text edit") == true
             || text?.localizedCaseInsensitiveContains("text entry was not confirmed") == true {
             return "text-entry"
+        }
+        if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue {
+            if text?.localizedCaseInsensitiveContains("Close the covering window") == true
+                || text?.localizedCaseInsensitiveContains("Move the intended window fully onto one active display") == true {
+                return "guard-rejected"
+            }
+            if text?.localizedCaseInsensitiveContains("sign-in") == true
+                || text?.localizedCaseInsensitiveContains("sign in") == true
+                || text?.localizedCaseInsensitiveContains("permission") == true
+                || text?.localizedCaseInsensitiveContains("macOS Downloads access") == true {
+                return "permission"
+            }
+            if text?.localizedCaseInsensitiveContains("The intended browser window changed or is unavailable") == true {
+                return "window-lost"
+            }
+            return "approval-needed"
         }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.unableToComplete.rawValue {
             if text?.contains("Generated arguments for ") == true,

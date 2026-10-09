@@ -1,6 +1,5 @@
 import AppKit
 import ApplicationServices
-import Carbon
 import CoreImage
 import Foundation
 
@@ -56,6 +55,45 @@ final class ComputerUseDefaultBrowserSession {
         var isNavigatingPath: Bool { goToFolderBounds != nil }
     }
 
+    struct SafariAddressBarCandidate {
+        let element: AXUIElement
+        let processIdentifier: pid_t
+        let role: String
+        let identifier: String
+        let isEnabled: Bool
+        let valueIsSettable: Bool
+        let isSecure: Bool
+        let isHidden: Bool
+        let isProtected: Bool
+    }
+
+    struct SafariAddressBarAXAccess {
+        let read: (String, AXUIElement) -> CFTypeRef?
+        let processIdentifier: (AXUIElement) -> pid_t?
+        let valueIsSettable: (AXUIElement) -> Bool
+        let setValue: (AXUIElement, String) -> AXError
+
+        static var live: SafariAddressBarAXAccess {
+            func read(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
+                guard !Task.isCancelled else { return nil }
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var result: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success,
+                      !Task.isCancelled else { return nil }
+                return result
+            }
+            return SafariAddressBarAXAccess(read: read, processIdentifier: { element in
+                var pid: pid_t = 0
+                guard AXUIElementGetPid(element, &pid) == .success else { return nil }
+                return pid
+            }, valueIsSettable: { element in
+                var settable = DarwinBoolean(false)
+                return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success
+                    && settable.boolValue
+            }, setValue: { element, value in AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) })
+        }
+    }
+
     enum Failure: Error, Equatable {
         case changedTaskOrGoal, targetLost, ambiguousWindows, noNewFocusedWindow
         case existingWindowsChanged, interrupted, journalUncertain, authenticationHandoff, browserAutomationPermissionRequired
@@ -95,6 +133,7 @@ final class ComputerUseDefaultBrowserSession {
     private let launchApplication: LaunchApplication
     private let captureWindows: CaptureWindows
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
+    private let safariAddressBarAX: SafariAddressBarAXAccess
     private var runState: RunState?
     var currentWindow: Window? { runState?.target }
     var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
@@ -116,11 +155,13 @@ final class ComputerUseDefaultBrowserSession {
          resolveHandler: @escaping ResolveHandler,
          launchApplication: @escaping LaunchApplication,
          captureWindows: @escaping CaptureWindows,
+         safariAddressBarAX: SafariAddressBarAXAccess = .live,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) }) throws {
         self.journalDirectory = journalDirectory
         self.resolveHandler = resolveHandler
         self.launchApplication = launchApplication
         self.captureWindows = captureWindows
+        self.safariAddressBarAX = safariAddressBarAX
         self.makeStore = makeStore
     }
 
@@ -215,9 +256,8 @@ final class ComputerUseDefaultBrowserSession {
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
     }
 
-    /// Changes the active URL in the already retained Safari window without
-    /// entering the address-bar text editor. The AppleScript source is fixed;
-    /// both the window number and destination are passed as AppleEvent data.
+    /// Navigates through Safari's observed address field using only the
+    /// already-authorized Accessibility and native input paths.
     func navigateRetainedSafariTab(to url: URL, taskID: String, goal: String,
                                    tools: ComputerUseHostTools,
                                    diagnostic: @MainActor (String) -> Void = { _ in }) async throws {
@@ -237,85 +277,219 @@ final class ComputerUseDefaultBrowserSession {
         guard !state.navigationDispatches.contains(url.absoluteString) else {
             diagnostic("phase=already_latched"); throw Failure.targetLost
         }
-        let nativeWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-        let matchingNumbers = Self.matchingCGWindowNumbers(target: target, windowInfo: nativeWindows)
-        let frontWindowNumber = Self.matchingCGWindowNumber(target: target, windowInfo: nativeWindows)
-        diagnostic("phase=native_window_match bounds=\(Int(target.identity.bounds.minX)),\(Int(target.identity.bounds.minY)),\(Int(target.identity.bounds.width)),\(Int(target.identity.bounds.height)) geometryMatches=\(matchingNumbers.count) frontWindowID=\(frontWindowNumber.map { String($0) } ?? "none")")
-        guard let windowNumber = frontWindowNumber else { throw Failure.targetLost }
+        let addressField: AXUIElement
+        do { addressField = try uniqueSafariAddressField(in: target, diagnostic: diagnostic) }
+        catch { diagnostic("phase=address_field_not_found"); throw error }
         try Task.checkCancellation()
         try tools.requireActive()
-        let permissionStatus = await Task.detached(priority: .userInitiated) {
-            Self.safariAutomationPermissionStatus()
-        }.value
-        diagnostic("phase=automation_permission_preflight status=\(permissionStatus)")
-        try Task.checkCancellation()
-        try tools.requireActive()
-        guard permissionStatus == noErr else {
-            if permissionStatus == OSStatus(errAEEventNotPermitted)
-                || permissionStatus == OSStatus(errAEEventWouldRequireUserConsent) {
-                throw Failure.browserAutomationPermissionRequired
-            }
-            throw Failure.targetLost
-        }
-        // The preflight ran off-main; reconfirm retained AX authority before
-        // latching and sending the mutating event.
         try validate(taskID: taskID, goal: goal, tools: tools)
-        guard let currentTarget = state.target, currentTarget.id == target.id,
-              currentTarget.application == target.application,
-              Self.matchingCGWindowNumber(target: currentTarget,
-                windowInfo: CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []) == windowNumber else {
-            diagnostic("phase=target_changed_after_permission_preflight")
+        if focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) != true {
+            let focusAction = ComputerUsePredictedAction.key(usage: 0x0F, modifiers: 1 << 3) // Command+L
+            let focusFingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
+            do {
+                try await tools.performNativeAction(focusAction, fingerprint: focusFingerprint, willBeginEffect: {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try self.validate(taskID: taskID, goal: goal, tools: tools)
+                    guard self.focusedSafariAddressField(in: target) != nil else { throw Failure.targetLost }
+                })
+            } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        try validate(taskID: taskID, goal: goal, tools: tools)
+        guard isCurrentSafariAddressField(addressField, target: target),
+              let focusedField = focusedSafariAddressField(in: target), CFEqual(focusedField, addressField) else {
+            diagnostic("phase=address_field_not_focused_before_navigation")
             throw Failure.targetLost
         }
-        // Latch before AppleEvents: an uncertain result must never create or
-        // navigate a second composer on Resume.
+        // Focus-only failures are safe to retry. Once the destination write
+        // begins, a partial write or uncertain Return must not be replayed.
         state.navigationDispatches.insert(url.absoluteString)
-        diagnostic("phase=appleevent_dispatch_latched nativeID=\(windowNumber)")
-        do {
-            try Self.setSafariFrontTabURL(url, expectedWindowNumber: windowNumber, diagnostic: diagnostic)
-        } catch Failure.browserAutomationPermissionRequired {
-            // macOS explicitly denied this AppleEvent, so it could not have
-            // mutated Safari. Allow Resume after the user grants Automation.
-            state.navigationDispatches.remove(url.absoluteString)
-            diagnostic("phase=automation_permission_denied latch_cleared=true")
-            throw Failure.browserAutomationPermissionRequired
-        } catch {
-            diagnostic("phase=appleevent_failed latch_retained=true")
-            throw error
+        diagnostic("phase=ax_navigation_latched")
+        let writeStatus = safariAddressBarAX.setValue(addressField, url.absoluteString)
+        guard writeStatus == .success else {
+            diagnostic("phase=ax_address_value_write_failed status=\(writeStatus.rawValue)")
+            throw Failure.targetLost
         }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        try validate(taskID: taskID, goal: goal, tools: tools)
+        guard
+              focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
+              safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == url.absoluteString else {
+            diagnostic("phase=ax_address_value_readback_or_focus_mismatch")
+            throw Failure.targetLost
+        }
+        let returnAction = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
+        let fingerprint = try tools.prepareNativeActionFingerprint(for: returnAction)
+        do {
+            try await tools.performNativeAction(returnAction, fingerprint: fingerprint, willBeginEffect: {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.validate(taskID: taskID, goal: goal, tools: tools)
+                guard self.isCurrentSafariAddressField(addressField, target: target),
+                      self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
+                      self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == url.absoluteString else {
+                    throw Failure.targetLost
+                }
+            })
+        } catch { diagnostic("phase=return_dispatch_failed"); throw error }
         try Task.checkCancellation()
         try tools.requireActive()
         do { try validate(taskID: taskID, goal: goal, tools: tools) }
         catch { diagnostic("phase=post_navigation_scope_validation_failed"); throw error }
-        let afterNativeWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
-        let afterNumbers = state.target.map { Self.matchingCGWindowNumbers(target: $0, windowInfo: afterNativeWindows) } ?? []
-        let afterFrontWindowNumber = state.target.flatMap { Self.matchingCGWindowNumber(target: $0, windowInfo: afterNativeWindows) }
         guard let after = state.target, after.id == target.id,
-              after.application == target.application,
-              afterFrontWindowNumber == windowNumber else {
-            diagnostic("phase=post_navigation_identity_mismatch geometryMatches=\(afterNumbers.count) frontWindowID=\(afterFrontWindowNumber.map { String($0) } ?? "none")")
+              after.application == target.application else {
+            diagnostic("phase=post_navigation_identity_mismatch")
             throw Failure.targetLost
         }
-        diagnostic("phase=navigation_complete nativeID=\(windowNumber)")
+        diagnostic("phase=ax_navigation_dispatched")
     }
 
-    private nonisolated static func safariAutomationPermissionStatus() -> OSStatus {
-        let bundleID = Data("com.apple.Safari".utf8)
-        var target = AEAddressDesc()
-        let createStatus = bundleID.withUnsafeBytes { bytes in
-            AECreateDesc(DescType(typeApplicationBundleID), bytes.baseAddress, bytes.count, &target)
+    static func selectedSafariAddressBarCandidate(from candidates: [SafariAddressBarCandidate],
+                                                   processIdentifier: pid_t) -> AXUIElement? {
+        let matches = candidates.filter {
+            $0.processIdentifier == processIdentifier
+                && ($0.role == "AXTextField" || $0.role == "AXComboBox")
+                && $0.identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
+                && $0.isEnabled && $0.valueIsSettable
+                && !$0.isSecure && !$0.isHidden && !$0.isProtected
         }
-        guard createStatus == noErr else { return OSStatus(createStatus) }
-        defer { AEDisposeDesc(&target) }
-        return AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, false)
+        guard matches.count == 1 else { return nil }
+        return matches[0].element
+    }
+
+    private func uniqueSafariAddressField(in target: Window,
+                                          diagnostic: (String) -> Void = { _ in }) throws -> AXUIElement {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        var queue: [AXUIElement] = [target.accessibilityElement]
+        var visited: [AXUIElement] = []
+        var candidates: [SafariAddressBarCandidate] = []
+        var foreignBranches = 0
+        func failure(_ reason: String) -> Failure {
+            diagnostic("phase=address_scan_failed reason=\(reason) nodes=\(visited.count) candidates=\(candidates.count) foreign_branches=\(foreignBranches)")
+            return .targetLost
+        }
+        while !queue.isEmpty {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline, visited.count < 256 else { throw failure("time_or_node_bound") }
+            let node = queue.removeFirst()
+            guard !visited.contains(where: { CFEqual($0, node) }) else { continue }
+            visited.append(node)
+            func read(_ attribute: String, _ element: AXUIElement) throws -> CFTypeRef? {
+                try Task.checkCancellation()
+                guard ContinuousClock.now < deadline else { throw failure("attribute_read_time_bound") }
+                return safariAddressBarAX.read(attribute, element)
+            }
+            guard let role = try read(kAXRoleAttribute as String, node) as? String else {
+                throw failure("role_unavailable")
+            }
+            if role == "AXWebArea" { continue }
+            guard safariAddressBarAX.processIdentifier(node) == target.application.processIdentifier else {
+                foreignBranches += 1
+                continue
+            }
+            let subrole = try read(kAXSubroleAttribute as String, node) as? String ?? ""
+            let isSecure = role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String)
+            let isHidden = (try read("AXHidden", node) as? NSNumber)?.boolValue == true
+            let isProtected = (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+            if isSecure || isHidden || isProtected { continue }
+            if role == "AXTextField" || role == "AXComboBox" {
+                let identifier = try read("AXIdentifier", node) as? String ?? ""
+                if identifier.isEmpty { diagnostic("phase=address_candidate_metadata_missing field=identifier") }
+                let enabledValue = try read(kAXEnabledAttribute as String, node) as? NSNumber
+                let enabled = enabledValue?.boolValue == true
+                if enabledValue == nil { diagnostic("phase=address_candidate_metadata_missing field=enabled") }
+                let valueIsSettable = safariAddressBarAX.valueIsSettable(node)
+                if !valueIsSettable { diagnostic("phase=address_candidate_not_writable") }
+                candidates.append(.init(element: node,
+                    processIdentifier: safariAddressBarAX.processIdentifier(node) ?? -1,
+                    role: role, identifier: identifier, isEnabled: enabled,
+                    valueIsSettable: valueIsSettable,
+                    isSecure: isSecure, isHidden: isHidden, isProtected: isProtected))
+            }
+            let knownLeafRoles: Set<String> = ["AXTextField", "AXComboBox", "AXButton", "AXStaticText",
+                "AXLink", "AXImage", "AXCheckBox", "AXPopUpButton", "AXMenuButton", "AXSlider",
+                "AXSeparator", "AXSplitter", "AXDisclosureTriangle", "AXProgressIndicator"]
+            guard let childrenValue = try read(kAXChildrenAttribute as String, node) else {
+                if knownLeafRoles.contains(role) { continue }
+                let safeRole = ["AXApplication", "AXWindow", "AXToolbar", "AXGroup", "AXSplitGroup",
+                    "AXTabGroup", "AXTab", "AXRadioButton"].contains(role) ? role : "other"
+                throw failure("children_unavailable_container_role_\(safeRole)")
+            }
+            guard CFGetTypeID(childrenValue) == CFArrayGetTypeID(),
+                  let children = childrenValue as? [AXUIElement],
+                  visited.count + queue.count + children.count <= 256 else { throw failure("children_malformed_or_over_bound") }
+            queue.append(contentsOf: children)
+        }
+        guard queue.isEmpty, ContinuousClock.now < deadline else { throw failure("incomplete_scan") }
+        guard let field = Self.selectedSafariAddressBarCandidate(from: candidates,
+                processIdentifier: target.application.processIdentifier) else {
+            let exactIdentifierCount = candidates.filter {
+                $0.processIdentifier == target.application.processIdentifier
+                    && $0.identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
+            }.count
+            throw failure(exactIdentifierCount > 1 ? "ambiguous_address_field" : "no_eligible_address_field")
+        }
+        guard addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline) else {
+            throw failure("address_field_outside_retained_window")
+        }
+        return field
+    }
+
+    private func addressFieldBelongsToRetainedWindow(_ field: AXUIElement, target: Window,
+                                                      deadline: ContinuousClock.Instant) -> Bool {
+        var cursor: AXUIElement? = field
+        var seen: [AXUIElement] = []
+        for _ in 0..<16 {
+            guard ContinuousClock.now < deadline, let current = cursor,
+                  !seen.contains(where: { CFEqual($0, current) }),
+                  safariAddressBarAX.processIdentifier(current) == target.application.processIdentifier else { return false }
+            if CFEqual(current, target.accessibilityElement) { return true }
+            seen.append(current)
+            guard let role = safariAddressBarAX.read(kAXRoleAttribute as String, current) as? String,
+                  role != "AXWebArea",
+                  let parentValue = safariAddressBarAX.read(kAXParentAttribute as String, current),
+                  CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return false }
+            cursor = unsafeBitCast(parentValue, to: AXUIElement.self)
+        }
+        return false
+    }
+
+    private func isCurrentSafariAddressField(_ field: AXUIElement, target: Window) -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        func read(_ attribute: String) -> CFTypeRef? {
+            guard ContinuousClock.now < deadline else { return nil }
+            return safariAddressBarAX.read(attribute, field)
+        }
+        guard safariAddressBarAX.processIdentifier(field) == target.application.processIdentifier,
+              let role = read(kAXRoleAttribute as String) as? String,
+              role == "AXTextField" || role == "AXComboBox",
+              read("AXIdentifier") as? String == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
+              role != "AXSecureTextField",
+              (read(kAXSubroleAttribute as String) as? String) != (kAXSecureTextFieldSubrole as String),
+              (read("AXHidden") as? NSNumber)?.boolValue != true,
+              (read("AXProtectedContent") as? NSNumber)?.boolValue != true,
+              (read(kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true,
+              ContinuousClock.now < deadline, safariAddressBarAX.valueIsSettable(field),
+              ContinuousClock.now < deadline else { return false }
+        return addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline)
+    }
+
+    private func focusedSafariAddressField(in target: Window) -> AXUIElement? {
+        let root = AXUIElementCreateApplication(target.application.processIdentifier)
+        guard let focusedWindowValue = safariAddressBarAX.read(kAXFocusedWindowAttribute as String, root),
+              CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else { return nil }
+        let focusedWindow = unsafeBitCast(focusedWindowValue, to: AXUIElement.self)
+        guard CFEqual(focusedWindow, target.accessibilityElement),
+              let focusedValue = safariAddressBarAX.read(kAXFocusedUIElementAttribute as String, root),
+              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return nil }
+        return unsafeBitCast(focusedValue, to: AXUIElement.self)
     }
 
     static func isSupportedGmailNavigationURL(_ url: URL) -> Bool {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "https", components.host?.lowercased() == "mail.google.com",
-              components.user == nil, components.password == nil, components.port == nil,
-              components.path.hasPrefix("/mail/u/") else { return false }
-        return true
+        ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) != nil
     }
 
     static func matchingCGWindowNumber(target: Window, windowInfo: [[String: Any]]) -> CGWindowID? {
@@ -330,66 +504,6 @@ final class ComputerUseDefaultBrowserSession {
         guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
               CGRectEqualToRect(bounds, target.identity.bounds) else { return nil }
         return CGWindowID(signedNumber)
-    }
-
-    private static func matchingCGWindowNumbers(target: Window, windowInfo: [[String: Any]]) -> [CGWindowID] {
-        windowInfo.compactMap { info -> CGWindowID? in
-            guard let owner = info[kCGWindowOwnerPID as String] as? Int,
-                  owner == Int(target.application.processIdentifier),
-                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                  let number = info[kCGWindowNumber as String] as? NSNumber,
-                  let rawBounds = info[kCGWindowBounds as String] as? [String: Any] else { return nil }
-            var bounds = CGRect.zero
-            guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
-                  CGRectEqualToRect(bounds, target.identity.bounds),
-                  number.uint32Value != 0 else { return nil }
-            return CGWindowID(number.uint32Value)
-        }
-    }
-
-    private static func setSafariFrontTabURL(_ url: URL, expectedWindowNumber: CGWindowID,
-                                            diagnostic: @MainActor (String) -> Void) throws {
-        guard let source = NSAppleScript(source: #"""
-            on navigateTab(targetWindowNumber, destinationURL)
-                tell application id "com.apple.Safari"
-                    with timeout of 10 seconds
-                        if (count of windows) < 1 then error number -128
-                        set targetWindow to first window whose id is targetWindowNumber
-                        if (id of front window) is not targetWindowNumber then error number -128
-                        set URL of current tab of targetWindow to destinationURL
-                        return id of targetWindow
-                    end timeout
-                end tell
-            end navigateTab
-            """#) else { throw Failure.targetLost }
-        var compileError: NSDictionary?
-        guard source.compileAndReturnError(&compileError) else {
-            let number = (compileError?[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
-            diagnostic("phase=script_compile_failed error_code=\(number)")
-            throw Failure.targetLost
-        }
-        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kASAppleScriptSuite),
-            eventID: AEEventID(kASSubroutineEvent), targetDescriptor: nil,
-            returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
-        event.setParam(NSAppleEventDescriptor(string: "navigatetab"), forKeyword: AEKeyword(keyASSubroutineName))
-        let arguments = NSAppleEventDescriptor.list()
-        arguments.insert(NSAppleEventDescriptor(int32: Int32(expectedWindowNumber)), at: 1)
-        arguments.insert(NSAppleEventDescriptor(string: url.absoluteString), at: 2)
-        event.setParam(arguments, forKeyword: AEKeyword(keyDirectObject))
-        var errorInfo: NSDictionary?
-        let result = source.executeAppleEvent(event, error: &errorInfo)
-        if let errorInfo {
-            let number = (errorInfo[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
-            diagnostic("phase=appleevent_error error_code=\(number)")
-            if number == -1743 {
-                throw Failure.browserAutomationPermissionRequired
-            }
-            throw Failure.targetLost
-        }
-        guard result.int32Value == Int32(expectedWindowNumber) else {
-            diagnostic("phase=appleevent_wrong_window_id result_id=\(result.int32Value) expected_id=\(expectedWindowNumber)")
-            throw Failure.targetLost
-        }
     }
 
     private func run(_ execution: ComputerUseTaskExecution, state: RunState,
