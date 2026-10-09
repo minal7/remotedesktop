@@ -5,6 +5,47 @@ import XCTest
 @testable import RemoteDesktopHost
 @testable import RemoteDesktopClientCore
 
+private enum GmailAcceptanceControlTrace {
+    static func compactEvent(request: Data, response: Data) -> Data? {
+        guard request.count <= 2 * 1_024 * 1_024, response.count <= 256 * 1_024,
+              let requestRoot = try? JSONSerialization.jsonObject(with: request) as? [String: Any],
+              let messages = requestRoot["messages"] as? [[String: Any]],
+              let user = messages.last(where: { $0["role"] as? String == "user" }),
+              let content = user["content"] as? String,
+              let context = try? JSONSerialization.jsonObject(with: Data(content.utf8)) as? [String: Any],
+              let responseRoot = try? JSONSerialization.jsonObject(with: response) as? [String: Any],
+              let choices = responseRoot["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let rawDecision = message["content"] as? String,
+              let decision = try? JSONSerialization.jsonObject(with: Data(rawDecision.utf8)) as? [String: Any] else {
+            return nil
+        }
+        let controls: [[String: Any]] = (context["native_controls"] as? [String: Any])?["items"] as? [[String: Any]]
+            ?? context["observed_controls"] as? [[String: Any]] ?? []
+        let safeControls = controls.prefix(48).map { item -> [String: Any] in
+            var safe: [String: Any] = [:]
+            for key in ["id", "role", "label", "enabled"] {
+                if let value = item[key], value is String || value is NSNumber { safe[key] = value }
+            }
+            return safe
+        }
+        let safeDecision: [String: Any] = [
+            "outcome": decision["outcome"] ?? NSNull(),
+            "control_id": decision["control_id"] ?? NSNull(),
+            "explanation": String((decision["explanation"] as? String ?? "").prefix(256)),
+        ]
+        return try? JSONSerialization.data(withJSONObject: [
+            "observed_controls": safeControls,
+            "control_count": controls.count,
+            "decision": safeDecision,
+            "request_bytes": request.count,
+            "response_bytes": response.count,
+            "focused_editor": context["focused_editor"] ?? NSNull(),
+            "current_action_error": context["action_error"] ?? context["current_action_error"] ?? NSNull(),
+        ], options: [.sortedKeys])
+    }
+}
+
 @MainActor
 final class CoreJobAcceptanceTests: XCTestCase {
     private struct Expected: Decodable {
@@ -62,7 +103,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         defer { client?.stop(); _ = manager?.stop() }
 
         do {
-            if job == "email" || job == "cloud" {
+            if job == "email" || job == "cloud" || job == "gmail" {
                 guard let sourcePath = expected.source_path, let sourceHash = expected.source_sha256,
                       try Self.sha256(URL(fileURLWithPath: sourcePath)) == sourceHash.lowercased() else {
                     throw HarnessError.prerequisite("The staged source does not match expected.json")
@@ -85,10 +126,52 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID,
                 clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
             let pendingStore = CompositionPendingStore()
+            let diagnosticLock = NSLock()
+            let visualLoader: (any ComputerUseVisualExecutorLoading)? = job == "gmail"
+                ? OSAtlasVisualExecutorLoader(nativeControlInspectExchange: { request, response in
+                    guard let event = GmailAcceptanceControlTrace.compactEvent(request: request, response: response) else { return }
+                    diagnosticLock.withLock {
+                        let path = trace.appendingPathComponent("gmail-control-decisions.jsonl")
+                        var data = (try? Data(contentsOf: path)) ?? Data()
+                        data.append(event); data.append(0x0A)
+                        try? Data(data.suffix(65_536)).write(to: path, options: .atomic)
+                    }
+                }, browserRevalidationFailureObserver: { expected, fresh, action, diagnostic in
+                    diagnosticLock.withLock {
+                        let path = trace.appendingPathComponent("gmail-revalidation.jsonl")
+                        let facts: [String: Any] = ["action": String(describing: action),
+                            "diagnostic": diagnostic,
+                            "expected_display_bounds": String(describing: expected.displayBounds),
+                            "fresh_display_bounds": String(describing: fresh.displayBounds)]
+                        guard let event = try? JSONSerialization.data(withJSONObject: facts, options: [.sortedKeys]) else { return }
+                        var data = (try? Data(contentsOf: path)) ?? Data()
+                        data.append(event); data.append(0x0A)
+                        try? Data(data.suffix(16_384)).write(to: path, options: .atomic)
+                    }
+                })
+                : nil
             let host = HostComputerUseManager(injector: InputInjector(),
                 nativeTextInstaller: nativeInstaller, macControlInstaller: helperInstaller,
+                visualExecutorLoader: visualLoader,
+                mcpPlanner: AppleFoundationMCPPlanner(inspectFailure: { message in
+                    diagnosticLock.withLock {
+                        let path = trace.appendingPathComponent("planner-failure.txt")
+                        var data = (try? Data(contentsOf: path)) ?? Data()
+                        data.append(contentsOf: (message + "\n").utf8)
+                        try? Data(data.suffix(65_536)).write(to: path, options: .atomic)
+                    }
+                }),
                 taskLedger: ComputerUseTaskLedger(fileURL: trace.appendingPathComponent("ledger.json")),
-                allowsExternalServices: true, channelFactory: { _ in mailbox })
+                allowsExternalServices: true,
+                nativeTextTargetDiagnosticObserver: { event in
+                    guard job == "gmail", let eventData = try? JSONEncoder().encode(event) else { return }
+                    diagnosticLock.withLock {
+                        let path = trace.appendingPathComponent("gmail-text-bindings.jsonl")
+                        var data = (try? Data(contentsOf: path)) ?? Data()
+                        data.append(eventData); data.append(0x0A)
+                        try? Data(data.suffix(65_536)).write(to: path, options: .atomic)
+                    }
+                }, channelFactory: { _ in mailbox })
             manager = host
             let phone = RemoteDesktopClientCore.ComputerUseSessionModel(hostName: "M0 local host",
                 pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
@@ -104,8 +187,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             let taskID = try await Self.waitForSentPrompt(bridge, deadline: .now + .seconds(5))
             record["task_id"] = taskID
+            record["raw_outcome"] = "running"
             let terminal = try await Self.waitForTerminal(phone, expected: expected,
-                deadline: .now + .seconds(180), trace: trace)
+                deadline: .now + .seconds(job == "gmail" ? 420 : 180), trace: trace)
             record["task_id"] = taskID
             record["raw_outcome"] = terminal.outcome
             record["text"] = String((phone.interventionGuidance
@@ -113,8 +197,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             record["progress"] = phone.taskProgressHistory
             var evidence: [String: Any] = ["transport": "local-in-process", "manager_ready_before_prompt": ready,
                 "dispatch_counts": ["client_prompt": 1, "native_inputs": NSNull()]]
-            evidence["draft_create_approved_count"] = terminal.approvedDrafts
-            evidence["other_approval_denied_count"] = terminal.deniedApprovals
+        evidence["draft_create_approved_count"] = terminal.approvedDrafts
+        evidence["other_approval_denied_count"] = terminal.deniedApprovals
             record["evidence"] = evidence
             switch job {
             case "email":
@@ -161,6 +245,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     "display_asleep_verified": false, "locked_state_detected": NSNull(),
                     "unlock_resume_prompt_shown": false, "pre_unlock_effect_count": NSNull(),
                     "start_seconds": NSNull(), "approval_push_seconds": NSNull()]
+            case "gmail":
+                var gmail: [String: Any] = ["approval_events": terminal.approvalEvents,
+                    "approval_events_omitted": terminal.approvalEventsOmitted,
+                    "approval_responses_denied": terminal.deniedApprovals,
+                    "harness_granted_approvals": 0,
+                    "attachment_bytes_verified": false]
+                Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                evidence["gmail"] = gmail
             default:
                 throw HarnessError.prerequisite("Unknown M0 job: \(job)")
             }
@@ -174,6 +266,13 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             record["evidence"] = evidence
         } catch {
+            if job == "gmail" {
+                var gmail: [String: Any] = ["attachment_bytes_verified": false]
+                Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                var evidence = record["evidence"] as? [String: Any] ?? [:]
+                evidence["gmail"] = gmail
+                record["evidence"] = evidence
+            }
             if let client {
                 record["progress"] = client.taskProgressHistory
                 if let outcome = client.latestTerminalOutcome { record["raw_outcome"] = outcome.rawValue }
@@ -213,6 +312,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let approvedDrafts: Int
         let deniedApprovals: Int
         let sendApprovalObserved: Bool
+        let approvalEvents: [[String: Any]]
+        let approvalEventsOmitted: Int
     }
 
     func testFailureClassSeparatesGeneratedToolSchemaFailuresFromHostGuardRejection() {
@@ -246,6 +347,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
     private static func waitForTerminal(_ client: RemoteDesktopClientCore.ComputerUseSessionModel,
         expected: Expected, deadline: ContinuousClock.Instant, trace: URL) async throws -> Terminal {
         var deniedApprovals = 0
+        var approvalEvents: [[String: Any]] = []
+        var approvalEventsOmitted = 0
         var lastObservation = ""
         while ContinuousClock.now < deadline {
             let observation = String(describing: client.state) + client.statusText
@@ -274,7 +377,23 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     // Observe the exact approval and leave it pending. No
                     // approval response can grant permission to send.
                     return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
-                        deniedApprovals: deniedApprovals, sendApprovalObserved: true)
+                        deniedApprovals: deniedApprovals, sendApprovalObserved: true,
+                        approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
+                }
+                if expected.job == "gmail" {
+                    if approvalEvents.count < 24 {
+                        approvalEvents.append([
+                            "request_id": request.requestID,
+                            "task_id": request.taskID,
+                            "confirm_label": request.confirmLabel ?? "",
+                            "message": request.message,
+                            "details": (request.details ?? []).map { ["label": $0.label, "value": $0.value] },
+                        ])
+                    } else {
+                        approvalEventsOmitted += 1
+                    }
+                    try? Self.write(["events": approvalEvents, "omitted": approvalEventsOmitted],
+                        to: trace.appendingPathComponent("gmail-approval-events.json"))
                 }
                 deniedApprovals += 1
                 client.respondToApproval(request, approved: false)
@@ -282,11 +401,142 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if let outcome = client.latestTerminalOutcome,
                !client.hasActivePrompt || outcome == .userInterventionRequired {
                 return Terminal(outcome: outcome.rawValue, approvedDrafts: 0,
-                    deniedApprovals: deniedApprovals, sendApprovalObserved: false)
+                    deniedApprovals: deniedApprovals, sendApprovalObserved: false,
+                    approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
             }
             try await Task.sleep(for: .milliseconds(100))
         }
         throw HarnessError.transport("Timed out waiting for the shipped client terminal outcome")
+    }
+
+    private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any]) {
+        guard let name = expected.attachment_name, let recipient = expected.to,
+              let subject = expected.subject, let body = expected.body,
+              let (_, application, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
+              let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
+              let focusedID = snapshot.focusedWindowID,
+              let window = snapshot.windows.first(where: { $0.id == focusedID }),
+              let page = try? ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
+                application: application, mayAct: { true }) else {
+            evidence["capture_status"] = "no-focused-default-browser-page"
+            return
+        }
+        let host = URLComponents(string: page.url)?.host?.lowercased() ?? ""
+        evidence["browser_bundle_id"] = application.bundleIdentifier
+        evidence["url_host"] = host
+        evidence["url_is_gmail"] = host == "mail.google.com"
+        guard page.application == application, host == "mail.google.com" else {
+            evidence["capture_status"] = "focused-page-is-not-gmail"
+            return
+        }
+        func value(_ attribute: String, _ element: AXUIElement) -> CFTypeRef? {
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            var result: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &result) == .success else { return nil }
+            return result
+        }
+        struct Node {
+            let element: AXUIElement
+            let role, title, description, text: String
+        }
+        func readTree(_ root: AXUIElement, limit: Int) -> [Node]? {
+            var queue = [root]
+            var visited: [AXUIElement] = []
+            var result: [Node] = []
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !queue.isEmpty, visited.count < limit, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = queue.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                result.append(Node(element: element, role: role, title: title, description: description, text: text))
+                if role == "AXSheet" || role == "AXDialog" { continue }
+                if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, limit - visited.count - queue.count)
+                    guard children.count <= room else { return nil }
+                    queue.append(contentsOf: children)
+                }
+            }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            return result
+        }
+        func discoverComposers(_ root: AXUIElement) -> [Node]? {
+            var queue = [root]
+            var visited: [AXUIElement] = []
+            var composers: [Node] = []
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = queue.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                if role == "AXGroup" && (title.hasPrefix("Compose:") || description.hasPrefix("Compose:")) {
+                    composers.append(Node(element: element, role: role, title: title, description: description, text: text))
+                    continue
+                }
+                // Gmail's inbox is an AXTable; its thousands of rows are unrelated to this owned compose.
+                if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
+                if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, 256 - visited.count - queue.count)
+                    guard children.count <= room else { return nil }
+                    queue.append(contentsOf: children)
+                }
+            }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            return composers
+        }
+        guard let composers = discoverComposers(window.accessibilityElement) else {
+            evidence["capture_status"] = "accessibility-tree-incomplete"
+            return
+        }
+        evidence["compose_count"] = composers.count
+        guard composers.count == 1, let composer = composers.first,
+              let nodes = readTree(composer.element, limit: 256) else {
+            evidence["capture_status"] = "compose-window-not-unique-or-readable"
+            return
+        }
+        let recipientContainer = nodes.first {
+            ($0.role == "AXGroup" || $0.role == "AXTextField") && ($0.title == "To" || $0.description == "To")
+        }
+        let recipientMatches = recipientContainer.flatMap { readTree($0.element, limit: 64) }?.contains {
+            $0.role == "AXStaticText" && $0.text == recipient
+        } == true
+        let subjectMatches = nodes.contains { $0.role == "AXTextField" && $0.title == "Subject" && $0.text == subject }
+        let bodyMatches = nodes.contains {
+            ($0.role == "AXTextArea" || $0.role == "AXTextEntryArea") && $0.title == "Message Body" && $0.text == body
+        }
+        let attachmentGroup = nodes.first {
+            $0.role == "AXGroup" && ($0.title + $0.description + $0.text).contains("Attachment: \(name).")
+                && ($0.title + $0.description + $0.text).contains("delete to remove it")
+        }
+        let attachmentNodes = attachmentGroup.flatMap { readTree($0.element, limit: 64) } ?? []
+        let attachmentNameVisible = attachmentNodes.contains {
+            $0.role == "AXLink" && [$0.title, $0.description, $0.text].contains(where: {
+                $0 == name || $0.hasPrefix("\(name) (")
+            })
+        }
+        let formatter = ByteCountFormatter(); formatter.countStyle = .file
+        let sizeLabel = formatter.string(fromByteCount: Int64(expected.source_bytes ?? 0))
+        let attachmentSizeVisible = (attachmentNodes + (attachmentGroup.map { [$0] } ?? [])).contains {
+            ($0.title + $0.description + $0.text).contains(sizeLabel)
+        }
+        evidence["recipient_matches"] = recipientMatches
+        evidence["subject_matches"] = subjectMatches
+        evidence["body_matches"] = bodyMatches
+        evidence["attachment_name_visible"] = attachmentNameVisible
+        evidence["attachment_size_label"] = sizeLabel
+        evidence["attachment_size_visible"] = attachmentSizeVisible
+        evidence["attachment_bytes_verified"] = false
+        evidence["saved_marker_observed"] = nodes.contains {
+            ($0.title + $0.description + $0.text).localizedCaseInsensitiveContains("Draft saved")
+        }
+        evidence["capture_status"] = "captured"
     }
 
     private static func exportDraft(expected: Expected, trace: URL,
@@ -387,7 +637,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
               let expectedDigest = expected.source_sha256 else {
             throw HarnessError.missingEvidence("Cloud expected.json lacks source or destination")
         }
-        let target = URL(fileURLWithPath: targetPath)
+        var target = URL(fileURLWithPath: targetPath)
         guard FileManager.default.fileExists(atPath: target.path) else {
             throw HarnessError.missingEvidence("Cloud destination file was not copied")
         }
@@ -398,12 +648,16 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
         }
         var uploaded: Bool?
-        for _ in 0..<30 {
+        var uploading: Bool?
+        let deadline = ContinuousClock.now.advanced(by: .seconds(60))
+        repeat {
+            target.removeAllCachedResourceValues()
             let values = try? target.resourceValues(forKeys: [.ubiquitousItemIsUploadedKey, .ubiquitousItemIsUploadingKey])
             uploaded = values?.ubiquitousItemIsUploaded
-            if uploaded == true || values?.ubiquitousItemIsUploading == false { break }
-            try await Task.sleep(for: .seconds(2))
-        }
+            uploading = values?.ubiquitousItemIsUploading
+            if uploaded == true || ContinuousClock.now >= deadline { break }
+            try await Task.sleep(for: min(.seconds(2), ContinuousClock.now.duration(to: deadline)))
+        } while true
         let sourceDigest = try Self.sha256(URL(fileURLWithPath: sourcePath))
         let destinationDigest = try Self.sha256(target)
         guard sourceDigest == expectedDigest.lowercased(), destinationDigest == sourceDigest else {
@@ -413,8 +667,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence["destination_path"] = target.path
         evidence["destination_sha256"] = destinationDigest
         evidence["provider_uploaded"] = uploaded as Any? ?? NSNull()
+        evidence["provider_uploading"] = uploading as Any? ?? NSNull()
         evidence["uploaded"] = uploaded == true
-        evidence["upload_state"] = uploaded == true ? "uploaded" : "unknown-or-not-uploaded"
+        evidence["upload_state"] = uploaded == true ? "uploaded"
+            : (uploaded == nil && uploading == nil ? "unknown" : "pending")
     }
 
     private static func captureFlightPage(text: String, trace: URL,

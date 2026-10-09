@@ -1,9 +1,10 @@
-"""Focused tests for the independent Mail acceptance checks."""
+"""Focused tests for the independent core-job acceptance checks."""
 
 from __future__ import annotations
 
 from email.message import EmailMessage
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,6 +16,120 @@ SPEC = importlib.util.spec_from_file_location("acceptance_run_job", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+
+class GmailHarnessTests(unittest.TestCase):
+    def test_retry_keeps_one_owned_draft_and_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixtures = runner.prepare_fixtures()
+                first = runner.gmail_session(fixtures)
+                retry = runner.gmail_session(fixtures)
+                self.assertEqual(first[:3], retry[:3])
+                self.assertEqual((first[3], retry[3]), (1, 2))
+                self.assertIsNone(first[4])
+                self.assertIsNone(retry[4])
+                self.assertEqual(list((root / "downloads").iterdir()), [first[2]])
+                self.assertEqual(runner.sha256(first[2].read_bytes()),
+                                 fixtures["Quarterly Metrics.xlsx"]["sha256"])
+                recipient = "checker-only@example.invalid"
+                for session in (first, retry):
+                    expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
+                        staged_source=session[2], gmail=(session[0], session[1], session[2], recipient,
+                                                       session[3], session[4]))
+                    self.assertEqual(expected["to"], recipient)
+                    self.assertNotIn(recipient, expected["prompt"])
+                    self.assertNotIn(str(session[2]), expected["prompt"])
+                    self.assertIn(session[1], expected["prompt"])
+                    self.assertIn("never send", expected["prompt"])
+                    self.assertEqual("reuse it" in expected["prompt"], session[3] > 1)
+
+    def test_observed_compose_url_is_reused_for_the_same_owned_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            observed_url = "https://mail.google.com/mail/u/0/#drafts/FMfcgzQX_ownedDraft123"
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                runner.TRACE_ROOT.mkdir(mode=0o700)
+                runner.GMAIL_SESSION_PATH.write_text(json.dumps({
+                    "schema_version": 1, "token": "a" * 32, "attempts": 1,
+                    "existing_draft_url": observed_url,
+                }), encoding="utf-8")
+                fixtures = runner.prepare_fixtures()
+                session = runner.gmail_session(fixtures)
+                self.assertEqual(session[4], observed_url)
+                self.assertEqual(json.loads(runner.GMAIL_SESSION_PATH.read_text())[
+                    "existing_draft_url"], observed_url)
+                expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
+                    staged_source=session[2], gmail=(session[0], session[1], session[2],
+                        "checker-only@example.invalid", session[3], session[4]))
+                self.assertIn(observed_url, expected["prompt"])
+                self.assertIn("Fill that draft; do not create another draft", expected["prompt"])
+                self.assertNotIn("create one test-owned draft", expected["prompt"])
+                self.assertNotIn("checker-only@example.invalid", expected["prompt"])
+                self.assertNotIn(str(session[2]), expected["prompt"])
+
+    def test_owned_compose_url_rejects_malformed_or_foreign_targets(self) -> None:
+        invalid = (
+            "not a URL",
+            "https://mail.google.com/mail/u/0/",
+            "https://mail.google.com.evil.invalid/mail/u/0/#drafts/FMfcgzQX_ownedDraft123",
+            "https://user@mail.google.com/mail/u/0/#drafts/FMfcgzQX_ownedDraft123",
+            "https://mail.google.com/mail/u/../#drafts/FMfcgzQX_ownedDraft123",
+            "https://mail.google.com/mail/u/0/#inbox",
+            "https://mail.google.com/mail/u/0/#inbox?compose=bad/value",
+            "https://mail.google.com/mail/u/0/#compose=FMfcgzQX_" + "a" * 2_050,
+        )
+        for url in invalid:
+            with self.subTest(url=url[:80]), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                    GMAIL_SESSION_PATH=root / "traces/session.json",
+                                    FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                    runner.TRACE_ROOT.mkdir(mode=0o700)
+                    runner.GMAIL_SESSION_PATH.write_text(json.dumps({
+                        "schema_version": 1, "token": "b" * 32, "attempts": 1,
+                        "existing_draft_url": url,
+                    }), encoding="utf-8")
+                    fixtures = runner.prepare_fixtures()
+                    with self.assertRaises(runner.AcceptanceError):
+                        runner.gmail_session(fixtures)
+
+    def test_visible_metadata_cannot_claim_full_attachment_acceptance(self) -> None:
+        outcome = self.exact_metadata()
+        check = runner.check_gmail({}, outcome)
+        self.assertFalse(check["passed"])
+        self.assertTrue(check["diagnostic_only"])
+        self.assertFalse(check["attachment_bytes_verified"])
+
+    def test_baseline_rejects_granted_approval_and_records_incorrect_compose(self) -> None:
+        outcome = self.exact_metadata()
+        outcome["evidence"]["gmail"]["harness_granted_approvals"] = 1
+        with self.assertRaises(runner.AcceptanceError):
+            runner.check_gmail({}, outcome)
+        for key, value in (("recipient_matches", False), ("compose_count", 2)):
+            with self.subTest(key=key):
+                outcome = self.exact_metadata()
+                outcome["evidence"]["gmail"][key] = value
+                check = runner.check_gmail({}, outcome)
+                self.assertFalse(check["passed"])
+                self.assertFalse(check["compose_fields_exact"])
+
+    @staticmethod
+    def exact_metadata() -> dict:
+        return {"raw_outcome": "taskCompleted", "evidence": {
+            "draft_create_approved_count": 0, "gmail": {
+                "url_is_gmail": True, "compose_count": 1,
+                "recipient_matches": True, "subject_matches": True,
+                "body_matches": True, "attachment_name_visible": True,
+                "attachment_size_visible": True, "attachment_bytes_verified": False,
+                "harness_granted_approvals": 0, "approval_responses_denied": 0,
+                "approval_events": [], "approval_events_omitted": 0,
+            }}}
 
 
 class MailBodyTests(unittest.TestCase):
@@ -161,6 +276,50 @@ class EmailPromptTests(unittest.TestCase):
                 self.assertEqual(len({result[0]["subject"] for result in expected_results}), 3)
                 runner.remove_owned_stage(staged, digest)
                 self.assertFalse(staged.exists())
+
+
+class CloudPromptTests(unittest.TestCase):
+    def test_cloud_provider_root_must_be_an_installed_direct_child(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            provider = home / "Library/CloudStorage/Dropbox"
+            nested = provider / "Projects"
+            nested.mkdir(parents=True)
+            icloud = home / "Library/Mobile Documents/com~apple~CloudDocs"
+            icloud.mkdir(parents=True)
+            with patch.object(runner.Path, "home", return_value=home):
+                self.assertEqual(runner.validate_cloud_root(provider), provider)
+                self.assertEqual(runner.validate_cloud_root(icloud), icloud)
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.validate_cloud_root(nested)
+
+    def test_cloud_discovery_preserves_name_and_keeps_source_identity_in_checker(self) -> None:
+        staged = Path("/private/mock/Downloads/M0-run-Board Review.pptx")
+        fixture = {"Board Review.pptx": {
+            "path": "/private/canonical/Board Review.pptx", "sha256": "fixture-sha256", "bytes": 42,
+        }}
+        providers = (
+            (Path("/private/mock/Library/Mobile Documents/com~apple~CloudDocs"), "iCloud Drive"),
+            (Path("/private/mock/Library/CloudStorage/GoogleDrive-account"), "GoogleDrive-account"),
+        )
+        for root, label in providers:
+            with self.subTest(provider=label):
+                expected, returned_stage, digest = runner.make_expected(
+                    "cloud", "cloud-run", 1, fixture, root, staged_source=staged)
+                self.assertEqual(returned_stage, staged)
+                self.assertEqual(digest, "fixture-sha256")
+                self.assertEqual(expected["source_path"], str(staged))
+                destination = root / "RemoteDesktopAcceptance/cloud-run" / staged.name
+                self.assertEqual(expected["destination_path"], str(destination))
+                prompt = expected["prompt"]
+                self.assertIn(label, prompt)
+                self.assertIn("latest Board Review deck in Downloads", prompt)
+                self.assertIn('"RemoteDesktopAcceptance/cloud-run"', prompt)
+                self.assertIn("Create", prompt)
+                self.assertIn("preserve its original filename", prompt)
+                self.assertNotIn(staged.name, prompt)
+                self.assertNotIn(str(staged), prompt)
+                self.assertNotIn(str(root), prompt)
 
 
 class SpotlightFixtureReadinessTests(unittest.TestCase):

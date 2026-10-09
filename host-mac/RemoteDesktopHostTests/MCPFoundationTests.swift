@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import RemoteDesktopHost
 
 final class MCPFoundationTests: XCTestCase {
@@ -64,6 +65,45 @@ final class MCPFoundationTests: XCTestCase {
         let latest = try XCTUnwrap(factory.createdSessions().last)
         let replayExecutions = await latest.executionCount()
         XCTAssertEqual(replayExecutions, 0, "A generation change must not replay either completed step")
+        await pool.cancelAll()
+    }
+
+    func testCloudStoragePoolReservesSidecarNameAndPublishesSignedHostTool() async throws {
+        let pointer = try XCTUnwrap(FileManager.default.temporaryDirectory.withUnsafeFileSystemRepresentation {
+            $0.flatMap { realpath($0, nil) }
+        })
+        defer { free(pointer) }
+        let home = URL(fileURLWithPath: String(cString: pointer), isDirectory: true)
+            .appendingPathComponent("MCPCloudPool-\(UUID().uuidString)", isDirectory: true)
+        let syncRoot = home.appendingPathComponent(
+            "Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+        try FileManager.default.createDirectory(at: syncRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let storage = RemoteDesktopCloudStorage(homeURL: home)
+        let primary = FakeMCPSessionFactory(toolNames: [
+            "focused_app", RemoteDesktopCloudStorageMCP.toolName,
+        ])
+        let pool = MCPClientPool(
+            binaryValidator: AcceptingMCPBinaryValidator(), mutationLedger: nil,
+            sessionFactory: { primary.make(binary: $0, generation: $1) },
+            embeddedSessionFactory: { _ in nil }, cloudStorage: storage)
+
+        _ = try await pool.start(binaryURL: fakeBinaryURL)
+        let tools = try await pool.allowedTools()
+        let cloudTools = tools.filter { $0.toolName == RemoteDesktopCloudStorageMCP.toolName }
+        let cloudTool = try XCTUnwrap(cloudTools.first)
+        XCTAssertEqual(cloudTools.count, 1, "The sidecar cannot impersonate the signed cloud-storage server.")
+        XCTAssertEqual(cloudTool.serverID, RemoteDesktopCloudStorageMCP.serverID)
+        XCTAssertEqual(cloudTool.risk, .approvalRequired)
+        XCTAssertEqual(cloudTool.approval.confirmLabel, "Save copy")
+        guard case .object(let root) = cloudTool.inputSchema,
+              case .object(let properties)? = root["properties"],
+              case .object(let provider)? = properties["provider_id"],
+              case .array(let providerIDs)? = provider["enum"] else {
+            return XCTFail("The host tool schema must list installed providers.")
+        }
+        XCTAssertEqual(providerIDs, [.string("icloud-drive")])
+
         await pool.cancelAll()
     }
 
@@ -135,7 +175,8 @@ final class MCPFoundationTests: XCTestCase {
         let primary = FakeMCPSessionFactory(toolNames: ["focused_app"], startGates: [1: gate])
         let validator = StagedMCPBinaryValidator(rejectedCalls: [2])
         let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
-            sessionFactory: { primary.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+            sessionFactory: { primary.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil },
+            cloudEmbeddedSessionFactory: { _ in nil })
         let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
         await fulfillment(of: [gate.started], timeout: 1)
         do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("The replacement fixture must fail validation") }
@@ -172,7 +213,8 @@ final class MCPFoundationTests: XCTestCase {
                 appBundleURL: fakeBinaryURL.deletingLastPathComponent(), executableURL: fakeBinaryURL)
             let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
                 sessionFactory: { primary.make(binary: $0, generation: $1) },
-                embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) })
+                embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) },
+                cloudEmbeddedSessionFactory: { _ in nil })
             if stage == .retirement { _ = try await pool.start(binaryURL: fakeBinaryURL) }
             let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
             await fulfillment(of: [gate.started], timeout: 1)
@@ -280,7 +322,8 @@ final class MCPFoundationTests: XCTestCase {
             "list_elements", "list_menu_titles", "list_shortcuts", "list_windows",
             "perform_element_action", "permissions_status", "press_key",
             "probe_ax_tree", "query_elements", "read_value", "reminders_list",
-            RemoteDesktopMailMCP.toolName, "set_element_attribute", "type_text",
+            RemoteDesktopMailMCP.toolName, RemoteDesktopCloudStorageMCP.toolName,
+            "set_element_attribute", "type_text",
             "wait_for_ax_notification",
             "wait_for_element", "wait_for_window_state_change",
         ]
@@ -308,7 +351,7 @@ final class MCPFoundationTests: XCTestCase {
         let expectedPlannerTools: Set<String> = [
             "contacts_search", "focused_app", "list_apps", "list_shortcuts",
             "list_windows", "permissions_status", RemoteDesktopMailMCP.toolName,
-            "reminders_list",
+            RemoteDesktopCloudStorageMCP.toolName, "reminders_list",
         ]
         XCTAssertEqual(
             MCPFirstComputerUseExecutor.structuredToolNames,

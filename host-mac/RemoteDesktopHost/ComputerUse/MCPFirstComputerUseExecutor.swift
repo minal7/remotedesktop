@@ -328,6 +328,7 @@ final class MCPFirstComputerUseExecutor:
         // Native Apple applications.
         "contacts_search",
         RemoteDesktopMailMCP.toolName,
+        RemoteDesktopCloudStorageMCP.toolName,
         "reminders_list",
         "list_shortcuts",
 
@@ -343,6 +344,7 @@ final class MCPFirstComputerUseExecutor:
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
     private let clientPool: any MCPClientPooling
+    private let cloudStorage: RemoteDesktopCloudStorage
     private let binaryURL: URL
     private let visualFallback: any ComputerUseExecuting
     typealias BrowserExecutorFactory = @MainActor () async throws -> any ComputerUseExecuting
@@ -403,6 +405,7 @@ final class MCPFirstComputerUseExecutor:
     private init(
         planner: any MCPProposalPlanning,
         clientPool: any MCPClientPooling,
+        cloudStorage: RemoteDesktopCloudStorage,
         binaryURL: URL,
         visualFallback: any ComputerUseExecuting,
         planningWorker: ComputerUsePlanningWorker,
@@ -414,6 +417,7 @@ final class MCPFirstComputerUseExecutor:
     ) {
         self.planner = planner
         self.clientPool = clientPool
+        self.cloudStorage = cloudStorage
         self.binaryURL = binaryURL
         self.visualFallback = visualFallback
         self.planningWorker = planningWorker
@@ -429,6 +433,7 @@ final class MCPFirstComputerUseExecutor:
         visualFallback: any ComputerUseExecuting,
         planner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
         clientPool: any MCPClientPooling,
+        cloudStorage: RemoteDesktopCloudStorage = .init(),
         planningWorker: ComputerUsePlanningWorker = .shared,
         planningTimeout: TimeInterval = ComputerUsePlanningWorker.maximumWait,
         documentPlanner: ComputerUseMCPDocumentPlanner = .init(),
@@ -444,6 +449,7 @@ final class MCPFirstComputerUseExecutor:
         let executor = MCPFirstComputerUseExecutor(
             planner: planner,
             clientPool: clientPool,
+            cloudStorage: cloudStorage,
             binaryURL: binaryURL.standardizedFileURL,
             visualFallback: visualFallback,
             planningWorker: planningWorker,
@@ -2398,6 +2404,46 @@ final class MCPFirstComputerUseExecutor:
                         throw MCPClientError.toolNotAllowed(call.toolName)
 
                     case .approvalRequired:
+                        let isCloudStorageCall = call.serverID == RemoteDesktopCloudStorageMCP.serverID
+                            && call.toolName == RemoteDesktopCloudStorageMCP.toolName
+                        var approvalCall = call
+                        var cloudNeedsReplacementApproval = false
+                        if isCloudStorageCall {
+                            guard let activeFileRun,
+                                  activeFileRun.selectedCandidate != nil else {
+                                return .userInterventionRequired(
+                                    "Choose the source file from the current local file list before saving it to cloud storage.")
+                            }
+                            do {
+                                try validateNativeFileCloudStorageProposal(
+                                    call, run: activeFileRun, state: state)
+                                try requireFileWorkActive(tools: tools, generation: generation)
+                                let cloudPrepared = try await cloudStorage.prepare(arguments: call.arguments)
+                                try checkGenerationCancellation(generation)
+                                try tools.requireActive()
+                                try validateNativeFileCloudStorageProposal(
+                                    call, run: activeFileRun, state: state)
+                                guard let cloudTool = structuredTools.first(where: {
+                                    $0.serverID == RemoteDesktopCloudStorageMCP.serverID
+                                        && $0.toolName == RemoteDesktopCloudStorageMCP.toolName
+                                }) else {
+                                    throw AppleFoundationMCPPlannerError.unknownProposal
+                                }
+                                approvalCall = try cloudTool.makeCall(
+                                    taskID: call.taskID,
+                                    arguments: cloudPrepared.arguments,
+                                    stepEffectID: call.stepEffectID)
+                                cloudNeedsReplacementApproval = cloudPrepared.needsReplacementApproval
+                            } catch is CancellationError {
+                                throw CancellationError()
+                            } catch RemoteDesktopCloudStorage.Failure.providerUnavailable {
+                                return .userInterventionRequired(
+                                    RemoteDesktopCloudStorage.Failure.providerUnavailable.localizedDescription)
+                            } catch {
+                                return .userInterventionRequired(
+                                    "The selected file or cloud destination changed before the copy could be prepared. Review the selection and try again.")
+                            }
+                        }
                         if call.toolName == RemoteDesktopMailMCP.toolName {
                             do {
                                 _ = try RemoteDesktopMailRequest(arguments: call.arguments)
@@ -2419,18 +2465,22 @@ final class MCPFirstComputerUseExecutor:
                             return .userInterventionRequired(
                                 "The attachment path must appear exactly in a user-provided message before Mail can prepare this action.")
                         }
-                        if let activeFileRun, activeFileRun.selectedCandidate == nil {
+                        if !isCloudStorageCall,
+                           let activeFileRun, activeFileRun.selectedCandidate == nil {
                             return .userInterventionRequired("Resolve the file from the current Downloads list before preparing a Mail attachment.")
                         }
-                        if let activeFileRun {
+                        if !isCloudStorageCall, let activeFileRun {
                             do { try validateNativeFileMailProposal(call, run: activeFileRun, state: state) }
                             catch { return .userInterventionRequired("The proposed Mail attachment does not match the accepted file. Choose or search again before preparing approval.") }
                             try requireFileWorkActive(tools: tools, generation: generation)
                         }
-                        let prepared = try await clientPool.prepareApproval(call)
+                        let prepared = try await clientPool.prepareApproval(approvalCall)
                         try checkGenerationCancellation(generation)
                         try tools.requireActive()
-                        if let activeFileRun {
+                        if isCloudStorageCall, let activeFileRun {
+                            do { try validateNativeFileCloudStorageProposal(call, run: activeFileRun, state: state) }
+                            catch { return .userInterventionRequired("The selected file changed while approval was being prepared. Search Downloads again.") }
+                        } else if let activeFileRun {
                             do { try validateNativeFileMailProposal(call, run: activeFileRun, state: state) }
                             catch { return .userInterventionRequired("The selected file changed while approval was being prepared. Search Downloads again.") }
                         }
@@ -2450,8 +2500,25 @@ final class MCPFirstComputerUseExecutor:
                                 result: result, trustedUserPrompt: state.trustedUserPrompt)
                             return .completed(verified.response)
                         }
+                        if isCloudStorageCall, !cloudNeedsReplacementApproval {
+                            try await clientPool.preflightApproved(
+                                prepared.call, fingerprint: prepared.fingerprint)
+                            try requireFileWorkActive(tools: tools, generation: generation)
+                            guard let activeFileRun else {
+                                throw ExecutorError.approvalStateChanged
+                            }
+                            try validateNativeFileCloudStorageProposal(
+                                call, run: activeFileRun, state: state)
+                            progress("Saving the selected file to cloud storage…")
+                            let result = try await clientPool.performApproved(
+                                prepared.call, fingerprint: prepared.fingerprint)
+                            let verified = try MCPApprovedActionResult.verified(
+                                call: prepared.call, result: result,
+                                trustedUserPrompt: state.trustedUserPrompt)
+                            return .completed(verified.response)
+                        }
                         pendingApprovalState = state
-                        pendingApprovalDigest = call.canonicalDigest
+                        pendingApprovalDigest = prepared.call.canonicalDigest
                         return .mcpApprovalRequired(prepared)
 
                     case .readOnly:
@@ -2770,6 +2837,22 @@ final class MCPFirstComputerUseExecutor:
         }
     }
 
+    private func validateNativeFileCloudStorageProposal(
+        _ call: MCPToolCall,
+        run: NativeFileRun,
+        state: PlanningState
+    ) throws {
+        let path = try resolveSelectedFile(run).path
+        guard call.taskID == state.taskID,
+              call.serverID == RemoteDesktopCloudStorageMCP.serverID,
+              call.toolName == RemoteDesktopCloudStorageMCP.toolName,
+              call.risk == .approvalRequired,
+              call.arguments["source_path"] == .string(path) else {
+            throw AppleFoundationMCPPlannerError.noProposal
+        }
+        try RemoteDesktopCloudStorage.validateArguments(call.arguments)
+    }
+
     private nonisolated static func isExactAbsolutePathInTrustedUserTurns(
         _ path: String, turns: [String]) -> Bool {
         guard path.hasPrefix("/"), !path.isEmpty, !path.contains("\0") else { return false }
@@ -2801,7 +2884,12 @@ final class MCPFirstComputerUseExecutor:
     private func validateFileApprovalForContinuation(_ call: MCPToolCall,
         state: PlanningState, run: NativeFileRun) throws {
         do {
-            try validateNativeFileMailProposal(call, run: run, state: state)
+            if call.serverID == RemoteDesktopCloudStorageMCP.serverID,
+               call.toolName == RemoteDesktopCloudStorageMCP.toolName {
+                try validateNativeFileCloudStorageProposal(call, run: run, state: state)
+            } else {
+                try validateNativeFileMailProposal(call, run: run, state: state)
+            }
         } catch {
             throw ExecutorError.approvalStateChanged
         }

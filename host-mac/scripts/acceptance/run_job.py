@@ -15,6 +15,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import shutil
 import subprocess
@@ -30,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[3]
 TRACE_ROOT = Path.home() / "Library/Application Support/RemoteDesktopHost/Traces"
 FIXTURE_ROOT = Path.home() / "RemoteDesktopAcceptance"
 DOWNLOADS = Path.home() / "Downloads"
+GMAIL_SESSION_PATH = TRACE_ROOT / "gmail-acceptance-session.json"
 TEST_ID = "RemoteDesktopHostTests/CoreJobAcceptanceTests/testRunJob"
 MAX_RUNS = 10
 MAX_TRACE_FOLDERS = 20
@@ -148,6 +150,83 @@ def stage_source(source: Path, run_id: str, expected_hash: str) -> Path:
     return destination
 
 
+def validate_gmail_compose_url(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.encode("utf-8")) > 2_048 or any(ord(char) < 0x20 for char in value):
+        raise AcceptanceError("Owned Gmail compose URL is invalid")
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as error:
+        raise AcceptanceError("Owned Gmail compose URL is invalid") from error
+    if (parsed.scheme != "https" or (parsed.hostname or "").lower() != "mail.google.com"
+            or parsed.username is not None or parsed.password is not None
+            or port not in (None, 443) or not re.fullmatch(r"/mail/u/[0-9]+/", parsed.path)):
+        raise AcceptanceError("Owned Gmail compose URL must stay on the signed-in Gmail origin")
+    identifiers: list[str] = []
+    for query in (parsed.query, parsed.fragment.split("?", 1)[-1]):
+        identifiers.extend(parse_qs(query, keep_blank_values=True).get("compose", []))
+    fragment = parsed.fragment
+    draft_match = re.search(r"(?:^|/)drafts/([A-Za-z0-9_-]{8,256})(?:$|[/?&])", fragment)
+    if draft_match:
+        identifiers.append(draft_match.group(1))
+    if not any(re.fullmatch(r"[A-Za-z0-9_-]{8,256}", identifier) for identifier in identifiers):
+        raise AcceptanceError("Owned Gmail compose URL is missing a draft identifier")
+    return value
+
+
+def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, int, str | None]:
+    """Persist one owned Gmail subject token and reuse its canonical attachment."""
+    TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if GMAIL_SESSION_PATH.is_symlink():
+        raise AcceptanceError("Gmail acceptance session must not be a symlink")
+    if GMAIL_SESSION_PATH.exists():
+        try:
+            saved = json.loads(GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AcceptanceError("Gmail acceptance session is invalid") from error
+        token = saved.get("token") if isinstance(saved, dict) else None
+        attempts = saved.get("attempts", 0) if isinstance(saved, dict) else 0
+        existing_draft_url = validate_gmail_compose_url(saved.get("existing_draft_url") if isinstance(saved, dict) else None)
+        if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+            raise AcceptanceError("Gmail acceptance session token is invalid")
+        if not isinstance(attempts, int) or attempts < 0:
+            raise AcceptanceError("Gmail acceptance session attempt counter is invalid")
+        attempts += 1
+    else:
+        token = uuid.uuid4().hex
+        attempts = 1
+        existing_draft_url = None
+    payload = json.dumps({"schema_version": 1, "token": token, "attempts": attempts,
+                          **({"existing_draft_url": existing_draft_url} if existing_draft_url else {})},
+                         sort_keys=True) + "\n"
+    temp = GMAIL_SESSION_PATH.with_name(GMAIL_SESSION_PATH.name + ".tmp")
+    if temp.exists() or temp.is_symlink():
+        raise AcceptanceError("Gmail acceptance session update is already in progress")
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(payload)
+    os.replace(temp, GMAIL_SESSION_PATH)
+    source = fixture["Quarterly Metrics.xlsx"]
+    subject = f"Remote Desktop acceptance [{token}]"
+    DOWNLOADS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if DOWNLOADS.is_symlink() or not DOWNLOADS.is_dir():
+        raise AcceptanceError("Downloads must be a real directory")
+    staged = DOWNLOADS / f"Gmail Acceptance {token} - Quarterly Metrics.xlsx"
+    payload = Path(source["path"]).read_bytes()
+    if sha256(payload) != source["sha256"]:
+        raise AcceptanceError("Canonical Gmail fixture changed before staging")
+    if staged.exists():
+        if staged.is_symlink() or not staged.is_file() or sha256(staged.read_bytes()) != source["sha256"]:
+            raise AcceptanceError("Existing Gmail acceptance attachment differs from its canonical fixture")
+    else:
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+    return token, subject, staged, attempts, existing_draft_url
+
+
 def wait_for_spotlight_visibility(path: Path, *, downloads: Path = DOWNLOADS,
                                   timeout: float = 30.0, process_timeout: float = 2.0,
                                   poll_interval: float = 0.25, run_process=subprocess.run,
@@ -209,16 +288,39 @@ def prune_traces() -> None:
 def make_expected(job: str, run_id: str, run_index: int,
                   fixture: dict[str, dict[str, Any]], cloud_root: Path | None,
                   send_approval_check: bool = False,
-                  staged_source: Path | None = None) -> tuple[dict[str, Any], Path | None, str | None]:
+                  staged_source: Path | None = None,
+                  gmail: tuple[str, str, Path, str, int, str | None] | None = None) -> tuple[dict[str, Any], Path | None, str | None]:
     expected: dict[str, Any] = {"job": job, "run_id": run_id, "run_index": run_index}
     stage: Path | None = None
     stage_hash: str | None = None
     pptx = fixture["Board Review.pptx"]
-    if job in {"email", "cloud"}:
-        stage = staged_source or stage_source(Path(pptx["path"]), run_id, pptx["sha256"])
-        stage_hash = pptx["sha256"]
-        expected.update({"source_path": str(stage), "source_sha256": pptx["sha256"],
-                         "source_bytes": pptx["bytes"], "attachment_name": stage.name})
+    if job in {"email", "cloud", "gmail"}:
+        source_info = fixture["Quarterly Metrics.xlsx"] if job == "gmail" else pptx
+        stage = staged_source or stage_source(Path(source_info["path"]), run_id, source_info["sha256"])
+        stage_hash = source_info["sha256"]
+        expected.update({"source_path": str(stage), "source_sha256": source_info["sha256"],
+                         "source_bytes": source_info["bytes"], "attachment_name": stage.name})
+        if job == "gmail":
+            if gmail is None:
+                raise AcceptanceError("Gmail acceptance session is missing")
+            token, subject, _, recipient, attempt, existing_draft_url = gmail
+            body = f"Please review the attached {stage.name}."
+            if existing_draft_url:
+                draft_instruction = (f"Resume the existing test-owned Gmail compose draft at this exact URL: "
+                    f"{existing_draft_url}. Fill that draft; do not create another draft. If the URL no longer "
+                    "opens the same draft, stop and ask me rather than creating a replacement. ")
+            elif attempt > 1:
+                draft_instruction = (f"In Gmail already signed in within the default browser, find the test-owned draft with "
+                    f"exact subject \"{subject}\" and reuse it. If it is absent, create one. ")
+            else:
+                draft_instruction = "In Gmail already signed in within the default browser, create one test-owned draft. "
+            expected.update({"gmail_token": token, "to": recipient, "subject": subject, "body": body,
+                "gmail_attempt": attempt,
+                "gmail_existing_draft_url": existing_draft_url,
+                "prompt": (draft_instruction
+                    + f"Address it to my own email address for the signed-in account. Use the exact subject \"{subject}\" "
+                    f"and exact body \"{body}\". Attach the file named \"{stage.name}\" from Downloads, leave the draft "
+                    "open for review, and never send it." )})
     if job == "email":
         expected.update({
             "to": "dana@example.com",
@@ -245,18 +347,23 @@ def make_expected(job: str, run_id: str, run_index: int,
     elif job == "cloud":
         if cloud_root is None:
             raise AcceptanceError("No installed cloud sync folder was selected")
-        destination = cloud_root / "RemoteDesktopAcceptance" / run_id / "Board Review.pptx"
+        folder = f"RemoteDesktopAcceptance/{run_id}"
+        destination = cloud_root / folder / stage.name
+        provider_label = "iCloud Drive" if cloud_root.name == "com~apple~CloudDocs" else cloud_root.name
         expected.update({"cloud_root": str(cloud_root), "destination_path": str(destination)})
         expected["prompt"] = (
-            f"Copy the latest Board Review deck, {stage.name}, from Downloads to "
-            f"{destination.parent} in the installed local sync folder using local file operations. "
-            "Keep the source, do not overwrite an existing file, and do not open a website."
+            f"Copy the latest Board Review deck in Downloads to {provider_label}. "
+            f"Create the folder \"{folder}\" in that provider's local sync folder and place the copy there; "
+            "preserve its original filename. Keep the source, do not overwrite an existing file, "
+            "and do not open a website."
         )
     elif job == "flights":
         expected["trip"] = {"origin": "SFO", "origin_name": "San Francisco",
                             "destination": "LIS", "destination_name": "Lisbon",
                             "date": "2026-11-10"}
         expected["prompt"] = "Find me a cheap flight from SFO to Lisbon on November 10, 2026. Return 3–5 options with prices copied from the page."
+    elif job == "gmail":
+        pass
     else:
         expected["prompt"] = (
             "Report whether this task reached the Mac. If it is locked, ask me to unlock it in the "
@@ -350,11 +457,15 @@ def sanitize_xcodebuild_command(command: list[str]) -> list[str]:
     return result
 
 
-def command_for(base: list[str], action: str, trace: Path | None = None) -> list[str]:
+def command_for(base: list[str], action: str, trace: Path | None = None,
+                test_allowance: int = TIMEOUT_SECONDS) -> list[str]:
     command = list(base)
     action_index = next(i for i, item in enumerate(command) if item in {"test", "build-for-testing", "test-without-building"})
     command[action_index] = action
     if action == "test-without-building":
+        if "-maximum-test-execution-time-allowance" in command:
+            index = command.index("-maximum-test-execution-time-allowance")
+            command[index + 1] = str(test_allowance)
         command.extend([f"-only-testing:{TEST_ID}", "-resultBundlePath", str(trace / "host.xcresult")])
     return command
 
@@ -545,6 +656,30 @@ def check_email(expected: dict[str, Any], outcome: dict[str, Any], trace: Path) 
             "attachment_sha256": sha256(payload), "mailbox_scope": "one run-specific Drafts subject"}
 
 
+def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
+    evidence = outcome["evidence"].get("gmail")
+    if not isinstance(evidence, dict):
+        raise AcceptanceError("Gmail outcome is missing focused browser evidence")
+    if evidence.get("harness_granted_approvals") != 0 or evidence.get("approval_responses_denied") != len(evidence.get("approval_events", [])) + evidence.get("approval_events_omitted", 0):
+        raise AcceptanceError("Gmail baseline must deny every observed approval")
+    if evidence.get("attachment_bytes_verified") is not False:
+        raise AcceptanceError("Gmail baseline must not claim attachment bytes were independently verified")
+    if outcome["evidence"].get("draft_create_approved_count") != 0:
+        raise AcceptanceError("Gmail baseline unexpectedly granted an approval")
+    captured = evidence.get("url_is_gmail") is True and evidence.get("compose_count") == 1
+    fields_exact = captured and all(evidence.get(key) is True for key in (
+        "recipient_matches", "subject_matches", "body_matches",
+        "attachment_name_visible", "attachment_size_visible"))
+    return {"passed": False, "diagnostic_only": True,
+            "reason": ("Gmail draft fields and attachment metadata match; attached bytes still need independent verification."
+                       if fields_exact else "The Gmail workflow has not produced a fully matching visible draft; inspect the recorded outcome and approvals."),
+            "terminal_outcome": outcome["raw_outcome"],
+            "compose_fields_exact": bool(fields_exact),
+            "attachment_name_and_size_visible": bool(fields_exact),
+            "attachment_bytes_verified": False, "harness_granted_approvals": 0,
+            "capture_status": evidence.get("capture_status")}
+
+
 def check_cloud(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
     evidence = outcome["evidence"].get("cloud")
     if not isinstance(evidence, dict):
@@ -676,18 +811,20 @@ def verify_run(trace: Path, expected: dict[str, Any], test_code: int) -> tuple[b
     if test_code != 0:
         return False, {"passed": False, "reason": f"xcodebuild test-without-building exit {test_code}"}
     outcome = read_outcome(trace, expected["job"], expected["run_id"])
-    if outcome["raw_outcome"] == "not-started":
+    if outcome["raw_outcome"] in {"not-started", "running"}:
         return False, {"passed": False, "reason": outcome.get("text", "Task did not start"),
                        "failure_class": outcome.get("failure_class")}
     if expected["job"] == "email":
         check = check_email(expected, outcome, trace)
+    elif expected["job"] == "gmail":
+        check = check_gmail(expected, outcome)
     elif expected["job"] == "cloud":
         check = check_cloud(expected, outcome)
     elif expected["job"] == "flights":
         check = check_flights(expected, outcome, trace)
     else:
         check = check_away(outcome)
-    return True, check
+    return check.get("passed") is True, check
 
 
 def trace_path(job: str, run_id: str) -> Path:
@@ -717,7 +854,7 @@ def check_cloud_root(raw: str | None) -> Path | None:
 def validate_cloud_root(root: Path) -> Path:
     cloud_storage = Path.home() / "Library/CloudStorage"
     icloud = Path.home() / "Library/Mobile Documents/com~apple~CloudDocs"
-    under_provider = cloud_storage.exists() and root != cloud_storage.resolve() and cloud_storage.resolve() in root.parents
+    under_provider = cloud_storage.exists() and root.parent == cloud_storage.resolve()
     is_icloud = icloud.exists() and root == icloud.resolve()
     if not root.is_dir() or not (under_provider or is_icloud):
         raise AcceptanceError("Cloud root must be an existing provider sync folder under CloudStorage or iCloud Drive")
@@ -726,15 +863,22 @@ def validate_cloud_root(root: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("job", choices=("email", "cloud", "flights", "away"))
+    parser.add_argument("job", choices=("email", "gmail", "cloud", "flights", "away"))
     parser.add_argument("--runs", type=int, required=True)
     parser.add_argument("--cloud-root", help="Installed provider sync folder for the cloud job")
+    parser.add_argument("--gmail-recipient", help="Expected signed-in Gmail address for read-only validation")
     parser.add_argument("--build-command-json", type=Path, help="Local xcodebuild argv override file; never shell-evaluated")
     parser.add_argument("--send-approval-check", action="store_true",
                         help="For email only, verify the exact Send approval without granting it")
     args = parser.parse_args()
     if not 1 <= args.runs <= MAX_RUNS:
         parser.error(f"--runs must be between 1 and {MAX_RUNS}")
+    if args.job == "gmail" and args.runs != 1:
+        parser.error("gmail currently accepts one run; retries reuse the same test-owned draft token")
+    if args.job == "gmail" and (not args.gmail_recipient or "@" not in args.gmail_recipient):
+        parser.error("gmail requires --gmail-recipient for checker-only validation")
+    if args.job != "gmail" and args.gmail_recipient:
+        parser.error("--gmail-recipient is only valid for gmail")
     if args.job != "cloud" and args.cloud_root:
         parser.error("--cloud-root is only valid for cloud")
     if args.send_approval_check and args.job != "email":
@@ -747,6 +891,7 @@ def main() -> int:
     prune_traces()
     batch_staged: Path | None = None
     batch_staged_hash: str | None = None
+    gmail: tuple[str, str, Path, str, int, str | None] | None = None
     try:
         cloud_root = check_cloud_root(args.cloud_root) if args.job == "cloud" else None
         fixture = prepare_fixtures()
@@ -754,9 +899,15 @@ def main() -> int:
             source = fixture["Board Review.pptx"]
             batch_staged = stage_source(Path(source["path"]), first_run_id, source["sha256"])
             batch_staged_hash = source["sha256"]
+        elif args.job == "gmail":
+            token, subject, staged, attempt, existing_draft_url = gmail_session(fixture)
+            gmail = (token, subject, staged, args.gmail_recipient, attempt, existing_draft_url)
+            batch_staged = staged
+            batch_staged_hash = fixture["Quarterly Metrics.xlsx"]["sha256"]
         base_command = load_build_command(args.build_command_json, env)
     except (AcceptanceError, OSError) as error:
-        remove_owned_stage(batch_staged, batch_staged_hash)
+        if args.job != "gmail":
+            remove_owned_stage(batch_staged, batch_staged_hash)
         print(f"Preflight failed: {error}", file=sys.stderr)
         report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
                   "runs_passed": 0, "failure_class": "other", "reason": f"preflight: {error}"}
@@ -807,7 +958,8 @@ def main() -> int:
             trace = first_trace if index == 1 else trace_path(args.job, run_id)
             try:
                 expected, _, _ = make_expected(args.job, run_id, index, fixture, cloud_root,
-                                               args.send_approval_check, staged_source=batch_staged)
+                                               args.send_approval_check, staged_source=batch_staged,
+                                               gmail=gmail)
                 (trace / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 test_env = env.copy()
                 test_env.update({
@@ -816,9 +968,11 @@ def main() -> int:
                     "TEST_RUNNER_CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(FIXTURE_ROOT),
                     "TEST_RUNNER_CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
                 })
-                command = command_for(base_command, "test-without-building", trace)
+                test_allowance = 480 if args.job == "gmail" else TIMEOUT_SECONDS
+                command = command_for(base_command, "test-without-building", trace,
+                                      test_allowance=test_allowance)
                 print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
-                code, elapsed = run_logged(command, test_env, trace / "test.log", TIMEOUT_SECONDS)
+                code, elapsed = run_logged(command, test_env, trace / "test.log", test_allowance)
                 try:
                     passed, check = verify_run(trace, expected, code)
                 except (AcceptanceError, OSError, ValueError) as error:
@@ -864,7 +1018,8 @@ def main() -> int:
         print(f"Summary trace: {summary_path.parent}", flush=True)
         return 0 if passed_count == args.runs else 1
     finally:
-        remove_owned_stage(batch_staged, batch_staged_hash)
+        if args.job != "gmail":
+            remove_owned_stage(batch_staged, batch_staged_hash)
 
 
 if __name__ == "__main__":

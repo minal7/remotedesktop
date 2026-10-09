@@ -2413,6 +2413,73 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.keyCount, 1)
     }
 
+    func testNativePlannerEditorActionsKeepExistingApproval() async throws {
+        let cases: [(ComputerUseDefaultBrowserControlPlan, ComputerUsePredictedAction)] = [
+            (.typeFocusedText(text: "123456", explanation: "Enter the requested value"), .typeText("123456")),
+            (.pressFocusedKey(chord: "Enter", explanation: "Commit the field"), .key(usage: 0x28, modifiers: 0)),
+        ]
+        for (plan, expectedAction) in cases {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let session = try fixture.session()
+            let goal = "Enter the requested value in the current field"
+            let taskID = "native-semantic-typing-approval"
+            let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+            graph.makePage()
+            let snapshot = ComputerUseTextSnapshot(targetID: "field", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false)
+            var effects = 0
+            let editor = ComputerUseTextEditor(read: { snapshot }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in effects += 1; return nil },
+                postUnicode: { _, _ in effects += 1 }, mayAct: { true })
+            let bounds = retained.identity.bounds
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                approvalTargetProvider: { _ in .init(context: "AXTextField verification code",
+                    applicationID: retained.application.bundleIdentifier, accessibilityIdentity: "field") },
+                actionPerformer: { _ in effects += 1 }, textEditor: editor,
+                screenProvider: { .init(image: CIImage(color: .black).cropped(to: bounds), displayBounds: bounds,
+                    frontmostWindowBounds: bounds) },
+                accessibilityContextProvider: { _ in "AXTextField verification code" },
+                planningAccessibilityIdentityProvider: { "field" },
+                frontmostApplicationIdentityProvider: { retained.application },
+                frontmostApplicationProvider: { retained.application.bundleIdentifier })
+            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+                propose: { _ in XCTFail("A grounded text proposal needs no visual model"); return .init(response: "", decision: .handoff("Stop")) },
+                nativeControlPlanner: { input, _ in
+                    XCTAssertNotNil(input.focusedEditor)
+                    XCTAssertNotNil(input.focusedTextState)
+                    return plan
+                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+                tools: tools, progress: { _ in })
+            guard case .approvalRequired(_, let action, _) = result else {
+                return XCTFail("Semantic typing must retain the existing sensitive-field approval gate")
+            }
+            XCTAssertEqual(action, expectedAction)
+            XCTAssertEqual(effects, 0)
+        }
+    }
+
+    func testNativePlannerTypingWithoutCurrentEditorHandsOffWithoutInput() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let session = try fixture.session()
+        let goal = "Fill the requested field"
+        let taskID = "native-semantic-typing-no-editor"
+        let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
+        graph.makePage()
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { _ in XCTFail("Ungrounded typing must not reach visual dispatch"); return .init(response: "", decision: .handoff("Stop")) },
+            nativeControlPlanner: { _, _ in .typeFocusedText(text: "Example", explanation: "Fill field") },
+            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
+            tools: fixture.tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("Focus the intended text field, then choose Resume."))
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the original browser-window setup may send input")
+    }
+
     func testNativeControlPlannerClicksValidatedCenterUsingNonzeroDisplayOrigin() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -4036,6 +4103,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     let description: String
                     switch plan {
                     case .pressControl(let id, let explanation): description = "pressControl id=\(id) explanation=\(explanation)"
+                    case .typeFocusedText(_, let explanation): description = "typeFocusedText explanation=\(explanation)"
+                    case .pressFocusedKey(let chord, let explanation): description = "pressFocusedKey chord=\(chord) explanation=\(explanation)"
                     case .visualFallback(let reason, let directive): description = "visualFallback reason=\(reason) directive=\(String(describing: directive))"
                     case .askUser(let question): description = "askUser question=\(question)"
                     }

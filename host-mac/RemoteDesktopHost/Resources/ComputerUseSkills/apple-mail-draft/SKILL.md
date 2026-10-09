@@ -1,10 +1,10 @@
 ---
 name: apple-mail-draft
-description: Default email drafting and approved sending in Apple Mail, including local file attachments.
+description: Draft in Apple Mail and prepare explicitly requested sends, including local file attachments.
 metadata:
   audience: native-mcp
   required-tools: remote_desktop_mail
 ---
-Preserve the prompt's exact recipient, subject, body, copies, attachments, and destination. Pass contact names as given; the host resolves Contacts and asks when a match is missing or ambiguous. Use `remote_desktop_mail` for native Apple Mail. Create drafts with `send_now:false`, leave them open, and require no approval. Set `send_now:true` only for explicit send requests; host approval governs delivery.
+Use for Apple Mail requests or the configured native email destination when the user has not named webmail. Use the browser for Gmail or other named webmail, including drafts. Preserve exact recipient, subject, body, Cc/Bcc, attachments, and destination. Pass contact names unchanged for host Contacts resolution; ask about missing or ambiguous matches. Use `remote_desktop_mail`; draft with `send_now:false` and leave open. Set `send_now:true` only for explicit send requests; host approval governs delivery.
 
-Omit `attachment_paths` when no attachment is requested. Preserve exact user paths. For a described local file, search Spotlight across Documents, Desktop, Downloads, and iCloud Drive using the user's natural description, requested kind, and date. Use offered metadata and opaque candidate IDs, follow pages until one candidate is supported, and ask a concise question when choices remain materially ambiguous. After host selection, pass the injected `host_resolved_attachment_paths` unchanged. For multiple described files, ask which single file to use. For website or webmail, choose the browser workflow.
+Omit `attachment_paths` when none is requested and preserve exact user paths. For described files, search Spotlight across Documents, Desktop, Downloads, and iCloud Drive using the user's description, format, and date. Use offered metadata and opaque IDs, follow pages, and ask when candidates remain ambiguous. After selection, pass injected `host_resolved_attachment_paths` unchanged. Ask which single file to use when multiple are described.

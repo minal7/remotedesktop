@@ -4358,6 +4358,56 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
         XCTAssertTrue(description.contains("\"send\""))
     }
 
+    func testGeneratedCloudFolderArgumentsEnforceSchemaPatternBeforeCapture() throws {
+        guard #available(macOS 26.0, *) else {
+            throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
+        }
+
+        let provider = RemoteDesktopCloudStorage.Provider(
+            id: "icloud-drive", label: "iCloud Drive",
+            rootURL: URL(fileURLWithPath: "/private/fixture/iCloud", isDirectory: true))
+        let schema = RemoteDesktopCloudStorageMCP.inputSchema(providers: [provider])
+        _ = try FoundationMCPJSONSchemaBridge(
+            rootSchema: schema, rootName: RemoteDesktopCloudStorageMCP.toolName).makeGenerationSchema()
+
+        func generatedArguments(folder: String) -> GeneratedContent {
+            GeneratedContent(kind: .structure(properties: [
+                "source_path": GeneratedContent(kind: .string("/Users/test/Downloads/Deck.pdf")),
+                "provider_id": GeneratedContent(kind: .string(provider.id)),
+                "relative_folder": GeneratedContent(kind: .string(folder)),
+            ], orderedKeys: ["source_path", "provider_id", "relative_folder"]))
+        }
+
+        for invalidFolder in ["/tmp/outside", "../outside"] {
+            var converter = FoundationMCPGeneratedContentConverter(rootSchema: schema)
+            XCTAssertThrowsError(try converter.convert(generatedArguments(folder: invalidFolder))) { error in
+                XCTAssertEqual(error as? FoundationMCPJSONSchemaError,
+                    .invalidGeneratedArguments("A generated string does not match its required pattern."))
+            }
+        }
+        var validConverter = FoundationMCPGeneratedContentConverter(rootSchema: schema)
+        guard case .object(let converted) = try validConverter.convert(
+            generatedArguments(folder: "RemoteDesktopAcceptance/Run-42")) else {
+            return XCTFail("The valid cloud arguments should remain an object.")
+        }
+        XCTAssertEqual(converted["relative_folder"],
+            .string("RemoteDesktopAcceptance/Run-42"))
+
+        guard case .object(var root) = schema,
+              case .object(var properties)? = root["properties"],
+              case .object(var folderSchema)? = properties["relative_folder"] else {
+            return XCTFail("The cloud folder schema should expose its bounded pattern.")
+        }
+        folderSchema["pattern"] = .string("[")
+        properties["relative_folder"] = .object(folderSchema)
+        root["properties"] = .object(properties)
+        XCTAssertThrowsError(try FoundationMCPJSONSchemaBridge(
+            rootSchema: .object(root), rootName: RemoteDesktopCloudStorageMCP.toolName).makeGenerationSchema()) { error in
+                XCTAssertEqual(error as? FoundationMCPJSONSchemaError,
+                    .unsupported("The input schema contains an invalid string pattern."))
+            }
+    }
+
     func testDynamicBridgeRejectsOpenEndedArguments() throws {
         guard #available(macOS 26.0, *) else {
             throw XCTSkip("Foundation Models runtime tests require macOS 26 or newer.")
@@ -6433,6 +6483,44 @@ extension AppleFoundationMCPPlannerTests {
     }
 
     @available(macOS 26.0, *)
+    func testNamedWebmailAndAppleMailOfferDistinctAuthorizedSurfaces() throws {
+        let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            serverID: RemoteDesktopMailMCP.serverID)
+        let gmailRequest = MCPProposalPlanningRequest(taskID: "named-gmail-destination",
+            prompt: "In Gmail, create an unsent draft.", tools: [mail], allowsBrowserWorkflow: true)
+        let appleMailRequest = MCPProposalPlanningRequest(taskID: "named-apple-mail-destination",
+            prompt: "In Apple Mail, create an unsent draft.", tools: [mail], allowsBrowserWorkflow: true)
+        let unqualifiedEmailRequest = MCPProposalPlanningRequest(taskID: "unqualified-email-destination",
+            prompt: "Create an unsent email draft.", tools: [mail], allowsBrowserWorkflow: true)
+
+        let gmailOptions = try FoundationMCPPlannerCapabilityMenu.options(for: gmailRequest)
+        let webmail = try XCTUnwrap(gmailOptions.first { $0.id == "browser" })
+        let nativeMail = try XCTUnwrap(gmailOptions.first { $0.id == "skill:apple-mail-draft" })
+        XCTAssertEqual(webmail.surface, .websiteOrWebmail)
+        XCTAssertEqual(nativeMail.surface, .nativeAppSkill)
+        XCTAssertEqual(nativeMail.mailAttachmentSource, .noAttachment)
+
+        let webmailStage = try FoundationMCPPlannerCapabilityMenu.select("browser", for: gmailRequest)
+        XCTAssertEqual(webmailStage.route, .browser)
+        XCTAssertTrue(webmailStage.exposure.bindings.isEmpty,
+            "Choosing a named webmail destination must not carry the native Apple Mail tool into execution.")
+        XCTAssertTrue(webmailStage.selectedToolIndices.isEmpty)
+
+        let appleMailStage = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: appleMailRequest)
+        XCTAssertEqual(appleMailStage.route, .native)
+        XCTAssertEqual(appleMailStage.selectedToolIndices, [0])
+        XCTAssertEqual(appleMailStage.exposure.bindings.map(\.allowedTool.serverID), [RemoteDesktopMailMCP.serverID])
+        XCTAssertFalse(appleMailStage.exposure.allowsBrowserWorkflow)
+
+        let unqualifiedOptions = try FoundationMCPPlannerCapabilityMenu.options(for: unqualifiedEmailRequest)
+        XCTAssertTrue(unqualifiedOptions.contains { $0.id == "skill:apple-mail-draft" },
+            "An unnamed email destination retains the configured native Mail option.")
+        XCTAssertNoThrow(try FoundationMCPPlannerCapabilityMenu.select(
+            "skill:apple-mail-draft", for: unqualifiedEmailRequest))
+    }
+
+    @available(macOS 26.0, *)
     func testGenericCapabilitySelectionPreservesRequestAndOriginalToolIndex() throws {
         let focusedApp = try makeAllowedTool(name: "focused_app", schema: emptyObjectSchema, risk: .readOnly)
         let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
@@ -6554,6 +6642,121 @@ extension AppleFoundationMCPPlannerTests {
         XCTAssertEqual(afterSelection.request.hostResolvedAttachmentPaths, [selectedPath])
         XCTAssertEqual(afterSelection.selectedToolIndices, [1])
         XCTAssertEqual(afterSelection.exposure.localFileKinds, [])
+    }
+
+    @available(macOS 26.0, *)
+    func testCloudStorageSkillWaitsForHostSelectionAndPinsOnlyPublicArguments() throws {
+        let provider = RemoteDesktopCloudStorage.Provider(
+            id: "provider-fixture", label: "Fixture Sync", rootURL: URL(fileURLWithPath: "/private/fixture/Sync", isDirectory: true))
+        let publicSchema = RemoteDesktopCloudStorageMCP.inputSchema(providers: [provider])
+        guard case .object(var executableRoot) = publicSchema,
+              case .object(var executableProperties)? = executableRoot["properties"] else {
+            return XCTFail("The cloud tool must provide a structured argument schema.")
+        }
+        executableProperties["source_sha256"] = .object(["type": .string("string")])
+        executableProperties["destination_path"] = .object(["type": .string("string")])
+        executableProperties["existing_destination_sha256"] = .object(["type": .string("string")])
+        executableRoot["properties"] = .object(executableProperties)
+        let cloud = try makeAllowedTool(name: RemoteDesktopCloudStorageMCP.toolName,
+            schema: .object(executableRoot), risk: .approvalRequired,
+            description: RemoteDesktopCloudStorageMCP.reviewedDescription,
+            serverID: RemoteDesktopCloudStorageMCP.serverID)
+        let mail = try makeAllowedTool(name: RemoteDesktopMailMCP.toolName,
+            schema: RemoteDesktopMailMCP.inputSchema, risk: .approvalRequired,
+            serverID: RemoteDesktopMailMCP.serverID)
+        let notQueried = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(),
+            page: .init(candidates: [], isComplete: false, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
+        let initialRequest = MCPProposalPlanningRequest(taskID: "cloud-source-initial",
+            prompt: "Copy the requested file to my sync folder.", tools: [mail, cloud],
+            localFileCatalog: notQueried)
+
+        let initialOptions = try FoundationMCPPlannerCapabilityMenu.options(for: initialRequest)
+        XCTAssertTrue(initialOptions.contains { $0.id == "cloud-source:described-local" })
+        XCTAssertFalse(initialOptions.contains { $0.id == "skill:save-to-cloud-storage" })
+        XCTAssertFalse(initialOptions.contains { $0.id == "native-tool:1" },
+            "The dedicated cloud operation cannot be selected through the generic tool route.")
+        let selectorInput = FoundationMCPPlannerCapabilityMenu.selectionInput(
+            for: initialRequest, options: initialOptions)
+        guard case .object(let selectorFields) = selectorInput,
+              case .object(let hostStage)? = selectorFields["host_stage"],
+              case .object(let cloudProviders)? = hostStage["cloud_storage_providers"] else {
+            return XCTFail("The source-stage selector should receive host-described cloud destinations.")
+        }
+        XCTAssertEqual(cloudProviders["provider_ids"], .array([.string(provider.id)]))
+        XCTAssertEqual(cloudProviders["description"], .string("Installed accounts: provider-fixture: Fixture Sync"))
+        XCTAssertNil(selectorFields["local_files"], "Provider context must not expose file inventory or paths.")
+        let initialExposure = try FoundationMCPProposalToolExposure.plan(for: initialRequest)
+        XCTAssertFalse(initialExposure.bindings.contains { $0.allowedTool.serverID == RemoteDesktopCloudStorageMCP.serverID })
+        XCTAssertEqual(initialExposure.localFileKinds, [.list])
+
+        let discovery = try FoundationMCPPlannerCapabilityMenu.select("cloud-source:described-local", for: initialRequest)
+        XCTAssertEqual(discovery.cloudStorageSource, .describedLocalFile)
+        XCTAssertTrue(discovery.selectedToolIndices.isEmpty)
+        XCTAssertTrue(discovery.exposure.bindings.isEmpty)
+        XCTAssertEqual(discovery.exposure.localFileKinds, [.list])
+        XCTAssertFalse(discovery.exposure.allowsBrowserWorkflow)
+
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "cloud-candidate-7", displayName: "Field Notes.pdf",
+            contentTypeIdentifier: nil, fileExtension: "pdf", byteCount: 8, modifiedAt: Date(),
+            createdAt: nil, addedToDirectoryAt: nil)
+        let available = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(),
+            page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
+                hasTiedSortValues: false, hasMissingSortValues: false))
+        let unresolved = MCPProposalPlanningRequest(taskID: "cloud-source-listed", prompt: initialRequest.prompt,
+            tools: initialRequest.tools, localFileCatalog: available)
+        let unresolvedOptions = try FoundationMCPPlannerCapabilityMenu.options(for: unresolved)
+        XCTAssertFalse(unresolvedOptions.contains { $0.id == "skill:save-to-cloud-storage" })
+        XCTAssertFalse(unresolvedOptions.contains { $0.id == "native-tool:1" })
+        XCTAssertTrue(unresolvedOptions.contains { $0.id == "cloud-source:described-local" })
+
+        let selectedContext = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
+            query: available.query, page: available.page, selectedCandidate: candidate)
+        let selectedPath = "/Users/test/Documents/Field Notes.pdf"
+        let selectedRequest = MCPProposalPlanningRequest(taskID: "cloud-selected", prompt: initialRequest.prompt,
+            tools: initialRequest.tools, localFileCatalog: selectedContext,
+            hostResolvedAttachmentPaths: [selectedPath])
+        let options = try FoundationMCPPlannerCapabilityMenu.options(for: selectedRequest)
+        XCTAssertTrue(options.contains { $0.id == "skill:save-to-cloud-storage" })
+        XCTAssertFalse(options.contains { $0.id == "native-tool:1" })
+        let stage = try FoundationMCPPlannerCapabilityMenu.select("skill:save-to-cloud-storage", for: selectedRequest)
+        XCTAssertEqual(stage.request, selectedRequest)
+        XCTAssertEqual(stage.cloudStorageSource, .hostSelectedFile)
+        XCTAssertEqual(stage.selectedToolIndices, [1])
+        XCTAssertEqual(stage.exposure.bindings.map(\.allowedTool.serverID), [RemoteDesktopCloudStorageMCP.serverID])
+        XCTAssertEqual(stage.exposure.bindings.map(\.toolIndex), [1],
+            "Tool identity must retain the original request index after the source stage.")
+        XCTAssertTrue(stage.exposure.localFileKinds.isEmpty)
+        XCTAssertFalse(stage.exposure.allowsBrowserWorkflow)
+
+        let plannerSchema = try FoundationMCPProposalTool.plannerInputSchema(
+            for: cloud, hostResolvedAttachmentPaths: [selectedPath], cloudStorageSource: stage.cloudStorageSource)
+        guard case .object(let root) = plannerSchema,
+              case .object(let properties)? = root["properties"],
+              case .object(let source)? = properties["source_path"],
+              case .object(let providerSchema)? = properties["provider_id"],
+              case .array(let required)? = root["required"] else {
+            return XCTFail("The selected cloud-copy schema should remain a closed structured object.")
+        }
+        XCTAssertEqual(source["const"], .string(selectedPath))
+        XCTAssertEqual(providerSchema["enum"], .array([.string(provider.id)]),
+            "The installed provider choices must come from the live service schema.")
+        XCTAssertNil(properties["source_sha256"])
+        XCTAssertNil(properties["destination_path"])
+        XCTAssertNil(properties["existing_destination_sha256"])
+        XCTAssertEqual(Set(required.compactMap { if case .string(let value) = $0 { value } else { nil } }),
+            Set(["source_path", "provider_id", "relative_folder"]))
+        XCTAssertEqual(root["additionalProperties"], .bool(false))
+
+        let skill = try XCTUnwrap(ComputerUseSkillCatalog.load().skills.first { $0.name == "save-to-cloud-storage" })
+        XCTAssertTrue(skill.requiredTools.contains(RemoteDesktopCloudStorageMCP.toolName))
+        XCTAssertFalse(skill.body.isEmpty)
+        XCTAssertLessThanOrEqual(skill.body.split(whereSeparator: \.isWhitespace).count, 150)
+
+        let mailNoAttachment = try FoundationMCPPlannerCapabilityMenu.select("skill:apple-mail-draft", for: initialRequest)
+        XCTAssertEqual(mailNoAttachment.mailAttachmentSource, .noAttachment,
+            "Adding cloud storage must not change the established no-attachment Mail route.")
+        XCTAssertEqual(mailNoAttachment.selectedToolIndices, [0])
     }
 
     @available(macOS 26.0, *)

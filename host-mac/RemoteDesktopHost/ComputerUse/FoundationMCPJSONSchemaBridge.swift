@@ -72,6 +72,18 @@ struct FoundationMCPJSONSchemaBridge {
             throw FoundationMCPJSONSchemaError.unsupported(
                 "The input schema uses unsupported keyword \(unsupportedKey).")
         }
+        if let rawPattern = object["pattern"] {
+            guard case .string(let pattern) = rawPattern else {
+                throw FoundationMCPJSONSchemaError.unsupported(
+                    "The input schema's string pattern must be a string.")
+            }
+            do {
+                _ = try NSRegularExpression(pattern: pattern)
+            } catch {
+                throw FoundationMCPJSONSchemaError.unsupported(
+                    "The input schema contains an invalid string pattern.")
+            }
+        }
 
         if let choices = combinatorChoices(in: object) {
             let nonNullChoices = choices.filter { !schemaTypes(in: $0).contains("null") }
@@ -702,6 +714,20 @@ private extension FoundationMCPGeneratedContentConverter {
 
     func validateString(_ value: String, schema: MCPJSONValue) throws {
         guard case .object(let object) = schema else { return }
+        if case .string(let pattern)? = object["pattern"] {
+            let expression: NSRegularExpression
+            do {
+                expression = try NSRegularExpression(pattern: pattern)
+            } catch {
+                throw FoundationMCPJSONSchemaError.unsupported(
+                    "The input schema contains an invalid string pattern.")
+            }
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            guard expression.firstMatch(in: value, range: range) != nil else {
+                throw FoundationMCPJSONSchemaError.invalidGeneratedArguments(
+                    "A generated string does not match its required pattern.")
+            }
+        }
         if case .array(let values)? = object["enum"], !values.contains(.string(value)) {
             throw FoundationMCPJSONSchemaError.invalidGeneratedArguments(
                 "A generated string is not an allowed choice.")

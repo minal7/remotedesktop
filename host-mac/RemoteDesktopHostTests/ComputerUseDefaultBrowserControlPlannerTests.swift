@@ -496,6 +496,102 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: oversizedContent, page: page(controls: [])))
     }
 
+    func testFocusedTextEntryIsOfferedOnlyForGroundedDefaultBrowserEditor() throws {
+        var input = makeInput()
+        input.defaultBrowserTask = true
+        input.focusedEditor = "AXTextField • To"
+        input.focusedTextState = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "to-field",
+            value: "", selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)))
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"visualFallback","control_id":null,"explanation":"Use screenshot."}"#)))
+        let groundedRequest = try planner.makeRequest(input: input, page: page(controls: []))
+        let groundedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(groundedRequest.httpBody)) as? [String: Any])
+        let groundedFormat = try XCTUnwrap(groundedBody["response_format"] as? [String: Any])
+        let groundedJSONSchema = try XCTUnwrap(groundedFormat["json_schema"] as? [String: Any])
+        let groundedSchema = try XCTUnwrap(groundedJSONSchema["schema"] as? [String: Any])
+        let groundedBranches = try XCTUnwrap(groundedSchema["oneOf"] as? [[String: Any]])
+        let typing = try XCTUnwrap(groundedBranches.first {
+            (($0["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String] == ["typeFocusedText"]
+        })
+        let typingProperties = try XCTUnwrap(typing["properties"] as? [String: Any])
+        let orderedBody = String(decoding: try XCTUnwrap(groundedRequest.httpBody), as: UTF8.self)
+        XCTAssertTrue(orderedBody.contains("\"properties\":{\"outcome\":{\"enum\":[\"typeFocusedText\"],\"type\":\"string\"},\"text\":{"),
+            "The ordered schema puts the outcome before proposed text")
+        XCTAssertEqual(typing["required"] as? [String], ["outcome", "text", "explanation"])
+        XCTAssertEqual((typingProperties["text"] as? [String: Any])?["maxLength"] as? Int, 2_000)
+        XCTAssertEqual(typing["additionalProperties"] as? Bool, false)
+        let focusedKey = try XCTUnwrap(groundedBranches.first {
+            (($0["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String] == ["pressFocusedKey"]
+        })
+        let focusedKeyProperties = try XCTUnwrap(focusedKey["properties"] as? [String: Any])
+        XCTAssertEqual(focusedKey["required"] as? [String], ["outcome", "chord", "explanation"])
+        XCTAssertEqual((focusedKeyProperties["chord"] as? [String: Any])?["enum"] as? [String],
+            ["Enter", "Tab", "Shift+Tab", "Escape", "Command+A", "Command+L"])
+        XCTAssertTrue(orderedBody.contains("\"properties\":{\"outcome\":{\"enum\":[\"pressFocusedKey\"],\"type\":\"string\"},\"chord\":{"),
+            "The ordered schema puts the outcome before the offered chord")
+
+        input.focusedTextState = nil
+        let ungroundedRequest = try planner.makeRequest(input: input, page: page(controls: []))
+        let ungroundedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(ungroundedRequest.httpBody)) as? [String: Any])
+        let ungroundedFormat = try XCTUnwrap(ungroundedBody["response_format"] as? [String: Any])
+        let ungroundedJSONSchema = try XCTUnwrap(ungroundedFormat["json_schema"] as? [String: Any])
+        let ungroundedSchema = try XCTUnwrap(ungroundedJSONSchema["schema"] as? [String: Any])
+        let ungroundedBranches = try XCTUnwrap(ungroundedSchema["oneOf"] as? [[String: Any]])
+        XCTAssertFalse(ungroundedBranches.contains {
+            (($0["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String] == ["typeFocusedText"]
+                || (($0["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String] == ["pressFocusedKey"]
+        })
+    }
+
+    func testFocusedTextEntryDecodesStrictlyAndPreservesWhitespaceOnlyWithCurrentGrounding() throws {
+        var input = makeInput()
+        input.defaultBrowserTask = true
+        input.focusedEditor = "AXTextField • To"
+        input.focusedTextState = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "to-field",
+            value: "", selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)))
+        let page = try page(controls: [])
+        let text = "  recipient@example.com  "
+        let content = #"{"outcome":"typeFocusedText","text":"  recipient@example.com  ","explanation":"Enter the requested recipient."}"#
+        XCTAssertEqual(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page, input: input),
+            .typeFocusedText(text: text, explanation: "Enter the requested recipient."))
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page),
+            "Inputless callers cannot authorize a focused-editor text proposal")
+
+        var ungrounded = input
+        ungrounded.defaultBrowserTask = false
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page, input: ungrounded))
+        ungrounded = input
+        ungrounded.focusedTextState = nil
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page, input: ungrounded))
+        ungrounded = input
+        ungrounded.focusedEditor = "  "
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: content, page: page, input: ungrounded))
+
+        let invalid = [
+            #"{"outcome":"typeFocusedText","text":"","explanation":"Enter text."}"#,
+            #"{"outcome":"typeFocusedText","text":"value","text":"other","explanation":"Enter text."}"#,
+            #"{"outcome":"typeFocusedText","text":"value","explanation":"Enter text.","extra":true}"#,
+            #"{"outcome":"typeFocusedText","text":"\#(String(repeating: "é", count: 1_025))","explanation":"Enter text."}"#,
+        ]
+        for response in invalid {
+            XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: response, page: page, input: input))
+        }
+
+        let keyContent = #"{"outcome":"pressFocusedKey","chord":"Enter","explanation":"Commit the current field."}"#
+        XCTAssertEqual(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: keyContent, page: page, input: input),
+            .pressFocusedKey(chord: "Enter", explanation: "Commit the current field."))
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: keyContent, page: page),
+            "Inputless callers cannot authorize a focused-key proposal")
+        for response in [
+            #"{"outcome":"pressFocusedKey","chord":"Command+Enter","explanation":"Send."}"#,
+            #"{"outcome":"pressFocusedKey","chord":"Escape","explanation":"Dismiss.","extra":true}"#,
+            #"{"outcome":"pressFocusedKey","chord":"Return","explanation":"Commit."}"#,
+            #"{"outcome":"pressFocusedKey","chord":"Enter","chord":"Tab","explanation":"Duplicate."}"#,
+        ] {
+            XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decode(content: response, page: page, input: input))
+        }
+    }
+
     func testPlannerFailsClosedForUnknownDisabledOrUnverifiedControlIDs() async throws {
         let page = try page(controls: [
             .init(id: "enabled", role: "AXButton", label: "New", frame: CGRect(x: 1, y: 2, width: 3, height: 4), enabled: true),
@@ -772,7 +868,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         let system = try XCTUnwrap(messages.first?["content"] as? String)
         XCTAssertTrue(system.contains("browser-navigation"))
-        XCTAssertTrue(system.contains("does not execute its steps"))
+        XCTAssertTrue(system.contains("uses only its guarded proposal schema"))
         XCTAssertTrue(system.contains("notQueried means no catalog search has happened"))
         XCTAssertTrue(system.contains("The host resolves files through its native catalog and chooser"))
         XCTAssertTrue(system.contains("one short, direct question the user can answer"))
@@ -798,6 +894,60 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         XCTAssertFalse(contextText.contains("/Users/"), "Local catalog paths are never exposed")
     }
 
+    func testBootstrapOffersOnlyGroundedTextAndKeyProposals() throws {
+        let goal = "Open https://mail.google.com/ and enter the requested recipient."
+        var input = ComputerUseFaraModel.Input(goal: goal, screenshotPNG: Data([1]), surface: .desktop)
+        input.defaultBrowserTask = true
+        input.focusedEditor = "AXTextField • To"
+        input.focusedTextState = try XCTUnwrap(ComputerUseNativeTextState(snapshot: .init(targetID: "to-field",
+            value: "", selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)))
+        let planner = try makePlanner(PlannerTransport(reply: try envelope(
+            #"{"outcome":"askUser","explanation":"Which recipient?"}"#)))
+        let request = try planner.makeBootstrapRequest(input: input)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+        let schema = try XCTUnwrap((format["json_schema"] as? [String: Any])?["schema"] as? [String: Any])
+        let alternatives = try XCTUnwrap(schema["oneOf"] as? [[String: Any]])
+        XCTAssertEqual(alternatives.count, 4)
+        XCTAssertEqual(alternatives.compactMap { branch in
+            (((branch["properties"] as? [String: Any])?["outcome"] as? [String: Any])?["enum"] as? [String])?.first
+        }, ["visualFallback", "askUser", "typeFocusedText", "pressFocusedKey"])
+        let serialized = String(decoding: try XCTUnwrap(request.httpBody), as: UTF8.self)
+        XCTAssertTrue(serialized.contains("\"properties\":{\"outcome\":{\"enum\":[\"typeFocusedText\"],\"type\":\"string\"},\"text\":{"))
+        XCTAssertTrue(serialized.contains("\"properties\":{\"outcome\":{\"enum\":[\"pressFocusedKey\"],\"type\":\"string\"},\"chord\":{"))
+        XCTAssertFalse(serialized.contains("pressControl"), "Bootstrap may not click page controls")
+
+        let textContent = #"{"outcome":"typeFocusedText","text":"recipient@example.com","explanation":"Enter the requested recipient."}"#
+        XCTAssertEqual(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: textContent, input: input),
+            .typeFocusedText(text: "recipient@example.com", explanation: "Enter the requested recipient."))
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: textContent),
+            "Inputless bootstrap decoding cannot authorize text entry")
+        let keyContent = #"{"outcome":"pressFocusedKey","chord":"Enter","explanation":"Commit the address field."}"#
+        XCTAssertEqual(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: keyContent, input: input),
+            .pressFocusedKey(chord: "Enter", explanation: "Commit the address field."))
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: keyContent),
+            "Inputless bootstrap decoding cannot authorize native keyboard input")
+
+        var ungrounded = input
+        ungrounded.focusedTextState = nil
+        let ungroundedRequest = try planner.makeBootstrapRequest(input: ungrounded)
+        let ungroundedBody = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(ungroundedRequest.httpBody)) as? [String: Any])
+        let ungroundedFormat = try XCTUnwrap(ungroundedBody["response_format"] as? [String: Any])
+        let ungroundedSchema = try XCTUnwrap((ungroundedFormat["json_schema"] as? [String: Any])?["schema"] as? [String: Any])
+        let ungroundedAlternatives = try XCTUnwrap(ungroundedSchema["oneOf"] as? [[String: Any]])
+        XCTAssertEqual(ungroundedAlternatives.count, 2)
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: textContent, input: ungrounded))
+        XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: keyContent, input: ungrounded))
+
+        for response in [
+            #"{"outcome":"pressFocusedKey","chord":"Command+Enter","explanation":"Send."}"#,
+            #"{"outcome":"pressFocusedKey","chord":"Enter","explanation":"Commit.","extra":true}"#,
+            #"{"outcome":"pressFocusedKey","chord":"Enter","chord":"Tab","explanation":"Duplicate."}"#,
+        ] {
+            XCTAssertThrowsError(try ComputerUseLocalDefaultBrowserControlPlanner.decodeBootstrap(content: response, input: input))
+        }
+    }
+
     func testBootstrapDecoderOnlyAcceptsBoundedAdviceOrQuestion() throws {
         let advice = #"{"outcome":"visualFallback","explanation":"Use the screenshot for one next step.","worker_directive":{"objective":"Open the explicitly requested website.","constraints":"Keep the original task in scope.","completion_criteria":["Reach the requested page."]}}"#
         let question = #"{"outcome":"askUser","explanation":"Which destination should I use?"}"#
@@ -819,7 +969,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         }
     }
 
-    func testOptInInstalledModelProducesOnlyBootstrapAdviceWithoutExecutingIt() async throws {
+    func testOptInInstalledModelProducesBootstrapProposalWithoutExecutingIt() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_BOOTSTRAP_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_BOOTSTRAP_PROBE=1 to ask the installed local model for bounded bootstrap advice.")
         }
@@ -868,8 +1018,13 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
                 add(attachment)
             case .askUser(let question):
                 XCTFail("The explicit destination and next browser step are already supplied; unexpected question category: \(question.isEmpty ? "empty" : "nonempty")")
+            case .typeFocusedText(let text, _):
+                XCTAssertEqual(text, "https://drive.google.com/",
+                    "A focused address field may receive only the exact user-supplied URL")
+            case .pressFocusedKey(let chord, _):
+                XCTAssertTrue(["Enter", "Tab", "Shift+Tab", "Escape", "Command+A", "Command+L"].contains(chord))
             case .pressControl:
-                XCTFail("Bootstrap has no control-dispatch outcome")
+                XCTFail("Bootstrap cannot propose page-control clicks")
             }
             await runtime.shutdown()
         } catch {
@@ -964,7 +1119,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             case .askUser:
                 outcome = "askUser"
                 directiveReceipt = [:]
-            case .pressControl:
+            case .pressControl, .typeFocusedText, .pressFocusedKey:
                 outcome = "invalidPressControl"
                 directiveReceipt = [:]
             }

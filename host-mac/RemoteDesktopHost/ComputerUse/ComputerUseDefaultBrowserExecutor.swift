@@ -609,6 +609,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             includeInModelHistory: false)
                     }
                     return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
+                case .typeFocusedText, .pressFocusedKey:
+                    scope.visualFallbackPending = false
+                    scope.pendingVisualDirective = nil
+                    return try Self.focusedEditorProposal(plan, input: bootstrapInput)
                 case .pressControl:
                     scope.visualFallbackPending = false
                     scope.pendingVisualDirective = nil
@@ -656,6 +660,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 scope.visualFallbackPending = true
                 scope.pendingVisualDirective = directive
                 return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+            case .typeFocusedText, .pressFocusedKey:
+                scope.visualFallbackPending = false
+                scope.pendingVisualDirective = nil
+                return try Self.focusedEditorProposal(plan, input: enriched)
             case .pressControl(let controlID, _):
                 scope.visualFallbackPending = false
                 scope.pendingVisualDirective = nil
@@ -732,6 +740,39 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 if scope.pendingVisualDirective == nil { scope.visualFallbackPending = false }
                 await finishRun()
             })
+    }
+
+    private static func focusedEditorProposal(_ plan: ComputerUseDefaultBrowserControlPlan,
+                                              input: ComputerUseFaraModel.Input) throws -> ComputerUseDesktopProposal {
+        guard input.surface == .desktop, input.defaultBrowserTask,
+              let editor = input.focusedEditor, !editor.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              input.focusedTextState != nil else {
+            return .init(response: "", decision: .handoff("Focus the intended text field, then choose Resume."),
+                includeInModelHistory: false)
+        }
+        let action: ComputerUseFaraAction
+        let arguments: [String: Any]
+        switch plan {
+        case .typeFocusedText(let text, _):
+            guard !text.isEmpty, text.utf8.count <= 2_048 else { throw ComputerUseDefaultBrowserControlPlanError.invalidProposal }
+            action = .typeText(text)
+            arguments = ["action": "type", "text": text]
+        case .pressFocusedKey(let chord, _):
+            let chords = ["Enter": ["Enter"], "Tab": ["Tab"], "Shift+Tab": ["Shift", "Tab"],
+                "Escape": ["Escape"], "Command+A": ["Command", "a"], "Command+L": ["Command", "l"]]
+            guard let keys = chords[chord] else { throw ComputerUseDefaultBrowserControlPlanError.invalidProposal }
+            action = .key(keys)
+            arguments = ["action": "key", "keys": keys]
+        default: throw ComputerUseDefaultBrowserControlPlanError.invalidProposal
+        }
+        // Semantic proposals enter the existing visual-input dispatch path;
+        // editability, exact focus, secure-field and approval checks still apply.
+        let data = try JSONSerialization.data(withJSONObject: ["name": "computer_use", "arguments": arguments],
+            options: [.sortedKeys, .withoutEscapingSlashes])
+        let json = String(decoding: data, as: UTF8.self)
+            .replacingOccurrences(of: "<", with: "\\u003c")
+            .replacingOccurrences(of: ">", with: "\\u003e")
+        return .init(response: "<tool_call>\n\(json)\n</tool_call>", action: action)
     }
 
     private static func nativeControlHistoryResponse(_ action: ComputerUseFaraAction,

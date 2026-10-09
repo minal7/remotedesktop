@@ -290,6 +290,8 @@
 		A5C947D58155D734355C1166 /* ComputerUseSkills in Resources */ = {isa = PBXBuildFile; fileRef = DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */; };
 		C0FFEE010A00100000000001 /* ComputerUseMailRecipients.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE010A00100000000002 /* ComputerUseMailRecipients.swift */; };
 		C0FFEE010A00100000000003 /* ComputerUseMailRecipientsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE010A00100000000004 /* ComputerUseMailRecipientsTests.swift */; };
+		C0FFEE020A00100000000001 /* RemoteDesktopCloudStorageMCP.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE020A00100000000002 /* RemoteDesktopCloudStorageMCP.swift */; };
+		C0FFEE020A00100000000003 /* RemoteDesktopCloudStorageMCPTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE020A00100000000004 /* RemoteDesktopCloudStorageMCPTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -597,6 +599,8 @@
 		DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ComputerUseSkills; path = RemoteDesktopHost/Resources/ComputerUseSkills; sourceTree = SOURCE_ROOT; };
 		C0FFEE010A00100000000002 /* ComputerUseMailRecipients.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseMailRecipients.swift; sourceTree = "<group>"; };
 		C0FFEE010A00100000000004 /* ComputerUseMailRecipientsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseMailRecipientsTests.swift; sourceTree = "<group>"; };
+		C0FFEE020A00100000000002 /* RemoteDesktopCloudStorageMCP.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopCloudStorageMCP.swift; sourceTree = "<group>"; };
+		C0FFEE020A00100000000004 /* RemoteDesktopCloudStorageMCPTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopCloudStorageMCPTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -711,6 +715,7 @@
 			children = (
 				E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */,
 				C0FFEE010A00100000000004 /* ComputerUseMailRecipientsTests.swift */,
+				C0FFEE020A00100000000004 /* RemoteDesktopCloudStorageMCPTests.swift */,
 				FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */,
 				535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */,
 				DED10FA558220D304359BD34 /* ComputerUseActionTextPlanTests.swift */,
@@ -934,6 +939,7 @@
 				A548774FD133C86136F2D8CA /* RemoteDesktopMailAutomationPreflight.swift */,
 				C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */,
 				C0FFEE010A00100000000002 /* ComputerUseMailRecipients.swift */,
+				C0FFEE020A00100000000002 /* RemoteDesktopCloudStorageMCP.swift */,
 				87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */,
 				DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */,
 			);
@@ -1179,6 +1185,7 @@
 			files = (
 				E70F3EE9AA8F4A6FB13FD901 /* CoreJobAcceptanceTests.swift in Sources */,
 				C0FFEE010A00100000000003 /* ComputerUseMailRecipientsTests.swift in Sources */,
+				C0FFEE020A00100000000003 /* RemoteDesktopCloudStorageMCPTests.swift in Sources */,
 				5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */,
 				55A2A0BAF6B182A15DF84ED7 /* ComputerUseActionTextPlanTests.swift in Sources */,
 				8D60C6AE0848631F3AE83F4B /* ComputerUseBrowserDOMTests.swift in Sources */,
@@ -1429,6 +1436,7 @@
 				3D7BE1972BA0547D0B21E541 /* RemoteDesktopMailAutomationPreflight.swift in Sources */,
 				13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */,
 				C0FFEE010A00100000000001 /* ComputerUseMailRecipients.swift in Sources */,
+				C0FFEE020A00100000000001 /* RemoteDesktopCloudStorageMCP.swift in Sources */,
 				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
 				1DB896FEBF27E320F0A2B5F3 /* SemanticCandidateSelectionV5.swift in Sources */,
 				D22E96536F20DF25230499D9 /* SemanticNativeToolWireContract.swift in Sources */,

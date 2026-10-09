@@ -1,6 +1,11 @@
 import CryptoKit
 import Foundation
 
+/// Experimental work remains disabled until explicitly enabled by the host.
+enum ComputerUseFeatureFlags {
+    static var computerUseV2: Bool { UserDefaults.standard.bool(forKey: "computerUseV2") }
+}
+
 /// A small, deterministic JSON representation kept independent from the MCP
 /// SDK. Planner, policy, and approval code can therefore exchange tool calls
 /// without retaining SDK transport objects or losing integer fidelity.
@@ -347,6 +352,11 @@ struct MCPApprovedActionResult: Equatable, Sendable {
 
     static func verified(call: MCPToolCall, result: MCPToolResult,
                          trustedUserPrompt: String) throws -> MCPApprovedActionResult {
+        if call.serverID == RemoteDesktopCloudStorageMCP.serverID,
+           call.toolName == RemoteDesktopCloudStorageMCP.toolName {
+            return try RemoteDesktopCloudStorage.verified(
+                call: call, result: result, trustedUserPrompt: trustedUserPrompt)
+        }
         guard call.risk == .approvalRequired,
               call.serverID == RemoteDesktopMailMCP.serverID,
               call.toolName == RemoteDesktopMailMCP.toolName,

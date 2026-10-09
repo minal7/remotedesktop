@@ -35,6 +35,41 @@ extension MCPPreparedApproval {
                 ]),
                 confirmLabel: sendsNow ? "Send email" : "Create draft")
 
+        case RemoteDesktopCloudStorageMCP.toolName:
+            let arguments = call.arguments
+            let sourceName = (arguments["source_path"]?.displayValue)
+                .map { URL(fileURLWithPath: $0).lastPathComponent }
+            let providerID = arguments["provider_id"]?.displayValue
+            let providerLabel: String
+            if providerID == "icloud-drive" {
+                providerLabel = "iCloud Drive"
+            } else if let providerID, providerID.hasPrefix("cloudstorage:") {
+                providerLabel = String(providerID.dropFirst("cloudstorage:".count))
+            } else {
+                providerLabel = "Selected cloud folder"
+            }
+            let folder = arguments["relative_folder"]?.displayValue ?? ""
+            let destinationName = (arguments["destination_path"]?.displayValue)
+                .map { URL(fileURLWithPath: $0).lastPathComponent }
+                ?? sourceName
+            let replacing: Bool
+            if case .some(.string(_)) = arguments["existing_destination_sha256"] {
+                replacing = true
+            } else { replacing = false }
+            let destination = [providerLabel, folder, destinationName]
+                .compactMap { $0 }
+                .filter { !$0.isEmpty }
+                .joined(separator: " › ")
+            return MCPComputerUseApprovalPresentation(
+                message: replacing
+                    ? "Replace this file in cloud storage?"
+                    : "Save a copy to cloud storage?",
+                details: Self.details([
+                    ("File", sourceName),
+                    ("Destination", destination),
+                ]),
+                confirmLabel: replacing ? "Replace file" : "Save copy")
+
         case "imessage_send":
             return MCPComputerUseApprovalPresentation(
                 message: "Send this message from your Mac?",

@@ -1727,6 +1727,182 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertEqual(direct, 0)
     }
 
+    func testSelectedDownloadsFileCopiesToNewCloudDestinationWithoutPhoneApproval() async throws {
+        let fixture = try makeCloudCopyFixture(existingDestination: false)
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let storage = RemoteDesktopCloudStorage(
+            homeURL: fixture.home, uploadResourceReader: { _ in .uploaded })
+        let rawArguments: [String: MCPJSONValue] = [
+            "source_path": .string(fixture.source.path),
+            "provider_id": .string("icloud-drive"),
+            "relative_folder": .string("RemoteDesktopAcceptance/run-one"),
+        ]
+        let bound = try await storage.prepare(arguments: rawArguments)
+        XCTAssertFalse(bound.needsReplacementApproval)
+
+        let cloudTool = try await makeCloudStorageTool(storage: storage)
+        let pool = StubMCPClientPool(tools: [try makeMailTool(), cloudTool],
+            resultText: "copied", structuredContent: cloudCopyReceipt(bound.arguments))
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let planner = ScriptedLocalFilePlanner(steps: [
+            .listFiles(query),
+            .cloud(providerID: "icloud-drive", folder: "RemoteDesktopAcceptance/run-one", sourcePath: nil),
+        ])
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool,
+            cloudStorage: storage,
+            localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID,
+                    approvedDirectory: fixture.downloads, pageSize: 8)
+            })
+        defer { executor.cancelMCPWork() }
+
+        let goal = "Copy the latest presentation in Downloads into iCloud Drive/RemoteDesktopAcceptance/run-one."
+        let result = try await executor.execute(taskID: "cloud-new-copy", prompt: goal,
+            trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(result, .completed("Saved to iCloud Drive › RemoteDesktopAcceptance/run-one · uploaded"))
+        let prepared = await pool.mostRecentPreparation()
+        XCTAssertEqual(prepared?.call.toolName, RemoteDesktopCloudStorageMCP.toolName)
+        XCTAssertEqual(prepared?.call.arguments, bound.arguments)
+        let preparations = await pool.preparedApprovalCount()
+        let executions = await pool.approvedExecuteCount()
+        XCTAssertEqual(preparations, 1)
+        XCTAssertEqual(executions, 1,
+            "A new verified copy uses the host's one-shot path without asking for replacement approval.")
+    }
+
+    func testCloudCollisionWaitsForReplaceApprovalAndSelectedPathSubstitutionIsRejected() async throws {
+        let fixture = try makeCloudCopyFixture(existingDestination: true)
+        defer { try? FileManager.default.removeItem(at: fixture.home) }
+        let storage = RemoteDesktopCloudStorage(
+            homeURL: fixture.home, uploadResourceReader: { _ in .uploaded })
+        let cloudTool = try await makeCloudStorageTool(storage: storage)
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .presentation,
+            sort: .init(field: .modifiedAt, direction: .descending))
+        let replacement = try await storage.prepare(arguments: [
+            "source_path": .string(fixture.source.path),
+            "provider_id": .string("icloud-drive"),
+            "relative_folder": .string("RemoteDesktopAcceptance/run-one"),
+        ])
+        XCTAssertTrue(replacement.needsReplacementApproval)
+        let replacementPool = StubMCPClientPool(tools: [try makeMailTool(), cloudTool],
+            resultText: "copied", structuredContent: cloudCopyReceipt(replacement.arguments))
+        let replacementPlanner = ScriptedLocalFilePlanner(steps: [
+            .listFiles(query),
+            .cloud(providerID: "icloud-drive", folder: "RemoteDesktopAcceptance/run-one", sourcePath: nil),
+        ])
+        let replacementExecutor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: StubVisualExecutor(), planner: replacementPlanner,
+            clientPool: replacementPool, cloudStorage: storage,
+            localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID,
+                    approvedDirectory: fixture.downloads, pageSize: 8)
+            })
+        defer { replacementExecutor.cancelMCPWork() }
+        let goal = "Replace the existing iCloud Drive copy with the latest presentation from Downloads."
+        let pending = try await replacementExecutor.execute(taskID: "cloud-replace", prompt: goal,
+            trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
+        guard case .mcpApprovalRequired(let prepared) = pending else {
+            return XCTFail("An existing destination must wait for explicit replacement approval, got \(pending)")
+        }
+        XCTAssertEqual(prepared.computerUsePresentation.confirmLabel, "Replace file")
+        XCTAssertEqual(prepared.computerUsePresentation.details.first(where: { $0.label == "File" })?.value,
+            fixture.source.lastPathComponent)
+        XCTAssertEqual(prepared.computerUsePresentation.details.first(where: { $0.label == "Destination" })?.value,
+            "iCloud Drive › RemoteDesktopAcceptance/run-one › \(fixture.source.lastPathComponent)")
+        let replacementPreparations = await replacementPool.preparedApprovalCount()
+        let replacementExecutions = await replacementPool.approvedExecuteCount()
+        XCTAssertEqual(replacementPreparations, 1)
+        XCTAssertEqual(replacementExecutions, 0)
+        try await replacementExecutor.preflightApprovedAction(prepared)
+        let completed = try await replacementExecutor.continueAfterApproval(
+            prepared, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(completed.callDigest, prepared.call.canonicalDigest)
+        XCTAssertEqual(completed.response,
+            "Saved to iCloud Drive › RemoteDesktopAcceptance/run-one · uploaded")
+        let completedExecutions = await replacementPool.approvedExecuteCount()
+        XCTAssertEqual(completedExecutions, 1,
+            "The exact replacement approval continues once with the verified cloud receipt.")
+
+        let wrongSource = fixture.downloads.appendingPathComponent("Not selected.txt")
+        try Data("other local file".utf8).write(to: wrongSource)
+        let substitutedPool = StubMCPClientPool(tools: [try makeMailTool(), cloudTool])
+        let substitutedPlanner = ScriptedLocalFilePlanner(steps: [
+            .listFiles(query),
+            .cloud(providerID: "icloud-drive", folder: "RemoteDesktopAcceptance/run-one", sourcePath: wrongSource.path),
+        ])
+        let substitutedExecutor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"),
+            visualFallback: StubVisualExecutor(), planner: substitutedPlanner,
+            clientPool: substitutedPool, cloudStorage: storage,
+            localFileCatalogFactory: { taskID in
+                try ComputerUseLocalFileCatalog(taskID: taskID,
+                    approvedDirectory: fixture.downloads, pageSize: 8)
+            })
+        defer { substitutedExecutor.cancelMCPWork() }
+        let rejected = try await substitutedExecutor.execute(taskID: "cloud-substitution", prompt: goal,
+            trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
+        guard case .userInterventionRequired = rejected else {
+            return XCTFail("The cloud proposal must remain bound to the selected catalog file, got \(rejected)")
+        }
+        let substitutedPreparations = await substitutedPool.preparedApprovalCount()
+        let substitutedExecutions = await substitutedPool.approvedExecuteCount()
+        XCTAssertEqual(substitutedPreparations, 0)
+        XCTAssertEqual(substitutedExecutions, 0)
+    }
+
+    private struct CloudCopyFixture {
+        let home: URL
+        let downloads: URL
+        let source: URL
+        let destination: URL
+    }
+
+    private func makeCloudCopyFixture(existingDestination: Bool) throws -> CloudCopyFixture {
+        let home = canonicalTemporaryDirectory
+            .appendingPathComponent("MCPCloudCopy-\(UUID().uuidString)", isDirectory: true)
+        let downloads = home.appendingPathComponent("Downloads", isDirectory: true)
+        let syncRoot = home.appendingPathComponent(
+            "Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
+        let destinationFolder = syncRoot.appendingPathComponent(
+            "RemoteDesktopAcceptance/run-one", isDirectory: true)
+        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
+        let source = downloads.appendingPathComponent("Board Review.pptx")
+        let destination = destinationFolder.appendingPathComponent(source.lastPathComponent)
+        try Data("selected presentation bytes".utf8).write(to: source)
+        if existingDestination { try Data("old destination".utf8).write(to: destination) }
+        return CloudCopyFixture(home: home, downloads: downloads,
+            source: source, destination: destination)
+    }
+
+    private func makeCloudStorageTool(
+        storage: RemoteDesktopCloudStorage
+    ) async throws -> MCPAllowedTool {
+        let session = RemoteDesktopCloudStorageMCPClientSession(
+            processGeneration: 1, storage: storage)
+        _ = try await session.start()
+        let tools = try await session.listAllowedTools()
+        return try XCTUnwrap(tools.first)
+    }
+
+    private func cloudCopyReceipt(_ arguments: [String: MCPJSONValue]) -> MCPJSONValue {
+        let hash = arguments["source_sha256"] ?? .null
+        return .object([
+            "status": .string("copied"),
+            "provider_id": arguments["provider_id"] ?? .null,
+            "provider_label": .string("iCloud Drive"),
+            "relative_folder": arguments["relative_folder"] ?? .null,
+            "destination_path": arguments["destination_path"] ?? .null,
+            "source_sha256": hash,
+            "destination_sha256": hash,
+            "upload_state": .string("uploaded"),
+        ])
+    }
+
     func testEmptyNameFilterFallbackPreservesScopeAndAllowsOnlyOfferedOlderCandidate() async throws {
         let directory = canonicalTemporaryDirectory
             .appendingPathComponent("MCPBroadenedMailFiles-\(UUID().uuidString)", isDirectory: true)
@@ -3608,7 +3784,10 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 expectedProjection: "Accessibility permission: granted."),
         ]
         let expectedReadOnlySurface = MCPFirstComputerUseExecutor
-            .structuredToolNames.subtracting([RemoteDesktopMailMCP.toolName])
+            .structuredToolNames.subtracting([
+                RemoteDesktopMailMCP.toolName,
+                RemoteDesktopCloudStorageMCP.toolName,
+            ])
         XCTAssertEqual(Set(rows.map(\.toolName)), expectedReadOnlySurface)
 
         for (index, row) in rows.enumerated() {
@@ -7139,6 +7318,7 @@ private actor ScriptedLocalFilePlanner: MCPProposalPlanning {
         case askForAll(String)
         case askForFirst(String)
         case selectNamedFile(String)
+        case cloud(providerID: String, folder: String, sourcePath: String?)
         case mail(String)
         case mailTo(String, String)
         case mailDraft(String, String, String, String)
@@ -7175,6 +7355,17 @@ private actor ScriptedLocalFilePlanner: MCPProposalPlanning {
                 throw AppleFoundationMCPPlannerError.noProposal
             }
             return .localFileOperation(.selectFile(candidateID: candidate.id))
+        case .cloud(let providerID, let folder, let sourcePath):
+            guard let tool = request.tools.first(where: {
+                $0.serverID == RemoteDesktopCloudStorageMCP.serverID
+                    && $0.toolName == RemoteDesktopCloudStorageMCP.toolName
+            }) else { throw AppleFoundationMCPPlannerError.noProposal }
+            let source = sourcePath ?? request.hostResolvedAttachmentPaths.first ?? ""
+            return .proposedCall(try tool.makeCall(taskID: request.taskID, arguments: [
+                "source_path": .string(source),
+                "provider_id": .string(providerID),
+                "relative_folder": .string(folder),
+            ]))
         case .mail(let path):
             return try Self.mailProposal(request, path: path)
         case .mailTo(let path, let recipient):

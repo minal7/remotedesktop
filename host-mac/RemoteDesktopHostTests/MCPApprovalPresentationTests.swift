@@ -146,6 +146,31 @@ final class MCPApprovalPresentationTests: XCTestCase {
             trustedUserPrompt: prompt))
     }
 
+    func testCloudReplacementApprovalShowsFileAndSyncDestinationWithoutHostHashes() throws {
+        let source = "/Users/test/Downloads/Board Review.pptx"
+        let destination = "/Users/test/Library/Mobile Documents/com~apple~CloudDocs/Acceptance/Board Review.pptx"
+        let prepared = try makePrepared(
+            toolName: RemoteDesktopCloudStorageMCP.toolName,
+            arguments: [
+                "source_path": .string(source),
+                "provider_id": .string("icloud-drive"),
+                "relative_folder": .string("Acceptance"),
+                "source_sha256": .string(String(repeating: "a", count: 64)),
+                "destination_path": .string(destination),
+                "existing_destination_sha256": .string(String(repeating: "b", count: 64)),
+            ])
+
+        let presentation = prepared.computerUsePresentation
+        XCTAssertEqual(presentation.confirmLabel, "Replace file")
+        XCTAssertEqual(presentation.message, "Replace this file in cloud storage?")
+        XCTAssertEqual(presentation.details, [
+            .init(label: "File", value: "Board Review.pptx"),
+            .init(label: "Destination", value: "iCloud Drive › Acceptance › Board Review.pptx"),
+        ])
+        XCTAssertFalse(presentation.details.contains { $0.value.contains(String(repeating: "a", count: 64)) })
+        XCTAssertFalse(presentation.details.contains { $0.value.contains("/Users/test") })
+    }
+
     private func makePrepared(
         toolName: String,
         arguments: [String: MCPJSONValue]
