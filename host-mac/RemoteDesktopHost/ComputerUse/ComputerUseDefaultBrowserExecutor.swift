@@ -246,8 +246,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         var nativeControlErrorDomainForDiagnostics: String?
         var nativeControlErrorCodeForDiagnostics: Int?
+        var gmailFieldDiagnostics: [String: String] = [:]
+        var gmailNavigationPhase: String?
         enum GmailNavigationStage { case navigateTarget, waitForTarget, ready }
-        enum GmailFlowStage { case compose, attach, waitingForPicker, waitingForAttachment, send, saveDraft, verifySend, verifyDraft, complete }
+        enum GmailFlowStage { case compose, normalizeDrafts, waitingForDraftReopen, attach, waitingForPicker, waitingForAttachment, send, saveDraft, verifySend, verifyDraft, complete }
         struct GmailSetup {
             let intent: ComputerUseWebJobRequest.GmailIntent
             let extraction: ComputerUseWebJobContentExtractor.Extraction
@@ -260,6 +262,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var gmailRecipientEscapeDispatched = false
         var gmailNavigationTargetURL: URL?
         var gmailFlowStage: GmailFlowStage = .compose
+        var gmailStandaloneDraftNormalizationComplete = false
         var gmailJob: ComputerUseGmailJob?
         var gmailNavigationStage: GmailNavigationStage = .navigateTarget
         var pendingGmailFlowStage: GmailFlowStage?
@@ -267,6 +270,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var gmailNavigationWaitCount = 0
         var gmailExpandedRecipientControl = false
         var gmailPendingSendAction: ComputerUsePredictedAction?
+        var pendingGmailDraftRowTarget: (subject: String, cell: AXUIElement, row: AXUIElement,
+            bounds: CGRect, action: ComputerUsePredictedAction)?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
              localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
             self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
@@ -307,6 +312,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             }
             guard let window = session.currentWindow else { throw Failure.noRetainedWindow }
             self.window = window
+            if action != nil, let target = pendingGmailDraftRowTarget {
+                var ambiguousRow = false
+                guard let action, action == target.action,
+                      let current = try ComputerUseGmailRecipientVerifier.exactDraftSubjectCellEvidence(
+                        window: window.accessibilityElement, application: window.application,
+                        subject: target.subject, ambiguous: &ambiguousRow,
+                        revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) }),
+                      CFEqual(current.cell, target.cell), CFEqual(current.row, target.row),
+                      current.bounds.equalTo(target.bounds) else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+            }
             if let panel = session.currentFileOpenPanel {
                 let selectedURL = try selectedFileURL()
                 guard panel.parentWindowID == window.id,
@@ -341,7 +358,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 let accountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
                     window: window.accessibilityElement, application: window.application,
                     revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
-                guard ComputerUseGmailAccountDirectory.email(in: accountLabel ?? "") == account.email else {
+                let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(window: window.accessibilityElement,
+                    application: window.application,
+                    revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
+                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                    windowTitle: title, accountControlLabel: accountLabel, expected: account) else {
                     throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                 }
                 try Task.checkCancellation()
@@ -373,6 +394,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
 
         func successfulDispatch(_ action: ComputerUsePredictedAction) {
+            if let pendingGmailDraftRowTarget, pendingGmailDraftRowTarget.action == action {
+                self.pendingGmailDraftRowTarget = nil
+            }
             if let pendingGmailFlowStage {
                 gmailFlowStage = pendingGmailFlowStage
                 self.pendingGmailFlowStage = nil
@@ -635,6 +659,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         if let code = scope.nativeControlErrorCodeForDiagnostics {
             diagnostic["nativeControlErrorCode"] = String(code)
         }
+        diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
+        if let phase = scope.gmailNavigationPhase { diagnostic["gmailNavigationPhase"] = phase }
+        diagnostic["lastSessionFailureForDiagnostics"] = String(describing: lastSessionFailureForDiagnostics)
         return diagnostic
     }
     var isReady: Bool { desktop.isReady }
@@ -740,7 +767,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 }
                 scope.gmailNavigationStage = .waitForTarget
                 do {
-                    try await scope.session.navigateRetainedSafariTab(to: target, taskID: taskID, goal: goal, tools: tools)
+                    scope.gmailNavigationPhase = nil
+                    try await scope.session.navigateRetainedSafariTab(to: target, taskID: taskID, goal: goal, tools: tools,
+                        diagnostic: { value in
+                            guard let phase = value.split(separator: " ", maxSplits: 1).first,
+                                  phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil else { return }
+                            scope.gmailNavigationPhase = String(phase)
+                        })
                 } catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
                     scope.gmailNavigationStage = .navigateTarget
                     throw ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired
@@ -946,7 +979,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                       pageURL.path.hasPrefix("/mail/u/") else {
                     return waitForGmailPage("Gmail could not be opened in the retained browser window. Review it, then choose Resume.")
                 }
-                scope.gmailNavigationWaitCount = 0
                 if scope.selectedGmailAccount == nil {
                     let menu = try ComputerUseGmailAccountDirectory.readMenu(window: window.accessibilityElement,
                         application: window.application, currentURL: page.url, closeMenu: true,
@@ -1004,12 +1036,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                 }
                 guard let selectedAccount = scope.selectedGmailAccount,
-                      let observedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: page.url) else {
+                      ComputerUseGmailAccountDirectory.accountIndex(from: page.url) != nil else {
                     return .init(response: "", decision: .handoff(
                         "The selected Gmail account is not active in the browser. Review the account, then choose Resume."),
                         includeInModelHistory: false)
                 }
-                if observedIndex != selectedAccount.index {
+                if ComputerUseGmailAccountDirectory.accountIndex(from: page.url) != selectedAccount.index {
+                    if scope.gmailNavigationStage == .waitForTarget {
+                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
+                    }
                     guard let target = ComputerUseGmailAccountDirectory.inboxURL(index: selectedAccount.index) else {
                         return .init(response: "", decision: .handoff(
                             "The selected Gmail account route could not be verified. Review the account, then choose Resume."),
@@ -1025,8 +1060,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 let currentAccountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
                     window: window.accessibilityElement, application: window.application,
                     revalidate: { try scope.check(nil, tools) })
-                guard let currentAccountLabel,
-                      ComputerUseGmailAccountDirectory.email(in: currentAccountLabel) == selectedAccount.email else {
+                let currentWindowTitle = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                    window: window.accessibilityElement, application: window.application,
+                    revalidate: { try scope.check(nil, tools) })
+                let standaloneAccountEmail = ComputerUseGmailAccountDirectory.standaloneComposerEmail(
+                    currentWindowTitle, currentURL: page.url)
+                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                    windowTitle: currentWindowTitle, accountControlLabel: currentAccountLabel,
+                    expected: selectedAccount) else {
+                    if scope.gmailNavigationStage == .waitForTarget,
+                       currentAccountLabel == nil, standaloneAccountEmail == nil {
+                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
+                    }
                     return .init(response: "", decision: .handoff(
                         "The selected Gmail account could not be confirmed. Review the account, then choose Resume."),
                         includeInModelHistory: false)
@@ -1060,10 +1105,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     scope.gmailSetup = nil
                     if gmailExistingDraftURL != nil {
                         guard job.verifiesComposeContents(page) else {
+                            scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
+                            if scope.gmailNavigationStage == .waitForTarget {
+                                return waitForGmailPage("Gmail is still loading the requested draft fields. Review the browser, then choose Resume.")
+                            }
                             return .init(response: "", decision: .handoff(
                                 "The existing Gmail draft does not match the requested fields. Review it before continuing."),
                                 includeInModelHistory: false)
                         }
+                        scope.gmailFieldDiagnostics = [:]
+                        scope.gmailNavigationWaitCount = 0
                         scope.gmailNavigationStage = .ready
                     } else {
                         scope.gmailNavigationTargetURL = job.composeURL
@@ -1097,7 +1148,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             }
             if let job = scope.gmailJob {
                 guard let account = job.request.account,
-                      ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                      let observedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: page.url) else {
                     return .init(response: "", decision: .handoff(
                         "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
                         includeInModelHistory: false)
@@ -1108,13 +1159,113 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 let currentLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
                     window: window.accessibilityElement, application: window.application,
                     revalidate: { try scope.check(nil, tools) })
-                guard ComputerUseGmailAccountDirectory.email(in: currentLabel ?? "") == account.email else {
+                let currentWindowTitle = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                    window: window.accessibilityElement, application: window.application,
+                    revalidate: { try scope.check(nil, tools) })
+                let standaloneAccountEmail = ComputerUseGmailAccountDirectory.standaloneComposerEmail(
+                    currentWindowTitle, currentURL: page.url)
+                if observedIndex != account.index {
+                    if scope.gmailNavigationStage == .waitForTarget,
+                       currentLabel == nil, standaloneAccountEmail == nil {
+                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
+                    }
+                    return .init(response: "", decision: .handoff(
+                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
+                        includeInModelHistory: false)
+                }
+                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                    windowTitle: currentWindowTitle, accountControlLabel: currentLabel, expected: account) else {
+                    if scope.gmailNavigationStage == .waitForTarget,
+                       currentLabel == nil, standaloneAccountEmail == nil {
+                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
+                    }
                     return .init(response: "", decision: .handoff(
                         "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
                         includeInModelHistory: false)
                 }
             }
             if var job = scope.gmailJob {
+                if scope.gmailFlowStage == .normalizeDrafts {
+                    guard let account = job.request.account,
+                          ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                        return .init(response: "", decision: .handoff(
+                            "Gmail left the selected account while opening Drafts."),
+                            includeInModelHistory: false)
+                    }
+                    guard page.url.range(of: #"^https://mail\.google\.com/mail/u/[0-9]+/#drafts$"#,
+                        options: [.regularExpression, .caseInsensitive]) != nil else {
+                        if scope.gmailNavigationStage == .waitForTarget {
+                            return waitForGmailPage("Gmail is still opening Drafts. Review the browser, then choose Resume.")
+                        }
+                        return .init(response: "", decision: .handoff(
+                            "Gmail did not open the selected account’s Drafts page."), includeInModelHistory: false)
+                    }
+                    var ambiguousRow = false
+                    guard let row = try ComputerUseGmailRecipientVerifier.exactDraftSubjectCellEvidence(
+                        window: window.accessibilityElement, application: window.application,
+                        subject: job.request.subject, ambiguous: &ambiguousRow,
+                        revalidate: { try scope.check(nil, tools) }) else {
+                        if !ambiguousRow, scope.gmailNavigationStage == .waitForTarget {
+                            return waitForGmailPage("Gmail is still saving the draft. Review Drafts, then choose Resume.")
+                        }
+                        return .init(response: "", decision: .handoff(
+                            "Gmail did not show exactly one complete Drafts row for this subject. Review Drafts before continuing."),
+                            includeInModelHistory: false)
+                    }
+                    guard let actionBounds = scope.session.currentActionBounds,
+                          let display = enriched.desktopDisplayBounds else {
+                        return .init(response: "", decision: .handoff(
+                            "The retained Gmail Drafts window could not be positioned safely."), includeInModelHistory: false)
+                    }
+                    scope.gmailNavigationWaitCount = 0
+                    let center = CGPoint(x: row.bounds.midX, y: row.bounds.midY)
+                    guard center.x.isFinite, center.y.isFinite, actionBounds.contains(center),
+                          display.width.isFinite, display.height.isFinite,
+                          display.width > 0, display.height > 0 else {
+                        return .init(response: "", decision: .handoff(
+                            "The exact Gmail draft row is outside the retained browser window."), includeInModelHistory: false)
+                    }
+                    let predicted = ComputerUsePredictedAction.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()),
+                        button: 1, count: 1)
+                    scope.pendingGmailDraftRowTarget = (job.request.subject, row.cell, row.row, row.bounds, predicted)
+                    try scope.check(predicted, tools)
+                    scope.pendingGmailFlowStage = .waitingForDraftReopen
+                    return .init(response: "", action: try Self.normalizedPointerAction(center: center, display: display),
+                        includeInModelHistory: false)
+                }
+                if scope.gmailFlowStage == .waitingForDraftReopen {
+                    guard let recoveredURL = URL(string: page.url),
+                          ComputerUseGmailJob.isOpaqueComposeDraftURL(recoveredURL) else {
+                        if scope.gmailNavigationStage == .waitForTarget {
+                            return waitForGmailPage("Gmail is still reopening the saved draft. Review the browser, then choose Resume.")
+                        }
+                        return .init(response: "", decision: .handoff(
+                            "Gmail did not reopen the saved draft from its exact Drafts row."),
+                            includeInModelHistory: false)
+                    }
+                    guard job.verifiesComposeContents(page) else {
+                        let diagnostics = job.composeFieldDiagnostics(page)
+                        scope.gmailFieldDiagnostics = diagnostics
+                        let subjectCount = Int(diagnostics["gmailSubjectFieldCount"] ?? "0") ?? 0
+                        let bodyCount = Int(diagnostics["gmailMessageBodyFieldCount"] ?? "0") ?? 0
+                        let hasConflict = (subjectCount > 0 && diagnostics["gmailSubjectValueMatches"] != "true")
+                            || (bodyCount > 0 && diagnostics["gmailMessageBodyValueMatches"] != "true")
+                        if !hasConflict, (subjectCount == 0 || bodyCount == 0),
+                           scope.gmailNavigationStage == .waitForTarget {
+                            return waitForGmailPage("Gmail is still loading the reopened draft fields. Review the browser, then choose Resume.")
+                        }
+                        return .init(response: "", decision: .handoff(
+                            "The recovered Gmail draft did not match the requested fields. Review it before continuing."),
+                            includeInModelHistory: false)
+                    }
+                    scope.gmailStandaloneDraftNormalizationComplete = true
+                    scope.gmailFlowStage = .compose
+                    scope.gmailNavigationStage = .ready
+                    scope.gmailWaitCount = 0
+                    scope.gmailNavigationWaitCount = 0
+                    scope.gmailFieldDiagnostics = [:]
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                }
                 let composerIsExpected = scope.gmailFlowStage != .verifySend
                     && scope.gmailFlowStage != .verifyDraft && scope.gmailFlowStage != .complete
                 if scope.gmailRecipientsVerified, let expectedAddress = scope.gmailRecipientMenuAddressToDismiss {
@@ -1142,6 +1293,24 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                 }
                 if composerIsExpected && job.verifiesComposeContents(page) {
+                    scope.gmailFieldDiagnostics = [:]
+                    if scope.gmailFlowStage == .compose, !scope.gmailStandaloneDraftNormalizationComplete,
+                       let account = job.request.account {
+                        let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                            window: window.accessibilityElement, application: window.application,
+                            revalidate: { try scope.check(nil, tools) })
+                        if ComputerUseGmailAccountDirectory.standaloneComposerEmail(title, currentURL: page.url)?
+                            .caseInsensitiveCompare(account.email) == .orderedSame {
+                            guard let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
+                                return .init(response: "", decision: .handoff(
+                                    "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
+                            }
+                            scope.gmailFlowStage = .normalizeDrafts
+                            scope.gmailNavigationTargetURL = draftsURL
+                            scope.gmailNavigationStage = .navigateTarget
+                            return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                        }
+                    }
                     scope.gmailNavigationStage = .ready
                     scope.gmailNavigationWaitCount = 0
                     if !scope.gmailRecipientsVerified {
@@ -1241,6 +1410,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         }
                     }
                 } else if composerIsExpected {
+                    scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
                     if scope.gmailNavigationStage == .waitForTarget {
                         return waitForGmailPage("Gmail did not show the exact requested draft fields. Review the browser, then choose Resume.")
                     }
@@ -1279,6 +1449,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
                 }
                 switch scope.gmailFlowStage {
+                case .normalizeDrafts, .waitingForDraftReopen:
+                    return .init(response: "", decision: .handoff(
+                        "Gmail draft recovery could not be verified. Review Drafts before continuing."),
+                        includeInModelHistory: false)
                 case .compose:
                     return .init(response: "", decision: .handoff("The Gmail compose fields could not be verified."),
                         includeInModelHistory: false)

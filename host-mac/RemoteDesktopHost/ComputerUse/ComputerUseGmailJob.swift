@@ -105,15 +105,34 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     func verifiesComposeContents(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
         guard let url = URL(string: observation.url), Self.isGmailURL(url), matchesAccount(url) else { return false }
         let fields = observation.formFieldValues
-        func exactField(_ label: String, _ value: String) -> Bool {
-            fields.contains { field in
-                field.label.localizedCaseInsensitiveContains(label) && field.value == value
-            }
+        let subjects = fields.filter {
+            $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Subject") == .orderedSame
         }
-        return exactField("subject", request.subject) && fields.contains {
-            ($0.role == "AXTextArea" || $0.label.localizedCaseInsensitiveContains("message body"))
-                && $0.value == request.body
+        let bodies = fields.filter {
+            $0.role == "AXTextArea" && $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Message Body") == .orderedSame
         }
+        return subjects.count == 1 && subjects[0].value == request.subject
+            && bodies.count == 1 && bodies[0].value == request.body
+    }
+
+    func composeFieldDiagnostics(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> [String: String] {
+        let fields = observation.formFieldValues
+        let subjects = fields.filter {
+            $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Subject") == .orderedSame
+        }
+        let bodies = fields.filter {
+            $0.role == "AXTextArea" && $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Message Body") == .orderedSame
+        }
+        return [
+            "gmailSubjectFieldCount": String(subjects.count),
+            "gmailSubjectValueMatches": String(subjects.count == 1 && subjects[0].value == request.subject),
+            "gmailMessageBodyFieldCount": String(bodies.count),
+            "gmailMessageBodyValueMatches": String(bodies.count == 1 && bodies[0].value == request.body),
+        ]
     }
 
     func verifiesRecipients(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
@@ -191,6 +210,20 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         isGmailURL(url) && isComposeOrDraftURL(url)
     }
 
+    static func isOpaqueComposeDraftURL(_ url: URL) -> Bool {
+        guard isGmailURL(url), let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment else {
+            return false
+        }
+        return fragment.range(of: #"^drafts\?compose=[A-Za-z0-9_-]{6,256}$"#,
+            options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    static func uniqueDraftSubjectCellIndex(rowTexts: [String], scanComplete: Bool, subject: String) -> Int? {
+        guard scanComplete, !subject.isEmpty else { return nil }
+        let matches = rowTexts.indices.filter { rowTexts[$0] == subject }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     private func matchesAccount(_ url: URL) -> Bool {
         guard let account = request.account else { return true }
         return ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) == account.index
@@ -260,9 +293,57 @@ enum ComputerUseGmailAccountDirectory {
         return index
     }
 
+    static func confirmsActiveAccount(currentURL: String, windowTitle: String?, accountControlLabel: String?,
+                                      expected: Account) -> Bool {
+        guard accountIndex(from: currentURL) == expected.index else { return false }
+        if let accountControlLabel {
+            guard accountControlLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+                .range(of: #"^Google Account:"#, options: [.regularExpression, .caseInsensitive]) != nil,
+                  email(in: accountControlLabel)?.caseInsensitiveCompare(expected.email) == .orderedSame else { return false }
+            if let titleEmail = standaloneComposerEmail(windowTitle, currentURL: currentURL),
+               titleEmail.caseInsensitiveCompare(expected.email) != .orderedSame { return false }
+            return true
+        }
+        return standaloneComposerEmail(windowTitle, currentURL: currentURL)?
+            .caseInsensitiveCompare(expected.email) == .orderedSame
+    }
+
+    static func standaloneComposerEmail(_ rawTitle: String?, currentURL: String) -> String? {
+        guard let rawTitle,
+              let url = URL(string: currentURL),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              accountIndex(from: currentURL) != nil,
+              components.queryItems?.filter({ $0.name == "fs" }).count == 1,
+              components.queryItems?.first(where: { $0.name == "fs" })?.value == "1",
+              components.queryItems?.filter({ $0.name == "tf" }).count == 1,
+              components.queryItems?.first(where: { $0.name == "tf" })?.value == "cm",
+              let match = rawTitle.range(of: #"^Compose Mail - ([^\s@]+@[^\s@]+) - Gmail$"#,
+                options: [.regularExpression, .caseInsensitive]),
+              let emailRange = rawTitle[match].range(of: #"[^\s@]+@[^\s@]+"#, options: .regularExpression) else { return nil }
+        return email(in: String(rawTitle[match][emailRange]))
+    }
+
+    @MainActor
+    static func observedWindowTitle(window: AXUIElement, application: ComputerUseApplicationIdentity,
+                                    revalidate: @MainActor () throws -> Void) throws -> String? {
+        try revalidate()
+        guard frontmostMatches(application) else { return nil }
+        AXUIElementSetMessagingTimeout(window, 0.1)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXTitleAttribute as CFString, &value) == .success,
+              let title = value as? String, !title.isEmpty else { return nil }
+        try revalidate()
+        return title
+    }
+
     static func inboxURL(index: Int) -> URL? {
         guard (0...9_999).contains(index) else { return nil }
         return URL(string: "https://mail.google.com/mail/u/\(index)/")
+    }
+
+    static func draftsURL(index: Int) -> URL? {
+        guard (0...9_999).contains(index) else { return nil }
+        return URL(string: "https://mail.google.com/mail/u/\(index)/#drafts")
     }
 
     static func email(in rawLabel: String) -> String? {
@@ -615,6 +696,92 @@ enum ComputerUseGmailRecipientVerifier {
         guard menus.count == 1, let address = try copyAddress(in: compose) else { return .unrecognized }
         try revalidate()
         return .copyAddress(address)
+    }
+
+    static func exactDraftSubjectCellEvidence(window: AXUIElement, application: ComputerUseApplicationIdentity,
+                                              subject: String,
+                                              ambiguous: inout Bool,
+                                              revalidate: @MainActor () throws -> Void)
+        throws -> (cell: AXUIElement, row: AXUIElement, bounds: CGRect)? {
+        try revalidate()
+        guard frontmostMatches(application), !subject.isEmpty else { return nil }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        var visited = 0, overflow = false, outerWebAreaSeen = false
+        var cellTexts: [String] = []
+        var cellElements: [AXUIElement] = []
+        func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
+            guard !Task.isCancelled, ContinuousClock.now < deadline else { overflow = true; return nil }
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
+                  !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+            return value
+        }
+        func visit(_ element: AXUIElement, depth: Int) {
+            guard depth <= 16, visited < 1_024, ContinuousClock.now < deadline, !Task.isCancelled else {
+                overflow = true; return
+            }
+            visited += 1
+            if read(element, kAXHiddenAttribute as String) as? Bool == true
+                || read(element, "AXProtectedContent") as? Bool == true { return }
+            let role = read(element, kAXRoleAttribute as String) as? String ?? ""
+            let subrole = read(element, kAXSubroleAttribute as String) as? String ?? ""
+            guard subrole != (kAXSecureTextFieldSubrole as String),
+                  !["AXTextArea", "AXSecureTextField", "AXMenu", "AXMenuItem"].contains(role) else { return }
+            if role == "AXWebArea" {
+                guard !outerWebAreaSeen else { return }
+                outerWebAreaSeen = true
+            }
+            if outerWebAreaSeen, role == "AXCell" {
+                cellTexts.append((read(element, kAXValueAttribute as String) as? String
+                    ?? read(element, kAXTitleAttribute as String) as? String) ?? "")
+                cellElements.append(element)
+            }
+            guard let children = read(element, kAXChildrenAttribute as String) as? [AXUIElement] else {
+                if ["AXWindow", "AXGroup", "AXWebArea", "AXTable", "AXRow", "AXScrollArea"].contains(role) {
+                    overflow = true
+                }
+                return
+            }
+            guard children.count <= 128 else { overflow = true; return }
+            children.forEach { visit($0, depth: depth + 1) }
+        }
+        visit(window, depth: 0)
+        guard !overflow, outerWebAreaSeen else { return nil }
+        let exactCellIndices = cellTexts.indices.filter { cellTexts[$0] == subject }
+        if exactCellIndices.count > 1 { ambiguous = true; return nil }
+        guard let selectedCellIndex = ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+                rowTexts: cellTexts, scanComplete: true, subject: subject),
+              cellElements.indices.contains(selectedCellIndex),
+              !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+
+        let cell = cellElements[selectedCellIndex]
+        var ancestor = cell
+        var row: AXUIElement?
+        for _ in 0..<12 {
+            guard let parentValue = read(ancestor, kAXParentAttribute as String),
+                  CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { break }
+            let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
+            let role = read(parent, kAXRoleAttribute as String) as? String ?? ""
+            if role == "AXRow" {
+                row = parent
+                break
+            }
+            ancestor = parent
+            if CFEqual(parent, window) { break }
+        }
+        guard let row,
+              let position = read(cell, kAXPositionAttribute as String),
+              let size = read(cell, kAXSizeAttribute as String),
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var point = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions),
+              point.x.isFinite, point.y.isFinite, dimensions.width.isFinite, dimensions.height.isFinite,
+              dimensions.width > 0, dimensions.height > 0 else { return nil }
+        try revalidate()
+        guard frontmostMatches(application) else { return nil }
+        return (cell, row, CGRect(origin: point, size: dimensions))
     }
 
     static func attachmentEvidence(window: AXUIElement, application: ComputerUseApplicationIdentity,

@@ -63,6 +63,100 @@ final class ComputerUseGmailJobTests: XCTestCase {
             from: "https://user@mail.google.com/mail/u/1/"))
     }
 
+    func testStandaloneGmailComposerAccountProofRequiresExactIndexedGmailWindowIdentity() {
+        let selected = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 0)
+        let composeURL = "https://mail.google.com/mail/u/0/?fs=1&to=test%40example.com&su=Review&tf=cm"
+        XCTAssertTrue(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: composeURL,
+            windowTitle: "Compose Mail - current@example.com - Gmail",
+            accountControlLabel: nil, expected: selected))
+
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: composeURL,
+            windowTitle: "Compose Mail - other@example.com - Gmail",
+            accountControlLabel: nil, expected: selected), "A matching URL index cannot override a different title identity")
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: "https://mail.google.com/mail/u/1/?fs=1&tf=cm",
+            windowTitle: "Compose Mail - current@example.com - Gmail",
+            accountControlLabel: nil, expected: selected), "The exact Gmail identity must stay bound to its selected numeric route")
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: composeURL,
+            windowTitle: "Compose Mail - current@example.com - Gmail Please review this draft",
+            accountControlLabel: nil, expected: selected), "Body text or an appended title cannot spoof the exact outer window title")
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: "https://mail.google.com.evil.test/mail/u/0/?fs=1&tf=cm",
+            windowTitle: "Compose Mail - current@example.com - Gmail",
+            accountControlLabel: nil, expected: selected))
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: "https://mail.google.com/mail/u/0/#inbox",
+            windowTitle: "Inbox (3) - current@example.com - Gmail",
+            accountControlLabel: nil, expected: selected), "An account-looking inbox title is not standalone composer proof")
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: composeURL,
+            windowTitle: "Compose Mail - current@example.com - Gmail",
+            accountControlLabel: "Google Account: other@example.com, Google membership", expected: selected),
+            "A conflicting account button must invalidate the title proof")
+        XCTAssertFalse(ComputerUseGmailAccountDirectory.confirmsActiveAccount(
+            currentURL: "https://mail.google.com/mail/u/0/?fs=1&tf=cm&tf=cm",
+            windowTitle: "Compose Mail - current@example.com - Gmail",
+            accountControlLabel: nil, expected: selected), "Duplicate composer markers are ambiguous")
+    }
+
+    func testGmailComposeVerificationRejectsDuplicateComposerFieldsWithMixedValues() throws {
+        let account = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 0)
+        let job = try ComputerUseGmailJob(request: .init(to: ["recipient@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "", sendRequested: false,
+            account: account))
+        let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 42,
+            codeIdentity: nil)!
+        let duplicateComposer = ComputerUseDefaultBrowserPageReader.Observation(id: "two-composers",
+            application: identity, url: "https://mail.google.com/mail/u/0/?fs=1&tf=cm",
+            renderedAXText: "", controls: [], iframeContentMayBeOmitted: true, truncated: false,
+            formFieldValues: [
+                .init(label: "To recipients", role: "AXTextField", value: "recipient@example.com"),
+                .init(label: "Subject", role: "AXTextField", value: "Review"),
+                .init(label: "Subject", role: "AXTextField", value: "Different draft"),
+                .init(label: "Message Body", role: "AXTextArea", value: "Please review."),
+                .init(label: "Message Body", role: "AXTextArea", value: "Different body"),
+            ])
+        XCTAssertFalse(job.verifiesCompose(duplicateComposer), "Two matching composers are ambiguous even when their values agree")
+    }
+
+    func testGmailComposeVerificationIgnoresUnrelatedWritingAssistantTextArea() throws {
+        let account = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 0)
+        let job = try ComputerUseGmailJob(request: .init(to: ["recipient@example.com"], cc: [], bcc: [],
+            subject: "Review", body: "Please review.", fileDescription: "", sendRequested: false,
+            account: account))
+        let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 42,
+            codeIdentity: nil)!
+        let standalone = ComputerUseDefaultBrowserPageReader.Observation(id: "standalone-compose",
+            application: identity, url: "https://mail.google.com/mail/u/0/?fs=1&tf=cm",
+            renderedAXText: "", controls: [], iframeContentMayBeOmitted: true, truncated: false,
+            formFieldValues: [
+                .init(label: "To recipients", role: "AXTextField", value: "recipient@example.com"),
+                .init(label: "Subject", role: "AXTextField", value: "Review"),
+                .init(label: "Message Body", role: "AXTextArea", value: "Please review."),
+                .init(label: "Describe your message", role: "AXTextArea", value: "Write with AI"),
+            ])
+        XCTAssertTrue(job.verifiesComposeContents(standalone),
+            "The Gmail writing assistant editor is not the message body field")
+    }
+
+    func testGmailDraftRecoveryRequiresOneExactSubjectCellAndCompleteScan() {
+        let subject = "Quarterly review"
+        XCTAssertEqual(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: ["Other draft", subject], scanComplete: true, subject: subject), 1)
+        XCTAssertNil(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: [subject, subject], scanComplete: true, subject: subject))
+        XCTAssertNil(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: [subject], scanComplete: false, subject: subject))
+        XCTAssertNil(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: ["Quarterly review draft"], scanComplete: true, subject: subject))
+    }
+
     @MainActor
     func testGmailAccountPreferenceStoresOnlyExplicitlySelectedEmail() throws {
         let suite = "ComputerUseGmailAccountPreferencesTests-\(UUID().uuidString)"
