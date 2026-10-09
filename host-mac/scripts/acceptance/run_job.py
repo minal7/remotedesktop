@@ -377,7 +377,7 @@ def remove_owned_stage(path: Path | None, expected_hash: str | None) -> None:
 def prune_traces() -> None:
     if not TRACE_ROOT.is_dir():
         return
-    milestone_prefixes = tuple(f"m{index}-" for index in range(5)) + ("mail-body-diagnostic-",)
+    milestone_prefixes = tuple(f"m{index}-" for index in range(5)) + ("w1-", "mail-body-diagnostic-",)
     owned = [path for path in TRACE_ROOT.iterdir()
              if path.is_dir() and not path.is_symlink() and path.name.startswith(milestone_prefixes)]
     owned.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)

@@ -47,7 +47,220 @@ private enum GmailAcceptanceControlTrace {
 }
 
 @MainActor
+private final class GmailAcceptanceVisualExecutorLoader: ComputerUseVisualExecutorLoading {
+    private let base: OSAtlasVisualExecutorLoader
+    private(set) var defaultBrowserExecutor: ComputerUseDefaultBrowserExecutor?
+
+    init(base: OSAtlasVisualExecutorLoader) { self.base = base }
+
+    private func retain(_ executor: any ComputerUseExecuting) -> any ComputerUseExecuting {
+        if let browser = executor as? ComputerUseDefaultBrowserExecutor {
+            defaultBrowserExecutor = browser
+        }
+        return executor
+    }
+
+    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
+        try base.prepareBrowser(receipt: receipt)
+    }
+
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting {
+        retain(try base.prepareDefaultBrowser(receipt: receipt))
+    }
+
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting {
+        retain(try base.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner))
+    }
+
+    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
+        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
+        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
+        retain(try base.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner,
+            nativeControlInputs: nativeControlInputs))
+    }
+
+    func load(receipt: ComputerUseInstallationReceipt,
+        progress: @escaping @MainActor (String) -> Void) async throws -> any ComputerUseExecuting {
+        retain(try await base.load(receipt: receipt, progress: progress))
+    }
+
+    func prepare(receipt: ComputerUseInstallationReceipt,
+        progress: @escaping @MainActor (String) -> Void) async throws -> ComputerUsePreparedVisualExecutor {
+        let prepared = try await base.prepare(receipt: receipt, progress: progress)
+        _ = retain(prepared.executor)
+        return prepared
+    }
+
+    func deactivate() async { await base.deactivate() }
+}
+
+@MainActor
 final class CoreJobAcceptanceTests: XCTestCase {
+
+    private struct GmailAXFact {
+        let role: String
+        let title: String
+        let description: String
+        let value: String
+
+        init(_ role: String, _ title: String = "", _ description: String = "", value: String = "") {
+            self.role = role
+            self.title = title
+            self.description = description
+            self.value = value
+        }
+    }
+
+    func testGmailAcceptanceRecognizesStandaloneComposerBeforeAttachment() {
+        let subject = "Remote Desktop acceptance [token]"
+        let account = "sender@example.com"
+        let recipient = "recipient@example.com"
+        let facts = Self.standaloneGmailFacts(subject: subject, recipient: recipient,
+            body: "Please review the attachment.")
+        let title = "Compose Mail - sender@example.com - Gmail"
+        let url = "https://mail.google.com/mail/u/0/?fs=1&to=recipient%40example.com&su=Remote%20Desktop%20acceptance%20%5Btoken%5D&body=Please%20review&tf=cm"
+        XCTAssertTrue(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: title, url: url, expectedAccount: account, subject: subject,
+            composeRegions: [facts]),
+            "A standalone compose can be recognized for safe reuse before it has an attachment")
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: title, url: url, expectedAccount: account, subject: subject,
+            composeRegions: [facts, facts]), "Duplicate compose regions must not be treated as owned")
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: title, url: "https://example.com/?fs=1&tf=cm", expectedAccount: account,
+            subject: subject, composeRegions: [facts]))
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: title, url: "https://mail.google.com/mail/u/0/?fs=1&fs=1&tf=cm",
+            expectedAccount: account, subject: subject, composeRegions: [facts]))
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: title, url: "https://mail.google.com/mail/u/0/?fs=1&tf=cm&tf=cm",
+            expectedAccount: account, subject: subject, composeRegions: [facts]))
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: "Compose Mail - recipient@example.com - Gmail",
+            webAreaDescription: "Compose Mail - recipient@example.com - Gmail", url: url,
+            expectedAccount: account, subject: subject, composeRegions: [facts]),
+            "The To recipient cannot stand in for the signed-in sender account")
+        XCTAssertFalse(Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+            webAreaDescription: "Another page", url: url, expectedAccount: account,
+            subject: subject, composeRegions: [facts]))
+    }
+
+    func testGmailAcceptanceDoesNotTreatComposeURLParametersAsFieldEvidence() {
+        let subject = "Remote Desktop acceptance [token]"
+        let body = "Please review the attachment."
+        let url = "https://mail.google.com/mail/u/0/?fs=1&to=recipient%40example.com&su=Remote%20Desktop%20acceptance%20%5Btoken%5D&body=Please%20review&tf=cm"
+        let facts = [GmailAXFact("AXTextField", "Subject", value: "different subject"),
+            GmailAXFact("AXTextArea", "Message Body", value: "different body")]
+        let proof = Self.gmailTextFieldProof(facts, subject: subject, body: body)
+        XCTAssertFalse(proof.subjectMatches)
+        XCTAssertFalse(proof.bodyMatches)
+        XCTAssertTrue(URLComponents(string: url)?.queryItems?.contains(where: { $0.name == "su" && $0.value == subject }) == true)
+        XCTAssertTrue(URLComponents(string: url)?.queryItems?.contains(where: { $0.name == "body" }) == true,
+            "URL query values are navigation evidence, never field evidence")
+    }
+
+    func testGmailAcceptanceTextFieldProofRequiresOneExactSubjectAndBodyValue() {
+        let subject = "Remote Desktop acceptance [token]"
+        let body = "Please review the attachment."
+        let exact = Self.gmailTextFieldProof([
+            GmailAXFact("AXTextField", "Subject", value: subject),
+            GmailAXFact("AXTextArea", "Message Body", value: body)], subject: subject, body: body)
+        XCTAssertTrue(exact.subjectMatches)
+        XCTAssertTrue(exact.bodyMatches)
+        let duplicate = Self.gmailTextFieldProof([
+            GmailAXFact("AXTextField", "Subject", value: subject),
+            GmailAXFact("AXTextField", "Subject", value: subject),
+            GmailAXFact("AXTextArea", "Message Body", value: body)], subject: subject, body: body)
+        XCTAssertFalse(duplicate.subjectMatches)
+        XCTAssertTrue(duplicate.bodyMatches)
+        let duplicateBody = Self.gmailTextFieldProof([
+            GmailAXFact("AXTextField", "Subject", value: subject),
+            GmailAXFact("AXTextArea", "Message Body", value: body),
+            GmailAXFact("AXTextArea", "Message Body", value: body)], subject: subject, body: body)
+        XCTAssertTrue(duplicateBody.subjectMatches)
+        XCTAssertFalse(duplicateBody.bodyMatches)
+    }
+
+    func testGmailAcceptanceDraftRecoveryRequiresOneExactSubjectRowAndCompleteScan() {
+        let subject = "Remote Desktop acceptance [token]"
+        XCTAssertEqual(Self.gmailUniqueDraftSubjectRowIndex(
+            cellValuesByRow: [["Other draft"], [subject]], scanComplete: true, subject: subject), 1)
+        XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
+            cellValuesByRow: [[subject], [subject]], scanComplete: true, subject: subject))
+        XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
+            cellValuesByRow: [[subject]], scanComplete: false, subject: subject))
+        XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
+            cellValuesByRow: [["Remote Desktop acceptance [other-token]"], ["body contains \(subject)"]],
+            scanComplete: true, subject: subject))
+    }
+
+    private static func standaloneGmailFacts(subject: String, recipient: String, body: String) -> [GmailAXFact] {
+        [GmailAXFact("AXGroup", subject),
+         GmailAXFact("AXStaticText", "Contact Name (\(recipient))"),
+         GmailAXFact("AXTextField", "Subject", value: subject),
+         GmailAXFact("AXTextArea", "Message Body", value: body),
+         GmailAXFact("AXButton", "Send"),
+         GmailAXFact("AXPopUpButton", "Attach files"),
+         GmailAXFact("AXButton", "Discard draft")]
+    }
+
+    private static func gmailStandaloneComposerIdentityMatches(windowTitle: String, webAreaDescription: String,
+        url: String, expectedAccount: String, subject: String, composeRegions: [[GmailAXFact]]) -> Bool {
+        let queryItems = URLComponents(string: url)?.queryItems ?? []
+        let fsItems = queryItems.filter { $0.name == "fs" }
+        let tfItems = queryItems.filter { $0.name == "tf" }
+        guard let urlParts = URLComponents(string: url), urlParts.scheme?.lowercased() == "https",
+              urlParts.host?.lowercased() == "mail.google.com", urlParts.user == nil,
+              urlParts.password == nil, urlParts.port == nil,
+              urlParts.path.range(of: #"^/mail/u/[0-9]+/?$"#, options: .regularExpression) != nil,
+              fsItems.count == 1, fsItems.first?.value == "1",
+              tfItems.count == 1, tfItems.first?.value == "cm",
+              ComputerUseGmailAccountDirectory.email(in: expectedAccount) == expectedAccount.lowercased(),
+              windowTitle == "Compose Mail - \(expectedAccount) - Gmail",
+              webAreaDescription == windowTitle,
+              composeRegions.count == 1, let facts = composeRegions.first else { return false }
+        let exactSubjectGroups = facts.filter {
+            $0.role == "AXGroup" && [$0.title, $0.description, $0.value].contains(subject)
+        }
+        guard exactSubjectGroups.count == 1,
+              facts.filter({ $0.role == "AXTextField" && $0.title == "Subject" }).count == 1,
+              facts.filter({ $0.role == "AXTextArea" && $0.title == "Message Body" }).count == 1,
+              facts.contains(where: {
+                  guard $0.role == "AXButton" else { return false }
+                  return [$0.title, $0.description].contains { label in
+                      let normalized = label.replacingOccurrences(of: "\u{202A}", with: "")
+                          .replacingOccurrences(of: "\u{202B}", with: "")
+                          .replacingOccurrences(of: "\u{202C}", with: "")
+                          .replacingOccurrences(of: "\u{2066}", with: "")
+                          .replacingOccurrences(of: "\u{2067}", with: "")
+                          .replacingOccurrences(of: "\u{2068}", with: "")
+                          .replacingOccurrences(of: "\u{2069}", with: "")
+                          .trimmingCharacters(in: .whitespacesAndNewlines)
+                      return normalized == "Send" || normalized.hasPrefix("Send (")
+                  }
+              }),
+              facts.contains(where: { $0.role == "AXPopUpButton" && $0.title == "Attach files" }),
+              facts.contains(where: { $0.role == "AXButton" && $0.title == "Discard draft" }) else { return false }
+        return true
+    }
+
+    private static func gmailTextFieldProof(_ facts: [GmailAXFact], subject: String, body: String)
+        -> (subjectMatches: Bool, bodyMatches: Bool) {
+        let subjectFields = facts.filter { $0.role == "AXTextField" && $0.title == "Subject" }
+        let bodyFields = facts.filter {
+            ($0.role == "AXTextArea" || $0.role == "AXTextEntryArea") && $0.title == "Message Body"
+        }
+        return (subjectFields.count == 1 && subjectFields.first?.value == subject,
+            bodyFields.count == 1 && bodyFields.first?.value == body)
+    }
+
+    private static func gmailUniqueDraftSubjectRowIndex(cellValuesByRow: [[String]], scanComplete: Bool,
+        subject: String) -> Int? {
+        guard scanComplete else { return nil }
+        let exactRows = cellValuesByRow.enumerated().filter { _, cells in cells.contains(subject) }
+        guard exactRows.count == 1 else { return nil }
+        return exactRows[0].offset
+    }
 
     private enum GmailPreferencePreflight: Equatable {
         case allowed
@@ -169,6 +382,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
         var manager: HostComputerUseManager?
         var client: RemoteDesktopClientCore.ComputerUseSessionModel?
+        var gmailVisualLoader: GmailAcceptanceVisualExecutorLoader?
         defer { client?.stop(); _ = manager?.stop() }
 
         do {
@@ -196,8 +410,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 clientID: clientID, sessionID: sessionID, pairingCode: pairingCode)
             let pendingStore = CompositionPendingStore()
             let diagnosticLock = NSLock()
-            let visualLoader: (any ComputerUseVisualExecutorLoading)? = job == "gmail"
-                ? OSAtlasVisualExecutorLoader(nativeControlInspectExchange: { request, response in
+            if job == "gmail" {
+                let base = OSAtlasVisualExecutorLoader(nativeControlInspectExchange: { request, response in
                     guard let event = GmailAcceptanceControlTrace.compactEvent(request: request, response: response) else { return }
                     diagnosticLock.withLock {
                         let path = trace.appendingPathComponent("gmail-control-decisions.jsonl")
@@ -218,7 +432,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
                         try? Data(data.suffix(16_384)).write(to: path, options: .atomic)
                     }
                 }, gmailExistingDraftURL: expected.gmail_existing_draft_url.flatMap { URL(string: $0) })
-                : nil
+                gmailVisualLoader = GmailAcceptanceVisualExecutorLoader(base: base)
+            } else {
+                gmailVisualLoader = nil
+            }
+            let visualLoader: (any ComputerUseVisualExecutorLoading)? = gmailVisualLoader
             let host = HostComputerUseManager(injector: InputInjector(),
                 nativeTextInstaller: nativeInstaller, macControlInstaller: helperInstaller,
                 visualExecutorLoader: visualLoader,
@@ -327,6 +545,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail, verifySavedDraft: true)
                 }
+                let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
+                if !productFieldDiagnostic.isEmpty {
+                    gmail["product_field_diagnostic"] = productFieldDiagnostic
+                }
                 evidence["gmail"] = gmail
             default:
                 throw HarnessError.prerequisite("Unknown M0 job: \(job)")
@@ -345,6 +567,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 var gmail: [String: Any] = ["attachment_bytes_verified": false]
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                }
+                let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
+                if !productFieldDiagnostic.isEmpty {
+                    gmail["product_field_diagnostic"] = productFieldDiagnostic
                 }
                 var evidence = record["evidence"] as? [String: Any] ?? [:]
                 evidence["gmail"] = gmail
@@ -384,6 +610,43 @@ final class CoreJobAcceptanceTests: XCTestCase {
         }
     }
 
+    private static func sanitizedGmailFieldDiagnostic(from loader: GmailAcceptanceVisualExecutorLoader?)
+        -> [String: Any] {
+        var result: [String: Any] = ["executorCaptured": loader?.defaultBrowserExecutor != nil]
+        guard let raw = loader?.defaultBrowserExecutor?.lastActionDiagnosticForTests else { return result }
+        for key in ["gmailSubjectFieldCount", "gmailMessageBodyFieldCount"] {
+            if let value = raw[key], let count = Int(value), (0...1_024).contains(count) {
+                result[key] = count
+            }
+        }
+        for key in ["gmailSubjectValueMatches", "gmailMessageBodyValueMatches"] {
+            if raw[key] == "true" { result[key] = true }
+            if raw[key] == "false" { result[key] = false }
+        }
+        if let phase = raw["gmailNavigationPhase"],
+           phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil {
+            result["gmailNavigationPhase"] = phase
+        }
+        let sessionFailures: Set<String> = ["changedTaskOrGoal", "targetLost", "ambiguousWindows",
+            "noNewFocusedWindow", "existingWindowsChanged", "interrupted", "journalUncertain",
+            "authenticationHandoff", "browserAutomationPermissionRequired"]
+        if raw["lastSessionFailureForDiagnostics"] == "nil" {
+            result["lastSessionFailureForDiagnostics"] = "nil"
+        } else if let failure = raw["lastSessionFailureForDiagnostics"],
+                  failure.hasPrefix("Optional("), failure.hasSuffix(")") {
+            let inner = String(failure.dropFirst("Optional(".count).dropLast())
+            guard inner.range(of: #"^(?:[A-Za-z0-9_]+\.)*[A-Za-z0-9_]+$"#,
+                options: .regularExpression) != nil else { return result }
+            let caseName = String(inner.split(separator: ".").last ?? "")
+            if sessionFailures.contains(caseName) {
+                result["lastSessionFailureForDiagnostics"] = "Optional(\(caseName))"
+            }
+        } else if let failure = raw["lastSessionFailureForDiagnostics"], sessionFailures.contains(failure) {
+            result["lastSessionFailureForDiagnostics"] = failure
+        }
+        return result
+    }
+
     private struct Terminal {
         let outcome: String
         let approvedDrafts: Int
@@ -402,6 +665,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertEqual(Self.failureClass(outcome: unable,
             text: "The local planning request is invalid: The selected file changed during validation."),
             "guard-rejected")
+        XCTAssertEqual(Self.failureClass(outcome: RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue,
+            text: "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
+            "guard-rejected", "A failed account proof is a host guard rejection, not an approval request")
         XCTAssertEqual(Self.failureClass(outcome: unable,
             text: "I couldn't complete that task: The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."),
             "text-entry")
@@ -670,16 +936,100 @@ final class CoreJobAcceptanceTests: XCTestCase {
             guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
             return composers
         }
+        func discoverStandaloneSubjectGroups(_ root: AXUIElement) -> [Node]? {
+            var queue = [root]
+            var visited: [AXUIElement] = []
+            var groups: [Node] = []
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = queue.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                if role == "AXGroup" && [title, description, text].contains(subject) {
+                    groups.append(Node(element: element, role: role, title: title,
+                        description: description, text: text))
+                    continue
+                }
+                if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
+                if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, 256 - visited.count - queue.count)
+                    guard children.count <= room else { return nil }
+                    queue.append(contentsOf: children)
+                }
+            }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            return groups
+        }
+        func outerWebAreaDescription(_ root: AXUIElement) -> String? {
+            var queue = [root]
+            var visited: [AXUIElement] = []
+            var descriptions: [String] = []
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = queue.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                if role == "AXWebArea" {
+                    if let description = value(kAXDescriptionAttribute as String, element) as? String,
+                       !description.isEmpty { descriptions.append(description) }
+                    continue
+                }
+                if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
+                if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
+                    let room = max(0, 256 - visited.count - queue.count)
+                    guard children.count <= room else { return nil }
+                    queue.append(contentsOf: children)
+                }
+            }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled,
+                  descriptions.count == 1 else { return nil }
+            return descriptions[0]
+        }
         guard let composers = discoverComposers(window.accessibilityElement) else {
             evidence["capture_status"] = "accessibility-tree-incomplete"
             return
         }
-        evidence["compose_count"] = composers.count
+        var standalone = false
+        var standaloneCandidates: [Node] = []
+        if composers.isEmpty {
+            guard let found = discoverStandaloneSubjectGroups(window.accessibilityElement) else {
+                evidence["capture_status"] = "accessibility-tree-incomplete"
+                return
+            }
+            standaloneCandidates = found
+            if !found.isEmpty {
+                let title = value(kAXTitleAttribute as String, window.accessibilityElement) as? String ?? ""
+                let description = outerWebAreaDescription(window.accessibilityElement) ?? ""
+                let expectedAccount = ComputerUseGmailAccountPreferences().preferredEmail ?? ""
+                let facts = found.count == 1 ? ((readTree(found[0].element, limit: 256) ?? []).map {
+                    GmailAXFact($0.role, $0.title, $0.description, value: $0.text)
+                }) : []
+                standalone = Self.gmailStandaloneComposerIdentityMatches(windowTitle: title,
+                    webAreaDescription: description, url: page.url, expectedAccount: expectedAccount,
+                    subject: subject, composeRegions: facts.isEmpty ? [] : [facts])
+                guard standalone else {
+                    evidence["compose_count"] = found.count
+                    evidence["capture_status"] = "standalone-compose-identity-unverified"
+                    return
+                }
+            }
+        }
+        evidence["compose_count"] = composers.count + (standalone ? 1 : 0)
+        evidence["compose_layout"] = standalone ? "standalone" : (composers.isEmpty ? "none" : "embedded")
+        evidence["compose_identity_verified"] = standalone || composers.count == 1
         var nodes: [Node] = []
         if composers.count == 1, let composer = composers.first,
            let composeNodes = readTree(composer.element, limit: 256) {
             nodes = composeNodes
-        } else if !(verifySavedDraft && composers.isEmpty) {
+        } else if standalone, let candidate = standaloneCandidates.first,
+                  let composeNodes = readTree(candidate.element, limit: 256) {
+            nodes = composeNodes
+        } else if !(verifySavedDraft && composers.isEmpty && standaloneCandidates.isEmpty) {
             evidence["capture_status"] = "compose-window-not-unique-or-readable"
             return
         }
@@ -729,10 +1079,20 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 }
             }
         }
-        let subjectMatches = nodes.contains { $0.role == "AXTextField" && $0.title == "Subject" && $0.text == subject }
-        let bodyMatches = nodes.contains {
-            ($0.role == "AXTextArea" || $0.role == "AXTextEntryArea") && $0.title == "Message Body" && $0.text == body
-        }
+        let axFacts = nodes.map { GmailAXFact($0.role, $0.title, $0.description, value: $0.text) }
+        let fieldProof = Self.gmailTextFieldProof(axFacts, subject: subject, body: body)
+        let subjectMatches = fieldProof.subjectMatches
+        let bodyMatches = fieldProof.bodyMatches
+        let ccValues = nodes.filter {
+            ($0.role == "AXTextField" || $0.role == "AXTextArea" || $0.role == "AXTextEntryArea")
+                && ["Cc", "CC"].contains($0.title)
+        }.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let bccValues = nodes.filter {
+            ($0.role == "AXTextField" || $0.role == "AXTextArea" || $0.role == "AXTextEntryArea")
+                && ["Bcc", "BCC"].contains($0.title)
+        }.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let ccMatches = ccValues.allSatisfy(\.isEmpty)
+        let bccMatches = bccValues.allSatisfy(\.isEmpty)
         let attachmentGroups = nodes.filter {
             $0.role == "AXGroup" && ($0.title + $0.description + $0.text).contains("Attachment:")
                 && ($0.title + $0.description + $0.text).contains("delete to remove it")
@@ -756,6 +1116,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence["recipient_matches"] = recipientMatches
         evidence["subject_matches"] = subjectMatches
         evidence["body_matches"] = bodyMatches
+        evidence["cc_matches"] = ccMatches
+        evidence["bcc_matches"] = bccMatches
         evidence["attachment_name_visible"] = attachmentNameVisible
         evidence["attachment_count"] = attachmentGroups.count
         evidence["attachment_size_label"] = sizeLabel
@@ -764,7 +1126,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence["saved_marker_observed"] = nodes.contains {
             ($0.title + $0.description + $0.text).localizedCaseInsensitiveContains("Draft saved")
         }
-        evidence["capture_status"] = composers.isEmpty ? "compose-already-closed" : "captured"
+        evidence["capture_status"] = standalone ? "standalone-compose-captured"
+            : (composers.isEmpty ? "compose-already-closed" : "captured")
         guard verifySavedDraft else { return }
         func press(_ element: AXUIElement) -> Bool {
             AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
@@ -785,9 +1148,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 let title = value(kAXTitleAttribute as String, element) as? String ?? ""
                 let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
                 let text = value(kAXValueAttribute as String, element) as? String ?? ""
-                let candidate = (role == "AXStaticText" && [title, description, text].contains(subject))
-                    || (role == "AXCell" && [title, description, text].contains(subject))
-                    || (role == "AXRow" && [title, description, text].contains(where: { $0.contains(subject) }))
+                let candidate = role == "AXCell" && text == subject
                 if candidate {
                     matches.append(Node(element: element, role: role, title: title,
                         description: description, text: text))
@@ -800,10 +1161,13 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
 
-            // Several AX nodes can expose the same row's subject. Collapse by
-            // the actionable row when present, otherwise retain the exact text node.
+            let exactCellIndex = Self.gmailUniqueDraftSubjectRowIndex(
+                cellValuesByRow: matches.map { [$0.text] }, scanComplete: true, subject: subject)
+            guard let exactCellIndex, matches.indices.contains(exactCellIndex) else { return [] }
+            let exactCell = matches[exactCellIndex]
+            // Resolve the exact subject cell to its actionable ancestor row.
             var rows: [Node] = []
-            for match in matches {
+            for match in [exactCell] {
                 var current: AXUIElement? = match.element
                 var row: AXUIElement?
                 for _ in 0..<8 {
@@ -940,6 +1304,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             && (savedFields["recipient_matches"] as? Bool == true)
             && (savedFields["subject_matches"] as? Bool == true)
             && (savedFields["body_matches"] as? Bool == true)
+            && (savedFields["cc_matches"] as? Bool == true)
+            && (savedFields["bcc_matches"] as? Bool == true)
             && (savedFields["attachment_name_visible"] as? Bool == true)
             && (savedFields["attachment_size_visible"] as? Bool == true)
         evidence["saved_oracle_status"] = evidence["draft_saved_verified"] as? Bool == true
@@ -1122,7 +1488,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
         }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue {
             if text?.localizedCaseInsensitiveContains("Close the covering window") == true
-                || text?.localizedCaseInsensitiveContains("Move the intended window fully onto one active display") == true {
+                || text?.localizedCaseInsensitiveContains("Move the intended window fully onto one active display") == true
+                || text?.localizedCaseInsensitiveContains("selected Gmail account could not be confirmed") == true {
                 return "guard-rejected"
             }
             if text?.localizedCaseInsensitiveContains("sign-in") == true
