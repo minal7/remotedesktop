@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from email.message import EmailMessage
 import importlib.util
+import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +21,27 @@ SPEC.loader.exec_module(runner)
 
 
 class GmailHarnessTests(unittest.TestCase):
+    def test_noncompleted_gmail_run_reports_actual_text_entry_failure_before_oracle_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary)
+            text = "I couldn't complete that task: The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."
+            outcome = {
+                "job": "gmail", "run_id": "run", "task_id": "task",
+                "raw_outcome": "unableToComplete", "text": text,
+                "elapsed_ms": 1, "failure_class": "text-entry",
+                "evidence": {"gmail": {
+                    "compose_count": 1,
+                    "compose_url": "https://mail.google.com/mail/u/0/#inbox",
+                    "subject_matches": False,
+                }},
+            }
+            (trace / "outcome.json").write_text(json.dumps(outcome), encoding="utf-8")
+            passed, check = runner.verify_run(trace,
+                {"job": "gmail", "run_id": "run", "send_approval_check": False}, 0)
+            self.assertFalse(passed)
+            self.assertEqual(check["reason"], text)
+            self.assertEqual(check["failure_class"], "text-entry")
+
     def test_retry_keeps_one_owned_draft_and_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -57,7 +80,7 @@ class GmailHarnessTests(unittest.TestCase):
                 runner.TRACE_ROOT.mkdir(mode=0o700)
                 runner.GMAIL_SESSION_PATH.write_text(json.dumps({
                     "schema_version": 1, "token": "a" * 32, "attempts": 1,
-                    "existing_draft_url": observed_url,
+                    "existing_draft_url": observed_url, "draft_saved_verified": True,
                 }), encoding="utf-8")
                 fixtures = runner.prepare_fixtures()
                 session = runner.gmail_session(fixtures)
@@ -67,11 +90,110 @@ class GmailHarnessTests(unittest.TestCase):
                 expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
                     staged_source=session[2], gmail=(session[0], session[1], session[2],
                         "checker-only@example.invalid", session[3], session[4]))
-                self.assertIn(observed_url, expected["prompt"])
-                self.assertIn("Fill that draft; do not create another draft", expected["prompt"])
+                self.assertNotIn(observed_url, expected["prompt"])
+                self.assertIn("Resume the exact test-owned Gmail draft selected by the host", expected["prompt"])
                 self.assertNotIn("create one test-owned draft", expected["prompt"])
                 self.assertNotIn("checker-only@example.invalid", expected["prompt"])
                 self.assertNotIn(str(session[2]), expected["prompt"])
+
+    def test_unverified_legacy_compose_url_is_preserved_but_not_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_oldBlankDraft123"
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                runner.TRACE_ROOT.mkdir(mode=0o700)
+                runner.GMAIL_SESSION_PATH.write_text(json.dumps({
+                    "schema_version": 1, "token": "c" * 32, "attempts": 3,
+                    "existing_draft_url": old_url,
+                }), encoding="utf-8")
+                fixtures = runner.prepare_fixtures()
+                session = runner.gmail_session(fixtures)
+                saved = json.loads(runner.GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+                self.assertIsNone(session[4])
+                self.assertEqual(saved["legacy_unverified_compose_url"], old_url)
+                self.assertFalse(saved["draft_saved_verified"])
+                self.assertEqual(session[3], 1)
+                expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
+                    staged_source=session[2], gmail=(session[0], session[1], session[2],
+                        "checker-only@example.invalid", session[3], session[4]))
+                self.assertNotIn(old_url, expected["prompt"])
+                self.assertIn("Use the Gmail compose opened by the host", expected["prompt"])
+
+    def test_verified_saved_draft_url_is_persisted_for_later_gate_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            observed_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_verifiedDraft123"
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixtures = runner.prepare_fixtures()
+                token, subject, staged, attempt, _ = runner.gmail_session(fixtures)
+                trace = root / "traces/run"
+                trace.mkdir()
+                (trace / "outcome.json").write_text(json.dumps({"evidence": {"gmail": {
+                    "draft_saved_verified": True, "saved_draft_url": observed_url,
+                }}}), encoding="utf-8")
+                gmail = (token, subject, staged, "checker@example.invalid", attempt, None)
+                updated = runner.persist_verified_gmail_draft_url(gmail, trace / "outcome.json")
+                self.assertEqual(updated[5], observed_url)
+                retry = runner.gmail_session(fixtures)
+                self.assertEqual(retry[0], token)
+                self.assertEqual(retry[4], observed_url)
+                self.assertEqual(retry[3], attempt + 1)
+
+    def test_exact_subject_url_is_reused_after_failed_oracle_without_becoming_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            observed_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_retryDraft123"
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixtures = runner.prepare_fixtures()
+                token, subject, staged, attempt, _ = runner.gmail_session(fixtures)
+                trace = root / "traces/run"
+                trace.mkdir()
+                (trace / "outcome.json").write_text(json.dumps({"evidence": {"gmail": {
+                    "draft_saved_verified": False, "saved_draft_url": observed_url,
+                    "saved_draft_count": 1, "saved_subject_matches": True,
+                }}}), encoding="utf-8")
+                gmail = (token, subject, staged, "checker@example.invalid", attempt, None)
+                runner.persist_gmail_retry_compose_url(gmail, trace / "outcome.json")
+                saved = json.loads(runner.GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+                self.assertEqual(saved["retry_compose_url"], observed_url)
+                self.assertFalse(saved["draft_saved_verified"])
+                self.assertNotIn("existing_draft_url", saved)
+                retry = runner.gmail_session(fixtures)
+                self.assertEqual(retry[4], observed_url)
+                self.assertFalse(json.loads(runner.GMAIL_SESSION_PATH.read_text())["draft_saved_verified"])
+                expected, _, _ = runner.make_expected("gmail", "run", 2, fixtures, None,
+                    staged_source=staged, gmail=(token, subject, staged,
+                        "checker@example.invalid", retry[3], retry[4]))
+                self.assertIn("Resume the exact test-owned Gmail draft", expected["prompt"])
+                self.assertNotIn(observed_url, expected["prompt"])
+
+    def test_unverified_retry_target_requires_exact_unique_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixtures = runner.prepare_fixtures()
+                token, subject, staged, attempt, _ = runner.gmail_session(fixtures)
+                trace = root / "traces/run"
+                trace.mkdir()
+                url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_notOwned123"
+                for evidence in (
+                    {"saved_draft_url": "https://mail.google.com/mail/u/0/#inbox",
+                     "saved_draft_count": 2, "saved_subject_matches": True},
+                    {"saved_draft_url": url, "saved_draft_count": 1, "saved_subject_matches": False},
+                ):
+                    (trace / "outcome.json").write_text(json.dumps({"evidence": {"gmail": evidence}}), encoding="utf-8")
+                    runner.persist_gmail_retry_compose_url(
+                        (token, subject, staged, "checker@example.invalid", attempt, None), trace / "outcome.json")
+                    saved = json.loads(runner.GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+                    self.assertNotIn("retry_compose_url", saved)
 
     def test_owned_compose_url_rejects_malformed_or_foreign_targets(self) -> None:
         invalid = (
@@ -99,12 +221,33 @@ class GmailHarnessTests(unittest.TestCase):
                     with self.assertRaises(runner.AcceptanceError):
                         runner.gmail_session(fixtures)
 
-    def test_visible_metadata_cannot_claim_full_attachment_acceptance(self) -> None:
+    def test_saved_draft_exact_fields_and_attachment_metadata_pass_without_hash_gate(self) -> None:
         outcome = self.exact_metadata()
-        check = runner.check_gmail({}, outcome)
-        self.assertFalse(check["passed"])
-        self.assertTrue(check["diagnostic_only"])
+        check = runner.check_gmail({"send_approval_check": False}, outcome)
+        self.assertTrue(check["passed"])
+        self.assertTrue(check["draft_saved_verified"])
         self.assertFalse(check["attachment_bytes_verified"])
+        outcome["evidence"]["gmail"]["saved_attachment_count"] = 2
+        with self.assertRaises(runner.AcceptanceError):
+            runner.check_gmail({"send_approval_check": False}, outcome)
+
+    def test_retry_draft_identity_ignores_mailbox_view_but_binds_account_and_id(self) -> None:
+        expected_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_ownedDraft123"
+        outcome = self.exact_metadata()
+        outcome["evidence"]["gmail"]["saved_draft_url"] = "https://mail.google.com/mail/u/0/#drafts/FMfcgzQX_ownedDraft123"
+        self.assertTrue(runner.check_gmail(
+            {"send_approval_check": False, "gmail_existing_draft_url": expected_url}, outcome)["passed"])
+        for changed_url in (
+            "https://mail.google.com/mail/u/0/#drafts/FMfcgzQX_otherDraft456",
+            "https://mail.google.com/mail/u/1/#drafts/FMfcgzQX_ownedDraft123",
+            "https://mail.google.com/mail/u/0/#inbox?view=cm&fs=1&tf=1",
+        ):
+            with self.subTest(url=changed_url):
+                changed = self.exact_metadata()
+                changed["evidence"]["gmail"]["saved_draft_url"] = changed_url
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_gmail(
+                        {"send_approval_check": False, "gmail_existing_draft_url": expected_url}, changed)
 
     def test_baseline_rejects_granted_approval_and_records_incorrect_compose(self) -> None:
         outcome = self.exact_metadata()
@@ -114,19 +257,62 @@ class GmailHarnessTests(unittest.TestCase):
         for key, value in (("recipient_matches", False), ("compose_count", 2)):
             with self.subTest(key=key):
                 outcome = self.exact_metadata()
-                outcome["evidence"]["gmail"][key] = value
-                check = runner.check_gmail({}, outcome)
-                self.assertFalse(check["passed"])
-                self.assertFalse(check["compose_fields_exact"])
+                field = {"recipient_matches": "saved_to_matches", "compose_count": "saved_draft_count"}[key]
+                outcome["evidence"]["gmail"][field] = False if key == "recipient_matches" else value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_gmail({"send_approval_check": False}, outcome)
+
+    def test_send_gate_requires_exact_pending_approval_and_zero_effects(self) -> None:
+        outcome = self.exact_metadata()
+        outcome["raw_outcome"] = "approvalRequired"
+        outcome["evidence"]["gmail"].update({
+            "send_approval_observed": True,
+            "send_approval_fields_exact": True,
+            "send_approval_count": 1,
+            "approval_responses_granted": 0,
+        })
+        self.assertTrue(runner.check_gmail({"send_approval_check": True}, outcome)["passed"])
+        for key, value in (("send_approval_fields_exact", False), ("send_approval_count", 2),
+                           ("approval_responses_granted", 1)):
+            invalid = self.exact_metadata()
+            invalid["raw_outcome"] = "approvalRequired"
+            invalid["evidence"]["gmail"].update(outcome["evidence"]["gmail"])
+            invalid["evidence"]["gmail"][key] = value
+            with self.subTest(key=key), self.assertRaises(runner.AcceptanceError):
+                runner.check_gmail({"send_approval_check": True}, invalid)
+
+    def test_cloud_job_is_explicitly_paused(self) -> None:
+        with patch.object(sys, "argv", [str(RUNNER_PATH), "cloud", "--runs", "1"]), \
+             patch("sys.stderr", new_callable=io.StringIO) as stderr, \
+             self.assertRaises(SystemExit) as raised:
+            runner.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("cloud acceptance is paused by A6", stderr.getvalue())
+
+    def test_gmail_gate_requires_ten_drafts_or_three_send_approvals(self) -> None:
+        cases = (
+            (["run_job.py", "gmail", "--runs", "1", "--gmail-recipient", "checker@example.invalid"],
+             "Gmail draft acceptance requires exactly 10 runs"),
+            (["run_job.py", "gmail", "--runs", "10", "--gmail-recipient", "checker@example.invalid",
+              "--send-approval-check"], "Gmail Send approval acceptance requires exactly 3 runs"),
+        )
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments), patch.object(sys, "argv", arguments), \
+                 patch("sys.stderr", new_callable=io.StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                runner.main()
+            self.assertEqual(raised.exception.code, 2)
+            self.assertIn(message, stderr.getvalue())
 
     @staticmethod
     def exact_metadata() -> dict:
         return {"raw_outcome": "taskCompleted", "evidence": {
             "draft_create_approved_count": 0, "gmail": {
-                "url_is_gmail": True, "compose_count": 1,
-                "recipient_matches": True, "subject_matches": True,
-                "body_matches": True, "attachment_name_visible": True,
-                "attachment_size_visible": True, "attachment_bytes_verified": False,
+                "draft_saved_verified": True, "saved_draft_count": 1,
+                "saved_attachment_count": 1,
+                "saved_draft_url": "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_ownedDraft123",
+                "saved_to_matches": True, "saved_subject_matches": True,
+                "saved_body_matches": True, "saved_attachment_name_visible": True,
+                "saved_attachment_size_visible": True, "attachment_bytes_verified": False,
                 "harness_granted_approvals": 0, "approval_responses_denied": 0,
                 "approval_events": [], "approval_events_omitted": 0,
             }}}
@@ -239,7 +425,7 @@ class EmailPromptTests(unittest.TestCase):
             self.assertIn("latest Board Review deck in Downloads", prompts[0])
             self.assertIn("most recently modified Board Review presentation in Downloads", prompts[1])
             self.assertIn("newest Board Review deck in Downloads", prompts[2])
-            self.assertTrue(all("leave it open for review; do not send" in prompt for prompt in prompts))
+            self.assertTrue(all("Save this draft for review and never send it" in prompt for prompt in prompts))
 
             send_expected, returned_stage, staged_hash = runner.make_expected(
                 "email", "send-run", 1, fixture, None, send_approval_check=True,

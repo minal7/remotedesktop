@@ -3063,6 +3063,40 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testGmailWithoutLocalContentExtractorStopsAtSetupHandoff() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "gmail-without-content-extractor"
+        let prompt = "Draft an email to reviewer@example.invalid with subject Update and body Please review."
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: prompt, tools: fixture.tools)
+        let setupKeyCount = fixture.desktop.keyCount
+        var proposalCalls = 0
+        var nativePlannerCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { _ in
+                proposalCalls += 1
+                return .init(response: "Unexpected fallback", action: .reportCompletion("Unexpected fallback"))
+            }, nativeControlPlanner: { _, _ in
+                nativePlannerCalls += 1
+                return .askUser("Unexpected native control fallback")
+            })
+
+        let result = try await executor.execute(taskID: taskID, prompt: prompt, trustedUserPrompt: prompt,
+            tools: fixture.tools, progress: { _ in })
+
+        guard case .userInterventionRequired(let message) = result else {
+            return XCTFail("Gmail without its local content capability must stop for setup, got \(result)")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("gmail"))
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("setup"))
+        XCTAssertEqual(proposalCalls, 0, "Missing local extraction must not invoke Fara or visual fallback")
+        XCTAssertEqual(nativePlannerCalls, 0, "Missing local extraction must not dispatch native control planning")
+        XCTAssertEqual(fixture.desktop.keyCount, setupKeyCount,
+            "Setup handoff must not send browser input beyond the fixture's initial setup key")
+    }
+
+    @MainActor
     func testSelectedFileCompletionDoesNotPassWhileDispatchedChooserRemainsOpen() async throws {
         let run = try await runSelectedFileCompletionFixture(
             answer: try Self.live09RetainedCompletionAnswer(), dispatchChooserConfirmation: true,

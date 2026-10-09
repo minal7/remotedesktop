@@ -110,7 +110,8 @@ final class MCPFirstComputerUseExecutor:
     ComputerUseTaskAwareExecuting,
     MCPApprovalContinuing,
     ComputerUseVisualApprovalContinuing,
-    ComputerUseTextClarificationContinuing {
+    ComputerUseTextClarificationContinuing,
+    ComputerUseGmailApprovalPresenting {
     /// Host-only proof that a validated native answer used selected records
     /// from one exact page observation. Never decoded from model output.
     struct NativeReadCompletion: Sendable {
@@ -683,6 +684,17 @@ final class MCPFirstComputerUseExecutor:
         }
         documentRun = nil
 
+        // A6 chooses the requested web destination before native capability
+        // planning. Installed desktop clients never change this route.
+        switch ComputerUseWebJobRequest.route(trustedUserPrompt) {
+        case .gmail, .googleDriveUpload, .dropboxUpload:
+            return try await executeVisualFallback(usingBrowser: true)
+        case .ambiguousStorage:
+            return .clarificationRequired("Should I upload the file to Google Drive or Dropbox?")
+        case .explicitAppleMail, .none:
+            break
+        }
+
         if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
             taskID: taskID, prompt: trustedUserPrompt, progress: progress) {
             try Task.checkCancellation()
@@ -1236,6 +1248,10 @@ final class MCPFirstComputerUseExecutor:
             try await visualContinuation.continueAfterApprovedVisualAction(continuation,
                 action: action, tools: tools, progress: progress)
         }
+    }
+
+    func gmailApprovalPresentation(for action: ComputerUsePredictedAction) -> MCPComputerUseApprovalPresentation? {
+        (retainedExecutor as? any ComputerUseGmailApprovalPresenting)?.gmailApprovalPresentation(for: action)
     }
 
     func cancelVisualApprovalContinuation(

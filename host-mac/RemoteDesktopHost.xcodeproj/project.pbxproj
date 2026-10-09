@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C0FFEE060A00100000000007 /* ComputerUseGmailJobTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000008 /* ComputerUseGmailJobTests.swift */; };
+		C0FFEE060A00100000000005 /* ComputerUseWebJobRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000006 /* ComputerUseWebJobRequestTests.swift */; };
+		C0FFEE060A00100000000003 /* ComputerUseGmailJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000004 /* ComputerUseGmailJob.swift */; };
+		C0FFEE060A00100000000001 /* ComputerUseWebJobRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000002 /* ComputerUseWebJobRequest.swift */; };
 		E70F3EE9AA8F4A6FB13FD901 /* CoreJobAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */; };
 		E0F002F002F002F002F00202 /* FARA-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00102 /* FARA-NOTICE.txt */; };
 		E0F002F002F002F002F00203 /* HOLO-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */; };
@@ -326,6 +330,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		C0FFEE060A00100000000008 /* ComputerUseGmailJobTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseGmailJobTests.swift; sourceTree = "<group>"; };
+		C0FFEE060A00100000000006 /* ComputerUseWebJobRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseWebJobRequestTests.swift; sourceTree = "<group>"; };
+		C0FFEE060A00100000000004 /* ComputerUseGmailJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseGmailJob.swift; sourceTree = "<group>"; };
+		C0FFEE060A00100000000002 /* ComputerUseWebJobRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseWebJobRequest.swift; sourceTree = "<group>"; };
 		E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreJobAcceptanceTests.swift; sourceTree = "<group>"; };
 		E0F001F001F001F001F00102 /* FARA-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-NOTICE.txt"; sourceTree = "<group>"; };
 		E0F001F001F001F001F00103 /* HOLO-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "HOLO-NOTICE.txt"; sourceTree = "<group>"; };
@@ -716,6 +724,8 @@
 				E70F3EE9AA8F4A6FB13FD902 /* CoreJobAcceptanceTests.swift */,
 				C0FFEE010A00100000000004 /* ComputerUseMailRecipientsTests.swift */,
 				C0FFEE020A00100000000004 /* RemoteDesktopCloudStorageMCPTests.swift */,
+				C0FFEE060A00100000000008 /* ComputerUseGmailJobTests.swift */,
+				C0FFEE060A00100000000006 /* ComputerUseWebJobRequestTests.swift */,
 				FD18C4E425AE91D459520417 /* AppleFoundationMCPPlannerTests.swift */,
 				535E648C4EAC1E7F0DC72B69 /* ComputerUseLocalFileCatalogTests.swift */,
 				DED10FA558220D304359BD34 /* ComputerUseActionTextPlanTests.swift */,
@@ -940,6 +950,8 @@
 				C9BE58B6666FC5BBCD6E2DBE /* RemoteDesktopMailMCP.swift */,
 				C0FFEE010A00100000000002 /* ComputerUseMailRecipients.swift */,
 				C0FFEE020A00100000000002 /* RemoteDesktopCloudStorageMCP.swift */,
+				C0FFEE060A00100000000004 /* ComputerUseGmailJob.swift */,
+				C0FFEE060A00100000000002 /* ComputerUseWebJobRequest.swift */,
 				87C85D18EE74BFDF5C71512D /* SemanticCandidateSelectionV5.swift */,
 				DE19039ABF07FF04D9C8B835 /* SemanticNativeToolWireContract.swift */,
 			);
@@ -1186,6 +1198,8 @@
 				E70F3EE9AA8F4A6FB13FD901 /* CoreJobAcceptanceTests.swift in Sources */,
 				C0FFEE010A00100000000003 /* ComputerUseMailRecipientsTests.swift in Sources */,
 				C0FFEE020A00100000000003 /* RemoteDesktopCloudStorageMCPTests.swift in Sources */,
+				C0FFEE060A00100000000007 /* ComputerUseGmailJobTests.swift in Sources */,
+				C0FFEE060A00100000000005 /* ComputerUseWebJobRequestTests.swift in Sources */,
 				5EA25BB8F67C3AD701724649 /* AppleFoundationMCPPlannerTests.swift in Sources */,
 				55A2A0BAF6B182A15DF84ED7 /* ComputerUseActionTextPlanTests.swift in Sources */,
 				8D60C6AE0848631F3AE83F4B /* ComputerUseBrowserDOMTests.swift in Sources */,
@@ -1437,6 +1451,8 @@
 				13010C7EF366983504391D6E /* RemoteDesktopMailMCP.swift in Sources */,
 				C0FFEE010A00100000000001 /* ComputerUseMailRecipients.swift in Sources */,
 				C0FFEE020A00100000000001 /* RemoteDesktopCloudStorageMCP.swift in Sources */,
+				C0FFEE060A00100000000003 /* ComputerUseGmailJob.swift in Sources */,
+				C0FFEE060A00100000000001 /* ComputerUseWebJobRequest.swift in Sources */,
 				5BEA124BF32042E307D79208 /* ScreenCapture.swift in Sources */,
 				1DB896FEBF27E320F0A2B5F3 /* SemanticCandidateSelectionV5.swift in Sources */,
 				D22E96536F20DF25230499D9 /* SemanticNativeToolWireContract.swift in Sources */,

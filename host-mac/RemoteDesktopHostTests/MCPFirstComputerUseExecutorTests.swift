@@ -86,6 +86,56 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         }
     }
 
+    func testA6WebDestinationsBypassNativePlannerWhileExplicitAppleMailStaysNative() async throws {
+        let webPrompts = [
+            "Draft an email to reviewer@example.invalid with subject Update and body Please review.",
+            "Upload the selected spreadsheet to Dropbox.",
+            "Add the latest presentation to Google Drive.",
+        ]
+        for (index, prompt) in webPrompts.enumerated() {
+            let planner = StubMCPPlanner(mode: .mail)
+            let pool = StubMCPClientPool(tools: [try makeMailTool()])
+            let desktop = StubVisualExecutor(result: .unableToComplete("Should not enter the desktop fallback"))
+            let browser = StubVisualExecutor(result: .completed("Web route selected"))
+            var browserFactoryCalls = 0
+            let executor = try await MCPFirstComputerUseExecutor.load(
+                binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: desktop,
+                planner: planner, clientPool: pool, browserExecutorFactory: {
+                    browserFactoryCalls += 1
+                    return browser
+                })
+            let result = try await executor.execute(taskID: "a6-web-route-\(index)", prompt: prompt,
+                trustedUserPrompt: prompt, tools: makeHostTools(), progress: { _ in })
+            XCTAssertEqual(result, .completed("Web route selected"))
+            XCTAssertTrue(planner.planningRequests.isEmpty, "Web destinations must not start native MCP planning")
+            XCTAssertEqual(browserFactoryCalls, 1)
+            XCTAssertEqual(browser.callCount, 1)
+            XCTAssertEqual(desktop.callCount, 0)
+            let helperStarts = await pool.helperStartCount()
+            XCTAssertEqual(helperStarts, 1, "Loading initializes the shared helper; the web route must bypass native planning and actions")
+        }
+
+        let planner = StubMCPPlanner(mode: .clarification)
+        let pool = StubMCPClientPool(tools: [try makeMailTool()])
+        let browser = StubVisualExecutor()
+        var browserFactoryCalls = 0
+        let executor = try await MCPFirstComputerUseExecutor.load(
+            binaryURL: URL(fileURLWithPath: "/test/helper"), visualFallback: StubVisualExecutor(),
+            planner: planner, clientPool: pool, browserExecutorFactory: {
+                browserFactoryCalls += 1
+                return browser
+            })
+        let explicitMailPrompt = "In Apple Mail, draft an email to reviewer@example.invalid."
+        let result = try await executor.execute(taskID: "a6-explicit-mail", prompt: explicitMailPrompt,
+            trustedUserPrompt: explicitMailPrompt, tools: makeHostTools(), progress: { _ in })
+        XCTAssertEqual(result, .clarificationRequired("Which document should I use?"))
+        XCTAssertEqual(planner.planningRequests.count, 1)
+        XCTAssertEqual(browserFactoryCalls, 0)
+        XCTAssertEqual(browser.callCount, 0)
+        let helperStarts = await pool.helperStartCount()
+        XCTAssertEqual(helperStarts, 2, "Explicit Apple Mail initializes and enters the existing native helper path")
+    }
+
 #if canImport(FoundationModels)
     @available(macOS 26.0, *)
     private func runProductionPlannerPresentationFileProbe(
@@ -148,7 +198,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 browserFactoryCalls += 1
                 return browserFallback
             })
-        let goal = "Draft an email to demo@example.invalid with subject \"Quarterly review\" and body \"Please review the latest presentation.\" Attach the most recently modified PowerPoint presentation in Downloads. Do not send the message; prepare a draft for review."
+        let goal = "In Apple Mail, draft an email to demo@example.invalid with subject \"Quarterly review\" and body \"Please review the latest presentation.\" Attach the most recently modified PowerPoint presentation in Downloads. Do not send the message; prepare a draft for review."
         defer { executor.cancelMCPWork() }
         defer {
             let attachment = XCTAttachment(string: diagnosticTrace.snapshot().joined(separator: "\n"))
@@ -1640,7 +1690,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: fallback, planner: planner, clientPool: pool)
-        let prompt = "Send the exact acceptance email, then list my reminders."
+        let prompt = "In Apple Mail, send the exact acceptance email, then list my reminders."
         let initial = try await executor.execute(taskID: "compound-approved", prompt: prompt, tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = initial else { return XCTFail("An exact action must still require approval") }
         let confirmed = try await executor.continueAfterApproval(prepared, tools: makeHostTools(), progress: { _ in })
@@ -1680,7 +1730,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 factoryCalls += 1
                 return try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email and attach the latest presentation in Downloads."
+        let goal = "In Apple Mail, draft an email and attach the latest presentation in Downloads."
         let result = try await executor.execute(taskID: "described-mail-file", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
 
@@ -1930,7 +1980,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email with the latest Board Review deck attached from Downloads."
+        let goal = "In Apple Mail, draft an email with the latest Board Review deck attached from Downloads."
         let result = try await executor.execute(taskID: "broadened-mail-file", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         guard case .completed = result else {
@@ -1975,7 +2025,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email with the latest Board Review deck attached from Downloads."
+        let goal = "In Apple Mail, draft an email with the latest Board Review deck attached from Downloads."
         let result = try await executor.execute(taskID: "empty-broadened-mail-file", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         guard case .clarificationRequired = result else {
@@ -2174,7 +2224,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email and attach the spreadsheet named Quarterly Spec."
+        let goal = "In Apple Mail, draft an email and attach the spreadsheet named Quarterly Spec."
         let result = try await executor.execute(taskID: "fragment-file", prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
         guard case .completed("Email draft opened visibly in Mail for review.") = result else {
@@ -2208,7 +2258,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Attach the latest presentation in Downloads to a draft email."
+        let goal = "In Apple Mail, attach the latest presentation in Downloads to a draft email."
         let result = try await executor.execute(taskID: "nonbest-file", prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
         guard case .userInterventionRequired(let message) = result else {
@@ -2325,7 +2375,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         var finished = false
         let request = Task { () -> Result<ComputerUseExecutionResult, Error> in
             defer { finished = true }
-            do { return .success(try await executor.execute(taskID: "stopped", prompt: "Draft the exact acceptance email.", tools: makeHostTools(), progress: { _ in })) }
+            do { return .success(try await executor.execute(taskID: "stopped", prompt: "In Apple Mail, draft the exact acceptance email.", tools: makeHostTools(), progress: { _ in })) }
             catch { return .failure(error) }
         }
         await fulfillment(of: [startGate.started], timeout: 1)
@@ -2353,7 +2403,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     private enum PreparationStage { case startup, discovery, preparation }
 
     private var exactPreparationPrompt: String {
-        "Draft an email to reviewer@example.invalid with subject Status and body The draft is ready for review."
+        "In Apple Mail, draft an email to reviewer@example.invalid with subject Status and body The draft is ready for review."
     }
 
     private func assertPreparationCancellation(at stage: PreparationStage, structured: Bool = false) async throws {
@@ -2433,7 +2483,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
     }
 
     func testPlanningDeadlineNeverFallsBackOrPreparesLateCalls() async throws {
-        for prompt in ["What application is focused?", "Draft the exact acceptance email."] {
+        for prompt in ["What application is focused?", "In Apple Mail, draft the exact acceptance email."] {
             let worker = ComputerUsePlanningWorker()
             let gate = ComputerUsePlanningTestGate<Void>(started: expectation(description: "planner started \(prompt)"),
                                                         returned: expectation(description: "planner returned \(prompt)"))
@@ -2597,7 +2647,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: StubMCPPlanner(mode: .mail), clientPool: pool,
             planningWorker: ComputerUsePlanningWorker())
-        let result = try await executor.execute(taskID: "approved", prompt: "Send the exact acceptance email.", tools: makeHostTools(), progress: { _ in })
+        let result = try await executor.execute(taskID: "approved", prompt: "In Apple Mail, send the exact acceptance email.", tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("The fixture needs an exact prepared action") }
         var finished = false
         let approved = Task {
@@ -2707,7 +2757,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: ComputerUseDeferredVisualExecutor(), planner: planner, clientPool: pool)
         XCTAssertTrue(executor.isReady)
         XCTAssertTrue(executor.hasAdditionalSetup)
-        let result = try await executor.execute(taskID: "structured-only", prompt: "Send the exact acceptance email.",
+        let result = try await executor.execute(taskID: "structured-only", prompt: "In Apple Mail, send the exact acceptance email.",
             tools: makeHostTools(), progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else { return XCTFail("Exact approval must still be required") }
         let before = await pool.approvedExecuteCount()
@@ -2726,7 +2776,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let structured = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: deferred, planner: StubMCPPlanner(mode: .draft), clientPool: pool)
-        _ = try await structured.execute(taskID: "draft", prompt: "Draft the exact acceptance email.",
+        _ = try await structured.execute(taskID: "draft", prompt: "In Apple Mail, draft the exact acceptance email.",
             tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(loads, 0)
         let needsVisual = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
@@ -2872,7 +2922,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let first = try await executor.execute(
             taskID: "task-email-draft",
-            prompt: "Send the exact acceptance email.",
+            prompt: "In Apple Mail, send the exact acceptance email.",
             tools: makeHostTools(),
             progress: { _ in })
 
@@ -3208,7 +3258,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             "attachment_paths": .array([.string(path)]),
         ]
 
-        let guessedPrompt = "Draft an email to reviewer@example.invalid and attach the exact file at \"\(longerQuotedPath)\"."
+        let guessedPrompt = "In Apple Mail, draft an email to reviewer@example.invalid and attach the exact file at \"\(longerQuotedPath)\"."
         let guessedPool = RecordingMCPClientPool(tools: [mail], resultsByTool: [
             RemoteDesktopMailMCP.toolName: try verifiedDraftResult(attachmentPaths: [path]),
         ])
@@ -3238,7 +3288,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         ])
         let contactText = try XCTUnwrap(String(
             data: MCPDigest.canonicalData(for: contactContent), encoding: .utf8))
-        let contactsPrompt = "Find Jordan Lee in my Contacts, then draft an email to Jordan Lee and attach the relevant presentation."
+        let contactsPrompt = "Find Jordan Lee in my Contacts, then draft an email in Apple Mail to Jordan Lee and attach the relevant presentation."
         let resultOnlyPool = RecordingMCPClientPool(tools: [contacts, mail], resultsByTool: [
             "contacts_search": try MCPToolResult(text: contactText, structuredContent: contactContent,
                 isError: false, wasTruncated: false),
@@ -3268,7 +3318,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         XCTAssertTrue(resultOnlyApproved.isEmpty)
         resultOnlyExecutor.cancelMCPWork()
 
-        let explicitPrompt = "Draft an email to reviewer@example.invalid and attach the exact file at \"\(path)\"."
+        let explicitPrompt = "In Apple Mail, draft an email to reviewer@example.invalid and attach the exact file at \"\(path)\"."
         let explicitPool = RecordingMCPClientPool(tools: [mail], resultsByTool: [
             RemoteDesktopMailMCP.toolName: try verifiedDraftResult(attachmentPaths: [path]),
         ])
@@ -5250,7 +5300,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool)
         let taskID = "contact-then-detailed-mail"
-        let prompt = "Find Jordan Lee in my Contacts, then send them a detailed email with subject Saturday food-drive pickup details. Say the pickup is Saturday at 10:00 AM at the Oak Street community center, ask them to bring the labeled pantry boxes to the east entrance, and thank them."
+        let prompt = "Find Jordan Lee in my Contacts, then in Apple Mail send them a detailed email with subject Saturday food-drive pickup details. Say the pickup is Saturday at 10:00 AM at the Oak Street community center, ask them to bring the labeled pantry boxes to the east entrance, and thank them."
 
         let firstResult = try await executor.execute(
             taskID: taskID,
@@ -5585,7 +5635,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         Recent conversation (oldest to newest):
         User: Open Calculator.
         Assistant: Done. I completed the task.
-        Current user request: Send an email to current@example.com saying Current task only.
+        Current user request: In Apple Mail, send an email to current@example.com saying Current task only.
         """
 
         let result = try await executor.execute(
@@ -5620,7 +5670,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let result = try await executor.execute(
             taskID: "task-open-and-mail",
-            prompt: "Open Mail and send an email to current@example.com saying Hello.",
+            prompt: "Open Apple Mail and send an email to current@example.com saying Hello.",
             tools: makeHostTools(),
             progress: { _ in })
 
@@ -5676,7 +5726,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let outcome = await captureExecution {
             try await executor.execute(
                 taskID: "task-repeated-read-mail",
-                prompt: "Send an email with an attachment",
+                prompt: "In Apple Mail, send an email with an attachment",
                 tools: makeHostTools(),
                 progress: { _ in })
         }
@@ -5701,7 +5751,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+        let prompt = "In Apple Mail, draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         do {
             _ = try await executor.execute(
@@ -5729,7 +5779,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+        let prompt = "In Apple Mail, draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         do {
             _ = try await executor.execute(
@@ -5758,7 +5808,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+        let prompt = "In Apple Mail, draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
             taskID: "mail-visual-handoff",
@@ -5789,7 +5839,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             planner: planner,
             clientPool: pool,
             browserExecutorFactory: { browser })
-        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+        let prompt = "In Apple Mail, draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
             taskID: "mail-browser-handoff",
@@ -5819,7 +5869,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             visualFallback: fallback,
             planner: planner,
             clientPool: pool)
-        let prompt = "Draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
+        let prompt = "In Apple Mail, draft an email to demo@example.com with subject Spec update and body Please review the attached spec; attach the latest presentation in Downloads."
 
         let result = try await executor.execute(
             taskID: "task-mail-attachment-requirement",
@@ -5859,7 +5909,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let result = try await executor.execute(
             taskID: "task-draft",
-            prompt: "Draft an email to Alex saying the acceptance test passed for review without sending it.",
+            prompt: "In Apple Mail, draft an email to Alex saying the acceptance test passed for review without sending it.",
             tools: makeHostTools(),
             progress: { _ in })
 
@@ -5892,7 +5942,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let result = try await executor.execute(
             taskID: "task-preflight",
-            prompt: "Send Alex an email saying the acceptance test passed.",
+            prompt: "In Apple Mail, send Alex an email saying the acceptance test passed.",
             tools: makeHostTools(),
             progress: { _ in })
         guard case .mcpApprovalRequired(let prepared) = result else {
@@ -5957,7 +6007,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
 
         let result = try await executor.execute(
             taskID: "task-send",
-            prompt: "Send Alex an email saying the acceptance test passed.",
+            prompt: "In Apple Mail, send Alex an email saying the acceptance test passed.",
             tools: makeHostTools(),
             progress: { _ in })
 
@@ -5995,7 +6045,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let outcome = await captureExecution {
             try await executor.execute(
                 taskID: "task-hallucination",
-                prompt: "Send the email",
+                prompt: "In Apple Mail, send the email",
                 tools: makeHostTools(),
                 progress: { _ in })
         }
@@ -6061,7 +6111,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: fallback, planner: planner, clientPool: pool)
-        let goal = "Find Jordan Lee in my Contacts, then draft an email to them with subject Project update and body Please review the specification."
+        let goal = "Find Jordan Lee in my Contacts, then draft an email in Apple Mail to them with subject Project update and body Please review the specification."
         let first: ComputerUseExecutionResult
         do {
             first = try await executor.execute(taskID: "generic-clarification-root", prompt: goal,
@@ -6153,7 +6203,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let fallback = StubVisualExecutor()
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: fallback, planner: planner, clientPool: pool)
-        let goal = "Find Avery in my Contacts, then draft an email to Jordan Lee with subject \"Project update\" and body \"Please update Jordan's contact email.\""
+        let goal = "Find Avery in my Contacts, then draft an email in Apple Mail to Jordan Lee with subject \"Project update\" and body \"Please update Jordan's contact email.\""
         let outcome = await captureExecution {
             try await executor.execute(taskID: "cross-clause-contact-authority", prompt: goal,
                 trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
@@ -6183,7 +6233,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 browserFactoryCalls += 1
                 return browser
             })
-        let goal = "Find a source in my signed-in browser and draft an email summarizing it."
+        let goal = "Find a source in my signed-in browser and draft an email in Apple Mail summarizing it."
         let initial = try await executor.execute(taskID: "clarified-browser-root", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(initial, .clarificationRequired(question))
@@ -6344,7 +6394,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 browserFactoryCalls += 1
                 return browser
             })
-        let goal = "Draft an email with the Spec spreadsheet attached."
+        let goal = "In Apple Mail, draft an email with the Spec spreadsheet attached."
         let initial = try await executor.execute(taskID: "selected-file-route-root", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(initial, .clarificationRequired(question))
@@ -6390,7 +6440,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 return browser
             })
         let rootID = "selected-file-after-answer-root"
-        let goal = "Draft an email with the Spec spreadsheet attached."
+        let goal = "In Apple Mail, draft an email with the Spec spreadsheet attached."
         let initial = try await executor.execute(taskID: rootID, prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(initial, .clarificationRequired(question))
@@ -6423,7 +6473,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool)
-        let goal = "Draft an email to a recipient and ask me for missing details."
+        let goal = "In Apple Mail, draft an email to a recipient and ask me for missing details."
         let firstResult = try await executor.execute(taskID: "clarification-chain-root", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(firstResult, .clarificationRequired(recipientQuestion))
@@ -6461,7 +6511,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             let pool = StubMCPClientPool(tools: [try makeMailTool()])
             let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
                 visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool)
-            let goal = "Draft an email to demo@example.invalid."
+            let goal = "In Apple Mail, draft an email to demo@example.invalid."
             let rootID = "invalid-generic-root-\(failure)"
             _ = try await executor.execute(taskID: rootID, prompt: goal,
                 trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
@@ -6510,7 +6560,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner,
             clientPool: StubMCPClientPool(tools: [try makeMailTool()]))
-        let goal = "Draft an email to demo@example.invalid."
+        let goal = "In Apple Mail, draft an email to demo@example.invalid."
         let rootID = "expired-generic-root"
         _ = try await executor.execute(taskID: rootID, prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
@@ -6550,7 +6600,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool)
-        let goal = "Draft an email to demo@example.invalid."
+        let goal = "In Apple Mail, draft an email to demo@example.invalid."
         _ = try await executor.execute(taskID: "cancel-generic-root", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         guard let pending = try executor.clarification(taskID: "cancel-generic-root") else {
@@ -6596,7 +6646,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
             localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email with the Spec spreadsheet attached."
+        let goal = "In Apple Mail, draft an email with the Spec spreadsheet attached."
         let first = try await executor.execute(taskID: "file-recipient-root", prompt: goal,
             trustedUserPrompt: goal, tools: makeHostTools(), progress: { _ in })
         XCTAssertEqual(first, .clarificationRequired(question))
@@ -6651,7 +6701,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
                 catalogFactories += 1
                 return try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: directory, pageSize: 8)
             })
-        let goal = "Draft an email with the most recently modified spreadsheet attached. Ask me for the recipient if needed."
+        let goal = "In Apple Mail, draft an email with the most recently modified spreadsheet attached. Ask me for the recipient if needed."
         let rootID = "clarified-tied-file-root"
         let initialResult = try await executor.execute(taskID: rootID, prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })
@@ -6786,7 +6836,7 @@ final class MCPFirstComputerUseExecutorTests: XCTestCase {
         let pool = StubMCPClientPool(tools: [try makeMailTool()])
         let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: "/test/helper"),
             visualFallback: StubVisualExecutor(), planner: planner, clientPool: pool)
-        let goal = "Draft an email and ask me for any missing details."
+        let goal = "In Apple Mail, draft an email and ask me for any missing details."
         let rootID = "multi-clarification-invalidation-root"
         _ = try await executor.execute(taskID: rootID, prompt: goal, trustedUserPrompt: goal,
             tools: makeHostTools(), progress: { _ in })

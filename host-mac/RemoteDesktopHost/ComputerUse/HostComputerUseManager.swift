@@ -8819,9 +8819,15 @@ final class HostComputerUseManager: ObservableObject {
                     continuationToken)
                 throw error
             }
+            // Gmail adds host-verified review fields to the existing native
+            // action approval. Its fingerprint and dispatch remain unchanged.
+            let gmailPresentation = (executor as? any ComputerUseGmailApprovalPresenting)?
+                .gmailApprovalPresentation(for: proposedAction)
             let request = ComputerUseApprovalRequest(
                 taskID: envelope.id,
-                message: prepared.message)
+                message: prepared.message,
+                details: gmailPresentation?.details,
+                confirmLabel: gmailPresentation?.confirmLabel)
             enterApproval(
                 PendingApproval(
                     request: request,

@@ -1935,6 +1935,34 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
+    func extractWebJobContent(endpoint: OSAtlasLlamaEndpoint,
+        originalRequest: String, clarifications: [[String: String]] = []
+    ) async throws -> ComputerUseWebJobContentExtractor.Extraction {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
+                bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseWebJobContentExtractor(connection: connection, transport: server.transport)
+            let plan = try await withTaskCancellationHandler {
+                try await planner.propose(originalRequest: originalRequest, clarifications: clarifications)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return plan
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
     func proposeDefaultBrowserControl(endpoint: OSAtlasLlamaEndpoint,
         input: ComputerUseFaraModel.Input,
         page: ComputerUseDefaultBrowserPageReader.Observation,

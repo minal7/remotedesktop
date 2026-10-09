@@ -7594,7 +7594,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         manager.authorizePeer(senderID: "IOS-PEER")
         let prompt = ComputerUseEnvelope(id: "independent-send-approval", senderID: "IOS-PEER", targetID: "HOST-ID",
             pairingCode: "123456", sessionID: "SESSION-1", kind: .prompt,
-            body: "Send an email to codex-acceptance@example.invalid with subject \"Status\" and body \"Everything is on schedule.\"")
+            body: "In Apple Mail, send an email to codex-acceptance@example.invalid with subject \"Status\" and body \"Everything is on schedule.\"")
         XCTAssertTrue(manager.handle(prompt, channel: channel))
         for _ in 0 ..< 200 {
             if case .awaitingApproval = manager.activity { break }

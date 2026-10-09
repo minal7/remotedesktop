@@ -176,6 +176,24 @@ def validate_gmail_compose_url(value: Any) -> str | None:
     return value
 
 
+def gmail_draft_identity(value: Any) -> tuple[str, str] | None:
+    """Return the Gmail account path and exact draft ID, ignoring mailbox view."""
+    normalized = validate_gmail_compose_url(value)
+    if normalized is None:
+        return None
+    parsed = urlparse(normalized)
+    identifiers: set[str] = set()
+    for query in (parsed.query, parsed.fragment.split("?", 1)[-1]):
+        identifiers.update(parse_qs(query, keep_blank_values=True).get("compose", []))
+    draft_match = re.search(r"(?:^|/)drafts/([A-Za-z0-9_-]{8,256})(?:$|[/?&])", parsed.fragment)
+    if draft_match:
+        identifiers.add(draft_match.group(1))
+    identifiers = {item for item in identifiers if re.fullmatch(r"[A-Za-z0-9_-]{8,256}", item)}
+    if len(identifiers) != 1:
+        raise AcceptanceError("Owned Gmail URL does not identify exactly one draft")
+    return parsed.path, next(iter(identifiers))
+
+
 def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, int, str | None]:
     """Persist one owned Gmail subject token and reuse its canonical attachment."""
     TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -188,18 +206,30 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
             raise AcceptanceError("Gmail acceptance session is invalid") from error
         token = saved.get("token") if isinstance(saved, dict) else None
         attempts = saved.get("attempts", 0) if isinstance(saved, dict) else 0
-        existing_draft_url = validate_gmail_compose_url(saved.get("existing_draft_url") if isinstance(saved, dict) else None)
+        candidate_url = validate_gmail_compose_url(saved.get("existing_draft_url") if isinstance(saved, dict) else None)
+        draft_verified = candidate_url is not None and isinstance(saved, dict) and saved.get("draft_saved_verified") is True
+        retry_url = validate_gmail_compose_url(saved.get("retry_compose_url") if isinstance(saved, dict) else None)
+        existing_draft_url = candidate_url if draft_verified else retry_url
+        legacy_url = (saved.get("legacy_unverified_compose_url") if isinstance(saved, dict) else None)
+        if candidate_url and existing_draft_url is None:
+            legacy_url = candidate_url
+        legacy_url = validate_gmail_compose_url(legacy_url)
         if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
             raise AcceptanceError("Gmail acceptance session token is invalid")
         if not isinstance(attempts, int) or attempts < 0:
             raise AcceptanceError("Gmail acceptance session attempt counter is invalid")
-        attempts += 1
+        attempts = 1 if candidate_url and existing_draft_url is None else attempts + 1
     else:
         token = uuid.uuid4().hex
         attempts = 1
         existing_draft_url = None
-    payload = json.dumps({"schema_version": 1, "token": token, "attempts": attempts,
-                          **({"existing_draft_url": existing_draft_url} if existing_draft_url else {})},
+        draft_verified = False
+        legacy_url = None
+    payload = json.dumps({"schema_version": 2, "token": token, "attempts": attempts,
+                          "draft_saved_verified": bool(draft_verified),
+                          **({"existing_draft_url": existing_draft_url} if existing_draft_url and draft_verified else {}),
+                          **({"retry_compose_url": existing_draft_url} if existing_draft_url and not draft_verified else {}),
+                          **({"legacy_unverified_compose_url": legacy_url} if legacy_url else {})},
                          sort_keys=True) + "\n"
     temp = GMAIL_SESSION_PATH.with_name(GMAIL_SESSION_PATH.name + ".tmp")
     if temp.exists() or temp.is_symlink():
@@ -225,6 +255,76 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
     return token, subject, staged, attempts, existing_draft_url
+
+
+def persist_verified_gmail_draft_url(gmail: tuple[str, str, Path, str, int, str | None],
+                                     outcome_path: Path) -> tuple[str, str, Path, str, int, str | None]:
+    try:
+        outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+        evidence = outcome["evidence"]["gmail"]
+        raw_url = evidence.get("saved_draft_url")
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return gmail
+    if evidence.get("draft_saved_verified") is not True:
+        return gmail
+    url = validate_gmail_compose_url(raw_url)
+    if url is None:
+        return gmail
+    token, subject, staged, recipient, attempt, _ = gmail
+    if GMAIL_SESSION_PATH.is_symlink():
+        raise AcceptanceError("Gmail acceptance session must not be a symlink")
+    saved = json.loads(GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+    if not isinstance(saved, dict) or saved.get("token") != token:
+        raise AcceptanceError("Gmail acceptance session changed during the run")
+    saved["schema_version"] = 2
+    saved["existing_draft_url"] = url
+    saved.pop("retry_compose_url", None)
+    saved["draft_saved_verified"] = True
+    temp = GMAIL_SESSION_PATH.with_name(GMAIL_SESSION_PATH.name + ".tmp")
+    if temp.exists() or temp.is_symlink():
+        raise AcceptanceError("Gmail acceptance session update is already in progress")
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(saved, sort_keys=True) + "\n")
+    os.replace(temp, GMAIL_SESSION_PATH)
+    return token, subject, staged, recipient, attempt, url
+
+
+def persist_gmail_retry_compose_url(gmail: tuple[str, str, Path, str, int, str | None],
+                                    outcome_path: Path) -> tuple[str, str, Path, str, int, str | None]:
+    """Retain an exact-token draft target after a failed oracle, never as acceptance."""
+    try:
+        outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+        evidence = outcome["evidence"]["gmail"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return gmail
+    if not isinstance(evidence, dict):
+        return gmail
+    saved_subject_match = evidence.get("saved_subject_matches") is True and evidence.get("saved_draft_count") == 1
+    compose_subject_match = evidence.get("subject_matches") is True and evidence.get("compose_count") == 1
+    saved_url = validate_gmail_compose_url(evidence.get("saved_draft_url")) if saved_subject_match else None
+    compose_url = validate_gmail_compose_url(evidence.get("compose_url")) if compose_subject_match else None
+    url = saved_url if saved_subject_match else compose_url if compose_subject_match else None
+    if url is None:
+        return gmail
+    token, subject, staged, recipient, attempt, _ = gmail
+    if GMAIL_SESSION_PATH.is_symlink():
+        raise AcceptanceError("Gmail acceptance session must not be a symlink")
+    saved = json.loads(GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+    if not isinstance(saved, dict) or saved.get("token") != token:
+        raise AcceptanceError("Gmail acceptance session changed during the run")
+    saved["schema_version"] = 2
+    saved["retry_compose_url"] = url
+    saved.pop("existing_draft_url", None)
+    saved["draft_saved_verified"] = False
+    temp = GMAIL_SESSION_PATH.with_name(GMAIL_SESSION_PATH.name + ".tmp")
+    if temp.exists() or temp.is_symlink():
+        raise AcceptanceError("Gmail acceptance session update is already in progress")
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(saved, sort_keys=True) + "\n")
+    os.replace(temp, GMAIL_SESSION_PATH)
+    return token, subject, staged, recipient, attempt, url
 
 
 def wait_for_spotlight_visibility(path: Path, *, downloads: Path = DOWNLOADS,
@@ -306,21 +406,22 @@ def make_expected(job: str, run_id: str, run_index: int,
             token, subject, _, recipient, attempt, existing_draft_url = gmail
             body = f"Please review the attached {stage.name}."
             if existing_draft_url:
-                draft_instruction = (f"Resume the existing test-owned Gmail compose draft at this exact URL: "
-                    f"{existing_draft_url}. Fill that draft; do not create another draft. If the URL no longer "
-                    "opens the same draft, stop and ask me rather than creating a replacement. ")
+                draft_instruction = "Resume the exact test-owned Gmail draft selected by the host; do not create another draft. "
             elif attempt > 1:
                 draft_instruction = (f"In Gmail already signed in within the default browser, find the test-owned draft with "
                     f"exact subject \"{subject}\" and reuse it. If it is absent, create one. ")
             else:
-                draft_instruction = "In Gmail already signed in within the default browser, create one test-owned draft. "
+                draft_instruction = "Use the Gmail compose opened by the host; do not create another compose. "
+            delivery_instruction = ("Prepare to send this email now, then stop at the host's Send approval prompt. "
+                "Do not confirm or send it. " if send_approval_check else "Save this draft for review and never send it. ")
             expected.update({"gmail_token": token, "to": recipient, "subject": subject, "body": body,
                 "gmail_attempt": attempt,
                 "gmail_existing_draft_url": existing_draft_url,
+                "send_approval_check": send_approval_check,
                 "prompt": (draft_instruction
                     + f"Address it to my own email address for the signed-in account. Use the exact subject \"{subject}\" "
-                    f"and exact body \"{body}\". Attach the file named \"{stage.name}\" from Downloads, leave the draft "
-                    "open for review, and never send it." )})
+                    f"and exact body \"{body}\". Attach the file named \"{stage.name}\" from Downloads. "
+                    + delivery_instruction)})
     if job == "email":
         expected.update({
             "to": "dana@example.com",
@@ -342,8 +443,9 @@ def make_expected(job: str, run_id: str, run_index: int,
         else:
             expected["prompt"] = (
                 f"{discovery_request} to {expected['to']}. Use the exact subject \"{expected['subject']}\" "
-                f"and exact body \"{expected['body']}\". Save it as a draft and leave it open for review; do not send."
+                f"and exact body \"{expected['body']}\". Save this draft for review and never send it."
             )
+        expected["prompt"] = "In Apple Mail, " + expected["prompt"]
     elif job == "cloud":
         if cloud_root is None:
             raise AcceptanceError("No installed cloud sync folder was selected")
@@ -660,24 +762,41 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
     evidence = outcome["evidence"].get("gmail")
     if not isinstance(evidence, dict):
         raise AcceptanceError("Gmail outcome is missing focused browser evidence")
-    if evidence.get("harness_granted_approvals") != 0 or evidence.get("approval_responses_denied") != len(evidence.get("approval_events", [])) + evidence.get("approval_events_omitted", 0):
-        raise AcceptanceError("Gmail baseline must deny every observed approval")
-    if evidence.get("attachment_bytes_verified") is not False:
-        raise AcceptanceError("Gmail baseline must not claim attachment bytes were independently verified")
-    if outcome["evidence"].get("draft_create_approved_count") != 0:
-        raise AcceptanceError("Gmail baseline unexpectedly granted an approval")
-    captured = evidence.get("url_is_gmail") is True and evidence.get("compose_count") == 1
-    fields_exact = captured and all(evidence.get(key) is True for key in (
-        "recipient_matches", "subject_matches", "body_matches",
-        "attachment_name_visible", "attachment_size_visible"))
-    return {"passed": False, "diagnostic_only": True,
-            "reason": ("Gmail draft fields and attachment metadata match; attached bytes still need independent verification."
-                       if fields_exact else "The Gmail workflow has not produced a fully matching visible draft; inspect the recorded outcome and approvals."),
-            "terminal_outcome": outcome["raw_outcome"],
-            "compose_fields_exact": bool(fields_exact),
-            "attachment_name_and_size_visible": bool(fields_exact),
-            "attachment_bytes_verified": False, "harness_granted_approvals": 0,
-            "capture_status": evidence.get("capture_status")}
+    if evidence.get("harness_granted_approvals") != 0 or outcome["evidence"].get("draft_create_approved_count") != 0:
+        raise AcceptanceError("Gmail acceptance must not grant any approval")
+    if expected.get("send_approval_check") is True:
+        if outcome["raw_outcome"] != "approvalRequired" or evidence.get("send_approval_observed") is not True:
+            raise AcceptanceError("Gmail Send run did not stop at the host approval prompt")
+        if (evidence.get("send_approval_count") != 1 or evidence.get("approval_responses_granted") != 0
+                or evidence.get("approval_responses_denied") != 0):
+            raise AcceptanceError("Gmail Send run did not leave exactly one ungranted approval pending")
+        if evidence.get("send_approval_fields_exact") is not True:
+            raise AcceptanceError("Gmail Send approval did not show the exact recipient, subject, message, and attachment")
+        return {"passed": True, "send_approval_observed": True, "stop_state": "approval-pending",
+                "harness_granted_approvals": 0}
+
+    if outcome["raw_outcome"] != "taskCompleted":
+        raise AcceptanceError("Gmail draft run did not complete")
+    if evidence.get("approval_responses_denied", 0) != 0:
+        raise AcceptanceError("Gmail draft run unexpectedly reached an approval prompt")
+    saved_url = validate_gmail_compose_url(evidence.get("saved_draft_url"))
+    expected_draft_url = expected.get("gmail_existing_draft_url")
+    if expected_draft_url and gmail_draft_identity(saved_url) != gmail_draft_identity(expected_draft_url):
+        raise AcceptanceError("Gmail draft oracle returned a different owned compose URL")
+    fields_exact = (evidence.get("draft_saved_verified") is True
+        and evidence.get("saved_draft_count") == 1
+        and evidence.get("saved_attachment_count") == 1
+        and all(evidence.get(key) is True for key in (
+            "saved_to_matches", "saved_subject_matches", "saved_body_matches",
+            "saved_attachment_name_visible", "saved_attachment_size_visible")))
+    if not fields_exact:
+        raise AcceptanceError("Saved Gmail Drafts page did not verify exactly one matching draft and attachment name/size")
+    if saved_url is None:
+        raise AcceptanceError("Gmail Drafts page did not return the validated test-owned draft URL")
+    return {"passed": True, "draft_saved_verified": True, "saved_draft_count": 1,
+            "saved_attachment_count": 1,
+            "fields_exact": True, "attachment_name_and_size_verified": True,
+            "attachment_bytes_verified": False}
 
 
 def check_cloud(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
@@ -814,6 +933,15 @@ def verify_run(trace: Path, expected: dict[str, Any], test_code: int) -> tuple[b
     if outcome["raw_outcome"] in {"not-started", "running"}:
         return False, {"passed": False, "reason": outcome.get("text", "Task did not start"),
                        "failure_class": outcome.get("failure_class")}
+    if expected["job"] == "gmail" and expected.get("send_approval_check") is not True \
+            and outcome["raw_outcome"] != "taskCompleted":
+        actual_text = outcome.get("text", "")
+        reason = actual_text if isinstance(actual_text, str) and actual_text.strip() else (
+            f"Gmail task ended with {outcome['raw_outcome']}"
+        )
+        return False, {"passed": False, "reason": reason,
+                       "raw_outcome": outcome["raw_outcome"],
+                       "failure_class": outcome.get("failure_class")}
     if expected["job"] == "email":
         check = check_email(expected, outcome, trace)
     elif expected["job"] == "gmail":
@@ -869,20 +997,24 @@ def main() -> int:
     parser.add_argument("--gmail-recipient", help="Expected signed-in Gmail address for read-only validation")
     parser.add_argument("--build-command-json", type=Path, help="Local xcodebuild argv override file; never shell-evaluated")
     parser.add_argument("--send-approval-check", action="store_true",
-                        help="For email only, verify the exact Send approval without granting it")
+                        help="For email or Gmail, verify the exact Send approval without granting it")
     args = parser.parse_args()
     if not 1 <= args.runs <= MAX_RUNS:
         parser.error(f"--runs must be between 1 and {MAX_RUNS}")
-    if args.job == "gmail" and args.runs != 1:
-        parser.error("gmail currently accepts one run; retries reuse the same test-owned draft token")
+    if args.job == "cloud":
+        parser.error("cloud acceptance is paused by A6; this runner will not execute OS-level cloud copies")
+    if args.job == "gmail" and args.send_approval_check and args.runs != 3:
+        parser.error("Gmail Send approval acceptance requires exactly 3 runs")
+    if args.job == "gmail" and not args.send_approval_check and args.runs != 10:
+        parser.error("Gmail draft acceptance requires exactly 10 runs")
     if args.job == "gmail" and (not args.gmail_recipient or "@" not in args.gmail_recipient):
         parser.error("gmail requires --gmail-recipient for checker-only validation")
     if args.job != "gmail" and args.gmail_recipient:
         parser.error("--gmail-recipient is only valid for gmail")
     if args.job != "cloud" and args.cloud_root:
         parser.error("--cloud-root is only valid for cloud")
-    if args.send_approval_check and args.job != "email":
-        parser.error("--send-approval-check is only valid for email")
+    if args.send_approval_check and args.job not in {"email", "gmail"}:
+        parser.error("--send-approval-check is only valid for email or gmail")
 
     env = developer_environment(clear_live_optins())
     TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -977,6 +1109,11 @@ def main() -> int:
                     passed, check = verify_run(trace, expected, code)
                 except (AcceptanceError, OSError, ValueError) as error:
                     passed, check = False, {"passed": False, "reason": str(error)}
+                if passed and args.job == "gmail" and not args.send_approval_check and gmail is not None:
+                    gmail = persist_verified_gmail_draft_url(gmail, trace / "outcome.json")
+                    gmail = (*gmail[:4], gmail[4] + 1, gmail[5])
+                elif args.job == "gmail" and not args.send_approval_check and gmail is not None:
+                    gmail = persist_gmail_retry_compose_url(gmail, trace / "outcome.json")
                 outcome_path = trace / "outcome.json"
                 failure_class = None
                 if outcome_path.is_file():

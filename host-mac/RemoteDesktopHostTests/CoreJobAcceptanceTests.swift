@@ -48,11 +48,13 @@ private enum GmailAcceptanceControlTrace {
 
 @MainActor
 final class CoreJobAcceptanceTests: XCTestCase {
+
     private struct Expected: Decodable {
         let job, run_id, prompt: String
         let source_path, source_sha256, attachment_name: String?
         let source_bytes: Int?
         let to, subject, body, cloud_root, destination_path: String?
+        let gmail_existing_draft_url: String?
         let send_approval_check: Bool?
         let trip: Trip?
     }
@@ -148,7 +150,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                         data.append(event); data.append(0x0A)
                         try? Data(data.suffix(16_384)).write(to: path, options: .atomic)
                     }
-                })
+                }, gmailExistingDraftURL: expected.gmail_existing_draft_url.flatMap { URL(string: $0) })
                 : nil
             let host = HostComputerUseManager(injector: InputInjector(),
                 nativeTextInstaller: nativeInstaller, macControlInstaller: helperInstaller,
@@ -249,9 +251,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 var gmail: [String: Any] = ["approval_events": terminal.approvalEvents,
                     "approval_events_omitted": terminal.approvalEventsOmitted,
                     "approval_responses_denied": terminal.deniedApprovals,
-                    "harness_granted_approvals": 0,
+                    "harness_granted_approvals": terminal.approvedDrafts,
+                    "approval_responses_granted": terminal.approvedDrafts,
+                    "send_approval_observed": terminal.sendApprovalObserved,
+                    "send_approval_fields_exact": terminal.sendApprovalFieldsExact,
+                    "send_approval_count": terminal.sendApprovalObserved ? 1 : 0,
                     "attachment_bytes_verified": false]
-                Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                if expected.send_approval_check != true {
+                    await Self.captureGmailDraft(expected: expected, evidence: &gmail, verifySavedDraft: true)
+                }
                 evidence["gmail"] = gmail
             default:
                 throw HarnessError.prerequisite("Unknown M0 job: \(job)")
@@ -268,7 +276,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         } catch {
             if job == "gmail" {
                 var gmail: [String: Any] = ["attachment_bytes_verified": false]
-                Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                if expected.send_approval_check != true {
+                    await Self.captureGmailDraft(expected: expected, evidence: &gmail)
+                }
                 var evidence = record["evidence"] as? [String: Any] ?? [:]
                 evidence["gmail"] = gmail
                 record["evidence"] = evidence
@@ -282,7 +292,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                                                      text: record["text"] as? String)
             if let terminalFailure,
                (terminalFailure == "guard-rejected" || terminalFailure == "approval-needed"
-                    || terminalFailure == "model-malformed") {
+                    || terminalFailure == "model-malformed" || terminalFailure == "text-entry") {
                 record["failure_class"] = terminalFailure
             } else {
                 record["failure_class"] = Self.failureClass(error: error)
@@ -312,6 +322,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let approvedDrafts: Int
         let deniedApprovals: Int
         let sendApprovalObserved: Bool
+        let sendApprovalFieldsExact: Bool
         let approvalEvents: [[String: Any]]
         let approvalEventsOmitted: Int
     }
@@ -324,6 +335,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertEqual(Self.failureClass(outcome: unable,
             text: "The local planning request is invalid: The selected file changed during validation."),
             "guard-rejected")
+        XCTAssertEqual(Self.failureClass(outcome: unable,
+            text: "I couldn't complete that task: The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."),
+            "text-entry")
     }
 
     private static func waitForReady(_ host: HostComputerUseManager,
@@ -378,7 +392,31 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     // approval response can grant permission to send.
                     return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
                         deniedApprovals: deniedApprovals, sendApprovalObserved: true,
+                        sendApprovalFieldsExact: true,
                         approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
+                }
+                let gmailSendMessage = fields["Message"] as? String ?? ""
+                let gmailAttachmentPresentation = expected.attachment_name.map { name in
+                    "\(name) (\(expected.source_bytes ?? -1) bytes)"
+                }
+                let gmailSendFieldsExact = request.confirmLabel == "Send email"
+                    && fields["To"] == expected.to && fields["Subject"] == expected.subject
+                    && gmailSendMessage.hasPrefix(expected.body ?? "")
+                    && fields["Attachment"] == gmailAttachmentPresentation
+                    && fields["CC"] == nil && fields["BCC"] == nil
+                    && fields["Attachment 2"] == nil && fields["Attachment 3"] == nil
+                    && fields["Attachment 4"] == nil && fields["Attachment 5"] == nil
+                if expected.send_approval_check == true, expected.job == "gmail", gmailSendFieldsExact {
+                    let event: [String: Any] = [
+                        "request_id": request.requestID,
+                        "task_id": request.taskID,
+                        "confirm_label": request.confirmLabel ?? "",
+                        "message": request.message,
+                        "details": (request.details ?? []).map { ["label": $0.label, "value": $0.value] },
+                    ]
+                    return Terminal(outcome: "approvalRequired", approvedDrafts: 0,
+                        deniedApprovals: deniedApprovals, sendApprovalObserved: true,
+                        sendApprovalFieldsExact: true, approvalEvents: [event], approvalEventsOmitted: 0)
                 }
                 if expected.job == "gmail" {
                     if approvalEvents.count < 24 {
@@ -402,6 +440,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                !client.hasActivePrompt || outcome == .userInterventionRequired {
                 return Terminal(outcome: outcome.rawValue, approvedDrafts: 0,
                     deniedApprovals: deniedApprovals, sendApprovalObserved: false,
+                    sendApprovalFieldsExact: false,
                     approvalEvents: approvalEvents, approvalEventsOmitted: approvalEventsOmitted)
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -409,23 +448,40 @@ final class CoreJobAcceptanceTests: XCTestCase {
         throw HarnessError.transport("Timed out waiting for the shipped client terminal outcome")
     }
 
-    private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any]) {
+    private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any],
+                                          verifySavedDraft: Bool = false) async {
         guard let name = expected.attachment_name, let recipient = expected.to,
-              let subject = expected.subject, let body = expected.body,
-              let (_, application, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
-              let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
-              let focusedID = snapshot.focusedWindowID,
-              let window = snapshot.windows.first(where: { $0.id == focusedID }),
-              let page = try? ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
-                application: application, mayAct: { true }) else {
+              let subject = expected.subject, let body = expected.body else {
+            evidence["capture_status"] = "missing-expected-gmail-fields"
+            return
+        }
+        var captured: (ComputerUseApplicationIdentity, ComputerUseDefaultBrowserSession.Window,
+                       ComputerUseDefaultBrowserPageReader.Observation)?
+        let loadDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < loadDeadline, !Task.isCancelled {
+            if let (_, application, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
+               let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
+               let focusedID = snapshot.focusedWindowID,
+               let window = snapshot.windows.first(where: { $0.id == focusedID }),
+               let page = try? ComputerUseDefaultBrowserPageReader().read(window: window.accessibilityElement,
+                    application: application, mayAct: { true }),
+               page.application == application,
+               URLComponents(string: page.url)?.host?.lowercased() == "mail.google.com" {
+                captured = (application, window, page)
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        guard let (application, window, page) = captured else {
             evidence["capture_status"] = "no-focused-default-browser-page"
             return
         }
         let host = URLComponents(string: page.url)?.host?.lowercased() ?? ""
         evidence["browser_bundle_id"] = application.bundleIdentifier
         evidence["url_host"] = host
+        evidence["compose_url"] = page.url
         evidence["url_is_gmail"] = host == "mail.google.com"
-        guard page.application == application, host == "mail.google.com" else {
+        guard host == "mail.google.com" else {
             evidence["capture_status"] = "focused-page-is-not-gmail"
             return
         }
@@ -496,25 +552,73 @@ final class CoreJobAcceptanceTests: XCTestCase {
             return
         }
         evidence["compose_count"] = composers.count
-        guard composers.count == 1, let composer = composers.first,
-              let nodes = readTree(composer.element, limit: 256) else {
+        var nodes: [Node] = []
+        if composers.count == 1, let composer = composers.first,
+           let composeNodes = readTree(composer.element, limit: 256) {
+            nodes = composeNodes
+        } else if !(verifySavedDraft && composers.isEmpty) {
             evidence["capture_status"] = "compose-window-not-unique-or-readable"
             return
         }
         let recipientContainer = nodes.first {
             ($0.role == "AXGroup" || $0.role == "AXTextField") && ($0.title == "To" || $0.description == "To")
         }
-        let recipientMatches = recipientContainer.flatMap { readTree($0.element, limit: 64) }?.contains {
-            $0.role == "AXStaticText" && $0.text == recipient
-        } == true
+        let recipientNodes = recipientContainer.flatMap { readTree($0.element, limit: 64) } ?? []
+        var recipientMatches = recipientNodes.contains {
+            $0.role == "AXStaticText" && [$0.title, $0.description, $0.text].contains(recipient)
+        }
+        if !recipientMatches, !composers.isEmpty {
+            // A collapsed contact chip is not always exposed beneath a To group.
+            // Restrict fallback discovery to the subject field's parent inside
+            // this unique compose group, then use only an advertised AXShowMenu.
+            let subjectField = nodes.first { $0.role == "AXTextField" && $0.title == "Subject" }
+            var subjectParent: AXUIElement?
+            if let subjectField {
+                var parent: CFTypeRef?
+                if AXUIElementCopyAttributeValue(subjectField.element, kAXParentAttribute as CFString, &parent) == .success,
+                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() {
+                    subjectParent = (parent as! AXUIElement)
+                }
+            }
+            let chipScope = recipientContainer?.element ?? subjectParent
+            let chipNodes = chipScope.flatMap { readTree($0, limit: 64) } ?? []
+            func supportsShowMenu(_ element: AXUIElement) -> Bool {
+                var actions: CFArray?
+                guard AXUIElementCopyActionNames(element, &actions) == .success,
+                      let actions = actions as? [String] else { return false }
+                return actions.contains("AXShowMenu")
+            }
+            let chip = chipNodes.first {
+                $0.role == "AXStaticText" && !$0.text.isEmpty && $0.text != subject && supportsShowMenu($0.element)
+            }
+            if let chip, let chipScope,
+               AXUIElementPerformAction(chip.element, "AXShowMenu" as CFString) == .success {
+                try? await Task.sleep(for: .milliseconds(120))
+                let menuNodes = readTree(chipScope, limit: 128) ?? []
+                let copyLabel = "Copy \"\(recipient)\""
+                recipientMatches = menuNodes.contains {
+                    $0.role == "AXMenuItem" && [$0.title, $0.description, $0.text].contains(where: {
+                        $0 == copyLabel || $0 == "\(copyLabel) Option+C"
+                    })
+                }
+                if let menu = menuNodes.first(where: { $0.role == "AXMenu" }) {
+                    _ = AXUIElementPerformAction(menu.element, "AXCancel" as CFString)
+                }
+            }
+        }
         let subjectMatches = nodes.contains { $0.role == "AXTextField" && $0.title == "Subject" && $0.text == subject }
         let bodyMatches = nodes.contains {
             ($0.role == "AXTextArea" || $0.role == "AXTextEntryArea") && $0.title == "Message Body" && $0.text == body
         }
-        let attachmentGroup = nodes.first {
-            $0.role == "AXGroup" && ($0.title + $0.description + $0.text).contains("Attachment: \(name).")
+        let attachmentGroups = nodes.filter {
+            $0.role == "AXGroup" && ($0.title + $0.description + $0.text).contains("Attachment:")
                 && ($0.title + $0.description + $0.text).contains("delete to remove it")
         }
+        let expectedAttachmentGroups = attachmentGroups.filter {
+            ($0.title + $0.description + $0.text).contains("Attachment: \(name).")
+        }
+        let attachmentGroup = attachmentGroups.count == 1 && expectedAttachmentGroups.count == 1
+            ? expectedAttachmentGroups.first : nil
         let attachmentNodes = attachmentGroup.flatMap { readTree($0.element, limit: 64) } ?? []
         let attachmentNameVisible = attachmentNodes.contains {
             $0.role == "AXLink" && [$0.title, $0.description, $0.text].contains(where: {
@@ -530,13 +634,193 @@ final class CoreJobAcceptanceTests: XCTestCase {
         evidence["subject_matches"] = subjectMatches
         evidence["body_matches"] = bodyMatches
         evidence["attachment_name_visible"] = attachmentNameVisible
+        evidence["attachment_count"] = attachmentGroups.count
         evidence["attachment_size_label"] = sizeLabel
         evidence["attachment_size_visible"] = attachmentSizeVisible
         evidence["attachment_bytes_verified"] = false
         evidence["saved_marker_observed"] = nodes.contains {
             ($0.title + $0.description + $0.text).localizedCaseInsensitiveContains("Draft saved")
         }
-        evidence["capture_status"] = "captured"
+        evidence["capture_status"] = composers.isEmpty ? "compose-already-closed" : "captured"
+        guard verifySavedDraft else { return }
+        func press(_ element: AXUIElement) -> Bool {
+            AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+        }
+        func children(_ element: AXUIElement) -> [AXUIElement] {
+            value(kAXChildrenAttribute as String, element) as? [AXUIElement] ?? []
+        }
+        func findOwnedDraftSubject(_ root: AXUIElement, subject: String) -> [Node]? {
+            var queue = [root]
+            var visited: [AXUIElement] = []
+            var matches: [Node] = []
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while !queue.isEmpty, visited.count < 1_800, ContinuousClock.now < deadline, !Task.isCancelled {
+                let element = queue.removeFirst()
+                guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
+                visited.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                let candidate = (role == "AXStaticText" && [title, description, text].contains(subject))
+                    || (role == "AXCell" && [title, description, text].contains(subject))
+                    || (role == "AXRow" && [title, description, text].contains(where: { $0.contains(subject) }))
+                if candidate {
+                    matches.append(Node(element: element, role: role, title: title,
+                        description: description, text: text))
+                }
+                if role == "AXSheet" || role == "AXDialog" { continue }
+                let next = children(element)
+                let room = max(0, 1_800 - visited.count - queue.count)
+                guard next.count <= room else { return nil }
+                queue.append(contentsOf: next)
+            }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+
+            // Several AX nodes can expose the same row's subject. Collapse by
+            // the actionable row when present, otherwise retain the exact text node.
+            var rows: [Node] = []
+            for match in matches {
+                var current: AXUIElement? = match.element
+                var row: AXUIElement?
+                for _ in 0..<8 {
+                    guard let element = current else { break }
+                    let currentRole = value(kAXRoleAttribute as String, element) as? String ?? ""
+                    if currentRole == "AXRow" { row = element; break }
+                    var parent: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parent) == .success,
+                          let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                    current = (parent as! AXUIElement)
+                }
+                let actionable = row ?? match.element
+                guard !rows.contains(where: { CFEqual($0.element, actionable) }) else { continue }
+                let role = value(kAXRoleAttribute as String, actionable) as? String ?? match.role
+                let title = value(kAXTitleAttribute as String, actionable) as? String ?? match.title
+                let description = value(kAXDescriptionAttribute as String, actionable) as? String ?? match.description
+                let text = value(kAXValueAttribute as String, actionable) as? String ?? match.text
+                rows.append(Node(element: actionable, role: role, title: title,
+                    description: description, text: text))
+            }
+            return rows
+        }
+        if composers.count == 1 {
+            guard let saveClose = nodes.first(where: {
+                $0.role == "AXButton" && [$0.title, $0.description].contains("Save & close")
+            }), press(saveClose.element) else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "save-close-control-unavailable"
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(350))
+        }
+
+        // Search only browser chrome/navigation for Drafts; never traverse the inbox table.
+        var chromeQueue = [window.accessibilityElement]
+        var chromeSeen: [AXUIElement] = []
+        var chromeNodes: [Node] = []
+        let chromeDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while !chromeQueue.isEmpty, chromeSeen.count < 256, ContinuousClock.now < chromeDeadline,
+              !Task.isCancelled {
+            let element = chromeQueue.removeFirst()
+            guard !chromeSeen.contains(where: { CFEqual($0, element) }) else { continue }
+            chromeSeen.append(element)
+            let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+            let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+            let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+            let text = value(kAXValueAttribute as String, element) as? String ?? ""
+            chromeNodes.append(Node(element: element, role: role, title: title, description: description, text: text))
+            if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
+            let next = children(element)
+            let room = max(0, 256 - chromeSeen.count - chromeQueue.count)
+            guard next.count <= room else { break }
+            chromeQueue.append(contentsOf: next)
+        }
+        let draftsLabel = chromeNodes.first {
+            [$0.title, $0.description, $0.text].contains(where: { $0 == "Drafts" || $0.hasPrefix("Drafts ") })
+        }
+        var draftsNavigation: AXUIElement?
+        var draftsAncestor: AXUIElement? = draftsLabel?.element
+        for _ in 0..<6 {
+            guard let current = draftsAncestor else { break }
+            let role = value(kAXRoleAttribute as String, current) as? String ?? ""
+            if role == "AXLink" || role == "AXButton" || role == "AXRow" || role == "AXMenuItem" {
+                draftsNavigation = current
+                break
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            draftsAncestor = (parent as! AXUIElement)
+        }
+        guard let draftsNavigation, press(draftsNavigation) else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "drafts-navigation-unavailable"
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        guard let subjectNodes = findOwnedDraftSubject(window.accessibilityElement, subject: subject) else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "drafts-list-incomplete"
+            return
+        }
+        evidence["saved_draft_count"] = subjectNodes.count
+        guard subjectNodes.count == 1, let subjectNode = subjectNodes.first else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "owned-subject-not-unique-in-drafts"
+            return
+        }
+        var draftRow: AXUIElement?
+        var ancestor: AXUIElement? = subjectNode.element
+        for _ in 0..<8 {
+            guard let current = ancestor else { break }
+            let role = value(kAXRoleAttribute as String, current) as? String ?? ""
+            if role == "AXRow" || role == "AXLink" || role == "AXButton" {
+                draftRow = current
+                break
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success else { break }
+            guard let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            ancestor = (parent as! AXUIElement)
+        }
+        guard let draftRow, press(draftRow) else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "owned-draft-row-not-actionable"
+            return
+        }
+        var reopened = false
+        let reopenDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < reopenDeadline, !Task.isCancelled {
+            if let found = discoverComposers(window.accessibilityElement), found.count == 1 {
+                reopened = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        guard reopened else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "owned-draft-did-not-reopen"
+            return
+        }
+        var savedFields: [String: Any] = [:]
+        await Self.captureGmailDraft(expected: expected, evidence: &savedFields)
+        evidence["saved_draft_url"] = savedFields["compose_url"] ?? NSNull()
+        evidence["saved_to_matches"] = savedFields["recipient_matches"] ?? false
+        evidence["saved_subject_matches"] = savedFields["subject_matches"] ?? false
+        evidence["saved_body_matches"] = savedFields["body_matches"] ?? false
+        evidence["saved_attachment_name_visible"] = savedFields["attachment_name_visible"] ?? false
+        evidence["saved_attachment_size_visible"] = savedFields["attachment_size_visible"] ?? false
+        evidence["saved_attachment_count"] = savedFields["attachment_count"] ?? 0
+        evidence["draft_saved_verified"] = subjectNodes.count == 1
+            && (savedFields["attachment_count"] as? Int == 1)
+            && (savedFields["url_is_gmail"] as? Bool == true)
+            && (savedFields["recipient_matches"] as? Bool == true)
+            && (savedFields["subject_matches"] as? Bool == true)
+            && (savedFields["body_matches"] as? Bool == true)
+            && (savedFields["attachment_name_visible"] as? Bool == true)
+            && (savedFields["attachment_size_visible"] as? Bool == true)
+        evidence["saved_oracle_status"] = evidence["draft_saved_verified"] as? Bool == true
+            ? "reopened-from-drafts" : "reopened-draft-fields-mismatch"
     }
 
     private static func exportDraft(expected: Expected, trace: URL,
@@ -710,6 +994,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
     private static func failureClass(outcome: String?, text: String?) -> String? {
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.taskCompleted.rawValue { return nil }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue { return "approval-needed" }
+        if text?.localizedCaseInsensitiveContains("The app did not confirm the exact text edit") == true
+            || text?.localizedCaseInsensitiveContains("text entry was not confirmed") == true {
+            return "text-entry"
+        }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.unableToComplete.rawValue {
             if text?.contains("Generated arguments for ") == true,
                text?.contains(" did not satisfy the tool schema:") == true {

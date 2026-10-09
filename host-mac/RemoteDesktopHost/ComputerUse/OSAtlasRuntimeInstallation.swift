@@ -448,6 +448,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)?
     private let browserRevalidationFailureObserver:
         ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
+    private let gmailExistingDraftURL: URL?
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
     private let localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
@@ -461,6 +462,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
         browserRevalidationFailureObserver:
             ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver? = nil,
+        gmailExistingDraftURL: URL? = nil,
         faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
@@ -475,6 +477,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.runtime = runtime
         self.nativeControlInspectExchange = nativeControlInspectExchange
         self.browserRevalidationFailureObserver = browserRevalidationFailureObserver
+        self.gmailExistingDraftURL = gmailExistingDraftURL
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
         self.localFileCatalogFactory = localFileCatalogFactory
@@ -562,6 +565,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         }
         let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
         let nativeBootstrapPlanner: ComputerUseDefaultBrowserExecutor.NativeBootstrapPlanner?
+        let gmailContentExtractor: (@MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.Extraction)?
         if let nativeControlInputs {
             let cachedInputs = NativeControlInputsCache()
             let resolveNativeInputs: @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs? = {
@@ -569,6 +573,13 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                 guard let resolved = try await nativeControlInputs() else { return nil }
                 cachedInputs.value = resolved
                 return resolved
+            }
+            gmailContentExtractor = { prompt in
+                guard let inputs = try await resolveNativeInputs() else {
+                    throw OSAtlasLlamaRuntimeError.inactiveSession
+                }
+                let endpoint = try await runtime.activateNativeText(inputs)
+                return try await runtime.extractWebJobContent(endpoint: endpoint, originalRequest: prompt)
             }
             nativeControlPlanner = { input, page in
                 guard let inputs = try await resolveNativeInputs() else {
@@ -589,12 +600,14 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         } else {
             nativeControlPlanner = nil
             nativeBootstrapPlanner = nil
+            gmailContentExtractor = nil
         }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
             propose: propose, nativeFilePlanner: nativeFilePlanner, nativeControlPlanner: nativeControlPlanner,
             nativeBootstrapPlanner: nativeBootstrapPlanner,
             finishRun: { await runtime.shutdown() }, outcomeCheck: outcomeCheck,
-            revalidationFailureObserver: browserRevalidationFailureObserver)
+            revalidationFailureObserver: browserRevalidationFailureObserver,
+            gmailContentExtractor: gmailContentExtractor, gmailExistingDraftURL: gmailExistingDraftURL)
     }
 
     private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {

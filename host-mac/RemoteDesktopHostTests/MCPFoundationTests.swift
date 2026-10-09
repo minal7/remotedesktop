@@ -68,42 +68,21 @@ final class MCPFoundationTests: XCTestCase {
         await pool.cancelAll()
     }
 
-    func testCloudStoragePoolReservesSidecarNameAndPublishesSignedHostTool() async throws {
-        let pointer = try XCTUnwrap(FileManager.default.temporaryDirectory.withUnsafeFileSystemRepresentation {
-            $0.flatMap { realpath($0, nil) }
-        })
-        defer { free(pointer) }
-        let home = URL(fileURLWithPath: String(cString: pointer), isDirectory: true)
-            .appendingPathComponent("MCPCloudPool-\(UUID().uuidString)", isDirectory: true)
-        let syncRoot = home.appendingPathComponent(
-            "Library/Mobile Documents/com~apple~CloudDocs", isDirectory: true)
-        try FileManager.default.createDirectory(at: syncRoot, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: home) }
-        let storage = RemoteDesktopCloudStorage(homeURL: home)
+    func testPausedCloudStorageIsNotAdvertisedByHostOrSidecar() async throws {
         let primary = FakeMCPSessionFactory(toolNames: [
             "focused_app", RemoteDesktopCloudStorageMCP.toolName,
         ])
         let pool = MCPClientPool(
             binaryValidator: AcceptingMCPBinaryValidator(), mutationLedger: nil,
             sessionFactory: { primary.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil }, cloudStorage: storage)
-
+            embeddedSessionFactory: { _ in nil },
+            cloudEmbeddedSessionFactory: { generation in
+                RemoteDesktopCloudStorageMCPClientSession(processGeneration: generation)
+            })
         _ = try await pool.start(binaryURL: fakeBinaryURL)
         let tools = try await pool.allowedTools()
-        let cloudTools = tools.filter { $0.toolName == RemoteDesktopCloudStorageMCP.toolName }
-        let cloudTool = try XCTUnwrap(cloudTools.first)
-        XCTAssertEqual(cloudTools.count, 1, "The sidecar cannot impersonate the signed cloud-storage server.")
-        XCTAssertEqual(cloudTool.serverID, RemoteDesktopCloudStorageMCP.serverID)
-        XCTAssertEqual(cloudTool.risk, .approvalRequired)
-        XCTAssertEqual(cloudTool.approval.confirmLabel, "Save copy")
-        guard case .object(let root) = cloudTool.inputSchema,
-              case .object(let properties)? = root["properties"],
-              case .object(let provider)? = properties["provider_id"],
-              case .array(let providerIDs)? = provider["enum"] else {
-            return XCTFail("The host tool schema must list installed providers.")
-        }
-        XCTAssertEqual(providerIDs, [.string("icloud-drive")])
-
+        XCTAssertFalse(tools.contains { $0.toolName == RemoteDesktopCloudStorageMCP.toolName },
+            "A6 keeps sync-folder copying unrouted even when its experimental session exists.")
         await pool.cancelAll()
     }
 

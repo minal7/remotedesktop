@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import CoreImage
 import Foundation
 
@@ -57,7 +58,7 @@ final class ComputerUseDefaultBrowserSession {
 
     enum Failure: Error, Equatable {
         case changedTaskOrGoal, targetLost, ambiguousWindows, noNewFocusedWindow
-        case existingWindowsChanged, interrupted, journalUncertain, authenticationHandoff
+        case existingWindowsChanged, interrupted, journalUncertain, authenticationHandoff, browserAutomationPermissionRequired
     }
 
     typealias ResolveHandler = @MainActor () throws -> ComputerUseDefaultBrowserTarget.Handler
@@ -78,6 +79,7 @@ final class ComputerUseDefaultBrowserSession {
         var uncertain = false
         var currentFileOpenPanel: FileOpenPanel?
         var currentActionBounds: CGRect?
+        var navigationDispatches: Set<String> = []
 
         init(taskID: String, goalDigest: String, sessionTaskID: String,
              handler: ComputerUseDefaultBrowserTarget.Handler) {
@@ -211,6 +213,183 @@ final class ComputerUseDefaultBrowserSession {
         state.target = focused // Refresh current geometry; bounds are not window authority.
         state.currentFileOpenPanel = panel
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
+    }
+
+    /// Changes the active URL in the already retained Safari window without
+    /// entering the address-bar text editor. The AppleScript source is fixed;
+    /// both the window number and destination are passed as AppleEvent data.
+    func navigateRetainedSafariTab(to url: URL, taskID: String, goal: String,
+                                   tools: ComputerUseHostTools,
+                                   diagnostic: @MainActor (String) -> Void = { _ in }) async throws {
+        try Task.checkCancellation()
+        try tools.requireActive()
+        do { try validate(taskID: taskID, goal: goal, tools: tools) }
+        catch { diagnostic("phase=pre_navigation_scope_validation_failed"); throw error }
+        guard let state = runState, let target = state.target else {
+            diagnostic("phase=retained_target_missing"); throw Failure.targetLost
+        }
+        guard target.application.bundleIdentifier == "com.apple.Safari" else {
+            diagnostic("phase=unsupported_browser bundle=safari_required"); throw Failure.targetLost
+        }
+        guard Self.isSupportedGmailNavigationURL(url) else {
+            diagnostic("phase=destination_rejected"); throw Failure.targetLost
+        }
+        guard !state.navigationDispatches.contains(url.absoluteString) else {
+            diagnostic("phase=already_latched"); throw Failure.targetLost
+        }
+        let nativeWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let matchingNumbers = Self.matchingCGWindowNumbers(target: target, windowInfo: nativeWindows)
+        let frontWindowNumber = Self.matchingCGWindowNumber(target: target, windowInfo: nativeWindows)
+        diagnostic("phase=native_window_match bounds=\(Int(target.identity.bounds.minX)),\(Int(target.identity.bounds.minY)),\(Int(target.identity.bounds.width)),\(Int(target.identity.bounds.height)) geometryMatches=\(matchingNumbers.count) frontWindowID=\(frontWindowNumber.map { String($0) } ?? "none")")
+        guard let windowNumber = frontWindowNumber else { throw Failure.targetLost }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        let permissionStatus = await Task.detached(priority: .userInitiated) {
+            Self.safariAutomationPermissionStatus()
+        }.value
+        diagnostic("phase=automation_permission_preflight status=\(permissionStatus)")
+        try Task.checkCancellation()
+        try tools.requireActive()
+        guard permissionStatus == noErr else {
+            if permissionStatus == OSStatus(errAEEventNotPermitted)
+                || permissionStatus == OSStatus(errAEEventWouldRequireUserConsent) {
+                throw Failure.browserAutomationPermissionRequired
+            }
+            throw Failure.targetLost
+        }
+        // The preflight ran off-main; reconfirm retained AX authority before
+        // latching and sending the mutating event.
+        try validate(taskID: taskID, goal: goal, tools: tools)
+        guard let currentTarget = state.target, currentTarget.id == target.id,
+              currentTarget.application == target.application,
+              Self.matchingCGWindowNumber(target: currentTarget,
+                windowInfo: CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []) == windowNumber else {
+            diagnostic("phase=target_changed_after_permission_preflight")
+            throw Failure.targetLost
+        }
+        // Latch before AppleEvents: an uncertain result must never create or
+        // navigate a second composer on Resume.
+        state.navigationDispatches.insert(url.absoluteString)
+        diagnostic("phase=appleevent_dispatch_latched nativeID=\(windowNumber)")
+        do {
+            try Self.setSafariFrontTabURL(url, expectedWindowNumber: windowNumber, diagnostic: diagnostic)
+        } catch Failure.browserAutomationPermissionRequired {
+            // macOS explicitly denied this AppleEvent, so it could not have
+            // mutated Safari. Allow Resume after the user grants Automation.
+            state.navigationDispatches.remove(url.absoluteString)
+            diagnostic("phase=automation_permission_denied latch_cleared=true")
+            throw Failure.browserAutomationPermissionRequired
+        } catch {
+            diagnostic("phase=appleevent_failed latch_retained=true")
+            throw error
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        do { try validate(taskID: taskID, goal: goal, tools: tools) }
+        catch { diagnostic("phase=post_navigation_scope_validation_failed"); throw error }
+        let afterNativeWindows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] ?? []
+        let afterNumbers = state.target.map { Self.matchingCGWindowNumbers(target: $0, windowInfo: afterNativeWindows) } ?? []
+        let afterFrontWindowNumber = state.target.flatMap { Self.matchingCGWindowNumber(target: $0, windowInfo: afterNativeWindows) }
+        guard let after = state.target, after.id == target.id,
+              after.application == target.application,
+              afterFrontWindowNumber == windowNumber else {
+            diagnostic("phase=post_navigation_identity_mismatch geometryMatches=\(afterNumbers.count) frontWindowID=\(afterFrontWindowNumber.map { String($0) } ?? "none")")
+            throw Failure.targetLost
+        }
+        diagnostic("phase=navigation_complete nativeID=\(windowNumber)")
+    }
+
+    private nonisolated static func safariAutomationPermissionStatus() -> OSStatus {
+        let bundleID = Data("com.apple.Safari".utf8)
+        var target = AEAddressDesc()
+        let createStatus = bundleID.withUnsafeBytes { bytes in
+            AECreateDesc(DescType(typeApplicationBundleID), bytes.baseAddress, bytes.count, &target)
+        }
+        guard createStatus == noErr else { return OSStatus(createStatus) }
+        defer { AEDisposeDesc(&target) }
+        return AEDeterminePermissionToAutomateTarget(&target, typeWildCard, typeWildCard, false)
+    }
+
+    static func isSupportedGmailNavigationURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https", components.host?.lowercased() == "mail.google.com",
+              components.user == nil, components.password == nil, components.port == nil,
+              components.path.hasPrefix("/mail/u/") else { return false }
+        return true
+    }
+
+    static func matchingCGWindowNumber(target: Window, windowInfo: [[String: Any]]) -> CGWindowID? {
+        guard let firstOwnedAppWindow = windowInfo.first(where: { info in
+            (info[kCGWindowOwnerPID as String] as? Int) == Int(target.application.processIdentifier)
+                && (info[kCGWindowLayer as String] as? Int) == 0
+        }),
+              let number = firstOwnedAppWindow[kCGWindowNumber as String] as? NSNumber,
+              let signedNumber = Int32(exactly: number.int64Value), signedNumber > 0,
+              let rawBounds = firstOwnedAppWindow[kCGWindowBounds as String] as? [String: Any] else { return nil }
+        var bounds = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
+              CGRectEqualToRect(bounds, target.identity.bounds) else { return nil }
+        return CGWindowID(signedNumber)
+    }
+
+    private static func matchingCGWindowNumbers(target: Window, windowInfo: [[String: Any]]) -> [CGWindowID] {
+        windowInfo.compactMap { info -> CGWindowID? in
+            guard let owner = info[kCGWindowOwnerPID as String] as? Int,
+                  owner == Int(target.application.processIdentifier),
+                  let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
+                  let number = info[kCGWindowNumber as String] as? NSNumber,
+                  let rawBounds = info[kCGWindowBounds as String] as? [String: Any] else { return nil }
+            var bounds = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
+                  CGRectEqualToRect(bounds, target.identity.bounds),
+                  number.uint32Value != 0 else { return nil }
+            return CGWindowID(number.uint32Value)
+        }
+    }
+
+    private static func setSafariFrontTabURL(_ url: URL, expectedWindowNumber: CGWindowID,
+                                            diagnostic: @MainActor (String) -> Void) throws {
+        guard let source = NSAppleScript(source: #"""
+            on navigateTab(targetWindowNumber, destinationURL)
+                tell application id "com.apple.Safari"
+                    with timeout of 10 seconds
+                        if (count of windows) < 1 then error number -128
+                        set targetWindow to first window whose id is targetWindowNumber
+                        if (id of front window) is not targetWindowNumber then error number -128
+                        set URL of current tab of targetWindow to destinationURL
+                        return id of targetWindow
+                    end timeout
+                end tell
+            end navigateTab
+            """#) else { throw Failure.targetLost }
+        var compileError: NSDictionary?
+        guard source.compileAndReturnError(&compileError) else {
+            let number = (compileError?[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
+            diagnostic("phase=script_compile_failed error_code=\(number)")
+            throw Failure.targetLost
+        }
+        let event = NSAppleEventDescriptor(eventClass: AEEventClass(kASAppleScriptSuite),
+            eventID: AEEventID(kASSubroutineEvent), targetDescriptor: nil,
+            returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(NSAppleEventDescriptor(string: "navigatetab"), forKeyword: AEKeyword(keyASSubroutineName))
+        let arguments = NSAppleEventDescriptor.list()
+        arguments.insert(NSAppleEventDescriptor(int32: Int32(expectedWindowNumber)), at: 1)
+        arguments.insert(NSAppleEventDescriptor(string: url.absoluteString), at: 2)
+        event.setParam(arguments, forKeyword: AEKeyword(keyDirectObject))
+        var errorInfo: NSDictionary?
+        let result = source.executeAppleEvent(event, error: &errorInfo)
+        if let errorInfo {
+            let number = (errorInfo[NSAppleScript.errorNumber] as? NSNumber)?.intValue ?? 0
+            diagnostic("phase=appleevent_error error_code=\(number)")
+            if number == -1743 {
+                throw Failure.browserAutomationPermissionRequired
+            }
+            throw Failure.targetLost
+        }
+        guard result.int32Value == Int32(expectedWindowNumber) else {
+            diagnostic("phase=appleevent_wrong_window_id result_id=\(result.int32Value) expected_id=\(expectedWindowNumber)")
+            throw Failure.targetLost
+        }
     }
 
     private func run(_ execution: ComputerUseTaskExecution, state: RunState,

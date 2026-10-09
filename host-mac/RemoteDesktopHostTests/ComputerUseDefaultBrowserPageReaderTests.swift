@@ -635,6 +635,12 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertFalse(observation.exactTextValues.contains("protected destination text"))
         XCTAssertFalse(observation.exactTextValues.contains("Missing Target.pptx"),
             "Editable field values are not page text or control labels")
+        XCTAssertTrue(observation.formFieldValues.contains(.init(label: "Attachment name", role: "AXTextField",
+            value: "Missing Target.pptx")), "Ordinary editable values are separately identified as form state")
+        XCTAssertFalse(observation.formFieldValues.contains(where: { $0.value == "password-secret" }))
+        XCTAssertFalse(observation.formFieldValues.contains(where: { $0.value == "iframe-only secret" }))
+        XCTAssertFalse(observation.formFieldValues.contains(where: { $0.value == "hidden destination text" }))
+        XCTAssertFalse(observation.formFieldValues.contains(where: { $0.value == "protected destination text" }))
         XCTAssertFalse(graph.reads.contains(where: { $0 == ("secure", kAXValueAttribute as String) }))
     }
 

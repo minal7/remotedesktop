@@ -21,6 +21,16 @@ final class ComputerUseDefaultBrowserPageReader {
     }
 
     struct Observation: Equatable, Sendable {
+        struct FormFieldValue: Equatable, Sendable {
+            let label: String
+            let role: String
+            let value: String
+            let help: String
+
+            init(label: String, role: String, value: String, help: String = "") {
+                self.label = label; self.role = role; self.value = value; self.help = help
+            }
+        }
         let id: String
         let application: ComputerUseApplicationIdentity
         let url: String
@@ -29,6 +39,9 @@ final class ComputerUseDefaultBrowserPageReader {
         /// Complete text values observed on the current outer page. Empty for
         /// older or synthetic observations that do not carry this evidence.
         let exactTextValues: [String]
+        /// Bounded values for ordinary editable controls on the outer page.
+        /// Secure/protected controls and nested web areas are excluded.
+        let formFieldValues: [FormFieldValue]
         let controls: [Control]
         /// Safari/Chromium AX trees may omit or flatten iframe contents.
         /// This reader does not claim those contents are complete.
@@ -38,12 +51,14 @@ final class ComputerUseDefaultBrowserPageReader {
 
         init(id: String, application: ComputerUseApplicationIdentity, url: String, renderedAXText: String,
              controls: [Control], iframeContentMayBeOmitted: Bool, truncated: Bool,
-             focusedExpandedMenuHasNoActionableChildren: Bool = false, exactTextValues: [String] = []) {
+             focusedExpandedMenuHasNoActionableChildren: Bool = false, exactTextValues: [String] = [],
+             formFieldValues: [FormFieldValue] = []) {
             self.id = id
             self.application = application
             self.url = url
             self.renderedAXText = renderedAXText
             self.exactTextValues = exactTextValues
+            self.formFieldValues = formFieldValues
             self.controls = controls
             self.iframeContentMayBeOmitted = iframeContentMayBeOmitted
             self.truncated = truncated
@@ -235,9 +250,13 @@ final class ComputerUseDefaultBrowserPageReader {
 
         var text = "", controls: [Control] = [], controlRefs: [String: AXUIElement] = [:]
         var exactTextValues: [String] = []
+        var formFieldValues: [Observation.FormFieldValue] = []
+        var formFieldBytes = 0
         var exactTextBytes = 0
         let exactTextValueLimit = 32
         let exactTextByteLimit = 4_096
+        let formFieldValueLimit = 32
+        let formFieldByteLimit = 4_096
         var focusedEmptyExpandedMenu: AXUIElement?
         var contextBytes = 0
         // Start at the exact outer page, preserving the normal pruning and
@@ -292,6 +311,20 @@ final class ComputerUseDefaultBrowserPageReader {
             if role == "AXStaticText", let label = try string(kAXValueAttribute as String, node) ?? string(kAXTitleAttribute as String, node) {
                 appendText(label)
                 appendExactText(label)
+            }
+            if role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox",
+               (try string(kAXSubroleAttribute as String, node)) != (kAXSecureTextFieldSubrole as String),
+               (try value("AXProtectedContent", node) as? NSNumber)?.boolValue != true,
+               let fieldValue = try string(kAXValueAttribute as String, node) {
+                let fieldLabel = try string(kAXTitleAttribute as String, node)
+                    ?? string(kAXDescriptionAttribute as String, node)
+                    ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
+                let help = try string(kAXHelpAttribute as String, node) ?? ""
+                let cost = fieldLabel.utf8.count + role.utf8.count + fieldValue.utf8.count + help.utf8.count
+                if formFieldValues.count < formFieldValueLimit, formFieldBytes + cost <= formFieldByteLimit {
+                    formFieldValues.append(.init(label: fieldLabel, role: role, value: fieldValue, help: help))
+                    formFieldBytes += cost
+                } else { truncated = true }
             }
             if controlRoles.contains(role), controls.count < 32 {
                 let label = try string(kAXTitleAttribute as String, node) ?? string(kAXDescriptionAttribute as String, node)
@@ -437,7 +470,7 @@ final class ComputerUseDefaultBrowserPageReader {
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
             renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
             focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren,
-            exactTextValues: exactTextValues)
+            exactTextValues: exactTextValues, formFieldValues: formFieldValues)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
             webArea: webArea, url: url, controls: controlRefs,
             controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))
